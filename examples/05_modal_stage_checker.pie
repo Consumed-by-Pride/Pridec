@@ -1,0 +1,204 @@
+-- examples/05_modal_stage_checker.pie
+-- CMTT modal stage checker + IRDL opcode registry + HOSE prompts + comptime.
+
+fn prompt_install5 : i64 -> i64  #extern("__pride_prompt_install") #cc(c)
+fn prompt_unwind5  : i64 -> ()   #extern("__pride_prompt_unwind")  #cc(c)
+fn is_in_scope5    : i64 -> bool #extern("__pride_is_in_scope")    #cc(c)
+fn malloc5 : i64 -> ptr  #extern("malloc") #cc(c)
+fn free5   : ptr   -> () #extern("free")   #cc(c)
+
+-- ── §1  Stage-level taxonomy ─────────────────────────────────────────────────
+
+fn demo_stage_taxonomy : () -> bool
+  | () ->
+      let s0 = comptime 100 * 7
+      let l1 = comptime 1
+      let l2 = comptime 2
+      s0 == 700i64 && l1 == 1i64 && l2 == 2i64
+
+-- ── §2  CmttBox: open-code fragment with effect annotation ───────────────────
+
+struct Box5
+  stg  : i64
+  kin  : ptr
+  kout : ptr
+  nops : i64
+  ops  : [i64; 16]
+
+fn b5_new : (i64, ptr, ptr) -> Box5
+  | (s, ki, ko) -> Box5 { stg: s, kin: ki, kout: ko, nops: 0, ops: [0i64; 16] }
+
+fn b5_add : (*Box5, i64) -> ()
+  | (b, op) ->
+      if b.nops < 16
+        b.ops[b.nops] = op
+        b.nops = b.nops + 1
+
+fn b5_has : (*Box5, i64) -> bool
+  | (b, op) ->
+      let mut i : i64 = 0
+      let mut f : bool = false
+      while i < b.nops
+        f = if b.ops[i] == op then true else f
+        i = i + 1
+      f
+
+fn b5_fuse : (*Box5, ptr, ptr) -> ptr
+  | (b, ki, ko) -> if ko == null then ki else ki
+
+fn demo_cmtt_box : () -> bool
+  | () ->
+      let mut b = b5_new(1, null, null)
+      b5_add(&b, 1)
+      b5_add(&b, 2)
+      let has1 = b5_has(&b, 1)
+      let has2 = b5_has(&b, 2)
+      let nont = !b5_has(&b, 99)
+      let mut pu = b5_new(2, null, null)
+      has1 && has2 && nont && !b5_has(&pu, 1)
+
+-- ── §3  AOT fusion ───────────────────────────────────────────────────────────
+
+fn demo_aot_fusion : () -> bool
+  | () ->
+      let mut ba = b5_new(1, 0x100i64 as ptr, null)
+      let fa = b5_fuse(&ba, ba.kin, null)
+      let mut bb = b5_new(1, 0x100i64 as ptr, 0x200i64 as ptr)
+      let fb = b5_fuse(&bb, bb.kin, bb.kout)
+      fa == ba.kin && fb != null
+
+-- ── §4  IRDL opcode registry (flat i64 array) ────────────────────────────────
+
+struct Reg5
+  nops  : i64
+  codes : [i64; 64]
+
+fn reg5_init : () -> Reg5
+  | () ->
+      let mut r = Reg5 { nops: 0, codes: [0i64; 64] }
+      let mut i : i64 = 1
+      while i <= 6
+        r.codes[r.nops] = i
+        r.nops = r.nops + 1
+        i = i + 1
+      let mut h : i64 = 30
+      while h <= 41
+        r.codes[r.nops] = h
+        r.nops = r.nops + 1
+        h = h + 1
+      r
+
+fn demo_irdl_hose : () -> bool
+  | () ->
+      let reg = reg5_init()
+      let mut found : i64 = 0
+      let mut i : i64 = 0
+      while i < reg.nops
+        found = if reg.codes[i] >= 30 && reg.codes[i] <= 41 then found + 1 else found
+        if false
+          found = found + 1
+        i = i + 1
+      found == 12i64
+
+-- ── §5  Comptime powers-of-two table ─────────────────────────────────────────
+
+fn is_p2_5 : i64 -> bool | n -> n > 0 && (n & (n - 1)) == 0
+
+fn demo_comptime_table : () -> bool
+  | () ->
+      let t0 = comptime 1
+      let t1 = comptime 2
+      let t2 = comptime 4
+      let t7 = comptime 128
+      is_p2_5(t0) && is_p2_5(t1) && is_p2_5(t2) && t7 == 128i64
+
+-- ── §6  Box planned at compile time, dispatched inside HOSE prompt ────────────
+
+fn demo_box_prompt : () -> bool
+  | () ->
+      let pstg = comptime 1
+      let yop  = comptime 34
+      let mut b = b5_new(pstg, 0xDEADi64 as ptr, null)
+      b5_add(&b, yop)
+      b5_add(&b, comptime 30)
+      let pid : i64 = 501
+      let _   = prompt_install5(pid)
+      let act = is_in_scope5(pid)
+      let fused = b5_fuse(&b, b.kin, null)
+      prompt_unwind5(pid)
+      act && fused == b.kin
+
+-- ── §7  Stage-level scheduler via selection sort ─────────────────────────────
+
+fn stg_get : (ptr, i64) -> i64    | (p, i) -> *((p as i64 + i * 8) as *i64)
+fn stg_set : (ptr, i64, i64) -> () | (p, i, v) -> *((p as i64 + i * 8) as *i64) = v
+
+fn stg_swap : (ptr, i64, i64) -> ()
+  | (p, i, j) ->
+      let t = stg_get(p, i)
+      stg_set(p, i, stg_get(p, j))
+      stg_set(p, j, t)
+
+fn stg_max_from : (ptr, i64, i64) -> i64
+  | (p, n, from) ->
+      let mut best : i64 = from
+      let mut j    : i64 = from + 1
+      while j < n
+        best = if stg_get(p, j) > stg_get(p, best) then j else best
+        j = j + 1
+      best
+
+struct Stg8
+  s0 : i64
+  s1 : i64
+  s2 : i64
+  s3 : i64
+  s4 : i64
+  s5 : i64
+  s6 : i64
+  s7 : i64
+
+fn stg8_get : (*Stg8, i64) -> i64 | (s, i) -> *((s as i64 + i * 8) as *i64)
+fn stg8_set : (*Stg8, i64, i64) -> () | (s, i, v) -> *((s as i64 + i * 8) as *i64) = v
+
+fn stg8_swap : (*Stg8, i64, i64) -> ()
+  | (s, i, j) ->
+      let t = stg8_get(s, i)
+      stg8_set(s, i, stg8_get(s, j))
+      stg8_set(s, j, t)
+
+fn stg8_max : (*Stg8, i64, i64) -> i64
+  | (s, n, from) ->
+      let mut best : i64 = from
+      let mut j    : i64 = from + 1
+      while j < n
+        best = if stg8_get(s, j) > stg8_get(s, best) then j else best
+        j = j + 1
+      best
+
+fn demo_scheduler : () -> bool
+  | () ->
+      let mut stages = Stg8 { s0: 3, s1: 1, s2: 2, s3: 5, s4: 4, s5: 0, s6: 0, s7: 0 }
+      let mut k : i64 = 0
+      while k < 3
+        let best = stg8_max(&stages, 5, k)
+        if best != k then stg8_swap(&stages, k, best) else ()
+        k = k + 1
+      stg8_get(&stages, 0) == 5i64 && stg8_get(&stages, 1) == 4i64 && stg8_get(&stages, 2) == 3i64
+
+fn main : () -> ()
+  | () ->
+      let r1 = demo_stage_taxonomy()
+      let r2 = demo_cmtt_box()
+      let r3 = demo_aot_fusion()
+      let r4 = demo_irdl_hose()
+      let r5 = demo_comptime_table()
+      let r6 = demo_box_prompt()
+      let r7 = demo_scheduler()
+      let all = r1 && r2 && r3 && r4 && r5 && r6 && r7
+      if all
+        syscall(1, 1, "PASS\n" as i64, 5)
+        syscall(231, 0)
+      else
+        syscall(1, 1, "FAIL\n" as i64, 5)
+        syscall(231, 1)

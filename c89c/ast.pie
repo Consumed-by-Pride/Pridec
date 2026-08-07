@@ -1,0 +1,443 @@
+-- c89c/ast.pie — C89 AST: node/type/symbol arenas, string interner.
+-- Index-based (like stdlib/ast.pie) so arenas can grow without dangling ptrs.
+-- Id 0 always means "none"/null.
+
+mod c89c.ast
+
+use mem
+use os.linux
+use vec.vec
+
+-- ── Token kinds ──────────────────────────────────────────────────────────
+
+const TK_EOF     : i64 = 0i64
+const TK_IDENT   : i64 = 1i64
+const TK_INT     : i64 = 2i64
+const TK_FLOAT   : i64 = 3i64
+const TK_STR     : i64 = 4i64
+const TK_CHAR    : i64 = 5i64
+const TK_PUNCT   : i64 = 6i64
+const TK_KW      : i64 = 7i64
+
+-- Storage class / type qualifiers
+const SC_NONE    : i64 = 0i64
+const SC_TYPEDEF : i64 = 1i64
+const SC_EXTERN  : i64 = 2i64
+const SC_STATIC  : i64 = 3i64
+const SC_AUTO    : i64 = 4i64
+const SC_REGISTER: i64 = 5i64
+
+const Q_NONE     : i64 = 0i64
+const Q_CONST    : i64 = 1i64
+const Q_VOLATILE : i64 = 2i64
+
+-- Type kinds
+const TY_VOID    : i64 = 1i64
+const TY_CHAR    : i64 = 2i64
+const TY_SCHAR   : i64 = 3i64
+const TY_UCHAR   : i64 = 4i64
+const TY_SHORT   : i64 = 5i64
+const TY_USHORT  : i64 = 6i64
+const TY_INT     : i64 = 7i64
+const TY_UINT    : i64 = 8i64
+const TY_LONG    : i64 = 9i64
+const TY_ULONG   : i64 = 10i64
+const TY_FLOAT   : i64 = 11i64
+const TY_DOUBLE  : i64 = 12i64
+const TY_LDOUBLE : i64 = 13i64
+const TY_PTR     : i64 = 14i64
+const TY_ARRAY   : i64 = 15i64
+const TY_FUNC    : i64 = 16i64
+const TY_STRUCT  : i64 = 17i64
+const TY_UNION   : i64 = 18i64
+const TY_ENUM    : i64 = 19i64
+const TY_TYPENAME: i64 = 20i64
+
+-- Node kinds
+const N_TRANS    : i64 = 100i64
+const N_FUNDEF   : i64 = 101i64
+const N_VARDECL  : i64 = 102i64
+const N_TYPEDEF  : i64 = 103i64
+const N_STRUCT   : i64 = 104i64
+const N_UNION    : i64 = 105i64
+const N_ENUM     : i64 = 106i64
+
+const N_INT      : i64 = 200i64
+const N_FLOAT    : i64 = 201i64
+const N_STRVAL   : i64 = 202i64
+const N_CHAR     : i64 = 203i64
+const N_IDENT    : i64 = 204i64
+const N_UNARY    : i64 = 205i64
+const N_BINARY   : i64 = 206i64
+const N_CALL     : i64 = 207i64
+const N_INDEX    : i64 = 208i64
+const N_MEMBER   : i64 = 209i64
+const N_CAST     : i64 = 210i64
+const N_SIZEOFTY : i64 = 211i64
+const N_SIZEOFEX : i64 = 212i64
+const N_ASSIGN   : i64 = 213i64
+const N_COND     : i64 = 214i64
+const N_COMMA    : i64 = 215i64
+const N_INITLIST : i64 = 216i64
+
+const N_EXPRSTMT : i64 = 300i64
+const N_BLOCK    : i64 = 301i64
+const N_IF       : i64 = 302i64
+const N_WHILE    : i64 = 303i64
+const N_DO       : i64 = 304i64
+const N_FOR      : i64 = 305i64
+const N_SWITCH   : i64 = 306i64
+const N_CASE     : i64 = 307i64
+const N_DEFAULT  : i64 = 308i64
+const N_BREAK    : i64 = 309i64
+const N_CONTINUE : i64 = 310i64
+const N_RETURN   : i64 = 311i64
+const N_GOTO     : i64 = 312i64
+const N_LABEL    : i64 = 313i64
+const N_NULL     : i64 = 314i64
+
+const NULL_ID    : i64 = 0i64
+
+-- Symbol kinds
+const SYM_VAR      : i64 = 1i64
+const SYM_FUNC     : i64 = 2i64
+const SYM_TYPEDEF  : i64 = 3i64
+const SYM_TAG      : i64 = 4i64
+const SYM_ENUMVAL  : i64 = 5i64
+const SYM_LABEL    : i64 = 6i64
+
+-- ── Source position ──────────────────────────────────────────────────────
+
+struct Pos
+  line : i64
+  col  : i64
+  file : i64
+
+-- ── Type storage ─────────────────────────────────────────────────────────
+-- sizeof(Type) = 11 i64 fields = 88 bytes (no bools; all ints for vec memcmp simplicity)
+
+struct Type
+  kind       : i64
+  qual       : i64
+  t_sub      : i64
+  t_size     : i64
+  t_align    : i64
+  t_params   : i64
+  t_fields   : i64
+  t_tag      : i64
+  t_name     : i64
+  t_variadic : i64   -- 0 = no, 1 = yes
+  _pad       : i64
+
+const TYPE_SIZE : i64 = 88i64
+
+struct TypeArena
+  v : vec.Vec
+
+fn type_arena_new : () -> TypeArena
+  | () -> TypeArena { v: vec_new(TYPE_SIZE) }
+
+fn type_put : (*TypeArena, Type) -> i64
+  | (a, t) ->
+    let id = vec_len(&a.v) + 1i64
+    vec_push(&a.v, &t as ptr)
+    id
+
+fn type_get : (*TypeArena, i64) -> *Type
+  | (a, id) ->
+    if id <= NULL_ID || id > vec_len(&a.v) then 0 as *Type
+    else (vec_as_slice(&a.v) as i64 + (id - 1i64) * TYPE_SIZE) as *Type
+
+-- ── Node storage ─────────────────────────────────────────────────────────
+-- Left-child / right-sibling tree.
+
+struct Node
+  kind     : i64
+  pos_line : i64
+  pos_col  : i64
+  pos_file : i64
+  ival     : i64
+  sval     : i64
+  left     : i64
+  right    : i64
+
+const NODE_SIZE : i64 = 64i64
+
+struct NodeArena
+  v : vec.Vec
+
+fn node_arena_new : () -> NodeArena
+  | () -> NodeArena { v: vec_new(NODE_SIZE) }
+
+fn node_put : (*NodeArena, Node) -> i64
+  | (a, n) ->
+    let id = vec_len(&a.v) + 1i64
+    vec_push(&a.v, &n as ptr)
+    id
+
+fn node_get : (*NodeArena, i64) -> *Node
+  | (a, id) ->
+    if id <= NULL_ID || id > vec_len(&a.v) then 0 as *Node
+    else (vec_as_slice(&a.v) as i64 + (id - 1i64) * NODE_SIZE) as *Node
+
+fn node_mk : (*NodeArena, i64, Pos) -> i64
+  | (a, kind, p) ->
+    let n = Node {
+      kind: kind, pos_line: p.line, pos_col: p.col, pos_file: p.file,
+      ival: 0i64, sval: 0i64, left: NULL_ID, right: NULL_ID
+    }
+    node_put(a, n)
+
+fn node_add_child : (*NodeArena, i64, i64) -> ()
+  | (a, parent, child) ->
+    let p = node_get(a, parent)
+    if p.left == NULL_ID
+      p.left = child
+    else
+      let mut cur = p.left
+      while true
+        let cn = node_get(a, cur)
+        if cn.right == NULL_ID
+          cn.right = child
+          break
+        cur = cn.right
+
+fn node_children_len : (*NodeArena, i64) -> i64
+  | (a, id) ->
+    let mut n : i64 = 0i64
+    let mut cur = node_get(a, id).left
+    while cur != NULL_ID
+      n = n + 1i64
+      cur = node_get(a, cur).right
+    n
+
+fn node_child_at : (*NodeArena, i64, i64) -> i64
+  | (a, id, idx) ->
+    let mut cur = node_get(a, id).left
+    let mut i : i64 = 0i64
+    while cur != NULL_ID
+      if i == idx then return cur
+      cur = node_get(a, cur).right
+      i = i + 1i64
+    NULL_ID
+
+-- ── Param list (TY_FUNC parameters) ─────────────────────────────────────
+
+struct Param
+  name : i64
+  ty   : i64
+  next : i64
+
+const PARAM_SIZE : i64 = 24i64
+
+struct ParamArena
+  v : vec.Vec
+
+fn param_arena_new : () -> ParamArena
+  | () -> ParamArena { v: vec_new(PARAM_SIZE) }
+
+fn param_put : (*ParamArena, Param) -> i64
+  | (a, p) -> let id = vec_len(&a.v) + 1i64; vec_push(&a.v, &p as ptr); id
+
+fn param_get : (*ParamArena, i64) -> *Param
+  | (a, id) ->
+    if id <= NULL_ID || id > vec_len(&a.v) then 0 as *Param
+    else (vec_as_slice(&a.v) as i64 + (id - 1i64) * PARAM_SIZE) as *Param
+
+-- ── Field list (struct/union members) ───────────────────────────────────
+
+struct Field
+  name   : i64
+  ty     : i64
+  offset : i64
+  next   : i64
+
+const FIELD_SIZE : i64 = 32i64
+
+struct FieldArena
+  v : vec.Vec
+
+fn field_arena_new : () -> FieldArena
+  | () -> FieldArena { v: vec_new(FIELD_SIZE) }
+
+fn field_put : (*FieldArena, Field) -> i64
+  | (a, f) -> let id = vec_len(&a.v) + 1i64; vec_push(&a.v, &f as ptr); id
+
+fn field_get : (*FieldArena, i64) -> *Field
+  | (a, id) ->
+    if id <= NULL_ID || id > vec_len(&a.v) then 0 as *Field
+    else (vec_as_slice(&a.v) as i64 + (id - 1i64) * FIELD_SIZE) as *Field
+
+-- ── Symbol table (fixed-bucket hash table, chained) ─────────────────────
+
+const SYM_BUCKETS  : i64 = 1024i64
+
+struct Sym
+  name       : i64
+  kind       : i64
+  ty         : i64
+  storage    : i64
+  pos_line   : i64
+  pos_col    : i64
+  node       : i64
+  has_body   : i64    -- 0/1 (avoid bool for layout simplicity)
+  chain      : i64
+
+const SYM_SIZE : i64 = 72i64
+
+struct SymTab
+  v       : vec.Vec
+  buckets : vec.Vec   -- i64[SYM_BUCKETS], head per bucket
+  _pad    : i64
+
+fn symtab_new : () -> SymTab
+  | () ->
+    let zero : i64 = 0i64
+    let st = SymTab { v: vec_new(SYM_SIZE), buckets: vec_new(8i64), _pad: 0i64 }
+    -- grow bucket vec to SYM_BUCKETS zeros
+    let mut i : i64 = 0i64
+    while i < SYM_BUCKETS
+      vec_push(&st.buckets, &zero as ptr)
+      i = i + 1i64
+    st
+
+fn sym_hash : i64 -> i64
+  | name -> name & (SYM_BUCKETS - 1i64)
+
+fn symtab_put : (*SymTab, Sym) -> i64
+  | (st, s) ->
+    let id = vec_len(&st.v) + 1i64
+    let b = sym_hash(s.name)
+    let headp = (vec_as_slice(&st.buckets) as *i64) + b
+    let ns = s
+    ns.chain = headp[0i64]
+    vec_push(&st.v, &ns as ptr)
+    headp[0i64] = id
+    id
+
+fn symtab_get : (*SymTab, i64) -> *Sym
+  | (st, id) ->
+    if id <= NULL_ID || id > vec_len(&st.v) then 0 as *Sym
+    else (vec_as_slice(&st.v) as i64 + (id - 1i64) * SYM_SIZE) as *Sym
+
+fn symtab_lookup : (*SymTab, i64) -> i64
+  | (st, name) ->
+    let b = sym_hash(name)
+    let mut cur = ((vec_as_slice(&st.buckets) as *i64) + b)[0i64]
+    while cur != NULL_ID
+      let s = symtab_get(st, cur)
+      if s.name == name then return cur
+      cur = s.chain
+    NULL_ID
+
+-- ── String interner ─────────────────────────────────────────────────────
+-- Maps byte spans to dense 1-based i64 ids. Linear-chain hashing; copies
+-- bytes into an Arena so the input buffer can be freed after compilation.
+
+const INT_BUCKETS : i64 = 512i64
+
+struct InternEntry
+  ptr  : ptr
+  len  : i64
+  hash : i64
+  id   : i64
+  next : i64
+
+const INTENTRY_SIZE : i64 = 40i64
+
+struct Interner
+  arena   : mem.Arena
+  entries : vec.Vec
+  buckets : vec.Vec
+  count   : i64
+
+fn interner_new : () -> Interner
+  | () ->
+    let zero : i64 = 0i64
+    let it = Interner {
+      arena: mem.arena_new(1024i64 * 1024i64),
+      entries: vec_new(INTENTRY_SIZE),
+      buckets: vec_new(8i64),
+      count: 0i64
+    }
+    let mut i : i64 = 0i64
+    while i < INT_BUCKETS
+      vec_push(&it.buckets, &zero as ptr)
+      i = i + 1i64
+    it
+
+fn hash_bytes : (ptr, i64) -> i64
+  | (p, n) ->
+    let mut h : i64 = 2166136261i64
+    let mut i : i64 = 0i64
+    let bp = p as *u8
+    while i < n
+      h = (h ^ (bp[i] as i64)) * 16777619i64
+      i = i + 1i64
+    h
+
+fn interner_intern : (*Interner, ptr, i64) -> i64
+  | (it, p, n) ->
+    let h = hash_bytes(p, n) & (INT_BUCKETS - 1i64)
+    let headp = (vec_as_slice(&it.buckets) as *i64) + h
+    let mut cur = headp[0i64]
+    while cur != NULL_ID
+      let e = (vec_as_slice(&it.entries) as i64 + (cur - 1i64) * INTENTRY_SIZE) as *InternEntry
+      if e.hash == h && e.len == n
+        if linux.memcmp(e.ptr, p, n as u64) == 0i32 then return e.id
+      cur = e.next
+    let saved = mem.arena_push_str(&it.arena, p, n)
+    let id = vec_len(&it.entries) + 1i64
+    let e = InternEntry { ptr: saved, len: n, hash: h, id: id, next: headp[0i64] }
+    vec_push(&it.entries, &e as ptr)
+    headp[0i64] = id
+    it.count = it.count + 1i64
+    id
+
+fn interner_get : (*Interner, i64) -> *InternEntry
+  | (it, id) ->
+    if id <= NULL_ID || id > vec_len(&it.entries) then 0 as *InternEntry
+    else (vec_as_slice(&it.entries) as i64 + (id - 1i64) * INTENTRY_SIZE) as *InternEntry
+
+-- Convenience: intern a null-terminated C string.
+fn interner_intern_cstr : (*Interner, ptr) -> i64
+  | (it, p) -> interner_intern(it, p, linux.strlen(p) as i64)
+
+-- Diagnostic helpers use write(2) with hand-rolled int-to-decimal formatting
+-- to avoid variadic-printf quirks during early bring-up.
+
+fn write_u64 : (i32, i64) -> ()
+  | (fd, n0) ->
+    let mut buf : u8[24]
+    let mut i : i64 = 23i64
+    let mut n = n0
+    buf[i] = 0u8
+    i = i - 1i64
+    if n == 0i64
+      buf[i] = 48u8
+      i = i - 1i64
+    else
+      while n > 0i64
+        buf[i] = (n % 10i64 + 48i64) as u8
+        n = n / 10i64
+        i = i - 1i64
+    os.linux.write(fd, &buf[i + 1i64] as ptr, 23i64 - i as u64)
+
+fn write_cstr : (i32, ptr) -> ()
+  | (fd, s) -> os.linux.write(fd, s, os.linux.strlen(s))
+
+fn diag_report : (*i64, i32, Pos, ptr) -> ()
+  | (count, fd, p, msg) ->
+    write_u64(fd, p.line)
+    write_cstr(fd, ":")
+    write_u64(fd, p.col)
+    write_cstr(fd, ": ")
+    write_cstr(fd, msg)
+    write_cstr(fd, "\n")
+    count[0i64] = count[0i64] + 1i64
+
+fn diag_err : (*i64, Pos, ptr) -> ()
+  | (c, p, m) -> diag_report(c, 2i32, p, m)
+
+fn diag_note : (*i64, Pos, ptr) -> ()
+  | (c, p, m) -> diag_report(c, 2i32, p, m)

@@ -1,0 +1,109 @@
+-- examples/01_comptime_generic_specialization.pie
+-- Multi-stage programming: comptime constant folding + CMTT box modelling.
+-- Self-contained. No mod/use. All structs at module level.
+
+-- ── §1  comptime constant folding ─────────────────────────────────────────────
+
+fn demo_comptime_constants : () -> bool
+  | () ->
+      let table_size = comptime 8 * 1024
+      let cache_line = comptime 64
+      let slots      = comptime 8 * 1024 / 64
+      let mask       = comptime 128 - 1
+      table_size == 8192i64 && cache_line == 64i64 && slots == 128i64 && mask == 127i64
+
+-- ── §2  Staged arithmetic ─────────────────────────────────────────────────────
+
+fn demo_staged_arithmetic : () -> bool
+  | () ->
+      let c_sum  = comptime 100 + 23
+      let c_diff = comptime 200 - 57
+      let c_prod = comptime 12 * 11
+      c_sum == 123i64 && c_diff == 143i64 && c_prod == 132i64
+
+-- ── §3  CMTT box (open-code fragment □_{Γ'}^{L'} τ) ─────────────────────────
+-- Field names short to avoid struct-literal field/value name ambiguity.
+
+struct Box
+  stg  : i64
+  kin  : ptr
+  kout : ptr
+  nops : i64
+  ops  : [i64; 16]
+
+fn box_new : (i64, ptr, ptr) -> Box
+  | (s, ki, ko) -> Box { stg: s, kin: ki, kout: ko, nops: 0, ops: [0i64; 16] }
+
+fn box_add : (*Box, i64) -> ()
+  | (b, op) ->
+      if b.nops < 16
+        b.ops[b.nops] = op
+        b.nops = b.nops + 1
+
+fn box_has : (*Box, i64) -> bool
+  | (b, target) ->
+      let mut i : i64 = 0
+      let mut f : bool = false
+      while i < b.nops
+        f = if b.ops[i] == target then true else f
+        i = i + 1
+      f
+
+-- AOT fusion: Node(op, k_in, Id) ↦ k_in  (identity elimination when kout=null)
+fn box_fuse : (*Box, ptr, ptr) -> ptr
+  | (b, ki, ko) -> if ko == null then ki else ki
+
+fn demo_cmtt_box : () -> bool
+  | () ->
+      let mut b = box_new(2, null, null)
+      box_add(&b, 10)
+      box_add(&b, 20)
+      box_has(&b, 10) && box_has(&b, 20) && !box_has(&b, 99)
+
+-- ── §4  AOT fusion rules ─────────────────────────────────────────────────────
+
+fn demo_aot_fusion : () -> bool
+  | () ->
+      let mut ba = box_new(1, 0x100i64 as ptr, null)
+      let fa = box_fuse(&ba, ba.kin, null)
+      let r1 = fa == ba.kin
+      let mut bb = box_new(1, 0x100i64 as ptr, 0x200i64 as ptr)
+      let fb = box_fuse(&bb, bb.kin, bb.kout)
+      r1 && fb != null
+
+-- ── §5  Comptime powers-of-two table ─────────────────────────────────────────
+
+fn is_p2 : i64 -> bool | n -> n > 0 && (n & (n - 1)) == 0
+
+fn demo_comptime_table : () -> bool
+  | () ->
+      let t0 = comptime 1
+      let t1 = comptime 2
+      let t2 = comptime 4
+      let t3 = comptime 8
+      let t7 = comptime 128
+      is_p2(t0) && is_p2(t1) && is_p2(t2) && is_p2(t3) && t7 == 128i64
+
+-- ── §6  Box planned at stage 0, dispatched at stage 1 ────────────────────────
+
+fn demo_box_stage_plan : () -> bool
+  | () ->
+      let plan_stg = comptime 1
+      let op_load  = comptime 5
+      let op_store = comptime 6
+      let mut b = box_new(plan_stg, 0xDEADi64 as ptr, null)
+      box_add(&b, op_load)
+      box_add(&b, op_store)
+      b.stg == 1i64 && box_has(&b, 5) && box_has(&b, 6) && !box_has(&b, 99)
+
+fn main : () -> ()
+  | () ->
+      let r1 = demo_comptime_constants()
+      let r2 = demo_staged_arithmetic()
+      let r3 = demo_cmtt_box()
+      let r4 = demo_aot_fusion()
+      let r5 = demo_comptime_table()
+      let r6 = demo_box_stage_plan()
+      let all = r1 && r2 && r3 && r4 && r5 && r6
+      if all then syscall(1, 1, "PASS\n" as i64, 5) else syscall(1, 1, "FAIL\n" as i64, 5)
+      syscall(231, if all then 0 else 1)

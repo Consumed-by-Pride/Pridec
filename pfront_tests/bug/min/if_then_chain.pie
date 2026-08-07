@@ -1,0 +1,12 @@
+mod t
+-- Many chained else-if with inline then
+fn classify : i64 -> i64
+  | n ->
+    if n == 1i64 then 10i64
+    else if n == 2i64 then 20i64
+    else if n == 3i64 then 30i64
+    else if n == 4i64 then 40i64
+    else 0i64
+
+fn after : i64 -> i64
+  | x -> x + 1i64

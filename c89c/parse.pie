@@ -1,0 +1,708 @@
+-- c89c/parse.pie — Recursive-descent C89 parser.
+-- All conditional branches use indented BLOCK form (not single-line `then`)
+-- to avoid a known pfront layout bug (see pfront_tests/bug/known/layout_elseif_nest.pie).
+-- Where multiple conditions map to the same value, we call small helper fns
+-- or use mutable variables rather than deep nested `if ... then X else if ... then Y`.
+
+mod c89c.parse
+
+use c89c.ast
+use c89c.lex
+use vec.vec
+
+struct Parser
+  lx  : *Lexer
+  ta  : *TypeArena
+  na  : *NodeArena
+  pa  : *ParamArena
+  fa  : *FieldArena
+  errs: *i64
+  pos : i64
+
+-- ----- token helpers -----
+
+fn p_cur : *Parser -> *Token
+  | p ->
+    let base = vec_as_slice(&p.lx.tokens) as i64
+    (base + p.pos * TOKEN_SIZE) as *Token
+
+fn p_kind : *Parser -> i64 | p -> p_cur(p).kind
+fn p_iv   : *Parser -> i64 | p -> p_cur(p).ival
+fn p_sv   : *Parser -> i64 | p -> p_cur(p).sval
+
+fn p_at : *Parser -> Pos
+  | p ->
+    let t = p_cur(p)
+    Pos { line: t.line, col: t.col, file: 0i64 }
+
+fn p_adv : *Parser -> ()
+  | p ->
+    if p_kind(p) != TK_EOF
+      p.pos = p.pos + 1i64
+
+fn p_accept_p : (*Parser, i64, i64) -> bool
+  | (p, k, iv) ->
+    if p_kind(p) != k
+      return false
+    if p_iv(p) != iv
+      return false
+    p_adv(p)
+    return true
+
+fn p_accept_punct : (*Parser, i64) -> bool | (p, id) -> p_accept_p(p, TK_PUNCT, id)
+fn p_accept_kw    : (*Parser, i64) -> bool | (p, id) -> p_accept_p(p, TK_KW, id)
+
+fn p_expect : (*Parser, i64, i64, ptr) -> bool
+  | (p, k, iv, msg) ->
+    if p_accept_p(p, k, iv)
+      return true
+    diag_err(p.errs, p_at(p), msg)
+    false
+
+-- ----- node construction -----
+
+fn p_new : (*Parser, i64) -> *Node
+  | (p, k) ->
+    let t = p_cur(p)
+    let blank = Node { kind:k, pos_line:t.line, pos_col:t.col, pos_file:0i64,
+                       ival:0i64, sval:0i64, left:NULL_ID, right:NULL_ID }
+    let id = node_put(p.na, blank)
+    node_get(p.na, id)
+
+fn p_last : *Parser -> i64 | p -> vec_len(&p.na.v)
+
+fn p_add : (*Parser, *Node, i64) -> ()
+  | (p, parent, child) ->
+    let base = vec_as_slice(&p.na.v) as i64
+    let off = (parent as i64 - base) / NODE_SIZE
+    node_add_child(p.na, off + 1i64, child)
+
+-- ----- forward decls -----
+fn parse_expr        : *Parser -> i64
+fn parse_assign_expr : *Parser -> i64
+fn parse_stmt        : *Parser -> i64
+fn parse_type        : *Parser -> i64
+fn parse_decl        : *Parser -> i64
+fn parse_declarator  : (*Parser, i64, *i64) -> i64
+fn parse_compound_stmt : *Parser -> i64
+
+-- ----- types -----
+
+fn t_new : (*Parser, i64) -> i64
+  | (p, k) ->
+    let t = Type { kind:k, qual:Q_NONE, t_sub:NULL_ID, t_size:0i64, t_align:0i64,
+                   t_params:NULL_ID, t_fields:NULL_ID, t_tag:0i64, t_name:0i64,
+                   t_variadic:0i64, _pad:0i64 }
+    type_put(p.ta, t)
+
+fn tp : (*Parser, i64) -> *Type
+  | (p, id) -> type_get(p.ta, id)
+
+fn kw_is_type_kw : i64 -> bool
+  | kv ->
+    if kv == KW_INT then return true
+    if kv == KW_CHAR then return true
+    if kv == KW_SHORT then return true
+    if kv == KW_LONG then return true
+    if kv == KW_VOID then return true
+    if kv == KW_UNSIGNED then return true
+    if kv == KW_SIGNED then return true
+    if kv == KW_FLOAT then return true
+    if kv == KW_DOUBLE then return true
+    if kv == KW_STRUCT then return true
+    if kv == KW_UNION then return true
+    if kv == KW_ENUM then return true
+    false
+
+fn is_type_start : *Parser -> bool
+  | p ->
+    let k = p_kind(p)
+    if k == TK_KW
+      return kw_is_type_kw(p_iv(p))
+    if k == TK_IDENT
+      return true
+    false
+
+fn kw_to_tk : i64 -> i64
+  | kv ->
+    if kv == KW_INT then TY_INT
+    else if kv == KW_CHAR then TY_CHAR
+    else if kv == KW_VOID then TY_VOID
+    else if kv == KW_FLOAT then TY_FLOAT
+    else if kv == KW_DOUBLE then TY_DOUBLE
+    else if kv == KW_STRUCT then TY_STRUCT
+    else if kv == KW_UNION then TY_UNION
+    else if kv == KW_ENUM then TY_ENUM
+    else TY_INT
+
+fn parse_struct_body : (*Parser, i64) -> ()
+  | (p, t) ->
+    p_expect(p, TK_PUNCT, P_LBRACE, "expected '{'")
+    let mut first_f : i64 = NULL_ID
+    let mut last_f : i64 = NULL_ID
+    while p_kind(p) != TK_EOF && !p_accept_punct(p, P_RBRACE)
+      let fty = parse_type(p)
+      while true
+        let mut fnm : i64 = 0i64
+        let dty = parse_declarator(p, fty, &fnm)
+        let fr = Field { name:fnm, ty:dty, next:NULL_ID }
+        let fid = field_put(p.fa, fr)
+        if last_f == NULL_ID
+          first_f = fid
+        else
+          field_get(p.fa, last_f).next = fid
+        last_f = fid
+        p_accept_punct(p, P_SEMI)
+        break
+    tp(p, t).t_fields = first_f
+
+fn parse_enum_body : (*Parser, i64) -> ()
+  | (p, t) ->
+    if !p_accept_punct(p, P_LBRACE)
+      return
+    let mut ev : i64 = 0i64
+    while p_kind(p) != TK_EOF && !p_accept_punct(p, P_RBRACE)
+      if p_kind(p) == TK_IDENT
+        p_adv(p)
+        if p_accept_punct(p, P_ASSIGN)
+          let _ve = parse_assign_expr(p)
+          ev = 0i64  -- don't track values precisely
+        ev = ev + 1i64
+      if p_accept_punct(p, P_COMMA)
+        0i64
+      else
+        p_accept_punct(p, P_SEMI)
+
+fn parse_type : *Parser -> i64
+  | p ->
+    let mut t : i64 = NULL_ID
+    let mut is_unsigned : i64 = 0i64
+    let mut long_count : i64 = 0i64
+    while p_kind(p) == TK_KW
+      let kv = p_iv(p)
+      if kv == KW_UNSIGNED
+        is_unsigned = 1i64
+        p_adv(p)
+      else if kv == KW_SIGNED
+        p_adv(p)
+      else if kv == KW_LONG
+        long_count = long_count + 1i64
+        p_adv(p)
+      else if kv == KW_SHORT
+        p_adv(p)
+      else
+        break
+    let k = p_kind(p)
+    if k == TK_KW
+      let kv = p_iv(p)
+      if kv == KW_INT
+        t = t_new(p, TY_INT); p_adv(p)
+      else if kv == KW_CHAR
+        t = t_new(p, TY_CHAR); p_adv(p)
+      else if kv == KW_VOID
+        t = t_new(p, TY_VOID); p_adv(p)
+      else if kv == KW_FLOAT
+        t = t_new(p, TY_FLOAT); p_adv(p)
+      else if kv == KW_DOUBLE
+        t = t_new(p, TY_DOUBLE); p_adv(p)
+      else if kv == KW_STRUCT
+        p_adv(p)
+        t = t_new(p, TY_STRUCT)
+        if p_kind(p) == TK_IDENT
+          tp(p, t).t_tag = p_sv(p); p_adv(p)
+        parse_struct_body(p, t)
+      else if kv == KW_UNION
+        p_adv(p)
+        t = t_new(p, TY_UNION)
+        if p_kind(p) == TK_IDENT
+          tp(p, t).t_tag = p_sv(p); p_adv(p)
+        if p_accept_punct(p, P_LBRACE)
+          while p_kind(p) != TK_EOF && !p_accept_punct(p, P_RBRACE)
+            let _fty = parse_type(p)
+            while true
+              p_accept_punct(p, P_COMMA)
+              if p_kind(p) == TK_PUNCT && p_iv(p) == P_SEMI
+                break
+              p_adv(p)
+      else if kv == KW_ENUM
+        p_adv(p)
+        t = t_new(p, TY_ENUM)
+        if p_kind(p) == TK_IDENT
+          tp(p, t).t_tag = p_sv(p); p_adv(p)
+        parse_enum_body(p, t)
+    if t == NULL_ID
+      if k == TK_IDENT
+        t = t_new(p, TY_TYPENAME)
+        tp(p, t).t_name = p_sv(p)
+        p_adv(p)
+    if t == NULL_ID then return NULL_ID
+    if is_unsigned != 0i64
+      if tp(p, t).kind == TY_INT
+        tp(p, t).kind = TY_UINT
+    while p_accept_punct(p, P_STAR)
+      let pt = t_new(p, TY_PTR)
+      tp(p, pt).t_sub = t
+      t = pt
+    t
+
+-- ----- declarators -----
+
+fn parse_direct_declarator : (*Parser, i64, *i64) -> i64
+  | (p, base, name_out) ->
+    let mut ty = base
+    if p_accept_punct(p, P_LPAREN)
+      ty = parse_declarator(p, base, name_out)
+      p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+    else if p_kind(p) == TK_IDENT
+      name_out[0i64] = p_sv(p)
+      p_adv(p)
+    while true
+      if p_accept_punct(p, P_LBRACK)
+        let at = t_new(p, TY_ARRAY)
+        tp(p, at).t_sub = ty
+        if p_kind(p) != TK_PUNCT || p_iv(p) != P_RBRACK
+          let _sz = parse_assign_expr(p)
+          0i64
+        p_expect(p, TK_PUNCT, P_RBRACK, "expected ']'")
+        ty = at
+      else if p_accept_punct(p, P_LPAREN)
+        let mut first_p : i64 = NULL_ID
+        let mut last_p : i64 = NULL_ID
+        if !p_accept_punct(p, P_RPAREN)
+          if p_accept_kw(p, KW_VOID)
+            0i64
+          else
+            while true
+              let pt = parse_type(p)
+              let mut pn : i64 = 0i64
+              if p_kind(p) == TK_IDENT
+                let _ft = parse_declarator(p, pt, &pn)
+                0i64
+              let pr = Param { name:pn, ty:pt, next:NULL_ID }
+              let pid = param_put(p.pa, pr)
+              if last_p == NULL_ID
+                first_p = pid
+              else
+                param_get(p.pa, last_p).next = pid
+              last_p = pid
+              if p_accept_punct(p, P_COMMA)
+                if p_accept_punct(p, P_ELLIPSIS)
+                  tp(p, pt).t_variadic = 1i64
+                  p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+                  break
+                0i64
+              else
+                p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+                break
+        let ft = t_new(p, TY_FUNC)
+        tp(p, ft).t_sub = base
+        tp(p, ft).t_params = first_p
+        ty = ft
+      else
+        break
+    ty
+
+fn parse_declarator : (*Parser, i64, *i64) -> i64
+  | (p, base, name_out) ->
+    let mut ty = base
+    while p_accept_punct(p, P_STAR)
+      let pt = t_new(p, TY_PTR)
+      tp(p, pt).t_sub = ty
+      ty = pt
+    parse_direct_declarator(p, ty, name_out)
+
+-- ----- primary expressions -----
+
+fn parse_primary : *Parser -> i64
+  | p ->
+    let k = p_kind(p)
+    if k == TK_INT
+      let n = p_new(p, N_INT); n.ival = p_iv(p); p_adv(p); return p_last(p)
+    if k == TK_CHAR
+      let n = p_new(p, N_CHAR); n.ival = p_iv(p); p_adv(p); return p_last(p)
+    if k == TK_STR
+      let n = p_new(p, N_STRVAL); n.sval = p_sv(p); p_adv(p)
+      while p_kind(p) == TK_STR
+        p_adv(p)
+      return p_last(p)
+    if k == TK_FLOAT
+      let n = p_new(p, N_FLOAT); n.sval = p_sv(p); p_adv(p); return p_last(p)
+    if k == TK_KW
+      let kv = p_iv(p)
+      if kv == KW_SIZEOF
+        p_adv(p)
+        if p_accept_punct(p, P_LPAREN)
+          if is_type_start(p)
+            let ty = parse_type(p)
+            p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+            let n = p_new(p, N_SIZEOFTY); n.ival = ty; return p_last(p)
+          else
+            let e = parse_expr(p)
+            p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+            let n = p_new(p, N_SIZEOFEX); p_add(p, n, e); return p_last(p)
+        else
+          let e = parse_unary(p)
+          let n = p_new(p, N_SIZEOFEX); p_add(p, n, e); return p_last(p)
+    if k == TK_IDENT
+      let id = p_sv(p)
+      let n = p_new(p, N_IDENT); n.sval = id; p_adv(p)
+      let mut e = p_last(p)
+      while true
+        if p_accept_punct(p, P_LPAREN)
+          let cn = p_new(p, N_CALL); p_add(p, cn, e)
+          if !p_accept_punct(p, P_RPAREN)
+            while true
+              let a = parse_assign_expr(p)
+              p_add(p, cn, a)
+              if p_accept_punct(p, P_COMMA)
+                0i64
+              else
+                p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+                break
+          e = p_last(p)
+        else if p_accept_punct(p, P_LBRACK)
+          let in_ = p_new(p, N_INDEX); p_add(p, in_, e)
+          let idx = parse_expr(p)
+          p_add(p, in_, idx)
+          p_expect(p, TK_PUNCT, P_RBRACK, "expected ']'")
+          e = p_last(p)
+        else if p_accept_punct(p, P_ARROW)
+          let mn = p_new(p, N_MEMBER); mn.ival = 1i64; p_add(p, mn, e)
+          if p_kind(p) == TK_IDENT
+            mn.sval = p_sv(p); p_adv(p)
+          e = p_last(p)
+        else if p_accept_punct(p, P_DOT)
+          let mn = p_new(p, N_MEMBER); mn.ival = 0i64; p_add(p, mn, e)
+          if p_kind(p) == TK_IDENT
+            mn.sval = p_sv(p); p_adv(p)
+          e = p_last(p)
+        else if p_accept_punct(p, P_INC)
+          let un = p_new(p, N_UNARY); un.ival = 0x100i64 + 1i64; p_add(p, un, e); e = p_last(p)
+        else if p_accept_punct(p, P_DEC)
+          let un = p_new(p, N_UNARY); un.ival = 0x100i64 + 2i64; p_add(p, un, e); e = p_last(p)
+        else break
+      return e
+    if p_accept_punct(p, P_LPAREN)
+      let save_pos = p.pos
+      let mut is_cast : i64 = 0i64
+      if is_type_start(p)
+        let ty = parse_type(p)
+        if p_accept_punct(p, P_RPAREN)
+          let e = parse_unary(p)
+          let n = p_new(p, N_CAST); n.ival = ty; p_add(p, n, e); return p_last(p)
+        else
+          p.pos = save_pos
+          let e = parse_expr(p)
+          p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+          return e
+      else
+        let e = parse_expr(p)
+        p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+        return e
+    diag_err(p.errs, p_at(p), "expected expression")
+    if p_kind(p) != TK_EOF then p_adv(p)
+    let n = p_new(p, N_INT); n.ival = 0i64; p_last(p)
+
+-- ----- unary -----
+
+fn parse_unary : *Parser -> i64
+  | p ->
+    let k = p_kind(p)
+    if k == TK_PUNCT
+      let op = p_iv(p)
+      if op == P_STAR
+        p_adv(p); let e = parse_unary(p)
+        let n = p_new(p, N_UNARY); n.ival = op; p_add(p, n, e); return p_last(p)
+      if op == P_AMP
+        p_adv(p); let e = parse_unary(p)
+        let n = p_new(p, N_UNARY); n.ival = op; p_add(p, n, e); return p_last(p)
+      if op == P_PLUS || op == P_MINUS || op == P_BANG || op == P_TILDE
+        p_adv(p); let e = parse_unary(p)
+        let n = p_new(p, N_UNARY); n.ival = op; p_add(p, n, e); return p_last(p)
+      if op == P_INC
+        p_adv(p); let e = parse_unary(p)
+        let n = p_new(p, N_UNARY); n.ival = 0x200i64 + 1i64; p_add(p, n, e); return p_last(p)
+      if op == P_DEC
+        p_adv(p); let e = parse_unary(p)
+        let n = p_new(p, N_UNARY); n.ival = 0x200i64 + 2i64; p_add(p, n, e); return p_last(p)
+    parse_primary(p)
+
+-- ----- binary precedence -----
+
+fn is_assign_op : i64 -> bool
+  | op ->
+    if op == P_ASSIGN then return true
+    if op == P_MUL_EQ then return true
+    if op == P_DIV_EQ then return true
+    if op == P_MOD_EQ then return true
+    if op == P_ADD_EQ then return true
+    if op == P_SUB_EQ then return true
+    if op == P_SHL_EQ then return true
+    if op == P_SHR_EQ then return true
+    if op == P_AND_EQ then return true
+    if op == P_XOR_EQ then return true
+    if op == P_OR_EQ then return true
+    false
+
+fn bp : i64 -> i64
+  | op ->
+    if op == P_COMMA then 1i64
+    else if is_assign_op(op) then 2i64
+    else if op == P_QUESTION then 3i64
+    else if op == P_OR then 4i64
+    else if op == P_AND then 5i64
+    else if op == P_PIPE then 6i64
+    else if op == P_CARET then 7i64
+    else if op == P_EQEQ || op == P_NEQ then 8i64
+    else if op == P_LT || op == P_GT || op == P_LE || op == P_GE then 9i64
+    else if op == P_LSHIFT || op == P_RSHIFT then 10i64
+    else if op == P_PLUS || op == P_MINUS then 11i64
+    else if op == P_STAR || op == P_SLASH || op == P_PCT then 12i64
+    else 0i64
+
+fn parse_bin_rhs : (*Parser, i64, i64) -> i64
+  | (p, min_bp, lhs_in) ->
+    let mut lhs = lhs_in
+    while true
+      let k = p_kind(p)
+      if k != TK_PUNCT then break
+      let op = p_iv(p)
+      let prec = bp(op)
+      if prec == 0i64 then break
+      if prec < min_bp then break
+      p_adv(p)
+      if op == P_QUESTION
+        let th = parse_expr(p)
+        p_expect(p, TK_PUNCT, P_COLON, "expected ':' in ternary")
+        let rhs = parse_bin_rhs(p, prec, parse_unary(p))
+        let n = p_new(p, N_COND); p_add(p, n, lhs); p_add(p, n, th); p_add(p, n, rhs)
+        lhs = p_last(p)
+      else
+        let rprec : i64
+        if is_assign_op(op)
+          rprec = prec
+        else
+          rprec = prec + 1i64
+        let rhs = parse_bin_rhs(p, rprec, parse_unary(p))
+        let kind : i64
+        if is_assign_op(op)
+          kind = N_ASSIGN
+        else
+          kind = N_BINARY
+        let n = p_new(p, kind); n.ival = op; p_add(p, n, lhs); p_add(p, n, rhs)
+        lhs = p_last(p)
+    lhs
+
+fn parse_assign_expr : *Parser -> i64 | p -> parse_bin_rhs(p, 2i64, parse_unary(p))
+fn parse_expr : *Parser -> i64        | p -> parse_bin_rhs(p, 1i64, parse_unary(p))
+
+-- ----- statements -----
+
+fn p_check_rparen : *Parser -> bool
+  | p -> p_kind(p) == TK_PUNCT && p_iv(p) == P_RPAREN
+
+fn parse_compound_stmt : *Parser -> i64
+  | p ->
+    let n = p_new(p, N_BLOCK)
+    p_expect(p, TK_PUNCT, P_LBRACE, "expected '{'")
+    while p_kind(p) != TK_EOF && !p_accept_punct(p, P_RBRACE)
+      if is_type_start(p)
+        let d = parse_decl(p)
+        if d != NULL_ID then p_add(p, n, d)
+      else
+        let s = parse_stmt(p)
+        if s != NULL_ID then p_add(p, n, s)
+    p_last(p)
+
+fn parse_label_or_stmt : (*Parser, i64) -> i64
+  | (p, name) ->
+    let n = p_new(p, N_LABEL); n.sval = name
+    p_adv(p)  -- the ':'
+    p_last(p)
+
+fn parse_stmt : *Parser -> i64
+  | p ->
+    let t = p_cur(p)
+    if t.kind == TK_PUNCT && t.ival == P_SEMI
+      p_adv(p); let n = p_new(p, N_NULL); return p_last(p)
+    if t.kind == TK_PUNCT && t.ival == P_LBRACE
+      return parse_compound_stmt(p)
+    if t.kind == TK_KW
+      let kv = t.ival
+      if kv == KW_IF
+        p_adv(p)
+        p_expect(p, TK_PUNCT, P_LPAREN, "expected '('")
+        let c = parse_expr(p)
+        p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+        let th = parse_stmt(p)
+        let mut el : i64 = NULL_ID
+        if p_accept_kw(p, KW_ELSE)
+          el = parse_stmt(p)
+        let n = p_new(p, N_IF); p_add(p, n, c); p_add(p, n, th)
+        if el != NULL_ID then p_add(p, n, el)
+        return p_last(p)
+      if kv == KW_WHILE
+        p_adv(p)
+        p_expect(p, TK_PUNCT, P_LPAREN, "expected '('")
+        let c = parse_expr(p)
+        p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+        let b = parse_stmt(p)
+        let n = p_new(p, N_WHILE); p_add(p, n, c); p_add(p, n, b); return p_last(p)
+      if kv == KW_DO
+        p_adv(p)
+        let b = parse_stmt(p)
+        p_expect(p, TK_KW, KW_WHILE, "expected 'while'")
+        p_expect(p, TK_PUNCT, P_LPAREN, "expected '('")
+        let c = parse_expr(p)
+        p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+        p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+        let n = p_new(p, N_DO); p_add(p, n, b); p_add(p, n, c); return p_last(p)
+      if kv == KW_FOR
+        p_adv(p)
+        p_expect(p, TK_PUNCT, P_LPAREN, "expected '('")
+        let n = p_new(p, N_FOR)
+        if p_accept_punct(p, P_SEMI)
+          p_add(p, n, NULL_ID)
+        else if is_type_start(p)
+          let d = parse_decl(p)
+          p_add(p, n, d)
+        else
+          let e = parse_expr(p)
+          p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+          let es = p_new(p, N_EXPRSTMT); p_add(p, es, e); p_add(p, n, p_last(p))
+        if p_accept_punct(p, P_SEMI)
+          p_add(p, n, NULL_ID)
+        else
+          let c = parse_expr(p)
+          p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+          p_add(p, n, c)
+        if p_check_rparen(p)
+          p_add(p, n, NULL_ID)
+        else
+          let s = parse_expr(p)
+          p_add(p, n, s)
+        p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+        let b = parse_stmt(p)
+        p_add(p, n, b)
+        return p_last(p)
+      if kv == KW_SWITCH
+        p_adv(p)
+        p_expect(p, TK_PUNCT, P_LPAREN, "expected '('")
+        let c = parse_expr(p)
+        p_expect(p, TK_PUNCT, P_RPAREN, "expected ')'")
+        let b = parse_stmt(p)
+        let n = p_new(p, N_SWITCH); p_add(p, n, c); p_add(p, n, b); return p_last(p)
+      if kv == KW_CASE
+        p_adv(p)
+        let v = parse_expr(p)
+        p_expect(p, TK_PUNCT, P_COLON, "expected ':'")
+        let n = p_new(p, N_CASE); p_add(p, n, v); return p_last(p)
+      if kv == KW_DEFAULT
+        p_adv(p)
+        p_expect(p, TK_PUNCT, P_COLON, "expected ':'")
+        let n = p_new(p, N_DEFAULT); return p_last(p)
+      if kv == KW_BREAK
+        p_adv(p)
+        p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+        let n = p_new(p, N_BREAK); return p_last(p)
+      if kv == KW_CONTINUE
+        p_adv(p)
+        p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+        let n = p_new(p, N_CONTINUE); return p_last(p)
+      if kv == KW_RETURN
+        p_adv(p)
+        let mut v : i64 = NULL_ID
+        if !(p_kind(p) == TK_PUNCT && p_iv(p) == P_SEMI)
+          v = parse_expr(p)
+        p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+        let n = p_new(p, N_RETURN)
+        if v != NULL_ID then p_add(p, n, v)
+        return p_last(p)
+      if kv == KW_GOTO
+        p_adv(p)
+        let mut tgt : i64 = 0i64
+        if p_kind(p) == TK_IDENT
+          tgt = p_sv(p); p_adv(p)
+        p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+        let n = p_new(p, N_GOTO); n.sval = tgt; return p_last(p)
+    -- label?
+    if t.kind == TK_IDENT
+      -- lookahead for ':' at next token
+      let next_pos = p.pos + 1i64
+      let tok_base = vec_as_slice(&p.lx.tokens) as i64
+      let next_tok = (tok_base + next_pos * TOKEN_SIZE) as *Token
+      if next_tok.kind == TK_PUNCT && next_tok.ival == P_COLON
+        let name = p_sv(p); p_adv(p); p_adv(p)
+        let n = p_new(p, N_LABEL); n.sval = name; return p_last(p)
+    if is_type_start(p)
+      return parse_decl(p)
+    let e = parse_expr(p)
+    p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+    let n = p_new(p, N_EXPRSTMT); p_add(p, n, e); p_last(p)
+
+-- ----- declarations -----
+
+fn parse_init : *Parser -> i64
+  | p ->
+    if p_accept_punct(p, P_LBRACE)
+      let in_ = p_new(p, N_INITLIST)
+      while p_kind(p) != TK_EOF && !p_accept_punct(p, P_RBRACE)
+        let ie = parse_assign_expr(p)
+        p_add(p, in_, ie)
+        if p_accept_punct(p, P_COMMA)
+          0i64
+        else
+          p_expect(p, TK_PUNCT, P_RBRACE, "expected '}'")
+          break
+      return p_last(p)
+    parse_assign_expr(p)
+
+fn parse_decl : *Parser -> i64
+  | p ->
+    let is_typedef : i64 = 0i64
+    if p_accept_kw(p, KW_TYPEDEF)
+      is_typedef = 1i64
+    p_accept_kw(p, KW_EXTERN)
+    p_accept_kw(p, KW_STATIC)
+    let ty = parse_type(p)
+    if ty == NULL_ID then return NULL_ID
+    let mut first_decl : i64 = NULL_ID
+    while true
+      let mut name_id : i64 = 0i64
+      let dty = parse_declarator(p, ty, &name_id)
+      let mut d : i64 = NULL_ID
+      if is_typedef != 0i64
+        let nd = p_new(p, N_TYPEDEF); nd.ival = dty; nd.sval = name_id
+        d = p_last(p)
+      else if tp(p, dty).kind == TY_FUNC && p_kind(p) == TK_PUNCT && p_iv(p) == P_LBRACE
+        let nd = p_new(p, N_FUNDEF); nd.ival = dty; nd.sval = name_id
+        let body = parse_compound_stmt(p)
+        p_add(p, nd, body)
+        d = p_last(p)
+      else
+        let nd = p_new(p, N_VARDECL); nd.ival = dty; nd.sval = name_id
+        if p_accept_punct(p, P_ASSIGN)
+          let ie = parse_init(p)
+          p_add(p, nd, ie)
+        d = p_last(p)
+      if first_decl == NULL_ID then first_decl = d
+      if p_accept_punct(p, P_COMMA)
+        0i64
+      else
+        p_expect(p, TK_PUNCT, P_SEMI, "expected ';'")
+        break
+    first_decl
+
+-- ----- entry point -----
+
+fn parse_file : (*Parser, *Lexer, *TypeArena, *NodeArena, *ParamArena, *FieldArena, *i64) -> i64
+  | (p, lx, ta, na, pa, fa, errs) ->
+    p.lx = lx; p.ta = ta; p.na = na; p.pa = pa; p.fa = fa; p.errs = errs; p.pos = 0i64
+    let root = p_new(p, N_TRANS)
+    while p_kind(p) != TK_EOF
+      let d = parse_decl(p)
+      if d != NULL_ID then p_add(p, root, d)
+      if p_kind(p) == TK_EOF then break
+      if p_kind(p) != TK_PUNCT || (p_iv(p) != P_SEMI && p_iv(p) != P_RBRACE)
+        if p_kind(p) != TK_EOF then p_adv(p)
+    p_last(p)

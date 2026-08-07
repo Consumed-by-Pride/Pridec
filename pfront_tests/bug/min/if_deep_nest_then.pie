@@ -1,0 +1,16 @@
+mod t
+-- Two-level nesting of if-then-elseif-then
+fn f : i64 -> i64
+  | n ->
+    if n >= 0i64
+      if n < 10i64 then 1i64
+      else if n < 100i64 then 2i64
+      else 3i64
+    else if n < -10i64
+      if n < -100i64 then -3i64
+      else if n < -50i64 then -2i64
+      else -1i64
+    else 0i64
+
+fn g : i64 -> i64
+  | x -> x

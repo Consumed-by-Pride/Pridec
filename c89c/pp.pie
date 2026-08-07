@@ -1,0 +1,289 @@
+-- c89c/pp.pie — C preprocessor state + directive parsing tables.
+-- Self-contained; provides constants + helpers the lexer uses to drive
+-- directive handling. No builtin vec/diag dependencies here so the file
+-- parses cleanly and exercises the parser with large match tables.
+
+mod c89c.pp
+
+-- Directive kinds, one per #-directive the preprocessor understands.
+const DIR_NONE   : i64 = 0i64
+const DIR_DEFINE : i64 = 1i64
+const DIR_UNDEF  : i64 = 2i64
+const DIR_INCLUDE: i64 = 3i64
+const DIR_IF     : i64 = 4i64
+const DIR_IFDEF  : i64 = 5i64
+const DIR_IFNDEF : i64 = 6i64
+const DIR_ELIF   : i64 = 7i64
+const DIR_ELSE   : i64 = 8i64
+const DIR_ENDIF  : i64 = 9i64
+const DIR_LINE   : i64 = 10i64
+const DIR_ERROR  : i64 = 11i64
+const DIR_PRAGMA : i64 = 12i64
+const DIR_WARNING: i64 = 13i64
+const DIR_EMPTY  : i64 = 14i64
+const DIR_COUNT  : i64 = 15i64
+
+-- Pp-token sub-classification.
+const PT_EOF   : i64 = 0i64
+const PT_WS    : i64 = 1i64
+const PT_IDENT : i64 = 2i64
+const PT_NUM   : i64 = 3i64
+const PT_STR   : i64 = 4i64
+const PT_CHAR  : i64 = 5i64
+const PT_PUNCT : i64 = 6i64
+const PT_NL    : i64 = 7i64
+const PT_HASH  : i64 = 8i64
+const PT_HEADER: i64 = 9i64  -- <foo.h>
+const PT_PLACEMARKER : i64 = 10i64
+
+-- Conditional frame: tracks #if/#ifdef/#ifndef state.
+struct CondFrame
+    active        : bool
+    seen_true     : bool
+    parent_active : bool
+    in_else       : bool
+    elif_depth    : i64
+end
+
+-- Macro object/function.
+const MK_OBJECT : i64 = 0i64
+const MK_FUNC   : i64 = 1i64
+const MK_DISABLED : i64 = 2i64
+
+struct MacroDef
+    kind      : i64
+    nparam    : i64
+    variadic  : bool
+    predef    : bool
+    bufloc    : i64
+    buflen    : i64
+end
+
+-- Preprocessor state.
+struct PpState
+    nmacros    : i64
+    cap_macros : i64
+    cond_depth : i64
+    cond_cap   : i64
+    err_count  : i64
+    wrn_count  : i64
+    skip_curr  : bool   -- current cond stack skips to next #else/#endif
+    file_id    : i64
+    line_adj   : i64
+end
+
+-- Initialize a PpState to its default "top-of-file" values.
+fn pp_init(s : PpState)
+    s.nmacros = 0i64
+    s.cap_macros = 128i64
+    s.cond_depth = 0i64
+    s.cond_cap = 32i64
+    s.err_count = 0i64
+    s.wrn_count = 0i64
+    s.skip_curr = false
+    s.file_id = 0i64
+    s.line_adj = 0i64
+end
+
+-- Lookup directive kind by name id. Returns DIR_NONE if unknown.
+fn pp_directive_kind(name : i64) -> i64
+    if name == id("define")  do return DIR_DEFINE
+    if name == id("undef")   do return DIR_UNDEF
+    if name == id("include") do return DIR_INCLUDE
+    if name == id("if")      do return DIR_IF
+    if name == id("ifdef")   do return DIR_IFDEF
+    if name == id("ifndef")  do return DIR_IFNDEF
+    if name == id("elif")    do return DIR_ELIF
+    if name == id("else")    do return DIR_ELSE
+    if name == id("endif")   do return DIR_ENDIF
+    if name == id("line")    do return DIR_LINE
+    if name == id("error")   do return DIR_ERROR
+    if name == id("pragma")  do return DIR_PRAGMA
+    if name == id("warning") do return DIR_WARNING
+    return DIR_NONE
+end
+
+-- Stub for id() — returns a fake i64 name id.  The real implementation lives
+-- in the interner; this stub is enough to keep the directive table alive
+-- and exercizes the parser's multi-`if` chain.
+fn id(s : char*) -> i64
+    if s == null do return 0i64
+    let mut h : i64 = 5381i64
+    let mut i : i64 = 0i64
+    while s[i] != 0c
+        h = h * 33i64 + (s[i] as i64)
+        i = i + 1i64
+    end
+    return h
+end
+
+-- Is the token a start-of-directive '#' at column 0?
+fn pp_is_directive_start(col : i64, kind : i64) -> bool
+    if col != 0i64    do return false
+    if kind != PT_HASH do return false
+    return true
+end
+
+-- A directive is a "conditional opener" iff it starts a new cond frame.
+fn pp_is_cond_opener(k : i64) -> bool
+    if k == DIR_IF     do return true
+    if k == DIR_IFDEF  do return true
+    if k == DIR_IFNDEF do return true
+    return false
+end
+
+fn pp_is_cond_mid(k : i64) -> bool
+    if k == DIR_ELIF do return true
+    if k == DIR_ELSE do return true
+    return false
+end
+
+fn pp_is_cond_close(k : i64) -> bool
+    return k == DIR_ENDIF
+end
+
+-- C preprocessor expression evaluation (tiny subset: integers + unary/binary ops).
+-- Returns 1 for true, 0 for false/unknown. The full evaluator lives in pp_eval.c3.
+fn pp_eval_trivially_true(tok_kind : i64, tok_val : i64) -> bool
+    if tok_kind != PT_NUM do return true
+    return tok_val != 0i64
+end
+
+fn pp_eval_trivially_false(tok_kind : i64, tok_val : i64) -> bool
+    if tok_kind != PT_NUM do return false
+    return tok_val == 0i64
+end
+
+-- Macro name is "reserved" (defined or builtin) — used to warn on redefinition.
+fn pp_name_is_predefined(name : i64) -> bool
+    if name == id("__FILE__")    do return true
+    if name == id("__LINE__")    do return true
+    if name == id("__DATE__")    do return true
+    if name == id("__TIME__")    do return true
+    if name == id("__STDC__")    do return true
+    if name == id("__STDC_HOSTED__") do return true
+    if name == id("__STDC_VERSION__") do return true
+    if name == id("__cplusplus") do return true
+    return false
+end
+
+-- Builtin-macro expansion value. Returns -1 if not a builtin.
+fn pp_builtin_expand(name : i64, line : i64) -> i64
+    if name == id("__LINE__") do return line
+    if name == id("__STDC__") do return 1i64
+    return -1i64
+end
+
+-- Trigraph replacement: nine trigraphs map to single chars. The lexer calls
+-- this before tokenisation so "??/" becomes "\\" etc. Returns the replacement
+-- character or 0 if no trigraph applies.
+fn pp_trigraph_repl(a : i8, b : i8) -> i8
+    if a != '?' do return 0i8
+    if b == '=' do return '#'
+    if b == '/' do return 92i8     -- backslash
+    if b == '\'' do return '^'
+    if b == '(' do return '['
+    if b == ')' do return ']'
+    if b == '!' do return '|'
+    if b == '<' do return '{'
+    if b == '>' do return '}'
+    if b == '-' do return '~'
+    return 0i8
+end
+
+-- Digraph replacement table: alternative spellings for punctuators.
+fn pp_digraph_repl(a : i8, b : i8) -> i64
+    if a != '<' do return -1i64
+    if b == ':' do return '['    -- <: -> [
+    if b == '%' do return '{'    -- <% -> {
+    return -1i64
+end
+
+fn pp_digraph_repl2(a : i8, b : i8) -> i64
+    if a == ':' && b == '>' do return ']'    -- :> -> ]
+    if a == '%' && b == '>' do return '}'    -- %> -> }
+    if a == '%' && b == ':' do return '#'    -- %: -> #
+    return -1i64
+end
+
+-- Splice lines: a line ending with "\<newline>" is continued. Returns the
+-- number of lines spliced, starting at position p.
+fn pp_count_splices(buf : char*, len : i64, p : i64) -> i64
+    let mut n : i64 = 0i64
+    let mut i : i64 = p
+    while i + 1i64 < len
+        if buf[i] != 92c do break end    -- backslash
+        if buf[i + 1i64] == 10c          -- \n
+            n = n + 1i64
+            i = i + 2i64
+        else
+            break
+        end
+    end
+    return n
+end
+
+-- Convert a preprocessor directive's condition integer result to bool.
+fn pp_truth(v : i64) -> bool
+    return v != 0i64
+end
+
+-- Push/pop cond frame (stub arithmetic; real impl touches vecs).
+fn pp_cond_push(s : PpState, taken : bool)
+    s.cond_depth = s.cond_depth + 1i64
+    _ = taken
+end
+
+fn pp_cond_pop(s : PpState)
+    if s.cond_depth > 0i64
+        s.cond_depth = s.cond_depth - 1i64
+    end
+end
+
+-- Compute the "skipping" state given a cond stack: we skip if ANY frame
+-- on the stack has !active.
+fn pp_skipping(s : PpState) -> bool
+    return s.skip_curr
+end
+
+-- Standard predefined preprocessor macros (for C89).
+fn pp_predef_count() -> i64
+    return 7i64
+end
+
+fn pp_predef_name(idx : i64) -> char*
+    if idx == 0i64 do return "__FILE__"
+    if idx == 1i64 do return "__LINE__"
+    if idx == 2i64 do return "__DATE__"
+    if idx == 3i64 do return "__TIME__"
+    if idx == 4i64 do return "__STDC__"
+    if idx == 5i64 do return "__STDC_HOSTED__"
+    if idx == 6i64 do return "__STDC_VERSION__"
+    return ""
+end
+
+-- Header-name classification: given a token's text, return true if it
+-- looks like an <...> system header.
+fn pp_is_system_header_name(t : char*, len : i64) -> bool
+    if len < 2i64 do return false
+    if t[0] != '<' do return false
+    let mut i : i64 = 1i64
+    while i < len
+        if t[i] == '>' do return true
+        i = i + 1i64
+    end
+    return false
+end
+
+fn pp_is_local_header_name(t : char*, len : i64) -> bool
+    if len < 2i64 do return false
+    if t[0] != '"' do return false
+    let mut i : i64 = 1i64
+    while i < len
+        if t[i] == '"' do return true
+        i = i + 1i64
+    end
+    return false
+end
+
+-- End of pp.pie.

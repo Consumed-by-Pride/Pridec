@@ -1,0 +1,143 @@
+-- examples/02_algebraic_effects_state_logger.pie
+-- Algebraic effects: Ask (query) + Emit (accumulate-via-resume).
+-- All handlers are pure — state flows through resume values only.
+
+-- ── §1  Effects ───────────────────────────────────────────────────────────────
+
+effect Ask
+  ask : i64 -> i64
+
+effect Emit
+  emit : i64 -> i64   -- returns a handler-provided count increment
+
+-- ── §2  Fibonacci via Ask ─────────────────────────────────────────────────────
+
+fn fib_ask : i64 -> i64 ! [Ask]
+  | n ->
+      if n <= 1
+        n
+      else
+        let mut a : i64 = 0
+        let mut b : i64 = 1
+        let mut i : i64 = 2
+        while i <= n
+          let c = a + b
+          let _ = Ask.ask(i)
+          a = b
+          b = c
+          i = i + 1
+        b
+
+fn demo_fib_ask : () -> bool
+  | () ->
+      let result : i64 = handle fib_ask(10)
+        | Ask.ask i k -> k i
+      result == 55i64
+
+-- ── §3  Ask-based sum ─────────────────────────────────────────────────────────
+
+fn sum_asks : i64 -> i64 ! [Ask]
+  | n ->
+      let mut total : i64 = 0
+      let mut i     : i64 = 0
+      while i < n
+        total = total + Ask.ask(i)
+        i = i + 1
+      total
+
+fn demo_ask_sum : () -> bool
+  | () ->
+      -- ask(i) returns i*2 → 0+2+4+6+8 = 20
+      let result : i64 = handle sum_asks(5)
+        | Ask.ask i k -> k (i * 2)
+      result == 20i64
+
+-- ── §4  Emit: handler always returns 1, computation counts calls ──────────────
+
+fn emit_squares : i64 -> i64 ! [Emit]
+  | n ->
+      let mut i   : i64 = 1
+      let mut cnt : i64 = 0
+      while i <= n
+        cnt = cnt + Emit.emit(i * i)
+        i   = i + 1
+      cnt
+
+fn demo_emit_count : () -> bool
+  | () ->
+      -- pure handler: always return 1 per call
+      let count : i64 = handle emit_squares(5)
+        | Emit.emit _ k -> k 1
+      count == 5i64
+
+-- ── §5  Range sum via Ask ─────────────────────────────────────────────────────
+
+fn range_sum : (i64, i64) -> i64 ! [Ask]
+  | (lo, hi) ->
+      let mut total : i64 = 0
+      let mut i : i64 = lo
+      while i < hi
+        total = total + Ask.ask(i)
+        i = i + 1
+      total
+
+fn demo_range_sum : () -> bool
+  | () ->
+      -- ask(i) = i+1 → sum 1+2+3+4+5 = 15
+      let result : i64 = handle range_sum(0, 5)
+        | Ask.ask i k -> k (i + 1)
+      result == 15i64
+
+-- ── §6  Composed handlers: Ask inside Ask ────────────────────────────────────
+
+fn double_sum : i64 -> i64 ! [Ask]
+  | n ->
+      handle sum_asks(n)
+        | Ask.ask i k -> k (i * 2)
+
+fn demo_composed_ask : () -> bool
+  | () ->
+      -- sum_asks(4) with ask(i)=i*2 = 0+2+4+6 = 12
+      -- outer ask(4) returns double_sum(4) = 12
+      let result : i64 = handle Ask.ask(4)
+        | Ask.ask n k -> k (double_sum(n))
+      result == 12i64
+
+-- ── §7  Fibonacci with Emit counting ─────────────────────────────────────────
+
+fn fib_emit : i64 -> (i64, i64) ! [Emit]
+  | n ->
+      if n <= 1
+        let cnt = Emit.emit(n)
+        (n, cnt)
+      else
+        let mut a : i64 = 0
+        let mut b : i64 = 1
+        let mut i : i64 = 2
+        let mut cnt : i64 = 0
+        while i <= n
+          let c = a + b
+          cnt = cnt + Emit.emit(c)
+          a   = b
+          b   = c
+          i   = i + 1
+        cnt = cnt + Emit.emit(b)
+        (b, cnt)
+
+fn demo_fib_emit : () -> bool
+  | () ->
+      let (result, final_cnt) : (i64, i64) = handle fib_emit(10)
+        | Emit.emit _ k -> k 1
+      result == 55i64 && final_cnt == 10i64
+
+fn main : () -> ()
+  | () ->
+      let r1 = demo_fib_ask()
+      let r2 = demo_ask_sum()
+      let r3 = demo_emit_count()
+      let r4 = demo_range_sum()
+      let r5 = demo_composed_ask()
+      let r6 = demo_fib_emit()
+      let all = r1 && r2 && r3 && r4 && r5 && r6
+      if all then syscall(1, 1, "PASS\n" as i64, 5) else syscall(1, 1, "FAIL\n" as i64, 5)
+      syscall(231, if all then 0 else 1)

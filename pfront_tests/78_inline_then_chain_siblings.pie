@@ -1,0 +1,31 @@
+-- 78_inline_then_chain_siblings.pie
+-- Regression test for the layout_elseif_nest bug: when a function contains
+-- three or more `if / else if` branches where two adjacent outer branches
+-- have INNER `if ... then X else if ... then Y` chains (single-line then
+-- form), subsequent top-level siblings were absorbed into the function
+-- body. All three fns here must resolve as top-level.
+mod t78
+
+fn kw_lookup : i64 -> i64
+  | n ->
+    let mut r : i64 = 0i64
+    if n == 2i64
+      if n == 1i64 then r = 10i64
+      else if n == 2i64 then r = 20i64
+    else if n == 7i64
+      if n == 1i64 then r = 30i64
+      else if n == 2i64 then r = 0i64
+    else if n == 8i64
+      if n == 1i64 then r = 40i64
+      else r = 50i64
+    r
+
+fn classify_char : i64 -> i64
+  | c ->
+    if c >= 65i64 then if c <= 90i64 then 1i64 else 0i64
+    else if c >= 97i64 then if c <= 122i64 then 2i64 else 0i64
+    else if c >= 48i64 then if c <= 57i64 then 3i64 else 0i64
+    else 0i64
+
+fn after : i64 -> i64
+  | x -> x + 1i64

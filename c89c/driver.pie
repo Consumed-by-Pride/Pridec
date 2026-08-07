@@ -1,0 +1,39 @@
+-- c89c/driver.pie — Helper entry points that glue together lexer + parser + sema.
+
+mod c89c.driver
+
+use c89c.ast
+use c89c.lex
+use c89c.parse
+use c89c.sema
+use mem
+use os.linux
+use vec.vec
+
+fn driver_lex : (*Interner, ptr, i64, *i64) -> Lexer
+  | (it, buf, sz, errs) ->
+    let lx = lexer_new(it, buf, sz, 0i64, errs)
+    let mut l2 = lx
+    lex_lex(&l2)
+    l2
+
+fn driver_parse : (*Lexer, *TypeArena, *NodeArena, *ParamArena, *FieldArena, *i64) -> i64
+  | (lx, ta, na, pa, fa, errs) ->
+    let mut psr : Parser
+    psr.lx = lx
+    psr.ta = ta
+    psr.na = na
+    psr.pa = pa
+    psr.fa = fa
+    psr.errs = errs
+    psr.pos = 0i64
+    parse_file(&psr, lx, ta, na, pa, fa, errs)
+
+fn driver_sema : (*TypeArena, *NodeArena, *i64, i64) -> i64
+  | (ta, na, errs, root) ->
+    let mut s = sema_new(ta, na, errs)
+    sema_check_trans(&s, root)
+    root
+
+fn driver_token_count : *Lexer -> i64
+  | lx -> lexer_count(lx)

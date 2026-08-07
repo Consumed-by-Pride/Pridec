@@ -1,0 +1,13 @@
+mod t
+fn f : (i32) -> i64
+  | q ->
+    let vr : u64 =
+      if q >= 0i32
+        let shift = q - 63i32
+        if shift >= 0i32 && shift < 64i32 then 1u64
+        else if shift < 0i32 then 2u64
+        else 0u64
+      else
+        let neg_q = -q
+        3u64
+    vr

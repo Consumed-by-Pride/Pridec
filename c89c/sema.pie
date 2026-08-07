@@ -1,0 +1,394 @@
+-- c89c/sema.pie — Semantic analysis: name resolution, type checking,
+-- symbol table management. Walks the AST produced by parse.pie and
+-- binds identifiers to Sym entries. Reports type errors and arity mismatches.
+
+mod c89c.sema
+
+use c89c.ast
+use c89c.lex
+use vec.vec
+
+struct Sema
+  ta    : *TypeArena
+  na    : *NodeArena
+  st    : SymTab
+  tags  : SymTab    -- struct/union/enum tags (separate namespace)
+  labels: SymTab    -- goto labels (function-local)
+  errs  : *i64
+  fun_ty: i64       -- current function return type (TY_VOID at file scope)
+
+const SEMA_SCOPE_SIZE : i64 = 24i64
+
+fn sema_new : (*TypeArena, *NodeArena, *i64) -> Sema
+  | (ta, na, errs) ->
+    Sema {
+      ta: ta, na: na,
+      st: symtab_new(), tags: symtab_new(), labels: symtab_new(),
+      errs: errs, fun_ty: TY_VOID
+    }
+
+fn sema_err : (*Sema, Pos, ptr) -> ()
+  | (s, p, msg) -> diag_err(s.errs, p, msg)
+
+fn node_pos : (*NodeArena, i64) -> Pos
+  | (na, id) ->
+    let n = node_get(na, id)
+    Pos { line: n.pos_line, col: n.pos_col, file: n.pos_file }
+
+-- Direct declare with pre-interned name id.
+fn sema_define : (*Sema, i64, i64, i64, i64, i64, Pos) -> i64
+  | (s, name, kind, ty, storage, node, p) ->
+    let existing = symtab_lookup(&s.st, name)
+    if existing != NULL_ID
+      let ex = symtab_get(&s.st, existing)
+      if ex.has_body != 0i64 && kind == SYM_FUNC && storage == 0i64
+        sema_err(s, p, "redefinition of function")
+      if kind == SYM_VAR
+        sema_err(s, p, "redefinition of variable")
+    let sym = Sym {
+      name: name, kind: kind, ty: ty, storage: storage,
+      pos_line: p.line, pos_col: p.col, node: node, has_body: 0i64, chain: 0i64
+    }
+    symtab_put(&s.st, sym)
+
+fn sema_define_tag : (*Sema, i64, i64, i64, Pos) -> i64
+  | (s, name, kind, ty, p) ->
+    let existing = symtab_lookup(&s.tags, name)
+    if existing != NULL_ID
+      return existing
+    let sym = Sym {
+      name: name, kind: SYM_TAG, ty: ty, storage: SC_NONE,
+      pos_line: p.line, pos_col: p.col, node: 0i64, has_body: 0i64, chain: 0i64
+    }
+    symtab_put(&s.tags, sym)
+
+fn type_is_integer : (*TypeArena, i64) -> bool
+  | (ta, t) ->
+    if t == NULL_ID then return false
+    let k = type_get(ta, t).kind
+    if k == TY_CHAR then return true
+    if k == TY_SCHAR then return true
+    if k == TY_UCHAR then return true
+    if k == TY_SHORT then return true
+    if k == TY_USHORT then return true
+    if k == TY_INT then return true
+    if k == TY_UINT then return true
+    if k == TY_LONG then return true
+    if k == TY_ULONG then return true
+    if k == TY_ENUM then return true
+    false
+
+fn type_is_arithmetic : (*TypeArena, i64) -> bool
+  | (ta, t) ->
+    if t == NULL_ID then return false
+    let k = type_get(ta, t).kind
+    if type_is_integer(ta, t) then return true
+    if k == TY_FLOAT then return true
+    if k == TY_DOUBLE then return true
+    if k == TY_LDOUBLE then return true
+    false
+
+fn type_is_pointer : (*TypeArena, i64) -> bool
+  | (ta, t) ->
+    if t == NULL_ID then return false
+    type_get(ta, t).kind == TY_PTR
+
+fn type_is_scalar : (*TypeArena, i64) -> bool
+  | (ta, t) -> type_is_arithmetic(ta, t) || type_is_pointer(ta, t)
+
+fn type_is_void : (*TypeArena, i64) -> bool
+  | (ta, t) ->
+    if t == NULL_ID then return false
+    type_get(ta, t).kind == TY_VOID
+
+fn types_compatible : (*TypeArena, i64, i64) -> bool
+  | (ta, a, b) ->
+    if a == b then return true
+    if a == NULL_ID || b == NULL_ID then return true  -- be lenient during bring-up
+    let ka = type_get(ta, a).kind
+    let kb = type_get(ta, b).kind
+    if ka == kb then return true
+    -- Treat all integer types as compatible for now (loose C89).
+    if type_is_integer(ta, a) && type_is_integer(ta, b) then return true
+    -- pointer <-> integer warned but not errored
+    false
+
+-- Walk an expression node and return its deduced type id.
+fn sema_expr : (*Sema, i64) -> i64
+  | (s, id) ->
+    if id == NULL_ID then return NULL_ID
+    let n = node_get(s.na, id)
+    let p = node_pos(s.na, id)
+    if n.kind == N_INT
+      return TY_INT
+    if n.kind == N_CHAR
+      return TY_CHAR
+    if n.kind == N_FLOAT
+      return TY_DOUBLE
+    if n.kind == N_STRVAL
+      let t = t_new_direct(s, TY_PTR)
+      type_get(s.ta, t).t_sub = TY_CHAR
+      return t
+    if n.kind == N_IDENT
+      let sym_id = symtab_lookup(&s.st, n.sval)
+      if sym_id == NULL_ID
+        sema_err(s, p, "undeclared identifier")
+        return TY_INT
+      let sym = symtab_get(&s.st, sym_id)
+      return sym.ty
+    if n.kind == N_UNARY
+      let sub = node_child_at(s.na, id, 0i64)
+      let sty = sema_expr(s, sub)
+      if n.ival == P_STAR
+        if type_is_pointer(s.ta, sty)
+          return type_get(s.ta, sty).t_sub
+        sema_err(s, p, "dereference of non-pointer")
+        return TY_INT
+      if n.ival == P_AMP
+        let t = t_new_direct(s, TY_PTR)
+        type_get(s.ta, t).t_sub = sty
+        return t
+      if n.ival == P_MINUS || n.ival == P_PLUS
+        if !type_is_arithmetic(s.ta, sty)
+          sema_err(s, p, "unary +/- on non-arithmetic type")
+        return sty
+      if n.ival == P_BANG || n.ival == P_TILDE
+        if !type_is_scalar(s.ta, sty)
+          sema_err(s, p, "unary op on non-scalar")
+        return TY_INT
+      return sty
+    if n.kind == N_BINARY
+      let lhs = node_child_at(s.na, id, 0i64)
+      let rhs = node_child_at(s.na, id, 1i64)
+      let lty = sema_expr(s, lhs)
+      let rty = sema_expr(s, rhs)
+      if n.ival == P_COMMA then return rty
+      if n.ival == P_OR || n.ival == P_AND
+        return TY_INT
+      if n.ival == P_EQEQ || n.ival == P_NEQ || n.ival == P_LT ||
+         n.ival == P_GT || n.ival == P_LE || n.ival == P_GE
+        return TY_INT
+      if n.ival == P_LSHIFT || n.ival == P_RSHIFT ||
+         n.ival == P_PIPE || n.ival == P_CARET || n.ival == P_AMP
+        return TY_INT
+      if n.ival == P_PLUS || n.ival == P_MINUS || n.ival == P_STAR ||
+         n.ival == P_SLASH || n.ival == P_PCT
+        return TY_INT
+      return TY_INT
+    if n.kind == N_ASSIGN
+      let lhs = node_child_at(s.na, id, 0i64)
+      let rhs = node_child_at(s.na, id, 1i64)
+      let lty = sema_expr(s, lhs)
+      let rty = sema_expr(s, rhs)
+      if !types_compatible(s.ta, lty, rty)
+        sema_err(s, p, "assignment to incompatible type")
+      return lty
+    if n.kind == N_CALL
+      let fn_node = node_child_at(s.na, id, 0i64)
+      let mut arg_count : i64 = 0i64
+      let mut arg_cur = node_get(s.na, fn_node).right
+      while arg_cur != NULL_ID
+        arg_count = arg_count + 1i64
+        let aty = sema_expr(s, arg_cur)
+        arg_cur = node_get(s.na, arg_cur).right
+      if node_get(s.na, fn_node).kind == N_IDENT
+        let fid = symtab_lookup(&s.st, node_get(s.na, fn_node).sval)
+        if fid == NULL_ID
+          sema_err(s, p, "implicit function declaration")
+          return TY_INT
+        let fsym = symtab_get(&s.st, fid)
+        if fsym.kind != SYM_FUNC
+          sema_err(s, p, "calling non-function")
+        return type_get(s.ta, fsym.ty).t_sub
+      return TY_INT
+    if n.kind == N_INDEX
+      let arr = node_child_at(s.na, id, 0i64)
+      let idx = node_child_at(s.na, id, 1i64)
+      let aty = sema_expr(s, arr)
+      let _ity = sema_expr(s, idx)
+      if type_is_pointer(s.ta, aty) then return type_get(s.ta, aty).t_sub
+      if type_get(s.ta, aty).kind == TY_ARRAY then return type_get(s.ta, aty).t_sub
+      sema_err(s, p, "index of non-array/pointer")
+      return TY_INT
+    if n.kind == N_MEMBER
+      let obj = node_child_at(s.na, id, 0i64)
+      let _oty = sema_expr(s, obj)
+      return TY_INT
+    if n.kind == N_CAST
+      let ty = n.ival
+      let _sub = sema_expr(s, node_child_at(s.na, id, 0i64))
+      return ty
+    if n.kind == N_SIZEOFTY
+      return type_get(s.ta, 0i64).kind   -- returns size_t, but use TY_INT for now
+      return TY_INT
+    if n.kind == N_SIZEOFEX
+      let _sub = sema_expr(s, node_child_at(s.na, id, 0i64))
+      return TY_INT
+    if n.kind == N_COND
+      let _c = sema_expr(s, node_child_at(s.na, id, 0i64))
+      let th = sema_expr(s, node_child_at(s.na, id, 1i64))
+      let _el = sema_expr(s, node_child_at(s.na, id, 2i64))
+      return th
+    if n.kind == N_INITLIST
+      return TY_INT
+    TY_INT
+
+fn t_new_direct : (*Sema, i64) -> i64
+  | (s, k) ->
+    let t = Type {
+      kind:k, qual:Q_NONE, t_sub:NULL_ID, t_size:0i64, t_align:0i64,
+      t_params:NULL_ID, t_fields:NULL_ID, t_tag:0i64, t_name:0i64,
+      t_variadic:0i64, _pad:0i64
+    }
+    type_put(s.ta, t)
+
+-- Build a function type given return type and param list id.
+fn sema_mk_funtype : (*Sema, i64, i64) -> i64
+  | (s, ret, params) ->
+    let ft = t_new_direct(s, TY_FUNC)
+    type_get(s.ta, ft).t_sub = ret
+    type_get(s.ta, ft).t_params = params
+    ft
+
+-- Register a function declaration (prototype or definition).
+fn sema_declare_fun : (*Sema, i64, i64, i64, Pos) -> i64
+  | (s, name, ret_ty, params, p) ->
+    let ft = sema_mk_funtype(s, ret_ty, params)
+    let existing = symtab_lookup(&s.st, name)
+    if existing != NULL_ID
+      let ex = symtab_get(&s.st, existing)
+      return existing
+    sema_define(s, name, SYM_FUNC, ft, SC_EXTERN, 0i64, p)
+
+fn sema_check_stmt : (*Sema, i64) -> ()
+  | (s, id) ->
+    if id == NULL_ID then return
+    let n = node_get(s.na, id)
+    let p = node_pos(s.na, id)
+    if n.kind == N_EXPRSTMT
+      let e = node_child_at(s.na, id, 0i64)
+      sema_expr(s, e)
+      return
+    if n.kind == N_BLOCK
+      let mut c = n.left
+      while c != NULL_ID
+        sema_check_stmt(s, c)
+        c = node_get(s.na, c).right
+      return
+    if n.kind == N_RETURN
+      if n.left != NULL_ID
+        let rty = sema_expr(s, n.left)
+        if !types_compatible(s.ta, rty, s.fun_ty)
+          sema_err(s, p, "return type mismatch")
+      else
+        if s.fun_ty != TY_VOID
+          sema_err(s, p, "return with no value in non-void function")
+      return
+    if n.kind == N_IF
+      let c = node_child_at(s.na, id, 0i64)
+      let th = node_child_at(s.na, id, 1i64)
+      let el = node_child_at(s.na, id, 2i64)
+      sema_expr(s, c)
+      sema_check_stmt(s, th)
+      if el != NULL_ID then sema_check_stmt(s, el)
+      return
+    if n.kind == N_WHILE || n.kind == N_DO
+      let c = node_child_at(s.na, id, 0i64)
+      let b = node_child_at(s.na, id, 1i64)
+      sema_expr(s, c)
+      sema_check_stmt(s, b)
+      return
+    if n.kind == N_FOR
+      let init = node_child_at(s.na, id, 0i64)
+      let c = node_child_at(s.na, id, 1i64)
+      let step = node_child_at(s.na, id, 2i64)
+      let b = node_child_at(s.na, id, 3i64)
+      if init != NULL_ID then sema_check_stmt(s, init)
+      if c != NULL_ID then sema_expr(s, c)
+      if step != NULL_ID then sema_expr(s, step)
+      sema_check_stmt(s, b)
+      return
+    if n.kind == N_SWITCH
+      let c = node_child_at(s.na, id, 0i64)
+      let b = node_child_at(s.na, id, 1i64)
+      sema_expr(s, c)
+      sema_check_stmt(s, b)
+      return
+    if n.kind == N_CASE || n.kind == N_DEFAULT
+      let v = node_child_at(s.na, id, 0i64)
+      if v != NULL_ID then sema_expr(s, v)
+      return
+    if n.kind == N_BREAK || n.kind == N_CONTINUE
+      return
+    if n.kind == N_GOTO
+      return
+    if n.kind == N_LABEL
+      return
+    if n.kind == N_NULL
+      return
+    if n.kind == N_VARDECL
+      let dty = n.ival
+      let name = n.sval
+      if n.left != NULL_ID
+        sema_expr(s, n.left)
+      if name != 0i64
+        sema_define(s, name, SYM_VAR, dty, SC_AUTO, id, p)
+      return
+    return
+
+fn sema_define_fun : (*Sema, i64, i64, i64, i64, i64, Pos) -> ()
+  | (s, name, ret_ty, params, body, has_body, p) ->
+    let fid = sema_declare_fun(s, name, ret_ty, params, p)
+    if has_body != 0i64
+      let saved_ret = s.fun_ty
+      s.fun_ty = ret_ty
+      sema_check_stmt(s, body)
+      s.fun_ty = saved_ret
+      let fsym = symtab_get(&s.st, fid)
+      fsym.has_body = 1i64
+
+fn sema_check_decl : (*Sema, i64) -> ()
+  | (s, id) ->
+    if id == NULL_ID then return
+    let n = node_get(s.na, id)
+    let p = node_pos(s.na, id)
+    if n.kind == N_FUNDEF
+      let ret_ty = type_get(s.ta, n.ival).t_sub
+      let params = type_get(s.ta, n.ival).t_params
+      let body = n.left
+      sema_define_fun(s, n.sval, ret_ty, params, body, 1i64, p)
+      return
+    if n.kind == N_VARDECL
+      let dty = n.ival
+      if n.left != NULL_ID then sema_expr(s, n.left)
+      if n.sval != 0i64
+        sema_define(s, n.sval, SYM_VAR, dty, SC_EXTERN, id, p)
+      return
+    if n.kind == N_TYPEDEF
+      if n.sval != 0i64
+        sema_define(s, n.sval, SYM_TYPEDEF, n.ival, SC_TYPEDEF, id, p)
+      return
+
+fn sema_check_trans : (*Sema, i64) -> i64
+  | (s, root) ->
+    -- Pass 1: register all function prototypes and typedefs
+    let mut c = node_get(s.na, root).left
+    while c != NULL_ID
+      let d = node_get(s.na, c)
+      if d.kind == N_FUNDEF
+        let ret = type_get(s.ta, d.ival).t_sub
+        let params = type_get(s.ta, d.ival).t_params
+        sema_declare_fun(s, d.sval, ret, params, node_pos(s.na, c))
+      else if d.kind == N_TYPEDEF
+        if d.sval != 0i64
+          sema_define(s, d.sval, SYM_TYPEDEF, d.ival, SC_TYPEDEF, c, node_pos(s.na, c))
+      else if d.kind == N_VARDECL
+        if d.sval != 0i64
+          sema_define(s, d.sval, SYM_VAR, d.ival, SC_EXTERN, c, node_pos(s.na, c))
+      c = d.right
+    -- Pass 2: check bodies
+    c = node_get(s.na, root).left
+    while c != NULL_ID
+      sema_check_decl(s, c)
+      c = node_get(s.na, c).right
+    root

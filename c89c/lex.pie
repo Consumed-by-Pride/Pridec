@@ -1,0 +1,631 @@
+-- c89c/lex.pie — C89 lexer: turns a byte buffer into a token stream.
+-- Handles trigraphs (minimal), line continuations, comments, string/char literals,
+-- numeric literals (decimal/octal/hex/float), identifiers, keywords, punctuators.
+
+mod c89c.lex
+
+use c89c.ast
+use mem
+use os.linux
+use vec.vec
+
+-- ── Token (stored in a flat vec; 1-based id like other arenas) ───────────
+-- Each token records its kind, value (meaning depends on kind), and span.
+
+struct Token
+  kind    : i64     -- TK_*
+  ival    : i64     -- integer value / keyword id / punctuator id
+  sval    : i64     -- interned id (for identifiers / string literals)
+  line    : i64
+  col     : i64
+  pos     : i64     -- byte offset in source
+
+const TOKEN_SIZE : i64 = 56i64
+
+-- Keyword ids (distinct from TK_KW so we can switch on them)
+const KW_AUTO      : i64 = 1i64
+const KW_BREAK     : i64 = 2i64
+const KW_CASE      : i64 = 3i64
+const KW_CHAR      : i64 = 4i64
+const KW_CONST     : i64 = 5i64
+const KW_CONTINUE  : i64 = 6i64
+const KW_DEFAULT   : i64 = 7i64
+const KW_DO        : i64 = 8i64
+const KW_DOUBLE    : i64 = 9i64
+const KW_ELSE      : i64 = 10i64
+const KW_ENUM      : i64 = 11i64
+const KW_EXTERN    : i64 = 12i64
+const KW_FLOAT     : i64 = 13i64
+const KW_FOR       : i64 = 14i64
+const KW_GOTO      : i64 = 15i64
+const KW_IF        : i64 = 16i64
+const KW_INT       : i64 = 17i64
+const KW_LONG      : i64 = 18i64
+const KW_REGISTER  : i64 = 19i64
+const KW_RETURN    : i64 = 20i64
+const KW_SHORT     : i64 = 21i64
+const KW_SIGNED    : i64 = 22i64
+const KW_SIZEOF    : i64 = 23i64
+const KW_STATIC    : i64 = 24i64
+const KW_STRUCT    : i64 = 25i64
+const KW_SWITCH    : i64 = 26i64
+const KW_TYPEDEF   : i64 = 27i64
+const KW_UNION     : i64 = 28i64
+const KW_UNSIGNED  : i64 = 29i64
+const KW_VOID      : i64 = 30i64
+const KW_VOLATILE  : i64 = 31i64
+const KW_WHILE     : i64 = 32i64
+
+-- Punctuator ids
+const P_LPAREN   : i64 = 1i64     -- (
+const P_RPAREN   : i64 = 2i64     -- )
+const P_LBRACK   : i64 = 3i64     -- [
+const P_RBRACK   : i64 = 4i64     -- ]
+const P_LBRACE   : i64 = 5i64     -- {
+const P_RBRACE   : i64 = 6i64     -- }
+const P_DOT      : i64 = 7i64     -- .
+const P_ARROW    : i64 = 8i64     -- ->
+const P_INC      : i64 = 9i64     -- ++
+const P_DEC      : i64 = 10i64    -- --
+const P_AMP      : i64 = 11i64    -- &
+const P_STAR     : i64 = 12i64    -- *
+const P_PLUS     : i64 = 13i64    -- +
+const P_MINUS    : i64 = 14i64    -- -
+const P_TILDE    : i64 = 15i64    -- ~
+const P_BANG     : i64 = 16i64    -- !
+const P_SLASH    : i64 = 17i64    -- /
+const P_PCT      : i64 = 18i64    -- %
+const P_LSHIFT   : i64 = 19i64    -- <<
+const P_RSHIFT   : i64 = 20i64    -- >>
+const P_LT       : i64 = 21i64    -- <
+const P_GT       : i64 = 22i64    -- >
+const P_LE       : i64 = 23i64    -- <=
+const P_GE       : i64 = 24i64    -- >=
+const P_EQEQ     : i64 = 25i64    -- ==
+const P_NEQ      : i64 = 26i64    -- !=
+const P_CARET    : i64 = 27i64    -- ^
+const P_PIPE     : i64 = 28i64    -- |
+const P_AND      : i64 = 29i64    -- &&
+const P_OR       : i64 = 30i64    -- ||
+const P_QUESTION : i64 = 31i64    -- ?
+const P_COLON    : i64 = 32i64    -- :
+const P_SEMI     : i64 = 33i64    -- ;
+const P_ELLIPSIS : i64 = 34i64    -- ...
+const P_ASSIGN   : i64 = 35i64    -- =
+const P_MUL_EQ   : i64 = 36i64    -- *=
+const P_DIV_EQ   : i64 = 37i64    -- /=
+const P_MOD_EQ   : i64 = 38i64    -- %=
+const P_ADD_EQ   : i64 = 39i64    -- +=
+const P_SUB_EQ   : i64 = 40i64    -- -=
+const P_SHL_EQ   : i64 = 41i64    -- <<=
+const P_SHR_EQ   : i64 = 42i64    -- >>=
+const P_AND_EQ   : i64 = 43i64    -- &=
+const P_XOR_EQ   : i64 = 44i64    -- ^=
+const P_OR_EQ    : i64 = 45i64    -- |=
+const P_COMMA    : i64 = 46i64    -- ,
+
+struct Lexer
+  buf       : ptr
+  len       : i64
+  pos       : i64
+  line      : i64
+  col       : i64
+  file_id   : i64
+  tokens    : vec.Vec
+  interner  : *Interner
+  errs      : *i64
+  scratch   : *u8
+  scratch_len : i64
+
+const SCRATCH_CAP : i64 = 16384i64
+
+fn lexer_new : (*Interner, ptr, i64, i64, *i64) -> Lexer
+  | (it, buf, len, file, errs) ->
+    let sc : *u8 = mem.arena_alloc(&it.arena, SCRATCH_CAP, 8i64) as *u8
+    Lexer {
+      buf: buf, len: len, pos: 0i64, line: 1i64, col: 1i64,
+      file_id: file,
+      tokens: vec_new(TOKEN_SIZE),
+      interner: it, errs: errs,
+      scratch: sc, scratch_len: 0i64
+    }
+
+-- ── Low-level byte access ────────────────────────────────────────────────
+
+fn lex_peek : *Lexer -> i64
+  | l ->
+    if l.pos >= l.len then -1i64
+    else (l.buf as *u8)[l.pos] as i64
+
+fn lex_peek_at : (*Lexer, i64) -> i64
+  | (l, off) ->
+    let p = l.pos + off
+    if p >= l.len then -1i64
+    else (l.buf as *u8)[p] as i64
+
+fn lex_adv : *Lexer -> i64
+  | l ->
+    if l.pos >= l.len then return -1i64
+    let c = (l.buf as *u8)[l.pos] as i64
+    l.pos = l.pos + 1i64
+    if c == 10i64
+      l.line = l.line + 1i64
+      l.col = 1i64
+    else
+      l.col = l.col + 1i64
+    c
+
+fn lex_err : (*Lexer, ptr) -> ()
+  | (l, msg) ->
+    let p = Pos { line: l.line, col: l.col, file: l.file_id }
+    diag_err(l.errs, p, msg)
+
+-- ── Token emission ───────────────────────────────────────────────────────
+
+fn lex_tok : (*Lexer, i64, i64, i64, i64) -> ()
+  | (l, kind, iv, sv, start) ->
+    let t = Token {
+      kind: kind, ival: iv, sval: sv,
+      line: l.line, col: l.col - 1i64,
+      pos: start
+    }
+    vec_push(&l.tokens, &t as ptr)
+
+-- ── Whitespace & comments ────────────────────────────────────────────────
+
+fn lex_skip_ws_and_comments : *Lexer -> ()
+  | l ->
+    while true
+      let c = lex_peek(l)
+      if c == 32i64 || c == 9i64 || c == 10i64 || c == 12i64 || c == 13i64
+        lex_adv(l)
+      else if c == 47i64 && lex_peek_at(l, 1i64) == 47i64
+        lex_adv(l)
+        lex_adv(l)
+        while lex_peek(l) != -1i64 && lex_peek(l) != 10i64
+          lex_adv(l)
+      else if c == 47i64 && lex_peek_at(l, 1i64) == 42i64
+        lex_adv(l)
+        lex_adv(l)
+        let mut depth : i64 = 1i64
+        while depth > 0i64 && lex_peek(l) != -1i64
+          let ch = lex_adv(l)
+          if ch == 47i64 && lex_peek(l) == 42i64
+            lex_adv(l)
+            depth = depth + 1i64
+          else if ch == 42i64 && lex_peek(l) == 47i64
+            lex_adv(l)
+            depth = depth - 1i64
+        if depth > 0i64
+          lex_err(l, "unterminated /* comment")
+      else
+        break
+
+-- ── Keywords (table lookup) ──────────────────────────────────────────────
+-- Use MEMCMP against fixed strings; this avoids nested if/else-if chains
+-- that tickle a pfront layout bug.
+
+fn kw_match : (ptr, i64, ptr, i64) -> bool
+  | (a, al, b, bl) ->
+    if al != bl then return false
+    linux.memcmp(a, b, al as u64) == 0i32
+
+-- Helper: keyword check by exact length + memcmp.
+fn kw_check2 : (ptr, ptr) -> i64
+  | (p, s) -> if kw_match(p, 2i64, s, 2i64) then 1i64 else 0i64
+fn kw_check3 : (ptr, ptr) -> i64
+  | (p, s) -> if kw_match(p, 3i64, s, 3i64) then 1i64 else 0i64
+fn kw_check4 : (ptr, ptr) -> i64
+  | (p, s) -> if kw_match(p, 4i64, s, 4i64) then 1i64 else 0i64
+fn kw_check5 : (ptr, ptr) -> i64
+  | (p, s) -> if kw_match(p, 5i64, s, 5i64) then 1i64 else 0i64
+fn kw_check6 : (ptr, ptr) -> i64
+  | (p, s) -> if kw_match(p, 6i64, s, 6i64) then 1i64 else 0i64
+fn kw_check7 : (ptr, ptr) -> i64
+  | (p, s) -> if kw_match(p, 7i64, s, 7i64) then 1i64 else 0i64
+fn kw_check8 : (ptr, ptr) -> i64
+  | (p, s) -> if kw_match(p, 8i64, s, 8i64) then 1i64 else 0i64
+
+fn kw_lookup : (*Interner, i64) -> i64
+  | (it, id) ->
+    let e = interner_get(it, id)
+    if e as i64 == 0i64 then return 0i64
+    let p = e.ptr
+    let n = e.len
+    -- Use early-return pattern (flat, one if per keyword) to avoid deep nesting
+    -- that triggers a pfront layout bug.
+    if n == 2i64
+      if kw_check2(p, "if") != 0i64 then return KW_IF
+      if kw_check2(p, "do") != 0i64 then return KW_DO
+      return 0i64
+    if n == 3i64
+      if kw_check3(p, "int") != 0i64 then return KW_INT
+      if kw_check3(p, "for") != 0i64 then return KW_FOR
+      return 0i64
+    if n == 4i64
+      if kw_check4(p, "else") != 0i64 then return KW_ELSE
+      if kw_check4(p, "char") != 0i64 then return KW_CHAR
+      if kw_check4(p, "void") != 0i64 then return KW_VOID
+      if kw_check4(p, "long") != 0i64 then return KW_LONG
+      if kw_check4(p, "goto") != 0i64 then return KW_GOTO
+      if kw_check4(p, "auto") != 0i64 then return KW_AUTO
+      if kw_check4(p, "case") != 0i64 then return KW_CASE
+      if kw_check4(p, "enum") != 0i64 then return KW_ENUM
+      return 0i64
+    if n == 5i64
+      if kw_check5(p, "while") != 0i64 then return KW_WHILE
+      if kw_check5(p, "break") != 0i64 then return KW_BREAK
+      if kw_check5(p, "const") != 0i64 then return KW_CONST
+      if kw_check5(p, "float") != 0i64 then return KW_FLOAT
+      if kw_check5(p, "short") != 0i64 then return KW_SHORT
+      if kw_check5(p, "union") != 0i64 then return KW_UNION
+      return 0i64
+    if n == 6i64
+      if kw_check6(p, "return") != 0i64 then return KW_RETURN
+      if kw_check6(p, "double") != 0i64 then return KW_DOUBLE
+      if kw_check6(p, "extern") != 0i64 then return KW_EXTERN
+      if kw_check6(p, "signed") != 0i64 then return KW_SIGNED
+      if kw_check6(p, "sizeof") != 0i64 then return KW_SIZEOF
+      if kw_check6(p, "static") != 0i64 then return KW_STATIC
+      if kw_check6(p, "struct") != 0i64 then return KW_STRUCT
+      if kw_check6(p, "switch") != 0i64 then return KW_SWITCH
+      return 0i64
+    if n == 7i64
+      if kw_check7(p, "default") != 0i64 then return KW_DEFAULT
+      if kw_check7(p, "typedef") != 0i64 then return KW_TYPEDEF
+      return 0i64
+    if n == 8i64
+      if kw_check8(p, "continue") != 0i64 then return KW_CONTINUE
+      if kw_check8(p, "register") != 0i64 then return KW_REGISTER
+      if kw_check8(p, "volatile") != 0i64 then return KW_VOLATILE
+      if kw_check8(p, "unsigned") != 0i64 then return KW_UNSIGNED
+      return 0i64
+    0i64
+
+-- ── Identifiers & keywords ───────────────────────────────────────────────
+
+fn lex_ident : *Lexer -> i64
+  | l ->
+    let start = l.pos
+    while true
+      let c = lex_peek(l)
+      let is_alpha = (c >= 97i64 && c <= 122i64) || (c >= 65i64 && c <= 90i64) || c == 95i64
+      let is_dig   = c >= 48i64 && c <= 57i64
+      if is_alpha || is_dig
+        lex_adv(l)
+      else
+        break
+    let len = l.pos - start
+    let id = interner_intern(l.interner, (l.buf as i64 + start) as ptr, len)
+    let kw = kw_lookup(l.interner, id)
+    if kw != 0i64
+      lex_tok(l, TK_KW, kw, id, start)
+    else
+      lex_tok(l, TK_IDENT, 0i64, id, start)
+    0i64
+
+-- ── Numeric literals ─────────────────────────────────────────────────────
+
+fn is_digit : i64 -> bool
+  | c -> c >= 48i64 && c <= 57i64
+
+fn is_hex : i64 -> bool
+  | c -> (c >= 48i64 && c <= 57i64) || (c >= 97i64 && c <= 102i64) || (c >= 65i64 && c <= 70i64)
+
+fn is_oct : i64 -> bool
+  | c -> c >= 48i64 && c <= 55i64
+
+fn hex_digit_val : i64 -> i64
+  | d ->
+    if d >= 97i64 then d - 87i64
+    else if d >= 65i64 then d - 55i64
+    else d - 48i64
+
+fn lex_number : *Lexer -> ()
+  | l ->
+    let start = l.pos
+    let mut val : i64 = 0i64
+    let mut is_flt : bool = false
+    let c0 = lex_peek(l)
+    let mut base : i64 = 8i64
+    if c0 != 48i64
+      base = 10i64
+    else if lex_peek_at(l, 1i64) == 120i64 || lex_peek_at(l, 1i64) == 88i64
+      base = 16i64
+    if base == 16i64
+      lex_adv(l)
+      lex_adv(l)
+      while is_hex(lex_peek(l))
+        let d = lex_adv(l)
+        val = val * 16i64 + hex_digit_val(d)
+    else if base == 10i64
+      while is_digit(lex_peek(l))
+        val = val * 10i64 + (lex_adv(l) - 48i64)
+      if lex_peek(l) == 46i64
+        is_flt = true
+    else
+      lex_adv(l)
+      while is_oct(lex_peek(l))
+        val = val * 8i64 + (lex_adv(l) - 48i64)
+      if lex_peek(l) == 46i64
+        is_flt = true
+      else if is_digit(lex_peek(l)) && lex_peek(l) >= 56i64
+        lex_err(l, "digit 8 or 9 in octal constant")
+        while is_digit(lex_peek(l))
+          val = val * 10i64 + (lex_adv(l) - 48i64)
+    if is_flt
+      lex_adv(l)
+      while is_digit(lex_peek(l))
+        lex_adv(l)
+      if lex_peek(l) == 101i64 || lex_peek(l) == 69i64
+        lex_adv(l)
+        if lex_peek(l) == 43i64 || lex_peek(l) == 45i64
+          lex_adv(l)
+        while is_digit(lex_peek(l))
+          lex_adv(l)
+      let len = l.pos - start
+      let id = interner_intern(l.interner, (l.buf as i64 + start) as ptr, len)
+      lex_tok(l, TK_FLOAT, 0i64, id, start)
+    else
+      while true
+        let c = lex_peek(l)
+        if c == 117i64 || c == 85i64
+          lex_adv(l)
+        else if c == 108i64 || c == 76i64
+          lex_adv(l)
+        else
+          break
+      lex_tok(l, TK_INT, val, 0i64, start)
+
+-- ── Char & string literals ───────────────────────────────────────────────
+
+fn lex_escape : (*Lexer, *i64) -> i64
+  | (l, out_val) ->
+    let c = lex_adv(l)
+    if c == -1i64 then return -1i64
+    if c == 110i64 then return 10i64
+    if c == 116i64 then return 9i64
+    if c == 114i64 then return 13i64
+    if c == 92i64  then return 92i64
+    if c == 39i64  then return 39i64
+    if c == 34i64  then return 34i64
+    if c >= 48i64 && c <= 55i64
+      let mut v : i64 = c - 48i64
+      let mut i : i64 = 0i64
+      while i < 2i64 && lex_peek(l) >= 48i64 && lex_peek(l) <= 55i64
+        v = v * 8i64 + (lex_adv(l) - 48i64)
+        i = i + 1i64
+      return v
+    if c == 120i64
+      let mut v : i64 = 0i64
+      while is_hex(lex_peek(l))
+        let d = lex_adv(l)
+        v = v * 16i64 + hex_digit_val(d)
+      return v
+    c
+
+fn lex_char : *Lexer -> ()
+  | l ->
+    lex_adv(l)
+    let c = lex_peek(l)
+    let mut val : i64 = 0i64
+    if c == 92i64
+      lex_adv(l)
+      val = lex_escape(l, &val)
+    else if c != -1i64
+      val = lex_adv(l)
+    else
+      lex_err(l, "unterminated char literal")
+    if lex_peek(l) != 39i64
+      lex_err(l, "multi-character char literal (unsupported)")
+    else
+      lex_adv(l)
+    let start = l.pos - 3i64
+    lex_tok(l, TK_CHAR, val, 0i64, start)
+
+fn lex_string : *Lexer -> ()
+  | l ->
+    let start_pos = l.pos
+    lex_adv(l)
+    l.scratch_len = 0i64
+    while true
+      let c = lex_peek(l)
+      if c == -1i64
+        lex_err(l, "unterminated string literal")
+        break
+      if c == 34i64
+        lex_adv(l)
+        break
+      if c == 92i64
+        lex_adv(l)
+        let mut cv : i64 = 0i64
+        let ev = lex_escape(l, &cv)
+        if l.scratch_len < SCRATCH_CAP - 1i64
+          l.scratch[l.scratch_len] = ev as u8
+          l.scratch_len = l.scratch_len + 1i64
+      else
+        if l.scratch_len < SCRATCH_CAP - 1i64
+          l.scratch[l.scratch_len] = lex_adv(l) as u8
+          l.scratch_len = l.scratch_len + 1i64
+    l.scratch[l.scratch_len] = 0u8
+    let id = interner_intern(l.interner, l.scratch as ptr, l.scratch_len)
+    lex_tok(l, TK_STR, 0i64, id, start_pos)
+
+-- ── Punctuators (greedy) ─────────────────────────────────────────────────
+-- Outer branches do a single assignment; inner 2-char lookups use simple
+-- if/else (not chains) to avoid pfront layout bugs.
+
+fn lex_punct : *Lexer -> ()
+  | l ->
+    let start = l.pos
+    let c = lex_adv(l)
+    let c2 = lex_peek(l)
+    let mut pid : i64 = 0i64
+    if c == 40i64
+      pid = P_LPAREN
+    else if c == 41i64
+      pid = P_RPAREN
+    else if c == 91i64
+      pid = P_LBRACK
+    else if c == 93i64
+      pid = P_RBRACK
+    else if c == 123i64
+      pid = P_LBRACE
+    else if c == 125i64
+      pid = P_RBRACE
+    else if c == 126i64
+      pid = P_TILDE
+    else if c == 59i64
+      pid = P_SEMI
+    else if c == 58i64
+      pid = P_COLON
+    else if c == 63i64
+      pid = P_QUESTION
+    else if c == 44i64
+      pid = P_COMMA
+    else if c == 46i64
+      if c2 == 46i64 && lex_peek_at(l, 1i64) == 46i64
+        lex_adv(l)
+        lex_adv(l)
+        pid = P_ELLIPSIS
+      else
+        pid = P_DOT
+    else if c == 43i64
+      if c2 == 43i64
+        lex_adv(l)
+        pid = P_INC
+      else
+        if c2 == 61i64
+          lex_adv(l)
+          pid = P_ADD_EQ
+        else
+          pid = P_PLUS
+    else if c == 45i64
+      if c2 == 45i64
+        lex_adv(l)
+        pid = P_DEC
+      else
+        if c2 == 61i64
+          lex_adv(l)
+          pid = P_SUB_EQ
+        else
+          if c2 == 62i64
+            lex_adv(l)
+            pid = P_ARROW
+          else
+            pid = P_MINUS
+    else if c == 38i64
+      if c2 == 38i64
+        lex_adv(l)
+        pid = P_AND
+      else
+        if c2 == 61i64
+          lex_adv(l)
+          pid = P_AND_EQ
+        else
+          pid = P_AMP
+    else if c == 42i64
+      if c2 == 61i64
+        lex_adv(l)
+        pid = P_MUL_EQ
+      else
+        pid = P_STAR
+    else if c == 47i64
+      pid = P_SLASH
+    else if c == 37i64
+      if c2 == 61i64
+        lex_adv(l)
+        pid = P_MOD_EQ
+      else
+        pid = P_PCT
+    else if c == 60i64
+      if c2 == 60i64
+        lex_adv(l)
+        if lex_peek(l) == 61i64
+          lex_adv(l)
+          pid = P_SHL_EQ
+        else
+          pid = P_LSHIFT
+      else
+        if c2 == 61i64
+          lex_adv(l)
+          pid = P_LE
+        else
+          pid = P_LT
+    else if c == 62i64
+      if c2 == 62i64
+        lex_adv(l)
+        if lex_peek(l) == 61i64
+          lex_adv(l)
+          pid = P_SHR_EQ
+        else
+          pid = P_RSHIFT
+      else
+        if c2 == 61i64
+          lex_adv(l)
+          pid = P_GE
+        else
+          pid = P_GT
+    else if c == 61i64
+      if c2 == 61i64
+        lex_adv(l)
+        pid = P_EQEQ
+      else
+        pid = P_ASSIGN
+    else if c == 33i64
+      if c2 == 61i64
+        lex_adv(l)
+        pid = P_NEQ
+      else
+        pid = P_BANG
+    else if c == 94i64
+      if c2 == 61i64
+        lex_adv(l)
+        pid = P_XOR_EQ
+      else
+        pid = P_CARET
+    else if c == 124i64
+      if c2 == 124i64
+        lex_adv(l)
+        pid = P_OR
+      else
+        if c2 == 61i64
+          lex_adv(l)
+          pid = P_OR_EQ
+        else
+          pid = P_PIPE
+    else
+      lex_err(l, "unexpected character")
+      pid = 0i64
+    if pid != 0i64
+      lex_tok(l, TK_PUNCT, pid, 0i64, start)
+
+-- ── Top-level lex ────────────────────────────────────────────────────────
+
+fn lex_lex : *Lexer -> ()
+  | l ->
+    while true
+      lex_skip_ws_and_comments(l)
+      let c = lex_peek(l)
+      if c == -1i64
+        lex_tok(l, TK_EOF, 0i64, 0i64, l.pos)
+        break
+      let is_id_start = (c >= 97i64 && c <= 122i64) || (c >= 65i64 && c <= 90i64) || c == 95i64
+      if is_id_start
+        lex_ident(l)
+      else if is_digit(c)
+        lex_number(l)
+      else if c == 39i64
+        lex_char(l)
+      else if c == 34i64
+        lex_string(l)
+      else
+        lex_punct(l)
+
+fn lexer_count : *Lexer -> i64
+  | l -> vec_len(&l.tokens)
+
+fn lexer_tok_at : (*Lexer, i64) -> *Token
+  | (l, i) ->
+    if i < 0i64 || i >= vec_len(&l.tokens) then 0 as *Token
+    else (vec_as_slice(&l.tokens) as i64 + i * TOKEN_SIZE) as *Token

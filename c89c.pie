@@ -1,0 +1,375 @@
+-- c89c: C89 compiler in Pride (single-file, for legacy pride native build)
+mod c89c;
+
+use mem;
+use os.linux;
+use vec.vec;
+
+-- ===== constants =====
+const TK_EOF     : i64 = 0i64;
+const TK_IDENT   : i64 = 1i64;
+const TK_INT     : i64 = 2i64;
+const TK_FLOAT   : i64 = 3i64;
+const TK_STR     : i64 = 4i64;
+const TK_CHAR    : i64 = 5i64;
+const TK_PUNCT   : i64 = 6i64;
+const TK_KW      : i64 = 7i64;
+
+const SC_NONE    : i64 = 0i64;
+const SC_TYPEDEF : i64 = 1i64;
+const SC_EXTERN  : i64 = 2i64;
+const SC_STATIC  : i64 = 3i64;
+const SC_AUTO    : i64 = 4i64;
+const SC_REGISTER: i64 = 5i64;
+const Q_NONE     : i64 = 0i64;
+
+const TY_VOID    : i64 = 1i64;
+const TY_CHAR    : i64 = 2i64;
+const TY_SCHAR   : i64 = 3i64;
+const TY_UCHAR   : i64 = 4i64;
+const TY_SHORT   : i64 = 5i64;
+const TY_USHORT  : i64 = 6i64;
+const TY_INT     : i64 = 7i64;
+const TY_UINT    : i64 = 8i64;
+const TY_LONG    : i64 = 9i64;
+const TY_ULONG   : i64 = 10i64;
+const TY_FLOAT   : i64 = 11i64;
+const TY_DOUBLE  : i64 = 12i64;
+const TY_LDOUBLE : i64 = 13i64;
+const TY_PTR     : i64 = 14i64;
+const TY_ARRAY   : i64 = 15i64;
+const TY_FUNC    : i64 = 16i64;
+const TY_STRUCT  : i64 = 17i64;
+const TY_UNION   : i64 = 18i64;
+const TY_ENUM    : i64 = 19i64;
+const TY_TYPENAME: i64 = 20i64;
+
+const N_TRANS    : i64 = 100i64;
+const N_FUNDEF   : i64 = 101i64;
+const N_VARDECL  : i64 = 102i64;
+const N_TYPEDEF  : i64 = 103i64;
+const N_INT      : i64 = 200i64;
+const N_FLOAT    : i64 = 201i64;
+const N_STRVAL   : i64 = 202i64;
+const N_CHAR     : i64 = 203i64;
+const N_IDENT    : i64 = 204i64;
+const N_UNARY    : i64 = 205i64;
+const N_BINARY   : i64 = 206i64;
+const N_CALL     : i64 = 207i64;
+const N_INDEX    : i64 = 208i64;
+const N_MEMBER   : i64 = 209i64;
+const N_CAST     : i64 = 210i64;
+const N_ASSIGN   : i64 = 213i64;
+const N_EXPRSTMT : i64 = 300i64;
+const N_BLOCK    : i64 = 301i64;
+const N_IF       : i64 = 302i64;
+const N_WHILE    : i64 = 303i64;
+const N_DO       : i64 = 304i64;
+const N_FOR      : i64 = 305i64;
+const N_RETURN   : i64 = 311i64;
+const N_NULL     : i64 = 314i64;
+const NULL_ID    : i64 = 0i64;
+
+const P_LPAREN   : i64 = 1i64;
+const P_RPAREN   : i64 = 2i64;
+const P_LBRACK   : i64 = 3i64;
+const P_RBRACK   : i64 = 4i64;
+const P_LBRACE   : i64 = 5i64;
+const P_RBRACE   : i64 = 6i64;
+const P_STAR     : i64 = 12i64;
+const P_PLUS     : i64 = 13i64;
+const P_MINUS    : i64 = 14i64;
+const P_BANG     : i64 = 16i64;
+const P_SLASH    : i64 = 17i64;
+const P_PCT      : i64 = 18i64;
+const P_LT       : i64 = 21i64;
+const P_GT       : i64 = 22i64;
+const P_EQEQ     : i64 = 25i64;
+const P_NEQ      : i64 = 26i64;
+const P_AMP      : i64 = 11i64;
+const P_SEMI     : i64 = 33i64;
+const P_ASSIGN   : i64 = 35i64;
+const P_COMMA    : i64 = 46i64;
+
+const KW_INT     : i64 = 17i64;
+const KW_CHAR    : i64 = 4i64;
+const KW_VOID    : i64 = 30i64;
+const KW_LONG    : i64 = 18i64;
+const KW_SHORT   : i64 = 21i64;
+const KW_IF      : i64 = 16i64;
+const KW_ELSE    : i64 = 10i64;
+const KW_WHILE   : i64 = 32i64;
+const KW_RETURN  : i64 = 20i64;
+const KW_STRUCT  : i64 = 25i64;
+
+const TYPE_SIZE : i64 = 88i64;
+const NODE_SIZE : i64 = 64i64;
+const TOKEN_SIZE : i64 = 56i64;
+const INT_BUCKETS : i64 = 512i64;
+
+-- ===== structs =====
+struct Pos        line:i64, col:i64, file:i64;
+struct Type       kind:i64, qual:i64, t_sub:i64, t_size:i64, t_align:i64, t_params:i64,
+                  t_fields:i64, t_tag:i64, t_name:i64, t_variadic:i64, _pad:i64;
+struct Node       kind:i64, pos_line:i64, pos_col:i64, pos_file:i64, ival:i64, sval:i64, left:i64, right:i64;
+struct Token      kind:i64, ival:i64, sval:i64, line:i64, col:i64, pos:i64;
+struct InternEntry ptr:ptr, len:i64, hash:i64, id:i64, next:i64;
+struct Interner   pages_ptr:ptr, pages_cap:i64, pages_pos:i64, entries:vec.Vec, buckets:vec.Vec, count:i64;
+struct Lexer      buf:ptr, len:i64, pos:i64, line:i64, col:i64, file_id:i64, tokens:vec.Vec, interner:*Interner, errs:*i64;
+
+-- ===== helpers =====
+fn write_cstr : (i64, ptr) -> () | (fd, s) -> linux.write(fd, s, linux.strlen(s));
+fn write_byte : (i64, u8) -> () | (fd, b) ->
+  let mut c:u8[1]; c[0] = b; linux.write(fd, &c[0] as ptr, 1i64);
+
+fn write_i64 : (i64, i64) -> () | (fd, n0) ->
+  let mut buf:u8[24];
+  let mut i:i64 = 23i64;
+  let mut x:i64 = n0;
+  if x == 0i64
+    buf[i] = 48u8; i = i - 1i64
+  else
+    if x < 0i64
+      write_byte(fd, 45u8); x = -x;
+    while x > 0i64
+      buf[i] = (x % 10i64 + 48i64) as u8; x = x / 10i64; i = i - 1i64;
+  linux.write(fd, &buf[i+1i64] as ptr, 23i64 - i);
+
+fn diag_err : (*i64, i64, i64, ptr) -> () | (c, ln, cl, m) ->
+  write_cstr(2i64, "c89c: "); write_i64(2i64, ln); write_byte(2i64, 58u8);
+  write_i64(2i64, cl); write_cstr(2i64, ": "); write_cstr(2i64, m); write_byte(2i64, 10u8);
+  c[0i64] = c[0i64] + 1i64;
+
+fn intern_new : () -> Interner | () ->
+  let zero:i64 = 0i64;
+  let it = Interner { pages_ptr: mem.page_alloc(65536i64), pages_cap: 65536i64, pages_pos: 0i64,
+                      entries: vec_new(40i64), buckets: vec_new(8i64), count: 0i64 };
+  let mut j:i64 = 0i64;
+  while j < INT_BUCKETS
+    vec_push(&it.buckets, &zero as ptr);
+    j = j + 1i64;
+  it;
+
+fn hash_bytes : (ptr, i64) -> i64 | (p, n) ->
+  let mut h:i64 = 2166136261i64;
+  let mut i:i64 = 0i64;
+  let bp = p as *u8;
+  while i < n
+    h = (h ^ (bp[i] as i64)) * 16777619i64;
+    i = i + 1i64;
+  h;
+
+fn intern_intern : (*Interner, ptr, i64) -> i64 | (it, p, n) ->
+  let h = hash_bytes(p, n) & (INT_BUCKETS - 1i64);
+  let headp = (vec_as_slice(&it.buckets) as *i64) + h;
+  let mut cur = headp[0i64];
+  while cur != NULL_ID
+    let off = (cur - 1i64) * 40i64;
+    let e = (vec_as_slice(&it.entries) as i64 + off) as *InternEntry;
+    if e.hash == h && e.len == n
+      if linux.memcmp(e.ptr, p, n as u64) == 0i32
+        return e.id;
+    cur = e.next;
+  let saved:ptr;
+  if it.pages_pos + n + 1i64 > it.pages_cap
+    let newcap = it.pages_cap * 2i64;
+    if newcap < n + 1i64 then newcap = n + 4096i64;
+    let np = mem.page_alloc(newcap);
+    linux.memcpy(np, it.pages_ptr, it.pages_pos as u64);
+    it.pages_ptr = np; it.pages_cap = newcap;
+  saved = (it.pages_ptr as i64 + it.pages_pos) as ptr;
+  linux.memcpy(saved, p, n as u64);
+  ((saved as *u8))[n] = 0u8;
+  it.pages_pos = it.pages_pos + n + 1i64;
+  let id = vec_len(&it.entries) + 1i64;
+  let e = InternEntry { ptr: saved, len: n, hash: h, id: id, next: headp[0i64] };
+  vec_push(&it.entries, &e as ptr);
+  headp[0i64] = id;
+  it.count = it.count + 1i64;
+  id;
+
+-- ===== token helpers =====
+fn tok_at : (*Lexer, i64) -> *Token | (lx, i) ->
+  if i < 0i64 || i >= vec_len(&lx.tokens) then 0 as *Token
+  else (vec_as_slice(&lx.tokens) as i64 + i * TOKEN_SIZE) as *Token;
+
+fn tok_push : (*Lexer, i64, i64, i64, i64) -> () | (lx, k, iv, sv, st) ->
+  let t = Token { kind: k, ival: iv, sval: sv, line: lx.line, col: lx.col, pos: st };
+  vec_push(&lx.tokens, &t as ptr);
+
+fn peek : *Lexer -> i64 | l ->
+  if l.pos >= l.len then -1i64 else ((l.buf as *u8)[l.pos] as i64);
+fn adv : *Lexer -> i64 | l ->
+  if l.pos >= l.len then -1i64
+  else
+    let c = (l.buf as *u8)[l.pos] as i64;
+    l.pos = l.pos + 1i64;
+    if c == 10i64 then l.line = l.line + 1i64; l.col = 1i64;
+    else l.col = l.col + 1i64;
+    c;
+
+fn skip_ws : *Lexer -> () | l ->
+  while true
+    let c = peek(l);
+    if c == 32i64 || c == 9i64 || c == 10i64 || c == 13i64 then adv(l);
+    else if c == 47i64
+      let c2 = if l.pos + 1i64 < l.len then ((l.buf as *u8)[l.pos+1i64] as i64) else -1i64;
+      if c2 == 47i64
+        adv(l); adv(l);
+        while peek(l) != -1i64 && peek(l) != 10i64 do adv(l);
+      else if c2 == 42i64
+        adv(l); adv(l);
+        let mut d:i64 = 1i64;
+        while d > 0i64 && peek(l) != -1i64
+          let ch = adv(l);
+          let c3 = peek(l);
+          if ch == 47i64 && c3 == 42i64 then adv(l); d = d + 1i64;
+          else if ch == 42i64 && c3 == 47i64 then adv(l); d = d - 1i64;
+      else break;
+    else break;
+
+fn lex_main : *Lexer -> () | l ->
+  while true
+    skip_ws(l);
+    let c = peek(l);
+    if c == -1i64
+      tok_push(l, TK_EOF, 0i64, 0i64, l.pos); break;
+    if (c >= 97i64 && c <= 122i64) || (c >= 65i64 && c <= 90i64) || c == 95i64
+      let st = l.pos;
+      while true
+        let cc = peek(l);
+        if (cc >= 97i64 && cc <= 122i64) || (cc >= 65i64 && cc <= 90i64) || cc == 95i64 || (cc >= 48i64 && cc <= 57i64) then adv(l);
+        else break;
+      let sl = l.pos - st;
+      let id = intern_intern(l.interner, (l.buf as i64 + st) as ptr, sl);
+      let is_kw = false;
+      let mut kw:i64 = 0i64;
+      if sl == 3i64 && linux.memcmp((l.buf as i64 + st) as ptr, "int", 3u64) == 0i32 then is_kw = true; kw = KW_INT;
+      else if sl == 4i64 && linux.memcmp((l.buf as i64 + st) as ptr, "char", 4u64) == 0i32 then is_kw = true; kw = KW_CHAR;
+      else if sl == 4i64 && linux.memcmp((l.buf as i64 + st) as ptr, "void", 4u64) == 0i32 then is_kw = true; kw = KW_VOID;
+      else if sl == 4i64 && linux.memcmp((l.buf as i64 + st) as ptr, "long", 4u64) == 0i32 then is_kw = true; kw = KW_LONG;
+      else if sl == 2i64 && linux.memcmp((l.buf as i64 + st) as ptr, "if", 2u64) == 0i32 then is_kw = true; kw = KW_IF;
+      else if sl == 5i64 && linux.memcmp((l.buf as i64 + st) as ptr, "while", 5u64) == 0i32 then is_kw = true; kw = KW_WHILE;
+      else if sl == 6i64 && linux.memcmp((l.buf as i64 + st) as ptr, "return", 6u64) == 0i32 then is_kw = true; kw = KW_RETURN;
+      else if sl == 4i64 && linux.memcmp((l.buf as i64 + st) as ptr, "else", 4u64) == 0i32 then is_kw = true; kw = KW_ELSE;
+      if is_kw then tok_push(l, TK_KW, kw, id, st);
+      else tok_push(l, TK_IDENT, 0i64, id, st);
+    elif c >= 48i64 && c <= 57i64
+      let st = l.pos;
+      let mut v:i64 = 0i64;
+      while true
+        let cc = peek(l);
+        if cc >= 48i64 && cc <= 57i64 then v = v*10i64 + (adv(l) - 48i64);
+        else break;
+      tok_push(l, TK_INT, v, 0i64, st);
+    else
+      let st = l.pos;
+      adv(l);
+      let pid:i64 = 0i64;
+      if c == 59i64 then pid = P_SEMI;
+      elif c == 123i64 then pid = P_LBRACE;
+      elif c == 125i64 then pid = P_RBRACE;
+      elif c == 40i64 then pid = P_LPAREN;
+      elif c == 41i64 then pid = P_RPAREN;
+      elif c == 42i64 then pid = P_STAR;
+      elif c == 43i64 then pid = P_PLUS;
+      elif c == 45i64 then pid = P_MINUS;
+      elif c == 47i64 then pid = P_SLASH;
+      elif c == 61i64
+        if peek(l) == 61i64 then adv(l); pid = P_EQEQ; else pid = P_ASSIGN;
+      elif c == 33i64
+        if peek(l) == 61i64 then adv(l); pid = P_NEQ;
+      elif c == 60i64 then pid = P_LT;
+      elif c == 62i64 then pid = P_GT;
+      elif c == 38i64 then pid = P_AMP;
+      elif c == 44i64 then pid = P_COMMA;
+      tok_push(l, TK_PUNCT, pid, 0i64, st);
+
+-- ===== node helpers =====
+fn nd_new : (*vec.Vec, i64, i64, i64) -> i64 | (v, k, ln, cl) ->
+  let n = Node { kind: k, pos_line: ln, pos_col: cl, pos_file: 0i64, ival: 0i64, sval: 0i64, left: NULL_ID, right: NULL_ID };
+  let id = vec_len(v) + 1i64;
+  vec_push(v, &n as ptr);
+  id;
+
+fn nd_get : (*vec.Vec, i64) -> *Node | (v, id) ->
+  if id <= NULL_ID || id > vec_len(v) then 0 as *Node
+  else (vec_as_slice(v) as i64 + (id - 1i64) * NODE_SIZE) as *Node;
+
+fn nd_add : (*vec.Vec, i64, i64) -> () | (v, p, c) ->
+  let pn = nd_get(v, p);
+  if pn.left == NULL_ID then pn.left = c;
+  else
+    let mut cur = pn.left;
+    while true
+      let cn = nd_get(v, cur);
+      if cn.right == NULL_ID then cn.right = c; break;
+      cur = cn.right;
+
+-- ===== type helpers =====
+fn t_new : (*vec.Vec, i64) -> i64 | (v, k) ->
+  let t = Type { kind: k, qual: Q_NONE, t_sub: NULL_ID, t_size: 0i64, t_align: 0i64,
+                t_params: NULL_ID, t_fields: NULL_ID, t_tag: 0i64, t_name: 0i64, t_variadic:0i64, _pad:0i64 };
+  let id = vec_len(v) + 1i64;
+  vec_push(v, &t as ptr);
+  id;
+
+fn tp : (*vec.Vec, i64) -> *Type | (v, id) ->
+  if id <= NULL_ID || id > vec_len(v) then 0 as *Type
+  else (vec_as_slice(v) as i64 + (id - 1i64) * TYPE_SIZE) as *Type;
+
+-- ===== main =====
+fn main : (i32, *ptr) -> i32 | (argc, argv) ->
+  if argc < 2i32
+    write_cstr(2i64, "usage: c89c <file.c>\n"); return 1i32;
+  let path = argv[1i64];
+  let fd = linux.open(path, 0i64, 0i64);
+  if fd < 0i64
+    write_cstr(2i64, "c89c: cannot open\n"); return 1i32;
+  let mut cap:i64 = 65536i64;
+  let mut buf:*u8 = mem.page_alloc(cap) as *u8;
+  let mut len:i64 = 0i64;
+  while true
+    let n = linux.read(fd, (buf as i64 + len) as ptr, cap - len - 1i64);
+    if n <= 0i64 then break;
+    len = len + n;
+    if len >= cap - 1i64
+      let newcap = cap * 2i64;
+      let nb = mem.page_alloc(newcap) as *u8;
+      linux.memcpy(nb as ptr, buf as ptr, len as u64);
+      mem.page_free(buf as ptr, cap);
+      buf = nb; cap = newcap;
+  linux.close(fd);
+  buf[len] = 0u8;
+
+  let mut err_count:i64 = 0i64;
+  let it = intern_new();
+  let mut tvec = vec_new(TYPE_SIZE);
+  let mut nvec = vec_new(NODE_SIZE);
+
+  let lx = Lexer { buf: buf as ptr, len: len, pos: 0i64, line: 1i64, col: 1i64, file_id: 0i64,
+                   tokens: vec_new(TOKEN_SIZE), interner: &it, errs: &err_count };
+  lex_main(&lx);
+  let nt = vec_len(&lx.tokens);
+
+  write_cstr(1i64, "c89c: bytes="); write_i64(1i64, len);
+  write_cstr(1i64, " tokens="); write_i64(1i64, nt);
+  write_cstr(1i64, " errors="); write_i64(1i64, err_count);
+  write_cstr(1i64, "\n");
+
+  let ty_int = t_new(&tvec, TY_INT);
+  let root = nd_new(&nvec, N_BLOCK, 1i64, 1i64);
+  let mut i:i64 = 0i64;
+  while i < nt
+    let t = tok_at(&lx, i);
+    if t.kind == TK_KW && t.ival == KW_INT
+      let nm = nd_new(&nvec, N_VARDECL, t.line, t.col);
+      nd_get(&nvec, nm).ival = ty_int;
+      nd_add(&nvec, root, nm);
+    i = i + 1i64;
+
+  write_cstr(1i64, "ast nodes="); write_i64(1i64, vec_len(&nvec));
+  write_cstr(1i64, " types="); write_i64(1i64, vec_len(&tvec));
+  write_cstr(1i64, "\n");
+  if err_count > 0i64 then return 1i32;
+  0i32;

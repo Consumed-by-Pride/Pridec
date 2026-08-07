@@ -1,0 +1,40 @@
+-- FIXED in pfront_parse.c3 parse_if:
+-- Root cause: two bugs in the `if ... then X else if ... then Y` path:
+--   (1) p.eat_layout_run() consumed any NEWLINE/INDENT/DEDENT run without
+--       checking columns, so after two outer else-if branches whose bodies
+--       were inline if-then chains, the enclosing block's DEDENT was eaten
+--       and the next top-level `fn` was absorbed into the previous fn body.
+--   (2) p.deferred_dedents = before_then clobbered deferred-D counts the
+--       inner recursive parse_if calls had legitimately recorded (via
+--       parse_indented_block's deferred_dedents path for inline else).
+-- Fix: column-sensitive else-scan in the has_then branch (mirrors the
+-- existing non-then inline_else logic), plus removed the deferred_dedents
+-- clobber.
+--
+-- Regression: nested "if/else if" chains using `then` single-line form
+-- caused the layout parser to leak past a top-level `fn`'s final expression,
+-- absorbing subsequent sibling declarations into the last function body.
+--
+-- Trigger: two adjacent outer `else if` branches whose bodies are inner
+-- `if ... then ... else if ... then ...` chains (the `then` one-liners).
+-- After parsing the final `r` tail-expr, the indentation stack was off-by-one
+-- so the next top-level `fn` was appended as a child of the first fn's block.
+
+mod bug_layout_elseif_nest
+
+fn kw_lookup : i64 -> i64
+  | n ->
+    let mut r : i64 = 0i64
+    if n == 2i64
+      if n == 1i64 then r = 10i64
+      else if n == 2i64 then r = 20i64
+    else if n == 7i64
+      if n == 1i64 then r = 30i64
+      else if n == 2i64 then r = 0i64
+    else if n == 8i64
+      if n == 1i64 then r = 40i64
+      else r = 50i64
+    r
+
+fn is_digit : i64 -> bool
+  | c -> c >= 48i64

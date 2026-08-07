@@ -1,0 +1,31 @@
+-- 79_constfold.pie
+-- Sanity test for the constant-folding pass.
+mod t79
+
+const N : i64 = 64i64;
+const M : i64 = 4i64;
+const SZ : i64 = N * M;
+
+fn answer : () -> i64
+  | () -> 2i64 + 3i64 * 4i64
+
+fn truthy : () -> bool
+  | () -> !(!true)
+
+fn select : i64 -> i64
+  | x -> if true then x else 0i64
+
+fn dead_branch : i64 -> i64
+  | x -> if false then 999i64 else x + 1i64
+
+fn add_zero : i64 -> i64
+  | x -> x + 0i64
+
+fn mul_one : i64 -> i64
+  | x -> x * 1i64
+
+fn double_neg : i64 -> i64
+  | x -> -(-x)
+
+fn size : () -> i64
+  | () -> SZ

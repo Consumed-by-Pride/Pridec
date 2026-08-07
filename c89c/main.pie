@@ -1,0 +1,120 @@
+-- c89c/main.pie — Driver: read a C file, lex + parse + sema, print stats.
+
+mod c89c.main
+
+use c89c.ast
+use c89c.driver
+use c89c.lex
+use c89c.parse
+use c89c.sema
+use mem
+use os.linux
+use vec.vec
+
+fn write_cstr : (i64, ptr) -> ()
+  | (fd, s) -> linux.write(fd, s, linux.strlen(s))
+
+fn write_byte : (i64, u8) -> ()
+  | (fd, b) ->
+    let mut c : u8[1]
+    c[0] = b
+    linux.write(fd, &c[0] as ptr, 1i64)
+
+fn write_i64 : (i64, i64) -> ()
+  | (fd, n0) ->
+    let mut buf : u8[24]
+    let mut i : i64 = 23i64
+    let mut x = n0
+    if x == 0i64
+      buf[i] = 48u8
+      i = i - 1i64
+    else
+      if x < 0i64
+        write_byte(fd, 45u8)
+        x = -x
+      while x > 0i64
+        buf[i] = (x % 10i64 + 48i64) as u8
+        x = x / 10i64
+        i = i - 1i64
+    linux.write(fd, &buf[i + 1i64] as ptr, 23i64 - i)
+
+fn read_file_all : ptr -> (ptr, i64)
+  | path ->
+    let fd = linux.open(path, 0i64, 0i64)
+    if fd < 0i64
+      return (0 as ptr, 0i64)
+    let mut cap : i64 = 65536i64
+    let mut buf : *u8 = mem.page_alloc(cap) as *u8
+    let mut len : i64 = 0i64
+    while true
+      let n = linux.read(fd, (buf as i64 + len) as ptr, cap - len - 1i64)
+      if n <= 0i64
+        break
+      len = len + n
+      if len >= cap - 1i64
+        let new_cap = cap * 2i64
+        let new_buf = mem.page_alloc(new_cap) as *u8
+        linux.memcpy(new_buf as ptr, buf as ptr, len as u64)
+        mem.page_free(buf as ptr, cap)
+        buf = new_buf
+        cap = new_cap
+    linux.close(fd)
+    buf[len] = 0u8
+    (buf, len)
+
+fn count_nodes : (*NodeArena, i64, *i64) -> ()
+  | (na, id, out) ->
+    if id == NULL_ID
+      return
+    out[0i64] = out[0i64] + 1i64
+    let n = node_get(na, id)
+    let mut c = n.left
+    while c != NULL_ID
+      count_nodes(na, c, out)
+      c = node_get(na, c).right
+
+fn main : (i32, *ptr) -> i32
+  | (argc, argv) ->
+    if argc < 2i32
+      write_cstr(2i64, "usage: c89c <file.c>\n")
+      return 1i32
+    let path = argv[1i64]
+    let (buf, sz) = read_file_all(path)
+    if buf as i64 == 0i64
+      write_cstr(2i64, "c89c: cannot open file\n")
+      return 1i32
+
+    let mut lex_errs : i64 = 0i64
+    let mut parse_errs : i64 = 0i64
+    let mut sema_errs : i64 = 0i64
+    let mut total_errs : i64 = 0i64
+
+    let it = interner_new()
+    let ta = type_arena_new()
+    let na = node_arena_new()
+    let pa = param_arena_new()
+    let fa = field_arena_new()
+
+    let lx = driver_lex(&it, buf as ptr, sz, &total_errs)
+    let root = driver_parse(&lx, &ta, &na, &pa, &fa, &total_errs)
+    driver_sema(&ta, &na, &total_errs, root)
+
+    write_cstr(1i64, "c89c: bytes=")
+    write_i64(1i64, sz)
+    write_cstr(1i64, " tokens=")
+    write_i64(1i64, driver_token_count(&lx))
+    write_cstr(1i64, " errors=")
+    write_i64(1i64, total_errs)
+    write_cstr(1i64, "\n")
+
+    let mut node_count : i64 = 0i64
+    count_nodes(&na, root, &node_count)
+    write_cstr(1i64, "ast nodes=")
+    write_i64(1i64, node_count)
+    write_cstr(1i64, " types=")
+    write_i64(1i64, vec_len(&ta.v))
+    write_cstr(1i64, "\n")
+
+    if total_errs > 0i64
+      return 1i32
+    0i32

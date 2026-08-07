@@ -1,0 +1,12 @@
+mod t
+-- The shape that triggered the original bug: char classification chains
+-- using if/then/else-if-then/else. Previously c89c needed helper fns to
+-- avoid this shape. After the fix it should parse with both fns top-level.
+fn is_alpha : i64 -> bool
+  | c ->
+    if c >= 65i64 then if c <= 90i64 then true else false
+    else if c >= 97i64 then if c <= 122i64 then true else false
+    else false
+
+fn is_digit_after : i64 -> bool
+  | c -> c >= 48i64 && c <= 57i64

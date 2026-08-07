@@ -1,0 +1,28 @@
+*.o
+*.bc
+*.opt.bc
+*.ll
+/pride
+/pridec
+/pride_new
+.understand-anything/
+redteam/
+__pycache__/
+/tmp/
+
+# pfront build output
+/pfrontc
+/obj/
+
+# pear build output
+/pear_a1_test
+/pearc
+/pear_a2
+
+# generated AIR test outputs
+*.air
+!/docs/**/*.air
+!/pear/**/*.air
+
+# pfrontc binary
+pfrontc
