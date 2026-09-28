@@ -1021,41 +1021,33 @@ fn AirCmd* AirLower.block_to_cns(AirLower* lr, Node* n, AirCns* k)
     return lr.cut(mu, k);
 }
 
-// terminal_escapes — does `body` unconditionally transfer control to a
-// covariable OTHER THAN `alpha`?  If so, the surrounding μα.α wrapper is
-// dead code (the value bound by α is never produced because control
-// unwinds out via return/break/continue first).  If `body` reaches a cut
-// to α itself (the normal value-return path), or doesn't terminate, we
-// need to keep μα.
+// terminal_escapes — does `body` directly and unconditionally cut to
+// `%ret_N` (the enclosing function's return covariable), bypassing α?
+// That is: is body a SINGLE immediate cut `<v|%ret_N>` (modulo trivial
+// μα or ACMD_RET wrapping)?  If so, the outer μα wrapper is an admin
+// redex: the value never actually gets produced for α/k because return
+// unwinds the call frame.
+//
+// We deliberately keep this check simple (no recursion into seq/if/let
+// chains): those are handled by dead-code pruning at seq_cmds + emit
+// time, not by μα elision.
 fn bool terminal_escapes(AirCmd* c, char* alpha)
 {
     if (c == null) return false;
-    switch (c.tag)
-    {
-        case ACMD_JUMP: case ACMD_TRAP: case ACMD_UB:
-        case ACMD_BREAK: case ACMD_CONTINUE: case ACMD_RET:
-            return true;
-        case ACMD_CUT:
-        {
-            if (c.cns != null && c.cns.tag == ACNS_COVAR)
-            {
-                // Cutting to α itself is the normal "produce a value" path
-                // — does NOT escape.
-                if (c.cns.name == alpha) return false;
-                return true;
-            }
-            if (c.prd != null && c.prd.tag == APRD_MU)
-            {
-                return terminal_escapes(c.prd.body, c.prd.name);
-            }
-            return false;
-        }
-        case ACMD_SEQ: return terminal_escapes(c.body, alpha);
-        case ACMD_MU:  return terminal_escapes(c.body, alpha);
-        case ACMD_MUTILDE: return terminal_escapes(c.body, alpha);
-        case ACMD_LET: return terminal_escapes(c.body, alpha);
-        default: return false;
-    }
+    // Peeling away outer μα / ACMD_RET wrappers (α binder shadowing):
+    while (c.tag == ACMD_MU) { c = c.body; }
+    if (c.tag == ACMD_RET) return true;
+    if (c.tag == ACMD_JUMP || c.tag == ACMD_TRAP || c.tag == ACMD_UB
+     || c.tag == ACMD_BREAK || c.tag == ACMD_CONTINUE) return true;
+    if (c.tag == ACMD_CUT
+     && c.cns != null && c.cns.tag == ACNS_COVAR
+     && c.cns.name != alpha
+     && c.cns.name != null
+     && c.cns.name[0] == '%'
+     && c.cns.name[1] == 'r'
+     && c.cns.name[2] == 'e'
+     && c.cns.name[3] == 't') { return true; }
+    return false;
 }
 
 // letlike — translate a let/const/static declaration (NOT top-level).
@@ -2815,35 +2807,20 @@ fn bool is_terminal_cmd(AirCmd* c)
             return true;
         case ACMD_CUT:
         {
-            // A cut <v|k> is terminal whenever k is a covariable (named
-            // continuation point): %ret, a fresh %kN bound by μα (the
-            // producer-side activation for a block), a %lbl from
-            // break/continue/jump, etc. In λμμ̃, cutting directly to a
-            // covariable transfers control — statements after such a cut
-            // are unreachable.
+            // A cut <v|k> is terminal when k is a covariable (named
+            // continuation point): %ret, α from a μα, %lbl, etc. This
+            // is a direct control transfer; anything after is dead.
             //
-            // Cuts to composite consumers (μ̃x, call(…), .f, […], case{…},
-            // etc.) are NOT terminal — unless the producer is a μα whose
-            // body is itself terminal (i.e., an admin redex
-            // `<μα.<…|%ret>| μ̃x.rest>` where the μ never produces a value,
-            // so the outer consumer is dead code and the whole cut is
-            // terminal).
+            // We do NOT look through μ̃/if/match here because those
+            // require a deeper analysis that we leave to PEAR passes.
             if (c.cns != null && c.cns.tag == ACNS_COVAR) return true;
-            if (c.prd != null && c.prd.tag == APRD_MU)
-            {
-                return is_terminal_cmd(c.prd.body);
-            }
             return false;
         }
         case ACMD_SEQ:
-            // If the first command in the sequence is terminal the rest is dead.
             return is_terminal_cmd(c.body);
         case ACMD_MU:
-            // μα.c is a producer, not a transfer; recurse into body.
             return is_terminal_cmd(c.body);
         case ACMD_MUTILDE:
-            // μ̃α.c is a consumer binder; its body may contain terminals but
-            // μ̃ itself is a binder, not a cut.
             return is_terminal_cmd(c.body);
         case ACMD_LET:
             return is_terminal_cmd(c.body);

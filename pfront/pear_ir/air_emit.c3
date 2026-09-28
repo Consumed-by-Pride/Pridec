@@ -79,15 +79,7 @@ fn bool is_terminal(AirCmd* c)
             return true;
         case ACMD_CUT:
         {
-            // Any cut directly to a named covariable (%ret, %k, %lbl, …)
-            // is a control transfer — terminal.
             if (c.cns != null && c.cns.tag == ACNS_COVAR) return true;
-            // <μα.terminal|k> is terminal because the μα body transfers
-            // control before producing a value for k.
-            if (c.prd != null && c.prd.tag == APRD_MU)
-            {
-                return is_terminal(c.prd.body);
-            }
             return false;
         }
         case ACMD_SEQ: return is_terminal(c.body);
