@@ -268,8 +268,29 @@ fn void emit_typ(AirEmitter* e, AirTyp* t)
             if (t.arg_count >= 1) emit_typ(e, t.args[0]);
             return;
         case ATYP_TYPEOF:
-            e.wr("typeof(?)");
+        {
+            // typeof(prd) — the static type of an expression
+            e.wr("typeof(");
+            // t.args[0] can carry the inner typ/prd
+            if (t.arg_count > 0 && t.args[0] != null) { emit_typ(e, t.args[0]); }
+            else if (t.name != null) { e.wr(t.name); }
+            else { e.wr("_"); }
+            e.wr(")");
             return;
+        }
+        case ATYP_REFINE:
+        {
+            // {x: T | P} — refinement type
+            e.wr("{");
+            if (t.name != null) { e.wr(t.name); } else { e.wr("_"); }
+            if (t.arg_count > 0 && t.args[0] != null)
+            {
+                e.wr(": "); emit_typ(e, t.args[0]);
+            }
+            // refinement predicate carried in eff_name / refine_extra — just show braces
+            e.wr("}");
+            return;
+        }
         case ATYP_MULT:
             e.wr("*");
             return;
@@ -476,7 +497,16 @@ fn void emit_prd(AirEmitter* e, AirPrd* p)
         }
         case APRD_BYTES:
         {
-            e.wr("b\"...\""); return;
+            // b"…" literal — show short byte strings inline, long ones as b"…" with length
+            e.wr("b\"");
+            if (p.bytes != null && p.bytes_len > 0)
+            {
+                usz n = p.bytes_len < 32 ? p.bytes_len : 32;
+                for (usz i = 0; i < n; i++) { fputc((int)p.bytes[i], e.out); }
+                if (p.bytes_len > 32) e.wr("...");
+            }
+            e.wr("\"");
+            return;
         }
         case APRD_UNIT:  e.wr("()"); return;
         case APRD_NULL:  e.wr("null"); return;
@@ -550,7 +580,22 @@ fn void emit_prd(AirEmitter* e, AirPrd* p)
             e.indent_less();
             return;
         }
-        case APRD_COMETA: e.wr("cometa(?)"); return;
+        case APRD_COMETA:
+        {
+            // cometa is a co-λ (consumer-side lambda):  ~α.c
+            e.wr("~");
+            for (usz i = 0; i < p.binder_count; i++)
+            {
+                e.sp();
+                AirBinder* b = p.binders[i];
+                if (b != null) { e.wr(b.name != null ? b.name : "%k"); }
+            }
+            e.wr(".");
+            e.indent_more(); e.nl(); e.ind();
+            emit_cmd(e, p.body);
+            e.indent_less();
+            return;
+        }
         case APRD_BINOP:
         {
             e.wr("(");
@@ -575,11 +620,47 @@ fn void emit_prd(AirEmitter* e, AirPrd* p)
             return;
         case APRD_SIZEOF:   e.wr("sizeof("); emit_typ(e, p.ty); e.wr(")"); return;
         case APRD_ALIGNOF:  e.wr("alignof("); emit_typ(e, p.ty); e.wr(")"); return;
-        case APRD_OFFSETOF: e.wr("offsetof(?)"); return;
-        case APRD_REIFY:    e.wr("reify(?)"); return;
-        case APRD_EVAL:     e.wr("eval(?)"); return;
-        case APRD_QUOTE:    e.wr("quote(?)"); return;
-        case APRD_SPLICE:   e.wr("splice(?)"); return;
+        case APRD_OFFSETOF:
+        {
+            // offsetof(T, .f) — field name lives in p.name
+            e.wr("offsetof(");
+            emit_typ(e, p.ty);
+            if (p.name != null) { e.wr(", ."); e.wr(p.name); }
+            e.wr(")");
+            return;
+        }
+        case APRD_REIFY:
+        {
+            // reify: quote a term to its code value (stage-0 → stage-1)
+            e.wr("reify ");
+            if (p.body != null) { emit_cmd(e, p.body); } else { e.wr("()"); }
+            return;
+        }
+        case APRD_EVAL:
+        {
+            // eval: splice-and-run a code value (stage-1 → stage-0)
+            e.wr("eval ");
+            if (p.sub_count > 0 && p.subs[0] != null) { emit_prd(e, p.subs[0]); }
+            else { e.wr("()"); }
+            return;
+        }
+        case APRD_QUOTE:
+        {
+            // quote: quasi-quote a code block (`<c>` MSP syntax)
+            e.wr("quote {");
+            e.indent_more(); e.nl(); e.ind();
+            emit_cmd(e, p.body);
+            e.indent_less(); e.nl(); e.ind(); e.wr("}");
+            return;
+        }
+        case APRD_SPLICE:
+        {
+            // splice: escape a reified value into a quote (~e)
+            e.wr("~");
+            if (p.sub_count > 0 && p.subs[0] != null) { emit_prd(e, p.subs[0]); }
+            else { e.wr("()"); }
+            return;
+        }
         case APRD_POISON:   e.wr("poison"); return;
         case APRD_UNREACHABLE_VAL: e.wr("unreachable"); return;
         default: e.wr("?prd"); return;
@@ -756,7 +837,7 @@ fn void emit_cmd(AirEmitter* e, AirCmd* c)
         case ACMD_INVALID: e.wr("()"); return;
         case ACMD_CUT:
         {
-            // Suppress the admin redex <()|μ̃x.c> → c
+            // Suppress the admin redex <()|μ̃x.c> → c (unit-μ̃-admin)
             if (c.prd != null && c.prd.tag == APRD_UNIT
                 && c.cns != null && c.cns.tag == ACNS_COMU
                 && c.cns.body != null)
@@ -764,8 +845,54 @@ fn void emit_cmd(AirEmitter* e, AirCmd* c)
                 emit_cmd(e, c.cns.body);
                 return;
             }
-            // Detect <e|μ̃x. ()> as a discarded value; print `let _ = e;` in seq form
-            // but at top-level just emit "e;".
+            // Detect <e|μ̃x.c> as a let-binding sugar:
+            //   <e|μ̃x.c>  ≡ let x = e; c
+            // (Right-to-left μ̃ wrapping produces these during lowering;
+            // printing them as `let` gives a much more readable surface.)
+            if (c.cns != null && c.cns.tag == ACNS_COMU
+                && c.cns.body != null
+                && c.cns.bind != null
+                && c.prd != null)
+            {
+                char* xn = c.cns.bind;
+                bool is_discard = (xn[0] == '_' && xn[1] == 'x' && xn[2] == 0) // _x single fresh
+                               || (xn[0] == '_' && xn[1] == 0);
+                // If it's a `_x1`-style fresh name bound to () this drops to a
+                // bare expression statement (no let-visual noise).
+                if (is_discard && c.prd.tag == APRD_UNIT)
+                {
+                    emit_cmd(e, c.cns.body);
+                    return;
+                }
+                // Inside a SEQ or at fn-body top, emit `let x = e;` and continue.
+                e.wr("let ");
+                e.wr(xn);
+                e.wr(" = ");
+                emit_prd(e, c.prd);
+                // If body is () or nop, stop here (no trailing semicolon-noop).
+                if (is_nop_cmd(c.cns.body)) return;
+                // Otherwise: chain as let-in. If the body is itself a SEQ of stmts
+                // we just emit `;` and continue at the same indent; nested let/if/match
+                // on their own line get indented so it reads like a block.
+                bool body_is_seq = (c.cns.body.tag == ACMD_SEQ)
+                                || (c.cns.body.tag == ACMD_LET)
+                                || (c.cns.body.tag == ACMD_IF)
+                                || (c.cns.body.tag == ACMD_MATCH)
+                                || (c.cns.body.tag == ACMD_WHILE)
+                                || (c.cns.body.tag == ACMD_HANDLE);
+                if (body_is_seq)
+                {
+                    e.semi(); e.nl(); e.ind();
+                    emit_cmd(e, c.cns.body);
+                }
+                else
+                {
+                    e.wr("; ");
+                    emit_cmd(e, c.cns.body);
+                }
+                return;
+            }
+            // Detect <e|μ̃_. ()> as a bare expression-statement (discarded value).
             e.wr("<");
             emit_prd(e, c.prd);
             e.wr("|");
@@ -829,7 +956,29 @@ fn void emit_cmd(AirEmitter* e, AirCmd* c)
             }
             return;
         }
-        case ACMD_LETREC: e.wr("letrec ..."); return;
+        case ACMD_LETREC:
+        {
+            // Mutual-recursive let:
+            //   letrec x1 = p1; x2 = p2; ... ; body
+            e.wr("letrec ");
+            // The binders/prds are in mbinders/prds arrays
+            for (usz i = 0; i < c.mbinder_count; i++)
+            {
+                if (i > 0) { e.wr(";"); e.sp(); }
+                AirBinder* b = c.mbinders[i];
+                if (b != null && b.name != null) { e.wr(b.name); }
+                else { e.wr("_"); }
+                e.wr(" = ");
+                if (i < c.prd_count && c.prds[i] != null) { emit_prd(e, c.prds[i]); }
+                else { e.wr("()"); }
+            }
+            if (c.body != null && !is_nop_cmd(c.body))
+            {
+                e.semi(); e.nl(); e.ind();
+                emit_cmd(e, c.body);
+            }
+            return;
+        }
         case ACMD_BLOCK:
         {
             e.wr("{");
@@ -860,7 +1009,22 @@ fn void emit_cmd(AirEmitter* e, AirCmd* c)
             e.indent_less(); e.nl(); e.ind(); e.wr("}");
             return;
         }
-        case ACMD_FOR: e.wr("for ..."); return;
+        case ACMD_FOR:
+        {
+            // for-pattern:
+            //   for pat = start .. end { body }   OR   for x in coll { body }
+            // The lowerer doesn't emit ACMD_FOR directly yet; when it does
+            // the binder is in c.binder, iterable prd in c.prd, body in c.body.
+            e.wr("for ");
+            if (c.binder != null) { e.wr(c.binder); } else { e.wr("_"); }
+            e.wr(" in ");
+            if (c.prd != null) { emit_prd(e, c.prd); } else { e.wr("()"); }
+            e.wr(" {");
+            e.indent_more(); e.nl(); e.ind();
+            emit_cmd(e, c.body);
+            e.indent_less(); e.nl(); e.ind(); e.wr("}");
+            return;
+        }
         case ACMD_MATCH:
         {
             e.wr("match ");
@@ -914,7 +1078,13 @@ fn void emit_cmd(AirEmitter* e, AirCmd* c)
             if (c.prd != null) { e.sp(); emit_prd(e, c.prd); }
             return;
         }
-        case ACMD_RESUME: e.wr("resume"); return;
+        case ACMD_RESUME:
+        {
+            // resume v  (algebraic-effect resume of the delimited continuation)
+            e.wr("resume");
+            if (c.prd != null) { e.sp(); emit_prd(e, c.prd); }
+            return;
+        }
         case ACMD_JUMP:
         {
             e.wr("jump ");
@@ -989,13 +1159,76 @@ fn void emit_cmd(AirEmitter* e, AirCmd* c)
             e.indent_less(); e.nl(); e.ind(); e.wr("}");
             return;
         case ACMD_ASM:
-            e.wr("asm \"");
+        {
+            // asm("…" [: "constraint"(v), …] [: "constraint"(out), …] [: clobbers]) dialect[att|intel]
+            e.wr("asm");
+            if (c.asm_dialect == 1) { e.wr(" intel"); }
+            else { if (c.asm_dialect == 2) e.wr(" att"); }
+            e.wr(" \"");
             if (c.asm_text != null) e.wr(c.asm_text);
             e.wr("\"");
+            // Operands (if any attached as prds)
+            if (c.prd_count > 0)
+            {
+                e.wr(" :");
+                for (usz i = 0; i < c.prd_count; i++)
+                {
+                    if (i > 0) e.comma();
+                    e.sp();
+                    if (c.prds[i] != null) emit_prd(e, c.prds[i]);
+                }
+            }
             return;
-        case ACMD_SYSCALL: e.wr("syscall"); return;
-        case ACMD_ATOMIC:  e.wr("atomic"); return;
-        case ACMD_FENCE:   e.wr("fence"); return;
+        }
+        case ACMD_SYSCALL:
+        {
+            // syscall n(arg1, …, argN)  — Linux-style syscall
+            e.wr("syscall");
+            if (c.prd != null) { e.sp(); emit_prd(e, c.prd); }
+            if (c.prd_count > 0)
+            {
+                e.wr("(");
+                for (usz i = 0; i < c.prd_count; i++)
+                {
+                    if (i > 0) e.comma();
+                    if (c.prds[i] != null) emit_prd(e, c.prds[i]);
+                }
+                e.wr(")");
+            }
+            return;
+        }
+        case ACMD_ATOMIC:
+        {
+            // atomic op [ordering]  (op from atomic_op, ordering: 0=relaxed,1=acq,2=rel,3=acq_rel,4=seq_cst)
+            static char*[5] orders = { "relaxed", "acquire", "release", "acq_rel", "seq_cst" };
+            e.wr("atomic");
+            switch (c.atomic_op) {
+                case 0: e.wr(" load"); break;
+                case 1: e.wr(" store"); break;
+                case 2: e.wr(" xchg"); break;
+                case 3: e.wr(" add"); break;
+                case 4: e.wr(" sub"); break;
+                case 5: e.wr(" and"); break;
+                case 6: e.wr(" or"); break;
+                case 7: e.wr(" xor"); break;
+                case 8: e.wr(" nand"); break;
+                case 9: e.wr(" max"); break;
+                case 10: e.wr(" min"); break;
+                case 11: e.wr(" umax"); break;
+                case 12: e.wr(" umin"); break;
+                default: e.wr(" op"); break;
+            }
+            if (c.atomic_order >= 0 && c.atomic_order < 5) { e.sp(); e.wr(orders[c.atomic_order]); }
+            if (c.prd != null) { e.sp(); emit_prd(e, c.prd); }
+            return;
+        }
+        case ACMD_FENCE:
+        {
+            static char*[5] orders = { "relaxed", "acquire", "release", "acq_rel", "seq_cst" };
+            e.wr("fence");
+            if (c.atomic_order >= 0 && c.atomic_order < 5) { e.sp(); e.wr(orders[c.atomic_order]); }
+            return;
+        }
         default: e.wr("?cmd"); return;
     }
 }
