@@ -1,43 +1,65 @@
 // pear.c3 — PEAR: Pride's Engine for Abstractive Representations.
 //
-// Bootstrap codegen: AirModule -> LLVM IR text (.ll).  This is version 0.1
-// and targets a small subset (direct calls, binops, returns, lets, tail
-// composition).  SSA conversion for full μα/μ̃/jump/label/case will be
-// added incrementally.
+// v0.2 CFG/SSA emitter. AIR is in near-ANF form (lets + cuts + if/case), so
+// lowering to SSA basic blocks is straightforward. Emits clean LLVM IR text.
+//
+// Supported:
+//   • def/declare, typed params, void returns
+//   • APRD_INT/BOOL/UNIT/VAR/CON/BINOP/MU
+//   • ACNS_COVAR (→ ret), ACNS_COMU (→ let + continue), ACNS_CALL/STACK
+//   • ACMD_CUT/SEQ/LET/NOP/MU/MUTILDE/RET/TRAP/UB/IF/BLOCK
+//   • Comparisons produce i1 natively for br, zext to i64 for value use
+//   • Direct @fn calls; indirect %fn calls
+//   • Diamond CFG for ACMD_IF (both arms cut to ret → no φ needed)
 
 module pear;
 import air_ir;
 import air_types;
 
-// ── Externs ────────────────────────────────────────────────────────────
-
 extern fn int   fprintf(void* f, char* fmt, ...);
-extern fn int   snprintf(char* buf, usz n, char* fmt, ...);
+extern fn int   snprintf(char* buf, ulong n, char* fmt, ...);
 extern fn void* fopen(char* path, char* mode);
 extern fn int   fclose(void* f);
 
-// ── Codegen state ─────────────────────────────────────────────────────
+const uint NAMELEN = 64;
+const uint NAMES_N = 256;
+const uint DEFS_N  = 256;
 
 struct PearCg {
     AirModule* mod;
     void*      fp;
-    usz        tmp;
-    char[64]   scratch;     // primary scratch
-    char[64]   scratch2;    // secondary scratch (so two names can be live)
-    usz        name_n;
-    char[64][64] names;     // persistent name cache (stable pointers)
+    uint       tmp;
+    uint       blk;
+    uint       name_n;
+    char[NAMELEN][NAMES_N] names;
+    bool       blk_open;
+    bool       fn_is_void;
+    uint       defn_n;
+    char[NAMELEN][DEFS_N] defbuf;
+    // Simple copy-prop alias map: aliases[i] is the target name for names[i].
+    // When we skip emitting `%x = add i64 0, %y`, we record x→y so subsequent
+    // reads of %x resolve to %y.
+    char*[NAMES_N] aliases;
 }
 
-// Allocate a persistent %-name from the names[] cache so callers can hold
-// two or three names live simultaneously.
-fn char* PearCg.fresh(PearCg* cg, char* s)
+fn bool seq_eq(char* a, char* b)
+{
+    if (a == null || b == null) return a == b;
+    uint i = 0;
+    while (a[i] != 0 && b[i] != 0) { if (a[i] != b[i]) return false; i++; }
+    return a[i] == 0 && b[i] == 0;
+}
+
+fn char* PearCg.intern(PearCg* cg, char* s)
 {
     if (s == null) return (char*)"0";
-    usz i = cg.name_n;
-    if (i < 64)
+    if (s[0] == '0' && s[1] == 0) return (char*)"0";
+    if (s[0] == '1' && s[1] == 0) return (char*)"1";
+    uint i = cg.name_n;
+    if (i < NAMES_N)
     {
-        usz j = 0;
-        while (j < 62 && s[j] != 0) { cg.names[i][j] = s[j]; j++; }
+        uint j = 0;
+        while (j < NAMELEN - 1 && s[j] != 0) { cg.names[i][j] = s[j]; j++; }
         cg.names[i][j] = 0;
         cg.name_n = i + 1;
         return &cg.names[i][0];
@@ -45,39 +67,53 @@ fn char* PearCg.fresh(PearCg* cg, char* s)
     return s;
 }
 
-// ── Entry point ───────────────────────────────────────────────────────
-
-fn void pear_emit_module(AirModule* mod, char* ll_path)
+fn char* PearCg.mktmp(PearCg* cg)
 {
-    if (mod == null || ll_path == null) return;
-    void* fp = fopen(ll_path, "wb");
-    if (fp == null) return;
-
-    PearCg cg;
-    cg.mod = mod;
-    cg.fp = fp;
-    cg.tmp = 0;
-    cg.name_n = 0;
-
-    (void)fprintf(fp, "; PEAR -> LLVM IR (bootstrap)\n");
-    (void)fprintf(fp, "target triple = \"x86_64-pc-linux-gnu\"\n");
-    (void)fprintf(fp, "target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n\n");
-    (void)fprintf(fp, "declare i64 @write(i32, i8*, i64)\n");
-    (void)fprintf(fp, "declare i8* @malloc(i64)\n");
-    (void)fprintf(fp, "declare void @free(i8*)\n");
-    (void)fprintf(fp, "declare void @exit(i32) noreturn\n\n");
-
-    for (usz i = 0; i < mod.decl_count; i++)
-    {
-        AirDecl* d = mod.decls[i];
-        if (d == null) continue;
-        if (d.tag == ADECL_DEF) { pear_emit_fn(&cg, d); }
-    }
-
-    (void)fclose(fp);
+    char[NAMELEN] b;
+    (void)snprintf(&b[0], NAMELEN, "%%_t%u", cg.tmp);
+    cg.tmp++;
+    return cg.intern(&b[0]);
 }
 
-// ── Type printing ─────────────────────────────────────────────────────
+// Resolve an SSA name through the alias table (returns the ultimate name).
+fn char* PearCg.resolve(PearCg* cg, char* nm)
+{
+    if (nm == null) return (char*)"0";
+    if (nm[0] != '%') return nm;
+    // Look up nm in names[]; if found and alias exists, follow chain.
+    for (uint iter = 0; iter < 8; iter++)
+    {
+        bool found = false;
+        for (uint i = 0; i < cg.name_n; i++)
+        {
+            if (seq_eq(&cg.names[i][0], nm))
+            {
+                if (cg.aliases[i] != null) { nm = cg.aliases[i]; found = true; }
+                break;
+            }
+        }
+        if (!found) break;
+    }
+    return nm;
+}
+
+fn char* PearCg.mklbl(PearCg* cg, char* pfx)
+{
+    char[NAMELEN] b;
+    (void)snprintf(&b[0], NAMELEN, "%s.%u", pfx, cg.blk);
+    cg.blk++;
+    return cg.intern(&b[0]);
+}
+
+fn bool is_ret_covar(char* nm)
+{
+    if (nm == null) return false;
+    if (nm[0] != '%') return false;
+    if (nm[1] != 'r' || nm[2] != 'e' || nm[3] != 't') return false;
+    char c = nm[4];
+    if (c == 0) return true;
+    return c == '_';
+}
 
 fn void pear_typ(PearCg* cg, AirTyp* t)
 {
@@ -105,133 +141,146 @@ fn bool pear_is_void(AirTyp* t)
     return t.tag == ATYP_UNIT || t.tag == ATYP_BOTTOM;
 }
 
-fn char* PearCg.mktmp(PearCg* cg)
+fn bool is_cmp_binop(AirBinop op)
 {
-    char[64] b;
-    (void)snprintf(&b[0], 64, "_t%ld", (long)cg.tmp);
-    cg.tmp++;
-    return cg.fresh(&b[0]);
-}
-
-fn char* PearCg.mktmp_pct(PearCg* cg)
-{
-    char[64] b;
-    (void)snprintf(&b[0], 64, "%%_t%ld", (long)cg.tmp);
-    cg.tmp++;
-    return cg.fresh(&b[0]);
-}
-
-// ── Function emission ────────────────────────────────────────────────
-
-fn void pear_emit_fn(PearCg* cg, AirDecl* d)
-{
-    if (d == null) return;
-    char* nm = d.name;
-    if (nm == null) nm = (char*)"_anon";
-    cg.tmp = 0;
-
-    bool is_void = pear_is_void(d.ret_ty);
-
-    (void)fprintf(cg.fp, "define ");
-    if (is_void) { (void)fprintf(cg.fp, "void"); }
-    else         { pear_typ(cg, d.ret_ty); }
-    (void)fprintf(cg.fp, " @%s(", nm);
-    for (usz i = 0; i < d.param_count; i++)
+    switch (op)
     {
-        AirBinder* p = d.params[i];
-        if (i > 0) (void)fprintf(cg.fp, ", ");
-        (void)fprintf(cg.fp, "i64 %%%s", (p != null && p.name != null) ? p.name : "_");
+        case ABIN_LT: case ABIN_GT: case ABIN_LE:
+        case ABIN_GE: case ABIN_EQ: case ABIN_NEQ: return true;
+        default: return false;
     }
-    (void)fprintf(cg.fp, ") #0 {\nentry:\n");
-
-    bool term = false;
-    if (d.def_body != null) { term = pear_cmd(cg, d.def_body); }
-    if (!term)
-    {
-        if (is_void) { (void)fprintf(cg.fp, "  ret void\n"); }
-        else         { (void)fprintf(cg.fp, "  ret i64 0\n"); }
-    }
-    (void)fprintf(cg.fp, "}\n\n");
 }
 
-// ── Producers → "%name" / literal string ─────────────────────────────
+fn char* icode(AirBinop op)
+{
+    switch (op)
+    {
+        case ABIN_ADD: return (char*)"add nsw i64";
+        case ABIN_SUB: return (char*)"sub nsw i64";
+        case ABIN_MUL: return (char*)"mul nsw i64";
+        case ABIN_DIV: return (char*)"sdiv i64";
+        case ABIN_MOD: return (char*)"srem i64";
+        case ABIN_AND: return (char*)"and i64";
+        case ABIN_OR:  return (char*)"or i64";
+        case ABIN_XOR: return (char*)"xor i64";
+        case ABIN_SHL: return (char*)"shl i64";
+        case ABIN_SHR: return (char*)"ashr i64";
+        case ABIN_LT:  return (char*)"icmp slt i64";
+        case ABIN_GT:  return (char*)"icmp sgt i64";
+        case ABIN_LE:  return (char*)"icmp sle i64";
+        case ABIN_GE:  return (char*)"icmp sge i64";
+        case ABIN_EQ:  return (char*)"icmp eq i64";
+        case ABIN_NEQ: return (char*)"icmp ne i64";
+        default:       return (char*)"add nsw i64";
+    }
+}
 
-fn char* pear_prd(PearCg* cg, AirPrd* p)
+fn void pear_emit_ret(PearCg* cg, char* v)
+{
+    if (!cg.blk_open) return;
+    if (v != null)      { (void)fprintf(cg.fp, "  ret i64 %s\n", v); }
+    else if (cg.fn_is_void) { (void)fprintf(cg.fp, "  ret void\n"); }
+    else               { (void)fprintf(cg.fp, "  ret i64 0\n"); }
+    cg.blk_open = false;
+}
+
+fn void pear_open(PearCg* cg, char* lbl)
+{
+    if (cg.blk_open) pear_emit_ret(cg, null);
+    (void)fprintf(cg.fp, "%s:\n", lbl);
+    cg.blk_open = true;
+}
+
+fn void pear_br(PearCg* cg, char* tgt)
+{
+    if (!cg.blk_open) return;
+    (void)fprintf(cg.fp, "  br label %%%s\n", tgt);
+    cg.blk_open = false;
+}
+
+fn void pear_condbr(PearCg* cg, char* cv, char* t, char* e)
+{
+    if (!cg.blk_open) return;
+    (void)fprintf(cg.fp, "  br i1 %s, label %%%s, label %%%s\n", cv, t, e);
+    cg.blk_open = false;
+}
+
+fn void pear_trap(PearCg* cg)
+{
+    if (!cg.blk_open) return;
+    (void)fprintf(cg.fp, "  call void @llvm.trap()\n  unreachable\n");
+    cg.blk_open = false;
+}
+
+fn void PearCg.add_def(PearCg* cg, char* nm)
+{
+    if (nm == null) return;
+    if (cg.defn_n >= DEFS_N) return;
+    uint k = cg.defn_n;
+    uint j = 0;
+    while (j < NAMELEN - 1 && nm[j] != 0) { cg.defbuf[k][j] = nm[j]; j++; }
+    cg.defbuf[k][j] = 0;
+    cg.defn_n = k + 1;
+}
+
+fn bool PearCg.is_def(PearCg* cg, char* nm)
+{
+    if (nm == null) return false;
+    char* s = nm;
+    if (s[0] == '%') s = &s[1];
+    for (uint i = 0; i < cg.defn_n; i++)
+    {
+        if (seq_eq(&cg.defbuf[i][0], s)) return true;
+    }
+    return false;
+}
+
+fn char* pear_prd_i64(PearCg* cg, AirPrd* p)
 {
     if (p == null) return (char*)"0";
     switch (p.tag)
     {
         case APRD_INT:
         {
-            (void)snprintf(&cg.scratch[0], 64, "%ld", (long)p.ival);
-            return cg.fresh(&cg.scratch[0]);
+            char[NAMELEN] b;
+            (void)snprintf(&b[0], NAMELEN, "%ld", (long)p.ival);
+            return cg.intern(&b[0]);
         }
         case APRD_BOOL:
-        {
             return p.bval ? (char*)"1" : (char*)"0";
-        }
-        case APRD_UNIT: return (char*)"0";
-        case APRD_NULL: return (char*)"0";
-        case APRD_VAR:
-        case APRD_CON:
+        case APRD_UNIT: case APRD_NULL: return (char*)"0";
+        case APRD_VAR: case APRD_CON:
         {
             if (p.name == null) return (char*)"0";
-            // Already %-prefixed (e.g. %ret, %k1 used by the emitter).
-            if (p.name[0] == '%') return p.name;
-            // Bare variable → emit %name.
-            (void)snprintf(&cg.scratch[0], 64, "%%%s", p.name);
-            return cg.fresh(&cg.scratch[0]);
+            if (p.name[0] == '%') return cg.resolve(p.name);
+            char[NAMELEN] b;
+            (void)snprintf(&b[0], NAMELEN, "%%%s", p.name);
+            return cg.resolve(cg.intern(&b[0]));
         }
         case APRD_BINOP:
         {
-            // Evaluate operands FIRST (both names are stable in fresh[]),
-            // then emit the instruction using a fresh tmp for the result.
-            char* a = pear_prd(cg, p.subs[0]);
-            char* b = pear_prd(cg, p.subs[1]);
-            char* tn = cg.mktmp_pct();  // persistent %name in fresh[]
-            char* opc;
-            bool is_i1 = false;
-            switch (p.bop)
+            bool cmp = is_cmp_binop(p.bop);
+            char* a = pear_prd_i64(cg, p.subs[0]);
+            char* bb = pear_prd_i64(cg, p.subs[1]);
+            char* r = cg.mktmp();
+            (void)fprintf(cg.fp, "  %s = %s %s, %s\n", r, icode(p.bop), a, bb);
+            if (cmp)
             {
-                case ABIN_ADD: opc = (char*)"add nsw i64"; break;
-                case ABIN_SUB: opc = (char*)"sub nsw i64"; break;
-                case ABIN_MUL: opc = (char*)"mul nsw i64"; break;
-                case ABIN_DIV: opc = (char*)"sdiv i64"; break;
-                case ABIN_MOD: opc = (char*)"srem i64"; break;
-                case ABIN_AND: opc = (char*)"and i64"; break;
-                case ABIN_OR:  opc = (char*)"or i64"; break;
-                case ABIN_XOR: opc = (char*)"xor i64"; break;
-                case ABIN_SHL: opc = (char*)"shl i64"; break;
-                case ABIN_SHR: opc = (char*)"ashr i64"; break;
-                case ABIN_LT:  opc = (char*)"icmp slt i64"; is_i1 = true; break;
-                case ABIN_GT:  opc = (char*)"icmp sgt i64"; is_i1 = true; break;
-                case ABIN_LE:  opc = (char*)"icmp sle i64"; is_i1 = true; break;
-                case ABIN_GE:  opc = (char*)"icmp sge i64"; is_i1 = true; break;
-                case ABIN_EQ:  opc = (char*)"icmp eq i64";  is_i1 = true; break;
-                case ABIN_NEQ: opc = (char*)"icmp ne i64";  is_i1 = true; break;
-                default:       opc = (char*)"add nsw i64"; break;
+                char* z = cg.mktmp();
+                (void)fprintf(cg.fp, "  %s = zext i1 %s to i64\n", z, r);
+                return z;
             }
-            if (is_i1)
-            {
-                // Emit icmp into a tmp i1, then zext to i64; return the zext name.
-                char[64] in;
-                (void)snprintf(&in[0], 64, "_t%ld", (long)cg.tmp);
-                cg.tmp++;
-                char* in_pct = cg.fresh(&in[0]);  // alloc %name for i1 result
-                // Need to write "%in" for the i1 register name.
-                char[64] in_pct_buf;
-                (void)snprintf(&in_pct_buf[0], 64, "%%%s", &in[0]);
-                (void)fprintf(cg.fp, "  %s = %s %s, %s\n", &in_pct_buf[0], opc, a, b);
-                char* zn_pct = cg.mktmp_pct();
-                (void)fprintf(cg.fp, "  %s = zext i1 %s to i64\n", zn_pct, &in_pct_buf[0]);
-                return zn_pct;
-            }
-            (void)fprintf(cg.fp, "  %s = %s %s, %s\n", tn, opc, a, b);
-            return tn;
+            return r;
         }
         case APRD_MU:
         {
             (void)pear_cmd(cg, p.body);
+            return (char*)"0";
+        }
+        case APRD_COERCE:
+        {
+            // Type ascription: emit the inner value, ignore the type cast for now.
+            if (p.sub_count > 0 && p.subs[0] != null) return pear_prd_i64(cg, p.subs[0]);
             return (char*)"0";
         }
         default:
@@ -242,43 +291,81 @@ fn char* pear_prd(PearCg* cg, AirPrd* p)
     }
 }
 
-// ── Consumers ────────────────────────────────────────────────────────
-
-fn bool pear_cns(PearCg* cg, char* vname, AirCns* k)
+fn char* pear_prd_i1(PearCg* cg, AirPrd* p)
 {
-    if (k == null) return false;
+    if (p == null) return (char*)"0";
+    // Peel COERCE wrappers (type ascription).
+    AirPrd* q = p;
+    while (q.tag == APRD_COERCE && q.sub_count > 0 && q.subs[0] != null) q = q.subs[0];
+    if (q.tag == APRD_BINOP && is_cmp_binop(q.bop))
+    {
+        char* a = pear_prd_i64(cg, q.subs[0]);
+        char* bb = pear_prd_i64(cg, q.subs[1]);
+        char* r = cg.mktmp();
+        (void)fprintf(cg.fp, "  %s = %s %s, %s\n", r, icode(q.bop), a, bb);
+        return r;
+    }
+    if (q.tag == APRD_BOOL) return q.bval ? (char*)"1" : (char*)"0";
+    // If the producer is a variable that was just assigned an i1 value we
+    // can't track yet; fall through to i64 + icmp.
+    char* v = pear_prd_i64(cg, p);
+    char* r = cg.mktmp();
+    (void)fprintf(cg.fp, "  %s = icmp ne i64 %s, 0\n", r, v);
+    return r;
+}
+
+fn bool pear_cns(PearCg* cg, char* v, AirCns* k)
+{
+    if (k == null) { pear_emit_ret(cg, v); return true; }
     switch (k.tag)
     {
         case ACNS_COVAR:
         {
-            char* nm = k.name;
-            if (nm != null && nm[0] == '%' && nm[1] == 'r')
+            if (is_ret_covar(k.name)) { pear_emit_ret(cg, v); return true; }
+            // The "·" (middle-dot) hole covariable means "continue with the
+            // next command in the SEQ chain". Fall through: do NOT terminate;
+            // return false so the enclosing SEQ/let proceeds to next.
+            if (k.name != null && k.name[0] == (char)(0xc2) && k.name[1] == (char)(0xb7))
             {
-                (void)fprintf(cg.fp, "  ret i64 %s\n", vname);
-                return true;
+                return false;
             }
-            (void)fprintf(cg.fp, "  ; cut to %s (val %s) NYI\n", nm != null ? nm : "?", vname);
-            return false;
+            // Any other covar is treated as a jump target. For bootstrap, ret.
+            pear_emit_ret(cg, v);
+            return true;
         }
         case ACNS_COMU:
         {
-            if (k.bind != null && k.bind[0] != '%')
+            bool wild = (k.bind == null)
+                     || (k.bind[0] == '_' && k.bind[1] == 0)
+                     || (v != null && seq_eq(v, (char*)"0"));   // unit/hole binder
+            if (!wild && v != null)
             {
-                (void)fprintf(cg.fp, "  %%%s = %s\n", k.bind, vname);
+                char[NAMELEN] b;
+                (void)snprintf(&b[0], NAMELEN, "%%%s", k.bind);
+                char* bn = cg.intern(&b[0]);
+                char* rv = cg.resolve(v);
+                if (!seq_eq(rv, bn))
+                {
+                    if (rv[0] == '%')
+                    {
+                        for (uint i = 0; i < cg.name_n; i++)
+                        {
+                            if (seq_eq(&cg.names[i][0], bn)) { cg.aliases[i] = rv; break; }
+                        }
+                    }
+                    else
+                    {
+                        (void)fprintf(cg.fp, "  %s = add i64 0, %s\n", bn, rv);
+                    }
+                }
             }
             return pear_cmd(cg, k.body);
         }
-        case ACNS_CALL:
-        case ACNS_STACK:
+        case ACNS_CALL: case ACNS_STACK:
         {
-            // Call: vname is the callee name (e.g. "fib" or "one"), walk
-            // the STACK chain to collect arguments, then emit an LLVM
-            // call and feed the result into the terminal consumer.
-            AirPrd*[16] args; usz ac = 0;
+            AirPrd*[16] args; uint ac = 0;
             AirCns* cur = k;
             AirCns* ret_k = null;
-            // Walk: ACNS_CALL.tail -> ACNS_STACK(arg3, ACNS_STACK(arg2,... -> ret_k))
-            // When we see ACNS_CALL first, step into its .tail.
             if (cur.tag == ACNS_CALL) cur = cur.tail;
             while (cur != null)
             {
@@ -287,35 +374,44 @@ fn bool pear_cns(PearCg* cg, char* vname, AirCns* k)
                     if (ac < 16) { args[ac] = cur.prd; ac++; }
                     cur = cur.tail;
                 }
-                else
+                else if (cur.tag == ACNS_ASCRIBE)
                 {
-                    ret_k = cur;
-                    break;
+                    cur = cur.tail;
                 }
+                else { ret_k = cur; break; }
             }
-            // Emit: %r = call i64 @callee(i64 %a1, i64 %a2, ...)
-            char* rn = cg.mktmp();
-            (void)fprintf(cg.fp, "  %%%s = call i64 @%s(", rn, vname);
-            for (usz i = 0; i < ac; i++)
+            char* callee = v;
+            bool direct = false;
+            if (callee != null && callee[0] == '%' && cg.is_def(&callee[1]))
             {
-                if (i > 0) (void)fprintf(cg.fp, ", ");
-                char* an = pear_prd(cg, args[i]);
-                (void)fprintf(cg.fp, "i64 %s", an);
+                callee = &callee[1];
+                direct = true;
+            }
+            char*[16] argn;
+            for (uint i = 0; i < ac; i++)
+            {
+                uint idx = ac - 1 - i;
+                argn[idx] = pear_prd_i64(cg, args[idx]);
+            }
+            char* rn = cg.mktmp();
+            if (direct) { (void)fprintf(cg.fp, "  %s = call i64 @%s(", rn, callee); }
+            else        { (void)fprintf(cg.fp, "  %s = call i64 %s(", rn, callee != null ? callee : "0"); }
+            for (uint i = 0; i < ac; i++)
+            {
+                if (i > 0) { (void)fprintf(cg.fp, ", "); }
+                (void)fprintf(cg.fp, "i64 %s", argn[i] != null ? argn[i] : "0");
             }
             (void)fprintf(cg.fp, ")\n");
-            // Feed %rn into ret_k.
-            char* rn_pct = cg.mktmp_pct();
-            return pear_cns(cg, rn_pct, ret_k);
+            return pear_cns(cg, rn, ret_k);
         }
         default:
         {
-            (void)fprintf(cg.fp, "  ; cns tag %d NYI (val %s)\n", (int)k.tag, vname);
-            return false;
+            (void)fprintf(cg.fp, "  ; cns tag %d NYI\n", (int)k.tag);
+            pear_trap(cg);
+            return true;
         }
     }
 }
-
-// ── Commands ──────────────────────────────────────────────────────────
 
 fn bool pear_cmd(PearCg* cg, AirCmd* c)
 {
@@ -324,7 +420,11 @@ fn bool pear_cmd(PearCg* cg, AirCmd* c)
     {
         case ACMD_CUT:
         {
-            char* v = pear_prd(cg, c.prd);
+            if (c.prd != null && c.prd.tag == APRD_MU)
+            {
+                return pear_cmd(cg, c.prd.body);
+            }
+            char* v = pear_prd_i64(cg, c.prd);
             return pear_cns(cg, v, c.cns);
         }
         case ACMD_SEQ:
@@ -335,27 +435,171 @@ fn bool pear_cmd(PearCg* cg, AirCmd* c)
         }
         case ACMD_LET:
         {
-            if (c.prd != null)
+            if (c.prd != null && c.prd.tag != APRD_UNIT)
             {
-                char* v = pear_prd(cg, c.prd);
-                if (c.binder != null && c.prd.tag != APRD_UNIT)
+                bool wild = (c.binder == null) || (c.binder[0] == '_' && c.binder[1] == 0);
+                char* v = pear_prd_i64(cg, c.prd);
+                if (!wild && v != null)
                 {
-                    (void)fprintf(cg.fp, "  %%%s = %s\n", c.binder, v);
+                    char[NAMELEN] b;
+                    (void)snprintf(&b[0], NAMELEN, "%%%s", c.binder);
+                    char* bn = cg.intern(&b[0]);
+                    char* rv = cg.resolve(v);
+                    if (!seq_eq(rv, bn))
+                    {
+                        if (rv[0] == '%')
+                        {
+                            for (uint i = 0; i < cg.name_n; i++)
+                            {
+                                if (seq_eq(&cg.names[i][0], bn)) { cg.aliases[i] = rv; break; }
+                            }
+                        }
+                        else
+                        {
+                            (void)fprintf(cg.fp, "  %s = add i64 0, %s\n", bn, rv);
+                        }
+                    }
                 }
             }
             return pear_cmd(cg, c.body);
         }
-        case ACMD_NOP:
-            return false;
-        case ACMD_MUTILDE:
-        case ACMD_MU:
-        {
+        case ACMD_NOP: return false;
+        case ACMD_MU: case ACMD_MUTILDE: case ACMD_BLOCK:
             return pear_cmd(cg, c.body);
+        case ACMD_IF:
+        {
+            char* cv = pear_prd_i1(cg, c.prd);
+            char* tl = cg.mklbl("if.then");
+            char* el = cg.mklbl("if.else");
+            pear_condbr(cg, cv, tl, el);
+            pear_open(cg, tl);
+            bool tt = pear_cmd(cg, c.then_c);
+            if (!tt && cg.blk_open) { pear_emit_ret(cg, null); }
+            else if (cg.blk_open) { cg.blk_open = false; }
+            pear_open(cg, el);
+            bool et = pear_cmd(cg, c.else_c);
+            if (!et && cg.blk_open) { pear_emit_ret(cg, null); }
+            else if (cg.blk_open) { cg.blk_open = false; }
+            if (!tt || !et)
+            {
+                char* cont = cg.mklbl("if.cont");
+                pear_open(cg, cont);
+            }
+            return false;
         }
+        case ACMD_RET:
+        {
+            if (c.prd != null) { char* v = pear_prd_i64(cg, c.prd); pear_emit_ret(cg, v); }
+            else { pear_emit_ret(cg, null); }
+            return true;
+        }
+        case ACMD_TRAP: pear_trap(cg); return true;
+        case ACMD_UB:
+            if (cg.blk_open) { (void)fprintf(cg.fp, "  unreachable\n"); cg.blk_open = false; }
+            return true;
         default:
         {
-            (void)fprintf(cg.fp, "  ; cmd tag %d NYI\n", (int)c.tag);
+            (void)fprintf(cg.fp, "  ; cmd tag %d NYI (then_c=%p else_c=%p body=%p next=%p)\n",
+                (int)c.tag, (void*)c.then_c, (void*)c.else_c, (void*)c.body, (void*)c.next);
             return false;
         }
     }
+}
+
+fn void pear_emit_fn(PearCg* cg, AirDecl* d)
+{
+    if (d == null) return;
+    char* nm = d.name;
+    if (nm == null) nm = (char*)"_anon";
+    cg.tmp = 0; cg.blk = 0; cg.name_n = 0;
+    for (uint i = 0; i < NAMES_N; i++) cg.aliases[i] = null;
+    cg.fn_is_void = pear_is_void(d.ret_ty);
+
+    (void)fprintf(cg.fp, "define ");
+    if (cg.fn_is_void) { (void)fprintf(cg.fp, "void"); }
+    else { pear_typ(cg, d.ret_ty); }
+    (void)fprintf(cg.fp, " @%s(", nm);
+    for (uint i = 0; i < d.param_count; i++)
+    {
+        AirBinder* p = d.params[i];
+        if (i > 0) { (void)fprintf(cg.fp, ", "); }
+        char* pnm = (p != null && p.name != null) ? p.name : "_";
+        AirTyp* pt = (p != null) ? p.ty : null;
+        if (pt != null && !pear_is_void(pt)) { pear_typ(cg, pt); }
+        else { (void)fprintf(cg.fp, "i64"); }
+        (void)fprintf(cg.fp, " %%%s", pnm);
+    }
+    (void)fprintf(cg.fp, ") #0 {\n");
+    cg.blk_open = false;
+    pear_open(cg, (char*)"entry");
+    bool term = false;
+    if (d.def_body != null) term = pear_cmd(cg, d.def_body);
+    if (!term && cg.blk_open)
+    {
+        if (cg.fn_is_void) { (void)fprintf(cg.fp, "  ret void\n"); }
+        else { (void)fprintf(cg.fp, "  ret i64 0\n"); }
+        cg.blk_open = false;
+    }
+    else if (cg.blk_open) { cg.blk_open = false; }
+    (void)fprintf(cg.fp, "}\n\n");
+}
+
+fn void pear_emit_module(AirModule* mod, char* ll_path)
+{
+    if (mod == null || ll_path == null) return;
+    void* fp = fopen(ll_path, "wb");
+    if (fp == null) return;
+
+    PearCg cg;
+    cg.mod = mod; cg.fp = fp;
+    cg.tmp = 0; cg.blk = 0; cg.name_n = 0;
+    cg.blk_open = false; cg.fn_is_void = false; cg.defn_n = 0;
+
+    for (uint i = 0; i < mod.decl_count; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d == null) continue;
+        if (d.tag == ADECL_DEF && d.name != null) cg.add_def(d.name);
+    }
+
+    (void)fprintf(fp, "; PEAR v0.2 -> LLVM IR (CFG/SSA)\n");
+    (void)fprintf(fp, "target triple = \"x86_64-pc-linux-gnu\"\n");
+    (void)fprintf(fp, "target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n\n");
+    (void)fprintf(fp, "declare void @llvm.trap() noreturn nounwind\n");
+    (void)fprintf(fp, "declare i64 @write(i32, i8*, i64)\n");
+    (void)fprintf(fp, "declare i8* @malloc(i64)\n");
+    (void)fprintf(fp, "declare void @free(i8*)\n");
+    (void)fprintf(fp, "declare void @exit(i32) noreturn\n\n");
+
+    for (uint i = 0; i < mod.decl_count; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d == null) continue;
+        if (d.tag == ADECL_DECLARE)
+        {
+            (void)fprintf(fp, "declare ");
+            if (pear_is_void(d.ret_ty)) { (void)fprintf(fp, "void"); }
+            else { pear_typ(&cg, d.ret_ty); }
+            (void)fprintf(fp, "@%s(", d.name != null ? d.name : "_ext");
+            for (uint j = 0; j < d.param_count; j++)
+            {
+                if (j > 0) { (void)fprintf(fp, ", "); }
+                AirBinder* p = d.params[j];
+                if (p != null && p.ty != null && !pear_is_void(p.ty)) { pear_typ(&cg, p.ty); }
+                else { (void)fprintf(fp, "i64"); }
+            }
+            (void)fprintf(fp, ")\n");
+        }
+    }
+    (void)fprintf(fp, "\n");
+
+    for (uint i = 0; i < mod.decl_count; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d == null) continue;
+        if (d.tag == ADECL_DEF) pear_emit_fn(&cg, d);
+    }
+
+    (void)fprintf(fp, "attributes #0 = { nounwind ssp uwtable \"frame-pointer\"=\"all\" }\n");
+    (void)fclose(fp);
 }
