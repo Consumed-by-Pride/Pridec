@@ -2,27 +2,39 @@
 *.bc
 *.opt.bc
 *.ll
-/pride
-/pridec
-/pride_new
-.understand-anything/
-redteam/
-__pycache__/
-/tmp/
+*.a
+*.so
 
-# pfront build output
+# ── Compiler binaries ───────────────────────────────────────────────────
 /pfrontc
-/obj/
-
-# pear build output
+/pride
+/pride_new
 /pear_a1_test
 /pearc
 /pear_a2
+/legacy/pride1/pride
+/obj/
 
-# generated AIR test outputs
+# ── Generated AIR / AST / S-expr outputs ────────────────────────────────
 *.air
+*.ast
+*.sexp
 !/docs/**/*.air
-!/pear/**/*.air
+!/legacy/**/*.air
 
-# pfrontc binary
-pfrontc
+# ── Editor / tool detritus ──────────────────────────────────────────────
+.understand-anything/
+.vscode/
+.cache/
+redteam/
+__pycache__/
+/tmp/
+tmp/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Build byproducts ────────────────────────────────────────────────────
+build/
+dist/

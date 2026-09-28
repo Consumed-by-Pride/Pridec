@@ -6,7 +6,7 @@
 # to produce errors (type cycles, non-exhaustive matches) assert the count,
 # so a silent regression to "no diagnostics" fails the suite.
 set -u
-cd "$(dirname "$0")/.." || exit 1
+cd "$(dirname "$0")/../.." || exit 1
 BIN=./pfrontc
 [ -x "$BIN" ] || { echo "build ./pfront first"; exit 2; }
 
