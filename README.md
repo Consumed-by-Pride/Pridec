@@ -16,7 +16,7 @@ codegen, etc.).
 
 ### Prerequisites
 
-* **c3c 0.8.2** — the C3 compiler (Pridec is implemented in C3).
+* **c3c 0.8.4** — the C3 compiler (Pridec is implemented in C3).
   `make c3c` will fetch a static build to `~/c3bin/c3c` for you.
 * LLVM 22 is *not* required to build `pfrontc` itself. (The legacy backend
   under `legacy/pride1/` targets LLVM 22 directly; it is retained for
