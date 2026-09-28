@@ -8,7 +8,7 @@
 # by default.)
 #
 # Requirements:
-#   c3c 0.8.2     — C3 compiler (https://c3-lang.org)
+#   c3c 0.8.4     — C3 compiler (https://c3-lang.org)
 #                   Auto-fetched to ~/c3bin/c3c by `make c3c` if missing.
 #
 # Targets:
@@ -21,7 +21,7 @@
 
 C3C       ?= $(HOME)/c3bin/c3c
 C3C_LIB   ?= $(HOME)/c3lib
-C3C_VER   := v0.8.2
+C3C_VER   := v0.8.4
 C3C_URL   := https://github.com/c3lang/c3c/releases/download/$(C3C_VER)/c3-linux-static.tar.gz
 
 BINARY    := pfrontc
@@ -58,6 +58,7 @@ c3c:
 	  chmod +x $$(dirname $(C3C))/c3c $$(dirname $(C3C))/cfmt; \
 	  rm -rf $$(dirname $(C3C_LIB))/std; \
 	  cp -r /tmp/c3i/c3/lib/* $$(dirname $(C3C_LIB))/; \
+	  rm -f $$(dirname $(C3C_LIB))/std/std; \
 	  ln -sf $$(dirname $(C3C)) $$HOME/c3bin; \
 	  ln -sf $$(dirname $(C3C_LIB)) $$HOME/c3lib; \
 	  rm -rf /tmp/c3i; \

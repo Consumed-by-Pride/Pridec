@@ -63,7 +63,7 @@ struct Gvn
 {
     Arena* arena;
     Cfg*   cfg;
-    VnTable[8193] tables;   // one per block id
+    VnTable* tables;          // [8193] heap-alloc'd (one per block id); c3c 0.8.4 rejects >64KB stack and >1GB static
     uint next_vn_global;
     usz  blocks_done;
     usz  redundant;
@@ -75,6 +75,7 @@ fn void Gvn.init(Gvn* g, Arena* a)
     g.arena = a;
     g.cfg = null;
     g.next_vn_global = 1;
+    g.tables = (VnTable*)a.alloc(VnTable::size * 8193, 8);
     g.blocks_done = 0;
     g.redundant = 0;
     g.inserted = 0;

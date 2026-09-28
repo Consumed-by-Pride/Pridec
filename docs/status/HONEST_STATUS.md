@@ -1,7 +1,7 @@
 # Pride — Honest Capability Assessment
 
 **As of 2026-07-31. Compiler: 47,135 LoC C3 across 23 modules.**  
-**Verified against: c3c v0.8.2, LLVM 19.1.7, Debian trixie x86-64.**
+**Verified against: c3c v0.8.4, LLVM 19.1.7, Debian trixie x86-64.**
 
 ---
 
@@ -242,4 +242,4 @@ let r = match x
 | Execution tests | **44/47 pass** (up from 43, fixed test 40) |
 | Example files | 5 (all PASS at `opt -O1`) |
 | LLVM target | LLVM 19.1.7, x86-64 Linux ELF |
-| Host compiler | c3c v0.8.2 |
+| Host compiler | c3c v0.8.4 |
