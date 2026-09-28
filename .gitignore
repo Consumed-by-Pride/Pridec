@@ -38,3 +38,4 @@ tmp/
 # ── Build byproducts ────────────────────────────────────────────────────
 build/
 dist/
+pfrontc
