@@ -1,0 +1,28 @@
+mod cmp
+
+-- stdlib/cmp.pie — three-way comparison (Ordering) and common combinators.
+
+-- §1  ORDERING TYPE
+-- Encoded as an i64 for zero-dependency interop:
+--   -1 = LT, 0 = EQ, 1 = GT
+const ORDERING_LT : i64 = -1i64
+const ORDERING_EQ : i64 = 0i64
+const ORDERING_GT : i64 = 1i64
+
+fn is_lt : i64 -> bool | o -> o < 0i64
+fn is_eq : i64 -> bool | o -> o == 0i64
+fn is_gt : i64 -> bool | o -> o > 0i64
+
+-- §2  THREE-WAY COMPARISONS FOR i64 / u64
+fn cmp_i64 : (i64, i64) -> i64 | (a, b) -> if a < b { ORDERING_LT } else if a > b { ORDERING_GT } else { ORDERING_EQ }
+fn cmp_u64 : (u64, u64) -> i64 | (a, b) -> if a < b { ORDERING_LT } else if a > b { ORDERING_GT } else { ORDERING_EQ }
+
+-- §3  ORDERING COMBINATORS
+-- lex2: lexicographic pair. if first is EQ, use second.
+fn lex2 : (i64, i64) -> i64 | (a, b) -> if a != ORDERING_EQ { a } else { b }
+
+-- reverse: flip the ordering
+fn reverse : i64 -> i64 | o -> 0i64 - o
+
+-- §4  CLAMP / IN-RANGE (builds on cmp_i64 / min/max from prelude)
+fn in_range_i64 : (i64, i64, i64) -> bool | (v, lo, hi) -> v >= lo && v <= hi

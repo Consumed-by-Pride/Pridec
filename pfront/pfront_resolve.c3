@@ -378,6 +378,40 @@ fn Mod* Loader.load_entry(Loader* l, char* path)
     free((void*)ps);
     free((void*)lx);
     m.state = pfront_core::ModState.MOD_PARSED;
+
+    // Implicit prelude: inject a synthetic glob-import of `prelude` at the end
+    // of every module's top-level form list BEFORE we walk imports, so the
+    // module loader sees it and resolves it along with user-declared imports.
+    // Skip when the module being loaded IS prelude (avoid a circular import).
+    // We identify prelude by the source path ending in "/prelude.pie" or
+    // being exactly "prelude.pie", because `m.name_id` at this point is the
+    // interned FILE PATH (the dotted module name is assigned later when we
+    // encounter the `mod …;` decl inside).
+    {
+        bool is_prelude = false;
+        if (path != null)
+        {
+            usz pl = 0; while (path[pl] != 0) pl = pl + 1;
+            // path ends with "/prelude.pie" or == "prelude.pie"
+            char* suf = (char*)"prelude.pie"; usz sl = 11;
+            if (pl >= sl)
+            {
+                bool ok = true;
+                for (usz i = 0; i < sl; i++)
+                { if (path[pl - sl + i] != suf[i]) { ok = false; break; } }
+                if (ok && (pl == sl || path[pl - sl - 1] == '/')) { is_prelude = true; }
+            }
+        }
+        if (!is_prelude)
+        {
+            uint prelude_id = l.interner.intern((char*)"prelude", 7);
+            PNode* use_prelude = l.arena.node(pfront_core::NodeKind.N_USE, 0, 0);
+            use_prelude.name_id = prelude_id;
+            use_prelude.flags = pfront_core::NF_GLOB; // glob import (prelude::*)
+            l.arena.add_child(m.ast, use_prelude);
+        }
+    }
+
     l.load_imports_of(m);
     return m;
 }

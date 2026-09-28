@@ -1,0 +1,21 @@
+mod iter
+
+-- stdlib/iter/iter.pie — minimal iterator trait / range helpers.
+-- A full iterator protocol requires generic traits; until those land this
+-- module provides range folding helpers over i64 ranges which are enough to
+-- write loops portably without `for` sugar in the emitter.
+
+-- §1  RANGE FOLD LEFT (i64)
+-- foldl_range(lo, hi, init, f) — fold f across [lo, hi) stepping by 1
+fn foldl_range_i64 : (i64, i64, i64, fn(i64,i64)->i64) -> i64 | (lo, hi, z, f) ->
+  if lo >= hi { z }
+  else { foldl_range_i64(lo + 1i64, hi, f(z, lo), f) }
+
+-- §2  RANGE MAP / EACH (imperative: run an effect for every i)
+fn for_range_i64 : (i64, i64, fn(i64)->()) -> () | (lo, hi, g) ->
+  if lo >= hi { () }
+  else { g(lo); for_range_i64(lo + 1i64, hi, g) }
+
+-- §3  SUM / PRODUCT
+fn sum_range_i64 : (i64, i64) -> i64 | (a, b) ->
+  if a >= b { 0i64 } else { a + sum_range_i64(a + 1i64, b) }

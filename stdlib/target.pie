@@ -1,16 +1,47 @@
 mod target
 
-use target.abi
-use target.regalloc
-use target.mc_emitter
-use target.linker
-
 -- stdlib/target.pie — Standard Library Machine Target & Backend Suite
--- Exports System V ABIs, linear scan register allocation, native machine code emitters, and object linkers.
+-- The native backend lives under codegen.{x86_64,aarch64,riscvv64,jit} and
+-- is the place to add MC emission / register allocation / linkers. Until
+-- the full native backend lands these are re-exports of codegen.jit entry
+-- points so that `use target` at least links for JIT-style compilation.
 
-fn abi_classify : (*abi.TargetAbi, *ir.types.IrType) -> i64 | (a, t) -> abi.abi_classify_type(a, t)
-fn regalloc_new : i64 -> regalloc.RegAlloc                  | n -> regalloc.regalloc_new(n)
-fn regalloc_scan : (*regalloc.RegAlloc, *ir.func.IrFunction) -> i64 | (r, f) -> regalloc.regalloc_linear_scan(r, f)
-fn mc_emit_x86 : *ir.func.IrFunction -> codegen.x86_64.X86Asm | f -> mc_emitter.mc_emit_x86_64_function(f)
-fn linker_obj_new : () -> linker.NativeObject               | () -> linker.native_object_new()
-fn linker_obj_destroy : *linker.NativeObject -> ()          | o -> linker.native_object_destroy(o)
+-- JIT memory  (re-exported from codegen.jit via codegen module)
+use codegen
+
+fn jit_new : i64 -> codegen.jit.JitMemory        | sz -> codegen.jit_new(sz)
+fn jit_destroy : *codegen.jit.JitMemory -> i64  | j  -> codegen.jit_destroy(j)
+fn jit_exec : *codegen.jit.JitMemory -> i64     | j  -> codegen.jit_exec(j)
+fn jit_writable : *codegen.jit.JitMemory -> i64 | j  -> codegen.jit_writable(j)
+fn jit_ptr : *codegen.jit.JitMemory -> ptr      | j  -> codegen.jit_ptr(j)
+
+-- x86-64  (re-exported from codegen.x86_64)
+fn x86_new : () -> codegen.x86_64.X86Asm                 | () -> codegen.x86_new()
+fn x86_destroy : *codegen.x86_64.X86Asm -> ()            | a  -> codegen.x86_destroy(a)
+fn x86_nop : *codegen.x86_64.X86Asm -> ()                | a  -> codegen.x86_nop(a)
+fn x86_ret : *codegen.x86_64.X86Asm -> ()                | a  -> codegen.x86_ret(a)
+fn x86_mov_eax : (*codegen.x86_64.X86Asm, i64) -> ()     | (a, i) -> codegen.x86_mov_eax(a, i)
+
+-- AArch64
+fn aarch64_new : () -> codegen.aarch64.Aarch64Asm         | () -> codegen.aarch64_new()
+fn aarch64_destroy : *codegen.aarch64.Aarch64Asm -> ()    | a  -> codegen.aarch64_destroy(a)
+fn aarch64_nop : *codegen.aarch64.Aarch64Asm -> ()        | a  -> codegen.aarch64_nop(a)
+fn aarch64_ret : *codegen.aarch64.Aarch64Asm -> ()        | a  -> codegen.aarch64_ret(a)
+
+-- RISC-V 64
+fn riscv_new : () -> codegen.riscv64.RiscvAsm             | () -> codegen.riscv_new()
+fn riscv_destroy : *codegen.riscv64.RiscvAsm -> ()        | a  -> codegen.riscv_destroy(a)
+fn riscv_nop : *codegen.riscv64.RiscvAsm -> ()            | a  -> codegen.riscv_nop(a)
+fn riscv_ret : *codegen.riscv64.RiscvAsm -> ()            | a  -> codegen.riscv_ret(a)
+
+-- §2  TARGET TRIPLE
+-- These are filled in per-backend when a backend is selected; the default
+-- values here describe the host pfrontc is compiled on (x86-64 Linux).
+const TARGET_OS     : str = "linux"
+const TARGET_ARCH   : str = "x86_64"
+const TARGET_ABI    : str = "sysv"
+const POINTER_BITS  : i64 = 64i64
+const PTR_SIZE      : i64 = 8i64
+
+fn is_little_endian : () -> bool   | () -> true
+fn is_big_endian    : () -> bool   | () -> false

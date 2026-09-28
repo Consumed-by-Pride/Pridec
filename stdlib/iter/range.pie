@@ -1,0 +1,20 @@
+mod range
+
+-- stdlib/iter/range.pie — integer range primitives written without first-class
+-- function arguments (which pfront does not yet lower). These are enough to
+-- write recursive accumulators in user code over i64 ranges.
+
+-- §1  RANGE BOUNDS
+fn range_contains : (i64, i64, i64) -> bool | (lo, hi, v) -> v >= lo && v < hi
+fn range_is_empty : (i64, i64) -> bool | (lo, hi) -> lo >= hi
+fn range_len : (i64, i64) -> i64 | (lo, hi) -> if hi < lo { 0i64 } else { hi - lo }
+
+-- §2  ARITHMETIC SERIES
+fn sum_range_i64 : (i64, i64) -> i64 | (a, b) ->
+  if a >= b { 0i64 } else { a + sum_range_i64(a + 1i64, b) }
+
+fn product_range_i64 : (i64, i64) -> i64 | (a, b) ->
+  if a >= b { 1i64 } else { a * product_range_i64(a + 1i64, b) }
+
+fn count_range_i64 : (i64, i64) -> i64 | (a, b) ->
+  if a >= b { 0i64 } else { 1i64 + count_range_i64(a + 1i64, b) }

@@ -1,0 +1,48 @@
+mod prelude
+
+use mem
+
+-- stdlib/prelude.pie — the implicit prelude
+-- Every Pride program gets `use prelude` automatically, so the names exported
+-- here are in scope without an explicit import. Keep this file small and
+-- conservative; anything that needs generics, lambdas, or fancy types belongs
+-- in an opt-in module.
+
+-- §1  IDENTITY / BASIC HELPERS
+fn id_i64 : i64 -> i64 | x -> x
+fn ignore : i64 -> () | _ -> ()
+
+-- §2  MIN / MAX / CLAMP (i64)
+fn min : (i64, i64) -> i64 | (a, b) -> if a < b { a } else { b }
+fn max : (i64, i64) -> i64 | (a, b) -> if a > b { a } else { b }
+fn clamp : (i64, i64, i64) -> i64 | (v, lo, hi) -> max(lo, min(v, hi))
+
+-- §3  MIN / MAX (u64)
+fn minu : (u64, u64) -> u64 | (a, b) -> if a < b { a } else { b }
+fn maxu : (u64, u64) -> u64 | (a, b) -> if a > b { a } else { b }
+
+-- §4  POINTER / SIZE
+const NULL : ptr = null
+fn ptr_is_null : ptr -> bool | p -> p == null
+fn ptr_add : (ptr, i64) -> ptr | (p, o) -> (p as i64 + o) as ptr
+fn ptr_sub : (ptr, i64) -> ptr | (p, o) -> (p as i64 - o) as ptr
+fn ptr_diff : (ptr, ptr) -> i64 | (a, b) -> (a as i64) - (b as i64)
+
+-- §5  COMMON TYPE ALIASES
+type byte = u8
+type rune = i32
+
+-- §6  ARITHMETIC HELPERS (i64)
+fn abs : i64 -> i64 | n -> if n < 0i64 { 0i64 - n } else { n }
+fn signum : i64 -> i64 | n -> if n > 0i64 { 1i64 } else if n < 0i64 { -1i64 } else { 0i64 }
+
+-- §7  BITWISE HELPERS (u64)
+fn popcount : u64 -> i64 | _ -> 0i64   -- TODO: wire to builtin when available
+fn ctlz : u64 -> i64 | _ -> 0i64
+fn cttz : u64 -> i64 | _ -> 0i64
+fn bswap : u64 -> u64 | x -> x         -- TODO: wire to builtin
+
+-- §8  DEBUG / PANIC STUBS
+fn todo : () -> () | () -> ()           -- TODO: ub when UB reporting is wired
+fn unreachable : () -> () | () -> ()
+fn assert : bool -> () | c -> if c { () } else { () }
