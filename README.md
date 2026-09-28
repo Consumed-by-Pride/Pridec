@@ -1,13 +1,8 @@
 # Pridec — the Pride compiler
 
-> *"The over-engineered C."*
+> *"The over-engineered systems language. Computation is a cut."*
 
-Pride is an untyped (gradually-sorted) systems language with a classical
-sequent calculus **λ̄μμ̃** (Curien–Herbelin 2000) at its core: every term is
-a producer, every context a consumer, and computation is a *cut* between
-them. Multi-stage programming, algebraic effects & handlers, semantic
-subtyping, IRDL dialects (a là MLIR), and PGL decision-tree pattern matching
-are all built in.
+Pride is a gradually-sorted systems language built on the **classical sequent calculus λ̄μμ̃** (Curien–Herbelin 2000): every term is a producer, every evaluation context a consumer, and computation is a *cut* between them. Multi-stage programming, algebraic effects & handlers, semantic subtyping, IRDL dialects (a là MLIR), and PGL decision-tree pattern matching are all built in rather than bolted on.
 
 This repository is **pfrontc** — the current Pride front-end and AIR
 emitter. It takes `.pie` source and produces **AIR 1.0**
