@@ -7,17 +7,18 @@ import air_ir;
 
 alias Nk = pfront_core::NodeKind;
 
-fn char* air_node_text(AirModule* m, PNode* n, pfront_core::Interner* it) {
+fn char* air_node_text(PNode* n, pfront_core::Interner* it) {
     if (n==null) return null;
-    AirArena* a = m.arena;
-    if (n.p.sptr!=null && n.p.slen>0) { return a.dup(n.p.sptr, (usz)n.p.slen); }
-    if (it!=null && n.name_id!=0) {
-        char* t = it.text(n.name_id);
-        if (t == null) return null;
-        int ln = 0; while (t[ln] != 0) ln++;
-        return a.dup(t, (usz)ln);
+    // Prefer the interned name: it is stable and never leaks source.
+    if (it!=null && n.name_id!=0) return it.text(n.name_id);
+    // For simple ident/type name nodes (leaf identifiers), sptr points to the
+    // identifier span (safe). For anything with children (arrows, generics,
+    // clauses) sptr spans the whole construct, so we must NOT return it.
+    if (n.child_count == 0 && n.p.sptr!=null && n.p.slen>0
+        && (n.kind == Nk.N_TY_NAME || n.kind == Nk.N_EXPR_IDENT
+            || n.kind == Nk.N_PAT_IDENT)) {
+        return n.p.sptr;
     }
-    if (n.resolved != null) return air_node_text(m, n.resolved, it);
     return null;
 }
 fn int cstrlen_t(char* s) {
@@ -40,9 +41,6 @@ fn AirTyp* air_prim_ty(AirModule* m, char* nm) {
     if (streq_t(nm,"f128"))return air_ir::air_mk_typ(a,ATYP_F128);
     if (streq_t(nm,"bool"))return m.t_bool; if (streq_t(nm,"char"))return m.t_char;
     if (streq_t(nm,"str"))return m.t_str; if (streq_t(nm,"bytes"))return m.t_bytes;
-    if (streq_t(nm,"int"))return m.t_i64;
-    if (streq_t(nm,"uint"))return m.t_u64;
-    if (streq_t(nm,"float"))return m.t_f64;
     return null;
 }
 
@@ -91,13 +89,13 @@ fn AirTyp* air_translate_typ(AirModule* m, PNode* t, pfront_core::Interner* it, 
             AirTyp* dom=air_ir::air_mk_typ_tuple(a,&ds[0],dn); return air_ir::air_mk_typ_arrow(a,dom,ret);
         }
         case Nk.N_TY_NAME: case Nk.N_TY_PATH: {
-            char* nm=air_node_text(m,t,it); if(nm==null)return m.t_infer;
+            char* nm=air_node_text(t,it); if(nm==null)return m.t_infer;
             AirTyp* prim=air_prim_ty(m,nm); if(prim!=null)return prim;
             return air_ir::air_mk_typ_named(a, a.dup(nm,(usz)cstrlen_t(nm)));
         }
         case Nk.N_TY_GENERIC: {
             if(t.child_count==0)return m.t_infer;
-            char* nm=air_node_text(m,t.children[0],it); AirTyp* out;
+            char* nm=air_node_text(t.children[0],it); AirTyp* out;
             if(nm==null){out=m.t_infer;} else {
                 AirTyp* prim=air_prim_ty(m,nm);
                 if(prim!=null){out=prim;} else {out=air_ir::air_mk_typ_named(a,a.dup(nm,(usz)cstrlen_t(nm)));}
@@ -123,13 +121,13 @@ fn AirTyp* air_translate_typ(AirModule* m, PNode* t, pfront_core::Interner* it, 
         }
         case Nk.N_TY_FORALL: {
             if(t.child_count<2)return m.t_infer;
-            char* tv=air_node_text(m,t.children[0],it); if(tv==null)tv=(char*)"_a";
+            char* tv=air_node_text(t.children[0],it); if(tv==null)tv=(char*)"_a";
             AirTyp* body=air_translate_typ(m,t.children[1],it,depth+1);
             return air_ir::air_mk_typ_forall(a,a.dup(tv,(usz)cstrlen_t(tv)),body);
         }
         case Nk.N_TY_EXISTS: {
             if(t.child_count<2)return m.t_infer;
-            char* tv=air_node_text(m,t.children[0],it); if(tv==null)tv=(char*)"_e";
+            char* tv=air_node_text(t.children[0],it); if(tv==null)tv=(char*)"_e";
             AirTyp* body=air_translate_typ(m,t.children[1],it,depth+1);
             return air_ir::air_mk_typ_exists(a,a.dup(tv,(usz)cstrlen_t(tv)),body);
         }
@@ -137,7 +135,7 @@ fn AirTyp* air_translate_typ(AirModule* m, PNode* t, pfront_core::Interner* it, 
             char*[8] effs; usz n=0; AirTyp* tail=null;
             for(usz i=0;i<t.child_count&&n<8;i++){
                 PNode* ch=t.children[i]; if(ch==null)continue;
-                if(ch.kind==Nk.N_TY_EFFECT_ELEM){char*en=air_node_text(m,ch,it);if(en!=null){effs[n]=a.dup(en,(usz)cstrlen_t(en));n++;}}
+                if(ch.kind==Nk.N_TY_EFFECT_ELEM){char*en=air_node_text(ch,it);if(en!=null){effs[n]=a.dup(en,(usz)cstrlen_t(en));n++;}}
                 else if(ch.kind==Nk.N_TY_NAME||ch.kind==Nk.N_TY_PATH){tail=air_translate_typ(m,ch,it,depth+1);}
             }
             return air_ir::air_mk_typ_effrow_open(a,&effs[0],n,tail);

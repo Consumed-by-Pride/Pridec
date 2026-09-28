@@ -131,7 +131,8 @@ struct AirPrd {
 }
 struct AirCns {
     uint id; AirCnsTag tag; char* name; long idx; AirPrd* prd;
-    AirCns *tail; AirCns *cont_k;
+    AirCns* tail;
+    AirCns* cont_k;
     AirBranch*[64] branches; usz branch_count;
     AirCoBranch*[64] cobranches; usz cobranch_count;
     AirCmd* body; char* bind; AirTyp* ty;
@@ -142,7 +143,10 @@ struct AirCmd {
     uint id; AirCmdTag tag; AirPrd* prd; AirCns* cns;
     AirPrd*[16] prds; usz prd_count;
     char* binder; AirBinder*[16] mbinders; usz mbinder_count;
-    AirCmd *body; AirCmd *next; AirCmd *then_c; AirCmd *else_c;
+    AirCmd* body;
+    AirCmd* next;
+    AirCmd* then_c;
+    AirCmd* else_c;
     AirBranch*[64] branches; usz branch_count;
     AirCmd* handled; char* eff_op; char* target_label;
     char*[16] jump_args; usz jump_arg_count;
@@ -187,9 +191,7 @@ struct AirModule {
     AirPrd* p_true;
     AirPrd* p_false;
     AirPrd* p_null;
-    AirCns* c_ret;
-    AirPat* pat_wild;
-    AirCmd* nop;
+    AirCns* c_ret; AirPat* pat_wild; AirCmd* nop;
 }
 
 // ── Allocators ────────────────────────────────────────────────────────────
@@ -270,13 +272,6 @@ fn AirDecl* air_mk_decl(AirArena* a, AirDeclTag tag, char* nm) {
     d.is_varargs=false; d.extern_link=null; d.op_count=0;
     d.import_path=null; d.import_alias=null; d.import_glob=false;
     d.module_name=null; return d;
-}
-fn AirDecl* air_mk_import(AirArena* a, char* path, char* als, bool glob) {
-    AirDecl* d=air_mk_decl(a, ADECL_IMPORT, path); if(d==null)return null;
-    d.import_path=path; d.import_alias=als; d.import_glob=glob; return d;
-}
-fn AirDecl* air_mk_module_decl(AirArena* a, char* nm) {
-    return air_mk_decl(a, ADECL_MODULE, nm);
 }
 
 // Commands
@@ -508,3 +503,19 @@ fn void AirDecl.add_typaram(AirDecl* d, AirBinder* b)
     { if(d==null||b==null)return; if(d.typaram_count>=16)return; d.typarams[d.typaram_count]=b; d.typaram_count++; }
 fn void AirDecl.add_op(AirDecl* d, AirEffectOp* o)
     { if(d==null||o==null)return; if(d.op_count>=16)return; d.ops[d.op_count]=o; d.op_count++; }
+
+// Import and module decl constructors
+fn AirDecl* air_mk_import(AirArena* a, char* path, char* als, bool glob) {
+    AirDecl* d=air_mk_decl(a,ADECL_IMPORT,a.dup(path,(usz)air_cstrlen(path)));
+    if(d==null)return null;
+    d.import_path = d.name;
+    d.import_alias = als==null?null:a.dup(als,(usz)air_cstrlen(als));
+    d.import_glob = glob;
+    return d;
+}
+fn AirDecl* air_mk_module_decl(AirArena* a, char* name) {
+    AirDecl* d=air_mk_decl(a,ADECL_MODULE,a.dup(name,(usz)air_cstrlen(name)));
+    if(d==null)return null;
+    d.module_name = d.name;
+    return d;
+}

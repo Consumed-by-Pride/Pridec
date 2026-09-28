@@ -19,22 +19,26 @@ struct AirLocal {
 struct AirLoopLabel {
     char* break_lbl; char* continue_lbl; int depth;
 }
-const int AIR_SCOPE_RETS = 64;
 struct AirScope {
     AirArena* arena;
     int fresh_k, fresh_x, fresh_lbl, depth;
     AirLocal[AIR_SCOPE_LOCALS] locals; usz local_count;
     int[AIR_SCOPE_DEPTH] depth_marks; int depth_mark_count;
     AirLoopLabel[AIR_SCOPE_LABELS] loops; int loop_count;
-    char*[AIR_SCOPE_RETS] rets; int ret_count;
+    char*[64] rets; int ret_count;
     char[AIR_SCOPE_SCRATCH] scratch;
 }
 
 fn void AirScope.init(AirScope* s, AirArena* a) {
     s.arena=a; s.fresh_k=1; s.fresh_x=1; s.fresh_lbl=1; s.depth=0;
     s.local_count=0; s.depth_mark_count=0; s.loop_count=0; s.ret_count=0;
-    char* top = s.bind_covar("%ret", null);
-    s.push_ret(top);
+    char* ret0 = a.dup("%ret",4);
+    s.bind_covar(ret0, null);
+    s.rets[0] = ret0; s.ret_count = 1;
+}
+fn void AirScope.destroy(AirScope* s) {
+    s.fresh_k=1; s.fresh_x=1; s.fresh_lbl=1; s.depth=0;
+    s.local_count=0; s.depth_mark_count=0; s.loop_count=0; s.ret_count=0;
 }
 fn void AirScope.enter(AirScope* s) {
     if (s.depth_mark_count < AIR_SCOPE_DEPTH) {
@@ -46,6 +50,22 @@ fn void AirScope.enter(AirScope* s) {
 fn void AirScope.leave(AirScope* s) {
     if (s.depth_mark_count > 0) { s.depth_mark_count--; s.local_count=(usz)s.depth_marks[s.depth_mark_count]; }
     if (s.depth > 0) s.depth--;
+}
+
+// ── Return-stack: for nested defs / lambdas, each fn body pushes its own
+// %ret covariable so `return e` cuts to the innermost function's ret rather
+// than the outer one.
+fn char* AirScope.push_ret(AirScope* s, char* nm) {
+    char* bound = s.bind_covar(nm, null);
+    if (s.ret_count < 64) { s.rets[s.ret_count] = bound; s.ret_count++; }
+    return bound;
+}
+fn void AirScope.pop_ret(AirScope* s) {
+    if (s.ret_count > 1) s.ret_count--;
+}
+fn char* AirScope.current_ret(AirScope* s) {
+    if (s.ret_count <= 0) return (char*)"%ret";
+    return s.rets[s.ret_count - 1];
 }
 
 fn char* AirScope.bind(AirScope* s, char* src_nm, bool is_covar, PNode* decl) {
@@ -122,24 +142,6 @@ fn char* AirScope.current_break(AirScope* s) {
 }
 fn char* AirScope.current_continue(AirScope* s) {
     if (s.loop_count <= 0) return (char*)"%ret"; return s.loops[s.loop_count-1].continue_lbl;
-}
-
-fn void AirScope.push_ret(AirScope* s, char* r) {
-    if (s.ret_count >= AIR_SCOPE_RETS) return;
-    s.rets[s.ret_count] = r; s.ret_count++;
-}
-fn void AirScope.pop_ret(AirScope* s) {
-    if (s.ret_count > 0) s.ret_count--;
-}
-fn char* AirScope.current_ret(AirScope* s) {
-    if (s.ret_count <= 0) return (char*)"%ret";
-    return s.rets[s.ret_count - 1];
-}
-
-fn void AirScope.destroy(AirScope* s) {
-    s.fresh_k = 0; s.fresh_x = 0; s.fresh_lbl = 0; s.depth = 0;
-    s.local_count = 0; s.depth_mark_count = 0; s.loop_count = 0; s.ret_count = 0;
-    return;
 }
 
 fn bool streq(char* a, char* b) {

@@ -1,5 +1,13 @@
 // ============================================================================
-// air.c3 — public driver for emitting AIR (.air files) from pfront.
+// air.c3 — Public driver for AIR emission (selected by --emit-air).
+// ----------------------------------------------------------------------------
+// Pipeline:
+//   1. Derives the sibling .air path from the source .pie path.
+//   2. Sets up an AirArena, AirModule, AirScope, AirLower.
+//   3. Walks the post-theory PNode tree via air_lower.module_body(root)
+//      to build an in-memory AirModule of λ̄μμ̃ IR (prd/cns/cmd).
+//   4. Hands the AirModule to air_emit.emit_module to print clean, stubless
+//      AIR text (no *k*, no *dummy*, no <()|·> nops, no leaked spans).
 // ============================================================================
 module air;
 
@@ -9,64 +17,81 @@ import air_scope;
 import air_lower;
 import air_emit;
 
-extern fn void* fopen(char*, char*);
-extern fn void* fdopen(int, char*);
-extern fn int   fclose(void*);
-extern fn int   fflush(void*);
-
 alias PNode = pfront_core::PNode;
 
-// derive_air_path: take the input .pie path and produce the sibling .air path.
-fn char* derive_air_path(AirArena* a, char* in_path)
+extern fn int   snprintf(char* buf, usz n, char* fmt, ...);
+
+const usz AIR_PATH_MAX = 4096;
+
+// Derive "<stem>.air" from "<stem>.pie" (or any other extension). Strips the
+// last '.'-separated extension after the last '/', then appends ".air".
+fn char* derive_air_path(char* src, char* buf, usz cap)
 {
-    if (in_path == null) return a.dup("out.air", 7);
-    int n = 0;
-    while (in_path[n] != 0) { n++; }
-    int dot = -1; int slash = -1;
-    for (int i = 0; i < n; i++)
-    {
-        if (in_path[i] == '.') { dot = i; }
-        if (in_path[i] == '/' || in_path[i] == '\\') { slash = i; }
+    if (src == null) return null;
+    int sl = -1; int dl = -1; int n = 0;
+    while (src[n] != 0) {
+        if (src[n] == '/') sl = n;
+        if (src[n] == '.') dl = n;
+        n++;
     }
-    int base_start = slash + 1;
-    int out_len;
-    bool has_ext = (dot > base_start);
-    if (has_ext) { out_len = dot + 4; }
-    else { out_len = n + 4; }
-    char* out = (char*)a.alloc((usz)(out_len + 1), 1);
-    if (out == null) return a.dup("out.air", 7);
-    int take = has_ext ? dot : n;
-    for (int i = 0; i < take; i++) { out[i] = in_path[i]; }
-    out[take] = '.'; out[take+1] = 'a'; out[take+2] = 'i'; out[take+3] = 'r';
-    out[take+4] = 0;
-    return out;
+    bool has_ext = (dl > sl) && (dl > 0) && (dl < n - 1);
+    usz base_len = (usz)(has_ext ? dl : n);
+    if (base_len + 5 >= cap) return null;
+    for (usz i = 0; i < base_len; i++) buf[i] = src[i];
+    buf[base_len+0] = '.';
+    buf[base_len+1] = 'a';
+    buf[base_len+2] = 'i';
+    buf[base_len+3] = 'r';
+    buf[base_len+4] = 0;
+    return buf;
 }
 
-// emit_air — entry point called from pfront_main when --emit-air is on.
+// Resolve a module name from the AST root (best-effort).
+fn char* module_name_of(PNode* root)
+{
+    if (root == null) return (char*)"Main";
+    for (usz i = 0; i < root.child_count; i++)
+    {
+        PNode* c = root.children[i];
+        if (c == null) continue;
+        if (c.kind == pfront_core::NodeKind.N_MODULE)
+        {
+            if (c.p.sptr != null && c.p.slen > 0) return c.p.sptr;
+        }
+    }
+    return (char*)"Main";
+}
+
 fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
 {
-    if (root == null) return;
+    char[AIR_PATH_MAX] buf;
+    char* out_path = null;
+    if (path != null && path[0] != 0)
+    {
+        if (path[0] == '-' && path[1] == 0) { out_path = null; }
+        else { out_path = derive_air_path(path, &buf[0], AIR_PATH_MAX); }
+    }
+
+    // ── Build IR ────────────────────────────────────────────────────────
     AirArena arena;
     if (!arena.init()) return;
-    AirModule m;
-    char* mod_name = (char*)"main";
-    if (!m.init(&arena, mod_name, path)) { arena.destroy(); return; }
+    AirModule mod;
+    char* mod_nm = module_name_of(root);
+    if (!mod.init(&arena, mod_nm, path))
+    {
+        arena.destroy();
+        return;
+    }
     AirScope sc;
     sc.init(&arena);
     AirLower lr;
-    lr.init(&m, &sc, it);
-
+    lr.init(&mod, &sc, it);
     lr.module_body(root);
 
-    char* out_path = derive_air_path(&arena, path);
-    void* f = fopen(out_path, (char*)"wb");
-    if (f == null) { f = fdopen(1, (char*)"w"); }
-    if (f != null)
-    {
-        air_emit::emit_module(f, &m, &lr, &arena);
-        fflush(f);
-        if (f != (void*)(long)1) { fclose(f); }
-    }
+    // ── Emit text ──────────────────────────────────────────────────────
+    air_emit::emit_module(&mod, &lr, out_path);
+
+    // ── Teardown ───────────────────────────────────────────────────────
     sc.destroy();
     arena.destroy();
 }

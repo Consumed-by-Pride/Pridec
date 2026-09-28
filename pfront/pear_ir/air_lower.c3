@@ -298,31 +298,67 @@ fn char* AirLower.fresh_k(AirLower* lr)    { return lr.scope.fresh_k_covar(); }
 fn char* AirLower.fresh_x(AirLower* lr)    { return lr.scope.fresh_x_var(); }
 fn char* AirLower.fresh_lbl(AirLower* lr, char* hint) { return lr.scope.fresh_label(hint); }
 
-// node_text — extract the source text (identifier name, literal text, etc.)
-// from a PNode and dup it into the arena so we never hold a pointer into
-// source memory (which is NOT NUL-terminated and may not outlive lowering).
-fn char* node_text(AirLower* lr, Node* n)
+// node_text — extract the identifier/literal name from a PNode. For decls
+// and bindings the source sptr points at the leading keyword (`fn`, `def`,
+// `let`), so we drill into the first ident child instead. For everything
+// else we try sptr first, then the interner, then the resolved node.
+fn char* node_text(Node* n, pfront_core::Interner* it)
 {
     if (n == null) return null;
-    AirArena* a = lr.arena;
-    if (n.p.sptr != null && n.p.slen > 0)
+    // Decl/binder/module/use/field/etc: name lives in the first ident child.
+    if (pfront_core::is_decl(n.kind)
+        || n.kind == Nk.N_MODULE
+        || n.kind == Nk.N_USE
+        || n.kind == Nk.N_DECL_FIELD
+        || n.kind == Nk.N_DECL_VARIANT
+        || n.kind == Nk.N_DECL_EFFECT_OP
+        || n.kind == Nk.N_EXPR_FIELD_INIT)
     {
-        return a.dup(n.p.sptr, (usz)n.p.slen);
-    }
-    if (lr.it != null && n.name_id != 0)
-    {
-        char* t = lr.it.text(n.name_id);
-        if (t != null)
+        for (usz i = 0; i < n.child_count; i++)
         {
-            int ln = 0; while (t[ln] != 0) ln++;
-            return a.dup(t, (usz)ln);
+            Node* c = n.children[i];
+            if (c == null) continue;
+            if (c.kind == Nk.N_PAT_IDENT || c.kind == Nk.N_EXPR_IDENT
+                || c.kind == Nk.N_TY_NAME)
+            {
+                char* cn = node_text(c, it);
+                if (cn != null && cn[0] != 0) return cn;
+            }
         }
     }
-    if (n.resolved != null) return node_text(lr, n.resolved);
+    // For ident/pat/ty-name nodes prefer the interner over sptr because sptr
+    // may span a multi-token construct while name_id carries the resolved name.
+    if (it != null && n.name_id != 0)
+    {
+        char* iname = it.text(n.name_id);
+        if (iname != null && iname[0] != 0) return iname;
+    }
+    if (n.p.sptr != null && n.p.slen > 0
+        && (n.kind == Nk.N_PAT_IDENT || n.kind == Nk.N_EXPR_IDENT
+            || n.kind == Nk.N_TY_NAME || n.kind == Nk.N_EXPR_CHAR
+            || n.kind == Nk.N_EXPR_INT || n.kind == Nk.N_EXPR_FLOAT))
+    {
+        return n.p.sptr;
+    }
+    if (n.p.sptr != null && n.p.slen > 0
+        && (n.kind == Nk.N_EXPR_STRING || n.kind == Nk.N_PAT_LITERAL))
+    {
+        return n.p.sptr;
+    }
+    if (n.resolved != null)
+    {
+        Node* r = n.resolved;
+        if (it != null && r.name_id != 0) return it.text(r.name_id);
+        if (r.p.sptr != null && r.p.slen > 0
+            && (r.kind == Nk.N_PAT_IDENT || r.kind == Nk.N_EXPR_IDENT || r.kind == Nk.N_TY_NAME))
+        {
+            return r.p.sptr;
+        }
+    }
     return null;
 }
 
-fn char* AirLower.nm(AirLower* lr, Node* n) { return node_text(lr, n); }
+fn char* AirLower.nm(AirLower* lr, Node* n) { return node_text(n, lr.it); }
 
 // dup — duplicate a C string into the arena. Returns null for null input.
 fn char* AirLower.dup(AirLower* lr, char* s)
@@ -438,14 +474,6 @@ fn bool is_value_node(Node* n)
     }
 }
 
-// ── Forward group: pattern → producer → consumer → statement/command ──────
-// All methods on AirLower so mutual recursion works without forward decls.
-// Convention: every method returns a fully-formed AIR node or null/unit/nop
-// on failure. Pat returns AirPat*; prd returns AirPrd*; expr_to_cns returns
-// AirCmd* (the command that evaluates `n` and feeds its value into `k`);
-// cmd returns AirCmd*; decl returns AirDecl*.
-// (All methods are mutually visible within the module; no forward decls needed.)
-
 // ── Patterns ──────────────────────────────────────────────────────────────
 // Patterns appear in match arms, let bindings, fn parameters (as pat-ident),
 // etc. The translation is straightforward: wildcards become pat_wild,
@@ -468,7 +496,7 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
         case Nk.N_PAT_WILDCARD: return lr.mod.pat_wild;
         case Nk.N_PAT_IDENT:
         {
-            char* nm = node_text(lr, p);
+            char* nm = node_text(p, lr.it);
             // A leading underscore means "wildcard" (unused variable pattern);
             // we emit it as a wildcard rather than a binding to avoid
             // polluting the scope with names the user explicitly said they
@@ -517,7 +545,7 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
         }
         case Nk.N_PAT_VARIANT:
         {
-            char* vnm = node_text(lr, p);
+            char* vnm = node_text(p, lr.it);
             if (vnm == null) vnm = (char*)"_V";
             AirPat*[16] subs; usz n = 0;
             for (usz i = 0; i < p.child_count && i < 16; i++)
@@ -591,7 +619,7 @@ fn AirPrd* AirLower.prd(AirLower* lr, Node* n)
         case Nk.N_EXPR_IDENT:
         case Nk.N_EXPR_SELF:
         {
-            char* nm = node_text(lr, n);
+            char* nm = node_text(n, lr.it);
             if (nm == null) nm = (char*)"_x";
             char* x = lr.scope.lookup_var(nm);
             if (x == null) x = lr.dup(nm);
@@ -642,7 +670,7 @@ fn AirPrd* AirLower.lambda_prd(AirLower* lr, Node* n)
             if (c.child_count > 0)
             {
                 Node* pp = c.children[0];
-                pnm = node_text(lr, pp);
+                pnm = node_text(pp, lr.it);
                 if (pnm == null) pnm = (char*)"_";
             }
             if (c.type_ann != null) pty = air_types::air_ty(lr.mod, c.type_ann, lr.it);
@@ -651,8 +679,7 @@ fn AirPrd* AirLower.lambda_prd(AirLower* lr, Node* n)
             bc = bc + 1;
         }
     }
-    char* ret = lr.scope.bind_covar("%ret", null);
-    lr.scope.push_ret(ret);
+    char* ret = lr.scope.push_ret("%ret");
     AirCmd* body = null;
     for (i = 0; i < n.child_count; i++)
     {
@@ -664,8 +691,8 @@ fn AirPrd* AirLower.lambda_prd(AirLower* lr, Node* n)
         break;
     }
     if (body == null) body = lr.cut(lr.mod.p_unit, lr.cns_k(ret));
-    lr.scope.pop_ret();
     AirPrd* lam = air_ir::air_mk_lambda(lr.arena, &bv[0], bc, body);
+    lr.scope.pop_ret();
     lr.scope.leave();
     lr.total_prd++;
     return lam;
@@ -681,7 +708,7 @@ fn AirPrd* AirLower.struct_lit_prd(AirLower* lr, Node* n)
         AirFieldInit* fi = air_ir::air_new_AirFieldInit(lr.arena);
         if (c.kind == Nk.N_EXPR_FIELD_INIT)
         {
-            char* fnm = node_text(lr, c);
+            char* fnm = node_text(c, lr.it);
             if (fnm == null) fnm = (char*)"f";
             fi.name = lr.dup(fnm);
             fi.value = c.child_count > 0 ? lr.prd(c.children[0]) : lr.mod.p_unit;
@@ -746,12 +773,9 @@ fn AirCmd* AirLower.cmd(AirLower* lr, Node* n, char* k)
         }
         case Nk.N_STMT_RETURN:
         {
-            // return v = <v|%ret> where %ret is the enclosing fn's return
-            // covariable (not the local k, which may be a μ̃ binder for a
-            // case arm / let-binding). This is non-local return semantics.
-            char* ret = lr.scope.current_ret();
-            if (n.child_count > 0) return lr.expr_to_cns(n.children[0], lr.cns_k(ret));
-            return lr.cut(lr.mod.p_unit, lr.cns_k(ret));
+            // return v  =  < v | %ret >  (cut against the return covar).
+            if (n.child_count > 0) return lr.expr_to_cns(n.children[0], lr.cns_k(k));
+            return lr.cut(lr.mod.p_unit, lr.cns_k(k));
         }
         case Nk.N_STMT_BREAK:
         {
@@ -830,6 +854,11 @@ fn AirCmd* AirLower.stmts(AirLower* lr, Node* container, char* k, bool tail_is_k
     else if (last_n.kind == Nk.N_BLOCK || last_n.kind == Nk.N_STMT_EXPR
           || pfront_core::is_decl(last_n.kind))
     {
+        // The final child is a block/stmt/decl: dispatch through cmd().
+        // Note: N_DECL_FN/STRUCT/etc inside a block are LOCAL declarations
+        // (e.g. letrec when we add them); for now we emit them as nop+side
+        // effect.  We must NOT call decl_inner() here because that would
+        // register them as TOP-LEVEL decls!
         cur = lr.cmd(last_n, k);
     }
     else if (pfront_core::is_expr(last_n.kind))
@@ -851,34 +880,40 @@ fn AirCmd* AirLower.stmts(AirLower* lr, Node* container, char* k, bool tail_is_k
         cur = lr.cmd(last_n, k);
     }
 
-    // Walk backwards prepending preceding statements. Stop after a terminal
-    // (return/break/continue/trap/ub) so we don't emit dead code after it.
+    // Walk backwards prepending preceding statements.
     long i = last - 1;
-    bool dead = false;
     while (i >= 0)
     {
         Node* s = container.children[(usz)i];
-        if (s != null && !dead)
+        if (s != null)
         {
             AirCmd* sc;
             bool sc_consumes_cur = false;
             if (s.kind == Nk.N_DECL_LET || s.kind == Nk.N_DECL_CONST
              || s.kind == Nk.N_DECL_STATIC)
             {
-                // letlike already threads cur as the "rest" continuation,
-                // so the returned command already includes cur as its tail.
+                // Local let/const/static binding becomes ACMD_LET.
+                // letlike(s, rest) already threads `rest` (our `cur`) as its body,
+                // so we must NOT wrap it again in SEQ.
                 sc = lr.letlike(s, cur);
                 sc_consumes_cur = true;
             }
             else if (s.kind == Nk.N_DECL_FN || s.kind == Nk.N_DECL_EXTERN_FN
                   || s.kind == Nk.N_DECL_STRUCT || s.kind == Nk.N_DECL_UNION
                   || s.kind == Nk.N_DECL_ENUM || s.kind == Nk.N_DECL_TYPE
-                  || s.kind == Nk.N_DECL_EFFECT)
+                  || s.kind == Nk.N_DECL_EFFECT
+                  || s.kind == Nk.N_DECL_NEWTYPE || s.kind == Nk.N_DECL_INTERFACE
+                  || s.kind == Nk.N_DECL_IMPL)
             {
+                // Local fn/struct/enum/type/effect: nop placeholder (local defs
+                // via letrec are a future feature; top-level ones are handled
+                // by walk_decls).
                 sc = lr.nop();
             }
             else if (pfront_core::is_expr(s.kind))
             {
+                // Evaluate s, discard its value via fresh _x, then cur.
+                // expr_to_cns already includes the μ̃ binder wrapping cur.
                 char* ignore = lr.fresh_x();
                 sc = lr.expr_to_cns(s,
                     air_ir::air_mk_comu_cns(lr.arena, ignore, cur));
@@ -894,9 +929,8 @@ fn AirCmd* AirLower.stmts(AirLower* lr, Node* container, char* k, bool tail_is_k
             }
             else
             {
-                cur = air_ir::air_mk_seq(lr.arena, sc, cur);
+                cur = seq_cmds(lr, sc, cur);
             }
-            if (is_terminal_cmd_node(s)) { dead = true; }
         }
         i = i - 1;
     }
@@ -910,13 +944,45 @@ fn AirCmd* AirLower.block(AirLower* lr, Node* n, char* k)
     return lr.stmts(n, k, true);
 }
 
+// cmd_to_cns — lift a cmd-node (block/match-arm body) into an expr-position
+// command that, when run, evaluates the body and cuts its result to the
+// consumer k. This bridges between the cmd-world (which threads a covariable
+// *name*) and the cns-world (which threads an AirCns*).
+fn AirCmd* AirLower.cmd_to_cns(AirLower* lr, Node* n, AirCns* k)
+{
+    if (n == null) return lr.cut(lr.mod.p_unit, k);
+    if (n.kind == Nk.N_BLOCK) return lr.block_to_cns(n, k);
+    if (pfront_core::is_expr(n.kind)) return lr.expr_to_cns(n, k);
+    char* alpha = lr.fresh_k();
+    lr.mu++;
+    AirCmd* body = lr.cmd(n, alpha);
+    AirPrd* mu = air_ir::air_mk_mu_prd(lr.arena, alpha, body);
+    lr.total_prd++;
+    return lr.cut(mu, k);
+}
+
+// block_to_cns — block as an expression: evaluate the block, cutting the
+// tail to a fresh covariable α, then wrap in μα so the result is a producer
+// feeding into consumer k.
+fn AirCmd* AirLower.block_to_cns(AirLower* lr, Node* n, AirCns* k)
+{
+    char* alpha = lr.fresh_k();
+    lr.mu++;
+    AirCmd* body = lr.stmts(n, alpha, true);
+    AirPrd* mu = air_ir::air_mk_mu_prd(lr.arena, alpha, body);
+    lr.total_prd++;
+    return lr.cut(mu, k);
+}
+
 // letlike — translate a let/const/static declaration (NOT top-level).
-// Produces `let x = init in rest`, where `rest` is the continuation
-// passed in (the code following the let, already built inside-out).
+// Produces `let x = init; rest` where `rest` is the continuation threaded
+// in by stmts (which already wraps the remainder of the block). The init
+// is evaluated right-to-left: if it is a compound expression we CPS it
+// into a μ̃x binder; for simple value nodes we use the prd directly.
 fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
 {
-    if (s.child_count == 0) return rest == null ? lr.nop() : rest;
-    char* nm = node_text(lr, s);
+    if (s.child_count == 0) return rest;
+    char* nm = node_text(s, lr.it);
     if (nm == null) nm = (char*)"_let";
     Node* val = null;
     for (usz i = 0; i < s.child_count; i++)
@@ -934,9 +1000,18 @@ fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
         lr.lets++;
         return air_ir::air_mk_let(lr.arena, x, lr.mod.p_unit, rest);
     }
-    AirPrd* vp = lr.prd_or_bind(val);
+    if (is_value_node(val))
+    {
+        AirPrd* vp = lr.prd(val);
+        lr.lets++;
+        return air_ir::air_mk_let(lr.arena, x, vp, rest);
+    }
+    // Compound init: evaluate it into a fresh μ̃-bound x, then rest.
+    char* xv = lr.fresh_x();
+    AirPrd* xp = air_ir::air_mk_var(lr.arena, xv);
     lr.lets++;
-    return air_ir::air_mk_let(lr.arena, x, vp, rest);
+    AirCmd* bind = air_ir::air_mk_let(lr.arena, x, xp, rest);
+    return lr.expr_to_cns(val, air_ir::air_mk_comu_cns(lr.arena, xv, bind));
 }
 
 // decl_inner — register a top-level declaration into the module.
@@ -1031,7 +1106,7 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         case Nk.N_EXPR_IDENT:
         case Nk.N_EXPR_SELF:
         {
-            char* nm = node_text(lr, n);
+            char* nm = node_text(n, lr.it);
             if (nm == null) nm = (char*)"_";
             char* x = lr.scope.lookup_var(nm);
             if (x == null) x = lr.dup(nm);
@@ -1040,7 +1115,7 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         }
         case Nk.N_EXPR_PATH:
         {
-            char* nm = node_text(lr, n);
+            char* nm = node_text(n, lr.it);
             if (nm == null) nm = (char*)"_";
             lr.total_prd++;
             return lr.cut(air_ir::air_mk_var(lr.arena, lr.dup(nm)), k);
@@ -1063,7 +1138,7 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         case Nk.N_EXPR_METHOD:
         {
             if (n.child_count < 1) return lr.cut(lr.mod.p_unit, k);
-            char* mname = node_text(lr, n);
+            char* mname = node_text(n, lr.it);
             if (mname == null) mname = (char*)"_m";
             Node** rest = null; usz rc = 0;
             if (n.child_count > 1)
@@ -1081,7 +1156,7 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         case Nk.N_EXPR_LAMBDA:    return lr.lambda(n, k);
         case Nk.N_EXPR_BINARY:    return lr.binop(n, k);
         case Nk.N_EXPR_UNARY:     return lr.unop(n, k);
-        case Nk.N_BLOCK:          return lr.block_expr(n, k);
+        case Nk.N_BLOCK:          return lr.block_to_cns(n, k);
         case Nk.N_EXPR_REF:
         case Nk.N_EXPR_DEREF:     return lr.ref_deref(n, k);
         case Nk.N_EXPR_CAST:
@@ -1178,8 +1253,7 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
 
 fn AirCmd* AirLower.tuple_lit(AirLower* lr, Node* n, AirCns* k)
 {
-    AirPrd*[16] vars; usz vc = 0;
-    AirCmd* binds = null;
+    AirPrd*[16] vars; char*[16] xnames; bool[16] is_comp; usz vc = 0;
     lr.scope.enter();
     for (usz i = 0; i < n.child_count && i < 16; i++)
     {
@@ -1187,30 +1261,35 @@ fn AirCmd* AirLower.tuple_lit(AirLower* lr, Node* n, AirCns* k)
         if (c == null) continue;
         if (is_value_node(c))
         {
-            vars[vc] = lr.prd(c);
+            vars[vc] = lr.prd(c); is_comp[vc] = false;
         }
         else
         {
             char* xv = lr.fresh_x();
             vars[vc] = air_ir::air_mk_var(lr.arena, xv);
-            AirCmd* ev = lr.expr_to_cns(c,
-                air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-            binds = binds == null ? ev : air_ir::air_mk_seq(lr.arena, binds, ev);
+            xnames[vc] = xv; is_comp[vc] = true;
         }
         vc = vc + 1;
     }
     lr.total_prd++;
     AirPrd* tup = air_ir::air_mk_tuple(lr.arena, &vars[0], vc);
-    AirCmd* fin = lr.cut(tup, k);
-    AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
+    AirCmd* out = lr.cut(tup, k);
+    long i = (long)vc - 1;
+    while (i >= 0)
+    {
+        if (is_comp[(usz)i]) {
+            out = lr.expr_to_cns(n.children[(usz)i],
+                air_ir::air_mk_comu_cns(lr.arena, xnames[(usz)i], out));
+        }
+        i = i - 1;
+    }
     lr.scope.leave();
     return out;
 }
 
 fn AirCmd* AirLower.array_lit(AirLower* lr, Node* n, AirCns* k)
 {
-    AirPrd*[16] vars; usz vc = 0;
-    AirCmd* binds = null;
+    AirPrd*[16] vars; char*[16] xnames; bool[16] is_comp; usz vc = 0;
     lr.scope.enter();
     for (usz i = 0; i < n.child_count && i < 16; i++)
     {
@@ -1218,22 +1297,28 @@ fn AirCmd* AirLower.array_lit(AirLower* lr, Node* n, AirCns* k)
         if (c == null) continue;
         if (is_value_node(c))
         {
-            vars[vc] = lr.prd(c);
+            vars[vc] = lr.prd(c); is_comp[vc] = false;
         }
         else
         {
             char* xv = lr.fresh_x();
             vars[vc] = air_ir::air_mk_var(lr.arena, xv);
-            AirCmd* ev = lr.expr_to_cns(c,
-                air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-            binds = binds == null ? ev : air_ir::air_mk_seq(lr.arena, binds, ev);
+            xnames[vc] = xv; is_comp[vc] = true;
         }
         vc = vc + 1;
     }
     lr.total_prd++;
     AirPrd* arr = air_ir::air_mk_array(lr.arena, &vars[0], vc);
-    AirCmd* fin = lr.cut(arr, k);
-    AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
+    AirCmd* out = lr.cut(arr, k);
+    long i = (long)vc - 1;
+    while (i >= 0)
+    {
+        if (is_comp[(usz)i]) {
+            out = lr.expr_to_cns(n.children[(usz)i],
+                air_ir::air_mk_comu_cns(lr.arena, xnames[(usz)i], out));
+        }
+        i = i - 1;
+    }
     lr.scope.leave();
     return out;
 }
@@ -1250,7 +1335,7 @@ fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
         AirFieldInit* fi = air_ir::air_new_AirFieldInit(lr.arena);
         if (c.kind == Nk.N_EXPR_FIELD_INIT)
         {
-            char* fnm = node_text(lr, c);
+            char* fnm = node_text(c, lr.it);
             if (fnm == null) fnm = (char*)"f";
             fi.name = lr.dup(fnm);
             Node* val = c.child_count > 0 ? c.children[0] : null;
@@ -1316,82 +1401,105 @@ fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
 
 fn AirCmd* AirLower.call(AirLower* lr, Node* callee, Node** args, usz ac, AirCns* k)
 {
-    AirPrd*[16] avars; usz vc = 0;
-    AirCmd* binds = null;
     lr.scope.enter();
-    AirPrd* callee_v;
-    if (is_value_node(callee))
-    {
-        callee_v = lr.prd(callee);
-    }
-    else
-    {
-        char* cv = lr.fresh_x();
-        callee_v = air_ir::air_mk_var(lr.arena, cv);
-        AirCmd* ec = lr.expr_to_cns(callee,
-            air_ir::air_mk_comu_cns(lr.arena, cv, lr.nop()));
-        binds = ec;
-    }
+    // First snapshot: collect AirPrd slots for each arg (placeholders for
+    // non-value args), build the innermost <callee_var|call(slots; k)>, then
+    // wrap each compound subexpression right-to-left in μ̃x.<subexpr-code; ...>.
+    AirPrd*[16] avars;
+    char*[16]  anames;     // fresh var names for non-value args (index matches args)
+    bool[16]   is_comp;
+    usz vc = 0;
     for (usz i = 0; i < ac && i < 16; i++)
     {
         Node* a = args[i];
-        if (a == null) { avars[vc] = lr.mod.p_unit; }
-        else if (is_value_node(a)) { avars[vc] = lr.prd(a); }
+        if (a == null) { avars[vc] = lr.mod.p_unit; is_comp[vc] = false; }
+        else if (is_value_node(a)) { avars[vc] = lr.prd(a); is_comp[vc] = false; }
         else
         {
             char* xv = lr.fresh_x();
             avars[vc] = air_ir::air_mk_var(lr.arena, xv);
-            AirCmd* ea = lr.expr_to_cns(a,
-                air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-            binds = binds == null ? ea : air_ir::air_mk_seq(lr.arena, binds, ea);
+            anames[vc] = xv;
+            is_comp[vc] = true;
         }
         vc = vc + 1;
     }
     lr.total_cns++;
     AirCns* call_k = air_ir::air_mk_call(lr.arena, &avars[0], vc, k);
-    AirCmd* fin = lr.cut(callee_v, call_k);
-    AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
+    AirCmd* out;
+    AirPrd* cv_v;
+    if (is_value_node(callee))
+    {
+        cv_v = lr.prd(callee);
+        out = lr.cut(cv_v, call_k);
+    }
+    else
+    {
+        char* cx = lr.fresh_x();
+        cv_v = air_ir::air_mk_var(lr.arena, cx);
+        out = lr.cut(cv_v, call_k);
+    }
+    // Wrap args right-to-left.
+    long i = (long)vc - 1;
+    while (i >= 0)
+    {
+        if (is_comp[(usz)i])
+        {
+            out = lr.expr_to_cns(args[(usz)i],
+                air_ir::air_mk_comu_cns(lr.arena, anames[(usz)i], out));
+        }
+        i = i - 1;
+    }
+    // Wrap callee last (outermost) if compound.
+    if (!is_value_node(callee))
+    {
+        // cx is the name we used for callee placeholder
+        // (it was the last fresh_x, but we didn't capture it — get it from cv_v.name).
+        out = lr.expr_to_cns(callee,
+            air_ir::air_mk_comu_cns(lr.arena, cv_v.name, out));
+    }
     lr.scope.leave();
     return out;
 }
 
 fn AirCmd* AirLower.method_generic(AirLower* lr, Node* recv, char* mname, Node** args, usz ac, AirCns* k)
 {
-    AirPrd* rv; AirCmd* binds = null;
     lr.scope.enter();
-    if (is_value_node(recv))
-    {
-        rv = lr.prd(recv);
-    }
-    else
-    {
-        char* rv2 = lr.fresh_x();
-        rv = air_ir::air_mk_var(lr.arena, rv2);
-        binds = lr.expr_to_cns(recv,
-            air_ir::air_mk_comu_cns(lr.arena, rv2, lr.nop()));
-    }
-    AirPrd*[16] avars; usz vc = 0;
+    AirPrd*[16] avars; char*[16] anames; bool[16] is_comp; usz vc = 0;
     for (usz i = 0; i < ac && i < 16; i++)
     {
         Node* a = args[i];
-        if (a == null) { avars[vc] = lr.mod.p_unit; }
-        else if (is_value_node(a)) { avars[vc] = lr.prd(a); }
-        else
-        {
-            char* xv = lr.fresh_x();
-            avars[vc] = air_ir::air_mk_var(lr.arena, xv);
-            AirCmd* ea = lr.expr_to_cns(a,
-                air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-            binds = binds == null ? ea : air_ir::air_mk_seq(lr.arena, binds, ea);
-        }
+        if (a == null) { avars[vc] = lr.mod.p_unit; is_comp[vc] = false; }
+        else if (is_value_node(a)) { avars[vc] = lr.prd(a); is_comp[vc] = false; }
+        else { char*xv=lr.fresh_x(); avars[vc]=air_ir::air_mk_var(lr.arena,xv); anames[vc]=xv; is_comp[vc]=true; }
         vc = vc + 1;
     }
-    lr.total_cns++;
     AirCns* args_k = air_ir::air_mk_call(lr.arena, &avars[0], vc, k);
-    lr.total_cns++;
     AirCns* proj = air_ir::air_mk_field_cns(lr.arena, lr.dup(mname), args_k);
-    AirCmd* fin = lr.cut(rv, proj);
-    AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
+    AirPrd* rv_v; AirCmd* out;
+    if (is_value_node(recv))
+    {
+        rv_v = lr.prd(recv);
+        out = lr.cut(rv_v, proj);
+    }
+    else
+    {
+        char* rx = lr.fresh_x();
+        rv_v = air_ir::air_mk_var(lr.arena, rx);
+        out = lr.cut(rv_v, proj);
+    }
+    long i = (long)vc - 1;
+    while (i >= 0)
+    {
+        if (is_comp[(usz)i]) {
+            out = lr.expr_to_cns(args[(usz)i],
+                air_ir::air_mk_comu_cns(lr.arena, anames[(usz)i], out));
+        }
+        i = i - 1;
+    }
+    if (!is_value_node(recv)) {
+        out = lr.expr_to_cns(recv,
+            air_ir::air_mk_comu_cns(lr.arena, rv_v.name, out));
+    }
     lr.scope.leave();
     return out;
 }
@@ -1399,7 +1507,7 @@ fn AirCmd* AirLower.method_generic(AirLower* lr, Node* recv, char* mname, Node**
 fn AirCmd* AirLower.field_acc(AirLower* lr, Node* n, AirCns* k)
 {
     if (n.child_count < 1) return lr.cut(lr.mod.p_unit, k);
-    char* f = node_text(lr, n);
+    char* f = node_text(n, lr.it);
     if (f == null) f = (char*)"f";
     lr.total_cns++;
     AirCns* proj = air_ir::air_mk_field_cns(lr.arena, lr.dup(f), k);
@@ -1409,37 +1517,53 @@ fn AirCmd* AirLower.field_acc(AirLower* lr, Node* n, AirCns* k)
 fn AirCmd* AirLower.index_acc(AirLower* lr, Node* n, AirCns* k)
 {
     if (n.child_count < 2) return lr.cut(lr.mod.p_unit, k);
-    AirPrd* ov; AirPrd* iv; AirCmd* binds = null;
     lr.scope.enter();
-    if (is_value_node(n.children[0]))
-    {
-        ov = lr.prd(n.children[0]);
-    }
-    else
-    {
-        char* xv = lr.fresh_x();
-        ov = air_ir::air_mk_var(lr.arena, xv);
-        binds = lr.expr_to_cns(n.children[0],
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-    }
+    AirPrd* ov_p; AirPrd* iv_p;
+    char* ov_name = null; char* iv_name = null;
+    bool ov_comp = false; bool iv_comp = false;
     if (is_value_node(n.children[1]))
     {
-        iv = lr.prd(n.children[1]);
+        iv_p = lr.prd(n.children[1]);
     }
     else
     {
-        char* xv = lr.fresh_x();
-        iv = air_ir::air_mk_var(lr.arena, xv);
-        AirCmd* ei = lr.expr_to_cns(n.children[1],
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-        binds = binds == null ? ei : air_ir::air_mk_seq(lr.arena, binds, ei);
+        iv_name = lr.fresh_x();
+        iv_p = air_ir::air_mk_var(lr.arena, iv_name);
+        iv_comp = true;
     }
-    lr.total_cns++;
-    AirCns* ik = air_ir::air_mk_index(lr.arena, iv, k);
-    AirCmd* fin = lr.cut(ov, ik);
-    AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
+    AirCns* ik = air_ir::air_mk_index(lr.arena, iv_p, k);
+    AirCmd* out;
+    if (is_value_node(n.children[0]))
+    {
+        ov_p = lr.prd(n.children[0]);
+        out = lr.cut(ov_p, ik);
+    }
+    else
+    {
+        ov_name = lr.fresh_x();
+        ov_p = air_ir::air_mk_var(lr.arena, ov_name);
+        out = lr.cut(ov_p, ik);
+        ov_comp = true;
+    }
+    if (iv_comp) { out = lr.expr_to_cns(n.children[1],
+        air_ir::air_mk_comu_cns(lr.arena, iv_name, out)); }
+    if (ov_comp) { out = lr.expr_to_cns(n.children[0],
+        air_ir::air_mk_comu_cns(lr.arena, ov_name, out)); }
     lr.scope.leave();
     return out;
+}
+
+// bind_x_then — allocate a fresh μ̃-bound producer name xv, build the
+// consumer μ̃xv.then_body, then evaluate n into that consumer. This is
+// the primitive used to thread compound subexpressions into an outer
+// computation. ALWAYS use this instead of lr.nop() as the body of a
+// comu_cns when that comu wraps a non-value subexpression — lr.nop()
+// drops the continuation.
+fn AirCmd* AirLower.bind_x_then(AirLower* lr, Node* n, char** xv_out, AirCmd* then_body)
+{
+    char* xv = lr.fresh_x();
+    if (xv_out != null) *xv_out = xv;
+    return lr.expr_to_cns(n, air_ir::air_mk_comu_cns(lr.arena, xv, then_body));
 }
 
 // ── Operators ──────────────────────────────────────────────────────────
@@ -1459,85 +1583,76 @@ fn AirCmd* AirLower.binop(AirLower* lr, Node* n, AirCns* k)
     if ((Tk)op == Tk.TOKEN_AMPAMP) return lr.shortcircuit_and(n, k);
     if ((Tk)op == Tk.TOKEN_PIPEPIPE) return lr.shortcircuit_or(n, k);
     AirBinop b = token_to_binop(op);
-    AirPrd* l; AirPrd* r; AirCmd* binds = null;
     lr.scope.enter();
-    if (is_value_node(n.children[0]))
-    {
-        l = lr.prd(n.children[0]);
-    }
-    else
-    {
-        char* xv = lr.fresh_x();
-        l = air_ir::air_mk_var(lr.arena, xv);
-        binds = lr.expr_to_cns(n.children[0],
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-    }
-    if (is_value_node(n.children[1]))
-    {
-        r = lr.prd(n.children[1]);
-    }
-    else
-    {
-        char* xv = lr.fresh_x();
-        r = air_ir::air_mk_var(lr.arena, xv);
-        AirCmd* er = lr.expr_to_cns(n.children[1],
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-        binds = binds == null ? er : air_ir::air_mk_seq(lr.arena, binds, er);
-    }
+    AirPrd* lv_p; AirPrd* rv_p;
+    char* lx_n = null; char* rx_n = null;
+    bool lv_comp = false; bool rv_comp = false;
+    // RHS
+    if (is_value_node(n.children[1])) { rv_p = lr.prd(n.children[1]); }
+    else { rx_n = lr.fresh_x(); rv_p = air_ir::air_mk_var(lr.arena, rx_n); rv_comp = true; }
+    AirCmd* out;
+    // LHS
+    if (is_value_node(n.children[0])) { lv_p = lr.prd(n.children[0]); }
+    else { lx_n = lr.fresh_x(); lv_p = air_ir::air_mk_var(lr.arena, lx_n); lv_comp = true; }
     lr.total_prd++;
-    AirPrd* bp = air_ir::air_mk_binop(lr.arena, b, l, r);
-    AirCmd* fin = lr.cut(bp, k);
-    AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
+    AirPrd* bp = air_ir::air_mk_binop(lr.arena, b, lv_p, rv_p);
+    out = lr.cut(bp, k);
+    if (rv_comp) { out = lr.expr_to_cns(n.children[1],
+        air_ir::air_mk_comu_cns(lr.arena, rx_n, out)); }
+    if (lv_comp) { out = lr.expr_to_cns(n.children[0],
+        air_ir::air_mk_comu_cns(lr.arena, lx_n, out)); }
     lr.scope.leave();
     return out;
 }
 
 fn AirCmd* AirLower.shortcircuit_and(AirLower* lr, Node* n, AirCns* k)
 {
-    // l && r  ≡  if l then r else false
     if (n.child_count < 2) return lr.cut(lr.mod.p_false, k);
-    AirPrd* ap; AirCmd* binds = null;
     lr.scope.enter();
+    AirCmd* els = lr.cut(lr.mod.p_false, k);
+    AirCmd* thn = lr.expr_to_cns(n.children[1], k);
+    AirCmd* iff = air_ir::air_mk_if(lr.arena, lr.mod.p_unit, thn, els);
+    AirCmd* out;
     if (is_value_node(n.children[0]))
     {
-        ap = lr.prd(n.children[0]);
+        // iff needs real scrutinee; rebuild with prd:
+        iff = air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), thn, els);
+        out = iff;
     }
     else
     {
-        char* xv = lr.fresh_x();
-        ap = air_ir::air_mk_var(lr.arena, xv);
-        binds = lr.expr_to_cns(n.children[0],
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
+        char* ax = lr.fresh_x();
+        AirPrd* ap = air_ir::air_mk_var(lr.arena, ax);
+        iff = air_ir::air_mk_if(lr.arena, ap, thn, els);
+        out = lr.expr_to_cns(n.children[0],
+            air_ir::air_mk_comu_cns(lr.arena, ax, iff));
     }
-    AirCmd* thn = lr.expr_to_cns(n.children[1], k);
-    AirCmd* els = lr.cut(lr.mod.p_false, k);
-    AirCmd* iff = air_ir::air_mk_if(lr.arena, ap, thn, els);
     lr.scope.leave();
-    return binds == null ? iff : air_ir::air_mk_seq(lr.arena, binds, iff);
+    return out;
 }
 
 fn AirCmd* AirLower.shortcircuit_or(AirLower* lr, Node* n, AirCns* k)
 {
-    // l || r  ≡  if l then true else r
     if (n.child_count < 2) return lr.cut(lr.mod.p_true, k);
-    AirPrd* ap; AirCmd* binds = null;
     lr.scope.enter();
+    AirCmd* thn = lr.cut(lr.mod.p_true, k);
+    AirCmd* els = lr.expr_to_cns(n.children[1], k);
+    AirCmd* out;
     if (is_value_node(n.children[0]))
     {
-        ap = lr.prd(n.children[0]);
+        AirCmd* iff = air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), thn, els);
+        out = iff;
     }
     else
     {
-        char* xv = lr.fresh_x();
-        ap = air_ir::air_mk_var(lr.arena, xv);
-        binds = lr.expr_to_cns(n.children[0],
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
+        char* ax = lr.fresh_x();
+        AirPrd* ap = air_ir::air_mk_var(lr.arena, ax);
+        AirCmd* iff = air_ir::air_mk_if(lr.arena, ap, thn, els);
+        out = lr.expr_to_cns(n.children[0],
+            air_ir::air_mk_comu_cns(lr.arena, ax, iff));
     }
-    AirCmd* thn = lr.cut(lr.mod.p_true, k);
-    AirCmd* els = lr.expr_to_cns(n.children[1], k);
-    AirCmd* iff = air_ir::air_mk_if(lr.arena, ap, thn, els);
     lr.scope.leave();
-    return binds == null ? iff : air_ir::air_mk_seq(lr.arena, binds, iff);
+    return out;
 }
 
 fn AirCmd* AirLower.unop(AirLower* lr, Node* n, AirCns* k)
@@ -1554,35 +1669,45 @@ fn AirCmd* AirLower.unop(AirLower* lr, Node* n, AirCns* k)
         case TOKEN_AMP:   u = AUN_ADDR; break;
         default: u = AUN_NEG;
     }
-    AirPrd* v; AirCmd* binds = null;
     lr.scope.enter();
-    if (is_value_node(n.children[0]))
-    {
-        v = lr.prd(n.children[0]);
-    }
-    else
-    {
-        char* xv = lr.fresh_x();
-        v = air_ir::air_mk_var(lr.arena, xv);
-        binds = lr.expr_to_cns(n.children[0],
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
-    }
-    AirCmd* fin;
+    AirCmd* out;
     if (u == AUN_DEREF)
     {
-        // Deref is a consumer: < v | deref·k >
-        AirCns* dk = air_ir::air_new_AirCns(lr.arena);
-        dk.tag = ACNS_DEREF; dk.tail = k;
-        lr.total_cns++;
-        fin = lr.cut(v, dk);
+        if (is_value_node(n.children[0]))
+        {
+            AirCns* dk = air_ir::air_new_AirCns(lr.arena);
+            dk.tag = ACNS_DEREF; dk.tail = k;
+            lr.total_cns++;
+            out = lr.cut(lr.prd(n.children[0]), dk);
+        }
+        else
+        {
+            char* vx = lr.fresh_x();
+            AirPrd* vp = air_ir::air_mk_var(lr.arena, vx);
+            AirCns* dk = air_ir::air_new_AirCns(lr.arena);
+            dk.tag = ACNS_DEREF; dk.tail = k;
+            lr.total_cns++;
+            AirCmd* fin = lr.cut(vp, dk);
+            out = lr.expr_to_cns(n.children[0],
+                air_ir::air_mk_comu_cns(lr.arena, vx, fin));
+        }
+    }
+    else if (is_value_node(n.children[0]))
+    {
+        lr.total_prd++;
+        AirPrd* up = air_ir::air_mk_unop(lr.arena, u, lr.prd(n.children[0]));
+        out = lr.cut(up, k);
     }
     else
     {
+        char* vx = lr.fresh_x();
+        AirPrd* vp = air_ir::air_mk_var(lr.arena, vx);
         lr.total_prd++;
-        AirPrd* up = air_ir::air_mk_unop(lr.arena, u, v);
-        fin = lr.cut(up, k);
+        AirPrd* up = air_ir::air_mk_unop(lr.arena, u, vp);
+        AirCmd* fin = lr.cut(up, k);
+        out = lr.expr_to_cns(n.children[0],
+            air_ir::air_mk_comu_cns(lr.arena, vx, fin));
     }
-    AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
     lr.scope.leave();
     return out;
 }
@@ -1672,7 +1797,7 @@ fn AirCmd* AirLower.match_(AirLower* lr, Node* n, AirCns* k)
                 }
                 else
                 {
-                    cb = lr.cmd_cns(arm.children[j], k);
+                    cb = lr.cmd_to_cns(arm.children[j], k);
                 }
                 body = body == null ? cb : air_ir::air_mk_seq(lr.arena, body, cb);
             }
@@ -1727,10 +1852,10 @@ fn AirCmd* AirLower.loop_(AirLower* lr, Node* n, AirCns* k)
     else
     {
         lr.scope.enter();
-        char* ignore = lr.fresh_x();
-        AirCns* drop_k = air_ir::air_mk_comu_cns(lr.arena, ignore,
-            air_ir::air_mk_jump0(lr.arena, cont));
-        body_cmd = lr.expr_to_cns(body, drop_k);
+        char* after_lbl = lr.fresh_k();
+        AirCmd* body_eval = lr.cmd(body, after_lbl);
+        AirCmd* j = air_ir::air_mk_jump0(lr.arena, cont);
+        body_cmd = air_ir::air_mk_seq(lr.arena, body_eval, j);
         lr.scope.leave();
     }
     AirBranch*[2] bs;
@@ -1782,7 +1907,7 @@ fn AirCmd* AirLower.lambda(AirLower* lr, Node* n, AirCns* k)
             if (c.child_count > 0)
             {
                 Node* pp = c.children[0];
-                pnm = node_text(lr, pp);
+                pnm = node_text(pp, lr.it);
                 if (pnm == null) pnm = (char*)"_";
             }
             if (c.type_ann != null) pty = air_types::air_ty(lr.mod, c.type_ann, lr.it);
@@ -1792,15 +1917,14 @@ fn AirCmd* AirLower.lambda(AirLower* lr, Node* n, AirCns* k)
         }
         else if (c.kind == Nk.N_PAT_IDENT || c.kind == Nk.N_EXPR_IDENT)
         {
-            char* pnm = node_text(lr, c);
+            char* pnm = node_text(c, lr.it);
             if (pnm == null) pnm = (char*)"_";
             char* an = lr.scope.bind_var(pnm, c);
             bv[bc] = air_ir::air_mk_binder(lr.arena, an, lr.mod.t_infer, AMULT_UNR);
             bc = bc + 1;
         }
     }
-    char* ret = lr.scope.bind_covar("%ret", null);
-    lr.scope.push_ret(ret);
+    char* ret = lr.scope.push_ret("%ret");
     AirCmd* body = null;
     for (usz i = 0; i < n.child_count; i++)
     {
@@ -1812,9 +1936,9 @@ fn AirCmd* AirLower.lambda(AirLower* lr, Node* n, AirCns* k)
         break;
     }
     if (body == null) body = lr.cut(lr.mod.p_unit, lr.cns_k(ret));
-    lr.scope.pop_ret();
     lr.total_prd++;
     AirPrd* lam = air_ir::air_mk_lambda(lr.arena, &bv[0], bc, body);
+    lr.scope.pop_ret();
     lr.scope.leave();
     return lr.cut(lam, k);
 }
@@ -1981,7 +2105,7 @@ fn AirCmd* AirLower.perform(AirLower* lr, Node* n, AirCns* k)
         Node* head = n.children[0];
         if (head.kind == Nk.N_EXPR_PATH || head.kind == Nk.N_EXPR_IDENT)
         {
-            op = node_text(lr, head);
+            op = node_text(head, lr.it);
         }
     }
     if (op == null) op = (char*)"op";
@@ -2034,7 +2158,7 @@ fn AirCmd* AirLower.handle(AirLower* lr, Node* n, AirCns* k)
     }
     else
     {
-        comp = lr.cmd_cns(n.children[0], k);
+        comp = lr.cmd_to_cns(n.children[0], k);
     }
     AirBranch*[64] bs; usz bc = 0;
     for (usz i = 1; i < n.child_count && bc < 64; i++)
@@ -2055,7 +2179,7 @@ fn AirCmd* AirLower.handle(AirLower* lr, Node* n, AirCns* k)
             }
             else
             {
-                cb = lr.cmd_cns(arm.children[j], k);
+                cb = lr.cmd_to_cns(arm.children[j], k);
             }
             body = air_ir::air_mk_seq(lr.arena, body, cb);
         }
@@ -2117,25 +2241,83 @@ fn AirDecl* AirLower.decl(AirLower* lr, Node* n)
         case Nk.N_DECL_UNION:
         case Nk.N_DECL_NEWTYPE:
         case Nk.N_DECL_INTERFACE:  return lr.decl_struct(n);
+        case Nk.N_DECL_IMPL:       return null;
         case Nk.N_DECL_ENUM:       return lr.decl_enum(n);
         case Nk.N_DECL_TYPE:       return lr.decl_type(n);
         case Nk.N_DECL_LET:
         case Nk.N_DECL_CONST:
         case Nk.N_DECL_STATIC:     return lr.decl_letconst(n);
         case Nk.N_DECL_EFFECT:     return lr.decl_effect(n);
-        case Nk.N_DECL_IMPL:       return null;  // impls are compile-time dict tables
+        case Nk.N_USE:
+        {
+            // For `use foo.bar.baz` the sptr/slen covers the full dotted path
+            // while children are path components. Prefer sptr when available
+            // because node_text() would otherwise only return the first ident.
+            char* pth = null;
+            if (n.p.sptr != null && n.p.slen > 0)
+            {
+                pth = lr.arena.dup(n.p.sptr, (usz)n.p.slen);
+            }
+            else
+            {
+                pth = node_text(n, lr.it);
+            }
+            if (pth == null) pth = lr.dup((char*)"?_");
+            bool glob = (n.flags & 1) != 0;
+            char* als = null;
+            for (usz i = 0; i < n.child_count; i++)
+            {
+                Node* c = n.children[i];
+                if (c == null) continue;
+                if (c.kind == Nk.N_PAT_IDENT)
+                {
+                    als = node_text(c, lr.it);
+                    if (als != null)
+                    {
+                        als = lr.dup(als);
+                        break;
+                    }
+                }
+            }
+            AirDecl* d = air_ir::air_mk_import(lr.arena, lr.dup(pth), als, glob);
+            lr.total_decl++;
+            return d;
+        }
+        case Nk.N_MODULE:
+        {
+            char* nm = node_text(n, lr.it);
+            if (nm == null) nm = (char*)"M";
+            AirDecl* d = air_ir::air_mk_module_decl(lr.arena, lr.dup(nm));
+            lr.total_decl++;
+            return d;
+        }
         default: return null;
     }
 }
 
 fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
 {
-    char* nm = node_text(lr, n);
+    char* nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"_fn";
     char* nm2 = lr.dup(nm);
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DEF, nm2);
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
-    d.ret_ty = air_types::air_ty(lr.mod, n.type_ann != null ? n.type_ann : n.type_slot, lr.it);
+    // Return type: if the fn uses clause syntax (has N_CLAUSE children) the
+    // parser attaches an N_TY_FN covering the entire clause as type_ann, so we
+    // force t_infer and let PEAR infer the real arrow type. Otherwise trust
+    // an explicit N_TY_* annotation.
+    AirTyp* rty = lr.mod.t_infer;
+    bool has_clauses = false;
+    for (usz k2 = 0; k2 < n.child_count; k2++)
+    {
+        if (n.children[k2] != null && n.children[k2].kind == Nk.N_CLAUSE)
+        { has_clauses = true; break; }
+    }
+    if (!has_clauses && n.type_ann != null && pfront_core::is_type(n.type_ann.kind))
+    {
+        rty = air_types::air_ty(lr.mod, n.type_ann, lr.it);
+    }
+    d.ret_ty = rty;
     lr.scope.enter();
     for (usz i = 0; i < n.child_count; i++)
     {
@@ -2143,7 +2325,7 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
         if (c == null) continue;
         if (c.kind == Nk.N_DECL_TYPEPARAM)
         {
-            char* tn = node_text(lr, c);
+            char* tn = node_text(c, lr.it);
             if (tn == null) tn = (char*)"T";
             char* ta = lr.scope.bind_var(tn, c);
             AirBinder* tb = air_ir::air_mk_binder(lr.arena, ta, lr.mod.t_infer, AMULT_UNR);
@@ -2161,24 +2343,60 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
             if (c.child_count > 0)
             {
                 Node* pp = c.children[0];
-                pnm = node_text(lr, pp);
+                pnm = node_text(pp, lr.it);
                 if (pnm == null) pnm = (char*)"_";
             }
-            if (c.type_ann != null) pty = air_types::air_ty(lr.mod, c.type_ann, lr.it);
+            if (c.type_ann != null) { pty = air_types::air_ty(lr.mod, c.type_ann, lr.it); }
+            else if (c.type_slot != null) { pty = air_types::air_ty(lr.mod, c.type_slot, lr.it); }
             char* an = lr.scope.bind_var(pnm, c);
             AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
             d.add_param(pb);
         }
+        else if (c.kind == Nk.N_CLAUSE)
+        {
+            // Gather binders from the FIRST clause only (single-clause fns
+            // defined via clause syntax carry their params as patterns here).
+            // Multi-clause fns use pattern matching — parameters are still
+            // registered from the first clause so call-sites have arity info.
+            if (d.param_count == 0)
+            {
+                for (usz j = 0; j < c.child_count; j++)
+                {
+                    Node* cp = c.children[j];
+                    if (cp == null) continue;
+                    if (!pfront_core::is_pattern(cp.kind)) continue;
+                    char* pnm; AirTyp* pty = lr.mod.t_infer;
+                    bool is_thunk_wild = (cp.kind == Nk.N_PAT_WILDCARD)
+                        && (c.child_count == 1);
+                    if (is_thunk_wild) continue;
+                    if (cp.kind == Nk.N_PAT_WILDCARD) { pnm = (char*)"_"; }
+                    else
+                    {
+                        pnm = node_text(cp, lr.it);
+                        if (pnm == null) pnm = (char*)"_";
+                    }
+                    // Don't use cp.type_ann/cp.type_slot for clause patterns:
+                    // the parser frequently attaches the FULL return-type clause
+                    // text (e.g. "-> i64 | n -> ...") to pattern type annotations
+                    // which would leak source.  We leave pty as t_infer.
+                    char* an = lr.scope.bind_var(pnm, cp);
+                    AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
+                    d.add_param(pb);
+                }
+            }
+        }
     }
-    char* ret = lr.scope.bind_covar("%ret", n);
-    lr.scope.push_ret(ret);
+    char* ret = lr.scope.push_ret("%ret");
+    // Build body: prefer single BLOCK child; otherwise walk N_CLAUSEs as match,
+    // then walk expr children after the clauses; if nothing, emit <()|%ret>.
     AirCmd* body = null;
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* c = n.children[i];
         if (c == null) continue;
-        if (c.kind == Nk.N_DECL_PARAM || c.kind == Nk.N_DECL_TYPEPARAM) continue;
-        if (c.kind == Nk.N_PAT_IDENT || c.kind == Nk.N_TY_NAME) continue;
+        if (c.kind == Nk.N_DECL_PARAM || c.kind == Nk.N_DECL_TYPEPARAM
+            || c.kind == Nk.N_PAT_IDENT || c.kind == Nk.N_TY_NAME) continue;
+        if (c.kind == Nk.N_CLAUSE) continue; // handled below
         AirCmd* cm;
         bool is_last = true;
         for (usz j = i + 1; j < n.child_count; j++)
@@ -2186,7 +2404,8 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
             Node* c2 = n.children[j];
             if (c2 == null) continue;
             if (c2.kind == Nk.N_DECL_PARAM || c2.kind == Nk.N_DECL_TYPEPARAM
-             || c2.kind == Nk.N_PAT_IDENT || c2.kind == Nk.N_TY_NAME) continue;
+             || c2.kind == Nk.N_PAT_IDENT || c2.kind == Nk.N_TY_NAME
+             || c2.kind == Nk.N_CLAUSE) continue;
             is_last = false;
             break;
         }
@@ -2194,16 +2413,101 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
         {
             cm = lr.expr_to_cns(c, lr.cns_k(ret));
         }
+        else if (c.kind == Nk.N_BLOCK || c.kind == Nk.N_STMT_EXPR)
+        {
+            cm = lr.cmd(c, ret);
+        }
         else
         {
             cm = lr.cmd(c, ret);
         }
-        body = body == null ? cm : air_ir::air_mk_seq(lr.arena, body, cm);
+        body = body == null ? cm : seq_cmds(lr, body, cm);
+    }
+    // Multi-clause: if any N_CLAUSE children exist, build a match on the
+    // parameter (clause-syntax functions receive their argument via pattern
+    // matching). When param_count is 0 we match against unit.
+    if (body == null)
+    {
+        usz ccnt = 0;
+        for (usz i = 0; i < n.child_count; i++)
+        {
+            if (n.children[i] != null && n.children[i].kind == Nk.N_CLAUSE) ccnt++;
+        }
+        if (ccnt > 0)
+        {
+            AirBranch*[64] bs; usz bc = 0;
+            AirPrd* scr;
+            if (d.param_count >= 1)
+            {
+                char* arg0 = d.params[0].name;
+                scr = air_ir::air_mk_var(lr.arena, arg0);
+            }
+            else
+            {
+                scr = lr.mod.p_unit;
+            }
+            for (usz i = 0; i < n.child_count; i++)
+            {
+                Node* cl = n.children[i];
+                if (cl == null || cl.kind != Nk.N_CLAUSE) continue;
+                AirPat*[16] ps; usz pc = 0;
+                Node* body_n = null;
+                for (usz j = 0; j < cl.child_count; j++)
+                {
+                    Node* cp = cl.children[j];
+                    if (cp == null) continue;
+                    if (pfront_core::is_pattern(cp.kind))
+                    {
+                        AirPat* pp = lr.pat(cp);
+                        if (pp != null && pc < 16) { ps[pc] = pp; pc++; }
+                    }
+                    else if (pfront_core::is_expr(cp.kind) || cp.kind == Nk.N_BLOCK
+                             || cp.kind == Nk.N_STMT_EXPR)
+                    {
+                        body_n = cp;
+                    }
+                }
+                AirPat* pat;
+                if (pc == 0) { pat = lr.mod.pat_wild; }
+                else if (pc == 1) { pat = ps[0]; }
+                else { pat = air_ir::air_mk_pat_tuple(lr.arena, &ps[0], pc); }
+                lr.scope.enter();
+                AirCmd* bcmd = lr.nop();
+                if (body_n != null)
+                {
+                    if (pfront_core::is_expr(body_n.kind))
+                    {
+                        bcmd = lr.expr_to_cns(body_n, lr.cns_k(ret));
+                    }
+                    else
+                    {
+                        bcmd = lr.cmd(body_n, ret);
+                    }
+                }
+                lr.scope.leave();
+                AirBranch* br = air_ir::air_mk_branch(lr.arena, pat, bcmd);
+                if (bc < 64) { bs[bc] = br; bc++; }
+            }
+            if (bc == 0) { body = lr.cut(lr.mod.p_unit, lr.cns_k(ret)); }
+            else if (bc == 1 && bs[0].pat == lr.mod.pat_wild && scr == lr.mod.p_unit)
+            {
+                // Single `| _ -> expr` with no params: just evaluate expr, no match.
+                body = bs[0].body;
+            }
+            else
+            {
+                body = air_ir::air_mk_match(lr.arena, scr, &bs[0], bc);
+            }
+        }
+        else
+        {
+            body = lr.cut(lr.mod.p_unit, lr.cns_k(ret));
+        }
     }
     if (body == null) body = lr.cut(lr.mod.p_unit, lr.cns_k(ret));
-    lr.scope.pop_ret();
     lr.mutilde++;
     d.def_body = air_ir::air_mk_mutilde(lr.arena, ret, body);
+    lr.scope.pop_ret();
     lr.scope.leave();
     lr.total_decl++;
     return d;
@@ -2211,7 +2515,7 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
 
 fn AirDecl* AirLower.decl_extern(AirLower* lr, Node* n)
 {
-    char* nm = node_text(lr, n);
+    char* nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"extern";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DECLARE, lr.dup(nm));
     d.is_extern = true;
@@ -2228,7 +2532,7 @@ fn AirDecl* AirLower.decl_extern(AirLower* lr, Node* n)
             if (c.child_count > 0)
             {
                 Node* pp = c.children[0];
-                pnm = node_text(lr, pp);
+                pnm = node_text(pp, lr.it);
                 if (pnm == null) pnm = (char*)"_";
             }
             AirBinder* pb = air_ir::air_mk_binder(lr.arena, lr.dup(pnm), ty, AMULT_UNR);
@@ -2241,7 +2545,7 @@ fn AirDecl* AirLower.decl_extern(AirLower* lr, Node* n)
 
 fn AirDecl* AirLower.decl_struct(AirLower* lr, Node* n)
 {
-    char* nm = node_text(lr, n);
+    char* nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"S";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_CODATA, lr.dup(nm));
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
@@ -2250,7 +2554,7 @@ fn AirDecl* AirLower.decl_struct(AirLower* lr, Node* n)
         Node* f = n.children[i];
         if (f == null) continue;
         if (f.kind != Nk.N_DECL_FIELD) continue;
-        char* fnm = node_text(lr, f);
+        char* fnm = node_text(f, lr.it);
         if (fnm == null) fnm = (char*)"f";
         AirDtorDecl* dd = air_ir::air_mk_dtor_decl(lr.arena, lr.dup(fnm));
         AirTyp* fty = air_types::air_ty(lr.mod, f.type_ann != null ? f.type_ann : f.type_slot, lr.it);
@@ -2263,7 +2567,7 @@ fn AirDecl* AirLower.decl_struct(AirLower* lr, Node* n)
 
 fn AirDecl* AirLower.decl_enum(AirLower* lr, Node* n)
 {
-    char* nm = node_text(lr, n);
+    char* nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"E";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DATA, lr.dup(nm));
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
@@ -2272,7 +2576,7 @@ fn AirDecl* AirLower.decl_enum(AirLower* lr, Node* n)
         Node* v = n.children[i];
         if (v == null) continue;
         if (v.kind != Nk.N_DECL_VARIANT) continue;
-        char* vnm = node_text(lr, v);
+        char* vnm = node_text(v, lr.it);
         if (vnm == null) vnm = (char*)"V";
         AirCtorDecl* ct = air_ir::air_mk_ctor_decl(lr.arena, lr.dup(vnm));
         for (usz j = 0; j < v.child_count; j++)
@@ -2301,7 +2605,7 @@ fn AirDecl* AirLower.decl_enum(AirLower* lr, Node* n)
 
 fn AirDecl* AirLower.decl_type(AirLower* lr, Node* n)
 {
-    char* nm = node_text(lr, n);
+    char* nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"T";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DECLARE, lr.dup(nm));
     d.ret_ty = lr.mod.t_infer;
@@ -2315,13 +2619,12 @@ fn AirDecl* AirLower.decl_type(AirLower* lr, Node* n)
 
 fn AirDecl* AirLower.decl_letconst(AirLower* lr, Node* n)
 {
-    char* nm = node_text(lr, n);
+    char* nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"_c";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DEF, lr.dup(nm));
     d.ret_ty = air_types::air_ty(lr.mod, n.type_ann != null ? n.type_ann : n.type_slot, lr.it);
     lr.scope.enter();
-    char* ret = lr.scope.bind_covar("%ret", null);
-    lr.scope.push_ret(ret);
+    char* ret = lr.scope.push_ret("%ret");
     AirCmd* body = null;
     for (usz i = 0; i < n.child_count; i++)
     {
@@ -2340,9 +2643,9 @@ fn AirDecl* AirLower.decl_letconst(AirLower* lr, Node* n)
         break;
     }
     if (body == null) body = lr.cut(lr.mod.p_unit, lr.cns_k(ret));
-    lr.scope.pop_ret();
     lr.mutilde++;
     d.def_body = air_ir::air_mk_mutilde(lr.arena, ret, body);
+    lr.scope.pop_ret();
     lr.scope.leave();
     lr.total_decl++;
     return d;
@@ -2350,7 +2653,7 @@ fn AirDecl* AirLower.decl_letconst(AirLower* lr, Node* n)
 
 fn AirDecl* AirLower.decl_effect(AirLower* lr, Node* n)
 {
-    char* nm = node_text(lr, n);
+    char* nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"Eff";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_EFFECT, lr.dup(nm));
     for (usz i = 0; i < n.child_count; i++)
@@ -2358,7 +2661,7 @@ fn AirDecl* AirLower.decl_effect(AirLower* lr, Node* n)
         Node* op = n.children[i];
         if (op == null) continue;
         if (op.kind != Nk.N_DECL_EFFECT_OP) continue;
-        char* onm = node_text(lr, op);
+        char* onm = node_text(op, lr.it);
         if (onm == null) onm = (char*)"op";
         AirTyp* sig = air_types::air_ty(lr.mod, op.type_ann != null ? op.type_ann : op.type_slot, lr.it);
         AirEffectOp* aop = air_ir::air_mk_eff_op(lr.arena, lr.dup(onm), sig);
@@ -2368,157 +2671,118 @@ fn AirDecl* AirLower.decl_effect(AirLower* lr, Node* n)
     return d;
 }
 
-// cmd_cns — run a statement node, ensuring its final value feeds into the
-// consumer k. Terminal statements (return/break/continue/trap/ub) don't need
-// the μα wrapper — we call cmd() with a fresh dummy covar they never reach.
-fn AirCmd* AirLower.cmd_cns(AirLower* lr, Node* n, AirCns* k)
+// ── Top-level driver ─────────────────────────────────────────────────────
+// is_terminal_cmd — does this IR command already transfer control
+// unconditionally (cut to ret, jump, trap, ub, break, continue)? A seq is
+// terminal iff its *first* command is terminal (the rest is dead code).
+fn bool is_terminal_cmd(AirCmd* c)
 {
-    if (n == null) return lr.cut(lr.mod.p_unit, k);
-    switch (n.kind)
+    if (c == null) return false;
+    switch (c.tag)
     {
-        case Nk.N_STMT_RETURN:
-        case Nk.N_STMT_BREAK:
-        case Nk.N_STMT_CONTINUE:
-        case Nk.N_EXPR_TRAP:
-        case Nk.N_EXPR_UB:
-        case Nk.N_EXPR_UNREACHABLE:
-        {
-            char* d = lr.fresh_k();
-            return lr.cmd(n, d);
-        }
-        default: break;
-    }
-    if (pfront_core::is_expr(n.kind)) return lr.expr_to_cns(n, k);
-    return lr.block_expr(n, k);
-}
-
-// block_expr — block used in expression position, feeding the result into
-// an AirCns* continuation (allocates a fresh μα and calls stmts() against it).
-fn AirCmd* AirLower.block_expr(AirLower* lr, Node* n, AirCns* k)
-{
-    if (n == null) return lr.cut(lr.mod.p_unit, k);
-    char* alpha = lr.fresh_k();
-    lr.scope.enter();
-    AirCmd* body = lr.stmts(n, alpha, true);
-    lr.mu++;
-    AirPrd* mu_p = air_ir::air_mk_mu_prd(lr.arena, alpha, body);
-    AirCmd* out = lr.cut(mu_p, k);
-    lr.scope.leave();
-    return out;
-}
-
-// is_terminal_cmd_node — nodes that never return (dead code after them elided).
-fn bool is_terminal_cmd_node(Node* n)
-{
-    if (n == null) return false;
-    switch (n.kind)
-    {
-        case Nk.N_STMT_RETURN:
-        case Nk.N_STMT_BREAK:
-        case Nk.N_STMT_CONTINUE:
-        case Nk.N_EXPR_TRAP:
-        case Nk.N_EXPR_UB:
-        case Nk.N_EXPR_UNREACHABLE:
+        case ACMD_JUMP: case ACMD_TRAP: case ACMD_UB:
+        case ACMD_BREAK: case ACMD_CONTINUE: case ACMD_RET:
             return true;
-        case Nk.N_STMT_EXPR:
-        case Nk.N_BLOCK:
+        case ACMD_CUT:
         {
-            // A block/stmt-expr is terminal if its LAST non-null child is.
-            long last = (long)n.child_count - 1;
-            while (last >= 0 && n.children[(usz)last] == null) last--;
-            if (last < 0) return false;
-            return is_terminal_cmd_node(n.children[(usz)last]);
+            // A cut that targets a covariable starting with "%ret" is a return/terminal cut.
+            if (c.cns != null && c.cns.tag == ACNS_COVAR && c.cns.name != null)
+            {
+                char* s = c.cns.name;
+                if (s[0]=='%' && s[1]=='r' && s[2]=='e' && s[3]=='t') return true;
+            }
+            return false;
         }
+        case ACMD_SEQ:
+            // If the first command in the sequence is terminal the rest is dead.
+            return is_terminal_cmd(c.body);
+        case ACMD_MU:
+            return is_terminal_cmd(c.body);
         default: return false;
     }
-}
-
-// ============================================================================
-// Module-body driver (entry)
-// ============================================================================
-fn void AirLower.walk_decls(AirLower* lr, Node* n)
-{
-    if (n == null) return;
-    for (usz i = 0; i < n.child_count; i++)
-    {
-        Node* c = n.children[i];
-        if (c == null) continue;
-        switch (c.kind)
-        {
-            case Nk.N_MODULE:
-            case Nk.N_PROGRAM:
-            {
-                char* mnm = node_text(lr, c);
-                if (mnm != null && lr.mod.name != null)
-                {
-                    bool is_main = true;
-                    char* p = lr.mod.name;
-                    if (p[0] != 'm' || p[1] != 'a' || p[2] != 'i' || p[3] != 'n' || p[4] != 0) is_main = false;
-                    if (is_main) lr.mod.name = lr.dup(mnm);
-                }
-                lr.walk_decls(c);
-                continue;
-            }
-            case Nk.N_USE:
-            {
-                char* ipath = node_text(lr, c);
-                if (ipath == null) ipath = (char*)"?";
-                char* als = null;
-                bool glob = false;
-                for (usz j = 0; j < c.child_count; j++)
-                {
-                    Node* cc = c.children[j];
-                    if (cc == null) continue;
-                    if (cc.kind == Nk.N_USE_ITEM || cc.kind == Nk.N_MODULE_PATH)
-                    {
-                        char* inm = node_text(lr, cc);
-                        if (inm != null && als == null) als = inm;
-                        for (usz k2 = 0; k2 < cc.child_count; k2++)
-                        {
-                            Node* cck = cc.children[k2];
-                            if (cck == null) continue;
-                            char* tnm = node_text(lr, cck);
-                            if (tnm != null && tnm[0] == '*' && tnm[1] == 0) glob = true;
-                        }
-                    }
-                }
-                AirDecl* imp = air_ir::air_mk_import(lr.arena, lr.dup(ipath),
-                    als != null ? lr.dup(als) : null, glob);
-                lr.mod.add_decl(imp);
-                lr.total_decl++;
-                continue;
-            }
-            case Nk.N_DOC: continue;
-            default: break;
-        }
-        if (pfront_core::is_decl(c.kind))
-        {
-            lr.decl_inner(c);
-        }
-        else
-        {
-            lr.walk_decls(c);
-        }
-    }
-}
-
-fn void AirLower.module_body(AirLower* lr, Node* root)
-{
-    if (root == null) return;
-    lr.walk_decls(root);
 }
 
 fn bool is_nop_cmd(AirCmd* c)
 {
     if (c == null) return true;
-    if (c.tag == ACMD_NOP) return true;
+    if (c.tag == ACMD_CUT
+        && c.prd != null && c.prd.tag == APRD_UNIT
+        && c.cns != null && c.cns.tag == ACNS_COVAR) return true;
     return false;
 }
 
-fn AirCmd* AirLower.seq(AirLower* lr, AirCmd* a, AirCmd* b)
+// seq — build a sequence, dropping nop/terminal dead code.
+fn AirCmd* seq_cmds(AirLower* lr, AirCmd* a, AirCmd* b)
 {
-    if (is_nop_cmd(a)) return b;
-    if (is_nop_cmd(b)) return a;
+    if (a == null || is_nop_cmd(a)) return b;
+    if (b == null || is_nop_cmd(b)) return a;
+    if (is_terminal_cmd(a)) return a; // b is dead
     return air_ir::air_mk_seq(lr.arena, a, b);
 }
 
+// eval_then — evaluate expression n, bind its value to k's top, then run rest.
+// (Used when we need sequencing but don't want to bother with μ̃ binding.)
+fn AirCmd* eval_then(AirLower* lr, Node* n, AirCns* k, AirCmd* rest)
+{
+    AirCmd* c = lr.expr_to_cns(n, k);
+    return seq_cmds(lr, c, rest);
+}
+
+// walk_decls — recursive descent through the post-theory AST, collecting
+// N_MODULE/N_PROGRAM/N_BLOCK/N_STMT_EXPR children. N_MODULEs emit an
+// ADECL_MODULE followed by their contained decls.
+fn void AirLower.walk_decls(AirLower* lr, Node* n)
+{
+    if (n == null) return;
+    switch (n.kind)
+    {
+        case Nk.N_PROGRAM:
+        case Nk.N_BLOCK:
+        case Nk.N_STMT_EXPR:
+        {
+            for (usz i = 0; i < n.child_count; i++)
+            {
+                lr.walk_decls(n.children[i]);
+            }
+            return;
+        }
+        case Nk.N_MODULE:
+        {
+            // Emit the module header decl itself, then its children.
+            AirDecl* md = lr.decl(n);
+            if (md != null) lr.mod.add_decl(md);
+            for (usz i = 0; i < n.child_count; i++)
+            {
+                lr.walk_decls(n.children[i]);
+            }
+            return;
+        }
+        default:
+        {
+            if (pfront_core::is_decl(n.kind) || n.kind == Nk.N_USE)
+            {
+                lr.decl_inner(n);
+            }
+            // Recurse into children — we always walk down so that nested
+            // modules / comptime blocks / use-tree items are found.
+            for (usz i = 0; i < n.child_count; i++)
+            {
+                lr.walk_decls(n.children[i]);
+            }
+            return;
+        }
+    }
+}
+
+// module_body — driver. Sets up the return covariable on the scope and
+// walks the tree; decl_inner takes care of registering each decl into
+// lr.mod. Call this once per AirModule you want populated.
+fn void AirLower.module_body(AirLower* lr, Node* root)
+{
+    lr.scope.enter();
+    // Bind %ret as the top-level return covariable (for top-level exprs
+    // and any accidental free `return` at module scope).
+    (void)lr.scope.bind_covar("%ret", root);
+    lr.walk_decls(root);
+    lr.scope.leave();
+}
