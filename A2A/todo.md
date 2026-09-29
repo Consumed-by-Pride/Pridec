@@ -43,8 +43,12 @@ AIR shows the store is dropped (`let _ = 7;`) and the load is treated as a tuple
 - TM codegen level: switch LLVM_CODEGEN_O0 → O2 once DwarfEHPrepare crash is confirmed gone (it was likely caused by corrupted IR from the alloca bug).
 - Stdlib seed: Option, Result, Vec, String, Iterator, print/println, malloc/free wrappers, sorting, hash.
 
+## Father-of-Pride stack (all REBASED onto z @1893bbe — diffs now show only my changes, nothing of Pear's is reverted)
+Merge in this order, each is a clean fast-forward on the previous: **#2** Makefile → **#3** harness path (plain `z` reads 11/23 only because of the stale `pfront_tests/` path) → **#5** TRS real → **#8** symexe real + narrow/absint fixes (1483 → 96 corpus flow diagnostics) → **#11** NbE real. #9 closed (Pear applied it in v0.8.5). Result on top of z: pfront 135 pass / 5 pre-existing fails, stdlib 260/260, benches 0/200/100 (tak(18,10,4)=5 ×20 = **100**, not 10).
+**IN PROGRESS (Father-of-Pride):** remaining count-only theory passes — theory_eclass, theory_crdt, theory_stratified, theory_quals, theory_irdlssa, theory_mu, theory_hered (audit: 0 diagnostics / 0 mutations each).
+
 ## Audit-sourced files that are "demo / advisory only" (pick any)
-- theory_nbe.c3 — toy SKI reducer with synthetic counters → real NbE over AIR.
+- ~~theory_nbe.c3~~ — **DONE, Father-of-Pride, PR #11**: real NbE over the AST (closures/neutrals, β with fresh binders + capture check, effect-safe arg lets, δ only on β-created redexes, η, dead-lambda sweep). Test 83 + structural check.
 - pfront_vecloop.c3 — classifies VEC_REDUCTION/MAP/SCATTER but "No code is transformed" → emit LLVM loop metadata / parallel access scopes for PEAR.
 - pfront_spillcost.c3 / pfront_regpress.c3 / pfront_codelayout.c3 — LOW priority until PEAR has a real regalloc or does MIR.
 - theory/session, theory/sct, theory/crdt, theory/quals — advanced type-system features, can wait until backend is solid.
