@@ -1,43 +1,11 @@
+pfrontc
 *.o
 *.bc
-*.opt.bc
-*.ll
-*.a
-*.so
-
-# ── Compiler binaries ───────────────────────────────────────────────────
-/pfrontc
-/pride
-/pride_new
-/pear_a1_test
-/pearc
-/pear_a2
-/legacy/pride1/pride
-/obj/
-
-# ── Generated AIR / AST / S-expr outputs ────────────────────────────────
-*.air
-*.ast
-*.sexp
-!/docs/**/*.air
-!/legacy/**/*.air
-
-# ── Editor / tool detritus ──────────────────────────────────────────────
-.understand-anything/
-.vscode/
-.cache/
-redteam/
-__pycache__/
-/tmp/
-tmp/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# ── Build byproducts ────────────────────────────────────────────────────
-build/
-dist/
-pfrontc
-pfrontc
-bench/*_c
+bench/arr[0-9]*
+bench/fib
+bench/sum_to
+bench/tak
+bench/arr1
+bench/arr2
+bench/arr3
+bench/arr4
