@@ -1,0 +1,6 @@
+-- EXIT: 7
+-- Tail-position reference to a local declared before an intervening block:
+--   fn f(n) { let x = n; { let y = 2; } return x; }
+-- Emitted `<()|%ret_2>` (unit) before the fix, so f(7) returned 0.
+fn f(n: i64) -> i64 { let x: i64 = n; { let y: i64 = 2; } return x; }
+fn main(_) -> i64 { return f(7); }

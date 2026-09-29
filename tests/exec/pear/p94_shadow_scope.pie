@@ -1,0 +1,9 @@
+-- EXIT: 12
+-- Block scoping for shadowed names, both directions:
+--   outer() = 1  — `{ let x = 2; }` must NOT leak past the block, so `return x`
+--                  still sees the outer binding (returned 2 before the fix);
+--   inner() = 2  — `return x` INSIDE the block sees the shadowed binding.
+-- outer()*10 + inner() = 12 keeps both in one binary.
+fn outer(_) -> i64 { let x: i64 = 1; { let x: i64 = 2; } return x; }
+fn inner(_) -> i64 { let x: i64 = 1; { let x: i64 = 2; return x; } }
+fn main(_) -> i64 { return outer() * 10 + inner(); }

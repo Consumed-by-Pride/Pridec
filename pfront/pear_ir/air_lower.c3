@@ -862,6 +862,12 @@ fn AirCmd* AirLower.cmd(AirLower* lr, Node* n, char* k)
 // with the final command (either cut-to-k for the tail expr or a nop) and
 // prepend each preceding statement as a SEQ link.  This matches the
 // "continuation is built inside-out" nature of CPS.
+fn bool pclaim_pat_wild(Node* c)
+{
+    if (c == null) return false;
+    return c.kind == Nk.N_PAT_WILDCARD;
+}
+
 fn AirCmd* AirLower.stmts(AirLower* lr, Node* container, char* k, bool tail_is_k)
 {
     if (container == null || container.child_count == 0)
@@ -873,6 +879,35 @@ fn AirCmd* AirLower.stmts(AirLower* lr, Node* container, char* k, bool tail_is_k
     if (last < 0) return lr.cut(lr.mod.p_unit, lr.cns_k(k));
 
     lr.scope.enter();
+
+    // ── Pre-bind this block's locals BEFORE lowering the tail ────────────────
+    // The tail is lowered first (see the backward walk below), so a reference to
+    // a local declared earlier in the same block was looked up before the `let`
+    // that binds it had run. That only appeared to work when the AIR printer's
+    // fallback name happened to match the name the later `bind` chose; add an
+    // intervening block, the names diverge, and the reference silently degraded
+    // to unit — `let x = n; { let y = 2; } return x` returned 0.
+    // Binding the declarations here (and reusing the binding in letlike) makes
+    // the tail's lookups resolve to the real local.
+    for (usz pi = 0; pi < container.child_count; pi++)
+    {
+        Node* ps = container.children[pi];
+        if (ps == null) continue;
+        if (ps.kind != Nk.N_DECL_LET && ps.kind != Nk.N_DECL_CONST
+         && ps.kind != Nk.N_DECL_STATIC) continue;
+        if (lr.scope.lookup_decl(ps) != null) continue;    // already bound
+        char* pnm = node_text(ps, lr.it);
+        if (pnm == null || pnm[0] == 0 || pnm[0] == '_') continue;   // _-names stay wildcards
+        bool has_wildcard = false;
+        for (usz ci = 0; ci < ps.child_count; ci++)
+        {
+            Node* pc = ps.children[ci];
+            if (pc != null && pclaim_pat_wild(pc)) { has_wildcard = true; break; }
+        }
+        if (has_wildcard) continue;
+        lr.scope.bind_var(pnm, ps);
+    }
+
     AirCmd* cur;
     Node* last_n = container.children[(usz)last];
     if (last_n == null)
@@ -947,9 +982,36 @@ fn AirCmd* AirLower.stmts(AirLower* lr, Node* container, char* k, bool tail_is_k
                     air_ir::air_mk_comu_cns(lr.arena, ignore, cur));
                 sc_consumes_cur = true;
             }
+            else if (s.kind == Nk.N_STMT_RETURN || s.kind == Nk.N_STMT_BREAK
+                  || s.kind == Nk.N_STMT_CONTINUE)
+            {
+                // Genuine control transfer: unwind to the enclosing fn / loop.
+                // It does NOT fall through, so the following command stays
+                // reachable only on other paths and is kept by seq_cmds.
+                sc = lr.cmd(s, k);
+            }
             else
             {
-                sc = lr.cmd(s, k);
+                // ── Fall-through statement: continue with `cur`, not with `k` ──
+                // This branch covers statement-position blocks, assignments and
+                // control constructs (if/while/for/match/defer). Passing the
+                // block's ORIGINAL continuation `k` here made the statement jump
+                // past everything that followed it: `{ let y = 2; }` lowered to
+                // `let y = 2; <()|%ret_2>` — a cut to the function's RETURN
+                // covariable, which is_terminal_cmd() then reported as terminal,
+                // so seq_cmds() DROPPED the already-lowered `return x`. Hence
+                //   fn f(n: i64) -> i64 { let x: i64 = n; { let y: i64 = 2; } return x; }
+                // emitted `<()|%ret_2>` in tail position and returned 0.
+                // cmd_to_cns() lowers the statement against a consumer standing
+                // for `cur` (μ̃α.cur), so the rest of the block is threaded
+                // through instead of being discarded.
+                // Lower the statement against a FRESH admin continuation: its
+                // exit cut <()|%kN> becomes a join block and `cur` — sequenced
+                // next — is emitted into that block by the backend. (Passing the
+                // container's own `k` made the statement jump out of the block,
+                // and is_terminal_cmd() then let seq_cmds() drop `cur`.)
+                char* after = lr.fresh_k();
+                sc = lr.cmd(s, after);
             }
             if (sc_consumes_cur)
             {
@@ -1095,7 +1157,11 @@ fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
     }
 
     if (nm == null) nm = (char*)"_let";
-    char* x = lr.scope.bind_var(nm, s);
+    // Reuse the pre-binding made by stmts() for this declaration, if any: the
+    // block tail was already lowered against that name, so binding a second,
+    // differently-renamed local here would leave the tail pointing at the first.
+    char* x = lr.scope.lookup_decl(s);
+    if (x == null) { x = lr.scope.bind_var(nm, s); }
     if (val == null)
     {
         lr.lets++;
@@ -3134,6 +3200,23 @@ fn AirDecl* AirLower.decl_effect(AirLower* lr, Node* n)
 // is_terminal_cmd — does this IR command already transfer control
 // unconditionally (cut to ret, jump, trap, ub, break, continue)? A seq is
 // terminal iff its *first* command is terminal (the rest is dead code).
+// is_admin_join_name — is `nm` a freshly minted administrative continuation
+// ("%k" + digits, the shape AirScope.fresh_k_covar() mints)?
+//
+// The LLVM backend (pear.c3 Codegen.cns, ACNS_COVAR) implements <v|%kN> as a
+// JOIN: it positions the builder at block kN (creating it if this is the first
+// occurrence), emits the branch, and then emits the FOLLOWING commands into
+// that block. So a join cut is not a control transfer out of the current
+// region — the rest of the command stream is its body. Pruning commands after
+// such a cut (as a plain covar cut is pruned) silently deleted live code.
+fn bool is_admin_join_name(char* nm)
+{
+    if (nm == null) return false;
+    if (nm[0] != '%' || nm[1] != 'k') return false;
+    if (nm[2] < '0' || nm[2] > '9') return false;
+    return true;
+}
+
 fn bool is_terminal_cmd(AirCmd* c)
 {
     if (c == null) return false;
@@ -3148,9 +3231,16 @@ fn bool is_terminal_cmd(AirCmd* c)
             // continuation point): %ret, α from a μα, %lbl, etc. This
             // is a direct control transfer; anything after is dead.
             //
+            // EXCEPTION: administrative join covariables %kN — see
+            // is_admin_join_name(). The backend turns those into a block that
+            // the rest of the stream flows into, so following commands are live.
+            //
             // We do NOT look through μ̃/if/match here because those
             // require a deeper analysis that we leave to PEAR passes.
-            if (c.cns != null && c.cns.tag == ACNS_COVAR) return true;
+            if (c.cns != null && c.cns.tag == ACNS_COVAR)
+            {
+                return !is_admin_join_name(c.cns.name);
+            }
             return false;
         }
         case ACMD_SEQ:

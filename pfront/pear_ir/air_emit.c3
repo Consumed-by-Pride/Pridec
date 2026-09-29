@@ -69,6 +69,17 @@ fn bool is_nop_cmd(AirCmd* c)
 
 // Is this a command that unconditionally transfers control (no code after
 // it is reachable)?
+// Administrative join covariables (%kN) are not terminal: the backend emits the
+// commands that follow them into the join block they name. Mirrors
+// air_lower.is_admin_join_name() so the printed AIR keeps live commands.
+fn bool is_admin_join_name_e(char* nm)
+{
+    if (nm == null) return false;
+    if (nm[0] != '%' || nm[1] != 'k') return false;
+    if (nm[2] < '0' || nm[2] > '9') return false;
+    return true;
+}
+
 fn bool is_terminal(AirCmd* c)
 {
     if (c == null) return false;
@@ -79,7 +90,10 @@ fn bool is_terminal(AirCmd* c)
             return true;
         case ACMD_CUT:
         {
-            if (c.cns != null && c.cns.tag == ACNS_COVAR) return true;
+            if (c.cns != null && c.cns.tag == ACNS_COVAR)
+            {
+                return !is_admin_join_name_e(c.cns.name);
+            }
             return false;
         }
         case ACMD_SEQ: return is_terminal(c.body);

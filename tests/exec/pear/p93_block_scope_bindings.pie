@@ -1,0 +1,9 @@
+-- EXIT: 1
+-- A statement-position block must not lose the bindings around it. Before the
+-- fix, `stmts()` lowered the block with the *container's* continuation, which
+-- turned `{ let y = 2; }` into a cut to the function's return covariable; the
+-- real `return x` was then pruned as unreachable and this returned 0.
+-- The tail is also lowered before the preceding `let` is bound, so the binding
+-- pass must pre-bind declarations (see AirLower.stmts) or `return x` resolves
+-- through the AIR printer's name fallback.
+fn main(_) -> i64 { let x: i64 = 1; { let y: i64 = 2; } return x; }

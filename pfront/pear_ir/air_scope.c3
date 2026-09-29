@@ -108,6 +108,21 @@ fn char* AirScope.lookup(AirScope* s, char* src_nm, bool is_covar) {
     }
     return null;
 }
+// Look up a local by the AST declaration node it was bound from. Used by the
+// pre-binding pass in AirLower.stmts: the declaration is bound before the block
+// tail is lowered, and the later `let` statement must reuse that binding rather
+// than create a second one.
+fn char* AirScope.lookup_decl(AirScope* s, PNode* decl) {
+    if (decl == null) return null;
+    long i = (long)s.local_count - 1;
+    while (i >= 0) {
+        AirLocal* loc_ = &s.locals[(usz)i];
+        if (loc_.decl == decl) return loc_.air_name;
+        i--;
+    }
+    return null;
+}
+
 fn char* AirScope.lookup_var(AirScope* s, char* nm) { return s.lookup(nm, false); }
 fn char* AirScope.lookup_covar(AirScope* s, char* nm) { return s.lookup(nm, true); }
 

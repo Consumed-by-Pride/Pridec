@@ -11,7 +11,6 @@
 # See A2A/from_agent3.md for the full diagnosis behind each reason.
 #
 [0-9]*	Legacy corpus (clause-style + syscall I/O). Blocked by: clause-style bodies trap at runtime and drop the return type; syscall(arg...) lowers to a bare 'syscall;' with no arguments (air_lower never fills c.prd/prds). See A2A/from_agent3.md.
-pear/p90_*	Indexed store silently dropped by air_lower (assign_expr has no non-identifier target path) and PEAR never dispatches ACNS_STORE/ACNS_INDEX. Returns 0 instead of 7.
-pear/p91_*	Indexed array write in a loop: store is dropped, so the loop makes no progress and the program hangs (killed by timeout).
-pear/p92_*	Clause-style function body: AIR wraps a single irrefutable clause in a match on the param and drops the '-> i64' return type; the emitted binary traps (SIGTRAP 133).
+pear/p91_*	Indexed array write with a DYNAMIC index (the shape every bench/*_kernel.pie uses): the emitted IR contains a malformed GEP, so LLVM aborts inside EarlyCSE/simplifyGEPInst (DataLayout::getTypeAllocSize) with "Out of bounds memory access." and no binary is produced.
+pear/p92_*	Clause-style body: builds now, but the single irrefutable clause is still wrapped in a match on the parameter and the '-> i64' return type is dropped, so the binary traps (SIGTRAP 133) instead of returning 42. Every stdlib/example/conformance file is clause-style.
 test_*	Legacy corpus (clause-style + syscall I/O). Blocked by: clause-style bodies trap at runtime and drop the return type; syscall(arg...) lowers to a bare 'syscall;' with no arguments (air_lower never fills c.prd/prds). See A2A/from_agent3.md.
