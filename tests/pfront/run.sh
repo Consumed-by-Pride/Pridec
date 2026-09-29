@@ -92,6 +92,7 @@ declare -A EXPECT=(
   [79_trs_scoped]=0           # rewrite rules fire only at `|>`, never elsewhere
   [80_trs_guards]=0           # spec §16: guards, log2 folding, ++, |> and |>*
   [81_trs_confluence]=0       # non-confluence / non-termination are WARNINGS, not errors
+  [82_symexe_paths]=0         # symbolic execution: faults only on feasible paths, with witness
 )
 
 # ---------------------------------------------------------------------------
@@ -1482,6 +1483,44 @@ if [ "${f31:-0}" -ge 1 ] && [ "$f35" = "1" ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (31 fires %s, 35 normalises to n << 1)\n' "trs_fires" "$f31"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s 31 firings=%s 35 shl=%s\n' "trs_fires" "${f31:-0}" "$f35"
+fi
+
+# Symbolic execution + the two sibling flow analyses (narrow, absint) on
+# tests/pfront/82_symexe_paths.pie. Every line below is a TRUTH about that
+# file: what must be said, and — just as important — what must stay silent.
+sx=$("$BIN" tests/pfront/82_symexe_paths.pie -I stdlib -I . 2>&1)
+sx_ok=1
+sx_why=""
+need() { echo "$sx" | grep -q "$1" || { sx_ok=0; sx_why="$sx_why missing[$2]"; }; }
+deny() { echo "$sx" | grep -q "$1" && { sx_ok=0; sx_why="$sx_why noise[$2]"; }; }
+need '82_symexe_paths.pie:15:27: warning\[W4050\].*divisor is 0 when a != 0' "W4050 a%z with witness"
+need '82_symexe_paths.pie:29:5: warning\[W4052\].*when n > 10'                "W4052 assert on path"
+need '82_symexe_paths.pie:8:27: note\[N4051\].*requires x > 5'                "N4051 nested contradiction"
+deny '82_symexe_paths.pie:8:[0-9]*: warning\[W4050\]'                          "W4050 on pruned path"
+deny '82_symexe_paths.pie:22:[0-9]*: warning\[W4050\]'                         "W4050 y/x with x!=0"
+deny '82_symexe_paths.pie:38:[0-9]*: note\[N4051\]'                            "N4051 after break-loop"
+deny '82_symexe_paths.pie:50:[0-9]*: note\[N4051\]'                            "N4051 after rejoin"
+deny '82_symexe_paths.pie:8:10: warning\[W4120\]'                              "narrow: then-facts leaked into else"
+deny '82_symexe_paths.pie:42:[0-9]*: warning\[W4120\]'                         "narrow: while exit ignores break"
+deny '82_symexe_paths.pie:50:[0-9]*: warning\[W4120\]'                         "narrow: else sees then"
+deny '82_symexe_paths.pie:15:17: warning\[W4130\]'                             "absint: 10/a after a==0 return"
+if [ $sx_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (W4050/W4052/N4051 with witnesses; no noise on pruned paths)\n' "symexe_paths"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "symexe_paths" "$sx_why"
+fi
+
+# The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
+# (Before this work narrow emitted ~750 false "contradicts" warnings there.)
+noise=0
+for f in $(find stdlib -name '*.pie' 2>/dev/null); do
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4050|W4052|N4051|W4120)\]")
+  noise=$((noise+c))
+done
+if [ "$noise" -eq 0 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4050/W4052/N4051/W4120 across stdlib)\n' "flow_noise_floor"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi
 
 echo "---"
