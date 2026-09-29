@@ -1,0 +1,78 @@
+-- Size-change termination (Lee/Jones/Ben-Amram): which recursions are
+-- PROVED to terminate, which are proved to loop, and which are unknown.
+
+enum L
+  Nil
+  Cons(i64, L)
+
+extern fn sink : i64 -> () ! [IO]
+
+-- structural descent: t is a strict sub-term of xs
+fn len : L -> i64
+  | Nil -> 0
+  | Cons(_, t) -> 1 + len(t)
+
+-- integer descent with a lower bound from the early return
+fn fib : i64 -> i64
+  | n ->
+      if n < 2
+        return n
+      fib(n - 1) + fib(n - 2)
+
+-- descent WITHOUT a lower bound: fact(-1) never returns
+fn fact : i64 -> i64
+  | 0 -> 1
+  | n -> n * fact(n - 1)
+
+-- every argument unchanged, no guard: cannot terminate once entered
+fn spin : i64 -> i64
+  | n -> spin(n)
+
+-- lexicographic descent through the closure (Ackermann)
+fn ack : (i64, i64) -> i64
+  | (m, n) ->
+      if m <= 0
+        return n + 1
+      if n <= 0
+        return ack(m - 1, 1)
+      ack(m - 1, ack(m, n - 1))
+
+-- halving with a positive guard
+fn halve : i64 -> i64
+  | n ->
+      if n <= 0
+        return 0
+      halve(n / 2)
+
+-- mutual recursion, bounded below
+fn ev : i64 -> bool
+  | n ->
+      if n <= 0
+        return true
+      od(n - 1)
+fn od : i64 -> bool
+  | n ->
+      if n <= 0
+        return false
+      ev(n - 1)
+
+-- swapping arguments: not size-change terminating (the pair just rotates)
+fn swap : (i64, i64) -> i64
+  | (a, b) ->
+      if a <= 0
+        return b
+      swap(b, a)
+
+-- a local that happens to share a name is NOT the parameter
+fn shadow : i64 -> i64
+  | n ->
+      if n <= 0
+        return 0
+      let m = n + 1
+      shadow(m - 1)
+
+fn main : () -> () ! [IO]
+  | () ->
+      sink(len(Cons(1, Nil)) + fib(5) + fact(3) + spin(0) + ack(1, 1) + halve(8) + swap(1, 2) + shadow(3))
+      if ev(3)
+        sink(1)
