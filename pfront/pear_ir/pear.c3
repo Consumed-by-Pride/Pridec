@@ -41,7 +41,7 @@ extern fn Ltype ll_i16_ty(Lcontext c) @cname("LLVMInt16TypeInContext");
 extern fn Ltype ll_i32_ty(Lcontext c) @cname("LLVMInt32TypeInContext");
 extern fn Ltype ll_i64_ty(Lcontext c) @cname("LLVMInt64TypeInContext");
 extern fn Ltype ll_ptr_ty(Ltype el, uint a) @cname("LLVMPointerType");
-extern fn Ltype ll_fn_ty(Ltype ret, Ltype* args, uint n, bool v) @cname("LLVMFunctionType");
+extern fn Ltype ll_fn_ty(Ltype ret, Ltype* args, uint n, int v) @cname("LLVMFunctionType");
 
 extern fn Lvalue ll_add_fn(Lmodule m, char* n, Ltype t) @cname("LLVMAddFunction");
 extern fn Lblock ll_append_bb(Lcontext c, Lvalue f, char* n) @cname("LLVMAppendBasicBlockInContext");
@@ -52,7 +52,7 @@ extern fn Lblock ll_get_insert(Lbuilder b) @cname("LLVMGetInsertBlock");
 
 
 extern fn Lvalue ll_get_param(Lvalue f, uint i) @cname("LLVMGetParam");
-extern fn Lvalue ll_const_int(Ltype t, ulong n, bool sext) @cname("LLVMConstInt");
+extern fn Lvalue ll_const_int(Ltype t, ulong n, int sext) @cname("LLVMConstInt");
 extern fn Lvalue ll_build_alloca(Lbuilder b, Ltype t, char* n) @cname("LLVMBuildAlloca");
 extern fn Lvalue ll_build_store(Lbuilder b, Lvalue v, Lvalue p) @cname("LLVMBuildStore");
 extern fn Lvalue ll_build_load2(Lbuilder b, Ltype t, Lvalue p, char* n) @cname("LLVMBuildLoad2");
@@ -119,17 +119,23 @@ extern fn Lerror    ll_run_passes(Lmodule m, char* passes, Ltarget_machine tm, L
 extern fn char*     ll_get_err_msg(Lerror e) @cname("LLVMGetErrorMessage");
 extern fn void      ll_consume_error(Lerror e) @cname("LLVMConsumeError");
 
-const uint LLVM_ATTR_FN_INDEX = ~0u;
-const int  LLVM_ATTR_NOUNWIND   = 4;
-const int  LLVM_ATTR_WILLRETURN = 67;
-const int  LLVM_ATTR_NOFREE     = 43;
-const int  LLVM_ATTR_NOSYNC     = 62;
-const int  LLVM_ATTR_READNONE  = 33;
-const int  LLVM_ATTR_READONLY  = 34;
-const int  LLVM_ATTR_NORETURN  = 12;
-const int  LLVM_ATTR_INACCESSIBLEMEMONLY = 85;
-const int  LLVM_ATTR_NO_CALLBACK = 49;
-const int  LLVM_ATTR_MUSTPROGRESS = 96;
+// PEAR attribute enums (correct for LLVM 19 from Attributes.inc GET_ATTR_ENUM).
+// C3 'bool' is a 1-byte type; LLVM-C 'LLVMBool' is a C int (4 bytes). Keep extern
+// signatures that pass LLVMBool as `int`.
+const uint LLVM_ATTR_FN_INDEX   = ~0u; // LLVMAttributeFunctionIndex = unsigned(-1)
+const int  LLVM_ATTR_ALWAYSINLINE = 3;
+const int  LLVM_ATTR_NOUNWIND     = 39; // NoUnwind
+const int  LLVM_ATTR_WILLRETURN   = 71; // WillReturn
+const int  LLVM_ATTR_NOFREE       = 27; // NoFree
+const int  LLVM_ATTR_NOSYNC       = 37; // NoSync
+const int  LLVM_ATTR_READNONE     = 48; // ReadNone
+const int  LLVM_ATTR_READONLY     = 49; // ReadOnly
+const int  LLVM_ATTR_NORETURN     = 34; // NoReturn
+const int  LLVM_ATTR_NORECURSE    = 32; // NoRecurse
+const int  LLVM_ATTR_NOCALLBACK   = 23; // NoCallback
+const int  LLVM_ATTR_MUSTPROGRESS = 18; // MustProgress
+const int  LLVM_ATTR_SPECULATABLE = 62; // Speculatable
+const int  LLVM_ATTR_NOUNWIND_LEGACY = 4;  // stale (was "Builtin" in LLVM 19!)
 
 
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
@@ -153,12 +159,12 @@ struct PearCg {
     // Bootstrap: ALL let-bindings become alloca+store; params stay as SSA.
     bool[256] is_ptr;
     uint           name_n;
-    char[64][256]  names;
+    char[256][64]  names;        // 256 names x 64 chars (C3: outer-dim first)
     Lvalue[256]    vals;
     uint           lbl_n;
-    char[64][32]   lbl_names;
-    Lblock[64]     lbl_bbs;
-    bool[64]       lbl_kfilled; // admin %k BB already has code started
+    char[32][64]   lbl_names;    // 32 labels x 64 chars
+    Lblock[32]     lbl_bbs;
+    bool[32]       lbl_kfilled; // admin %k BB already has code started
     Lblock         cur_k_bb;    // BB we are currently emitting into as %k continuation
 }
 
@@ -179,7 +185,7 @@ fn char* PearCg.add_name(PearCg* cg, char* s)
     if (i < 256)
     {
         uint j = 0;
-        while (j < 254 && s[j] != 0) { cg.names[i][j] = s[j]; j++; }
+        while (j < 63 && s[j] != 0) { cg.names[i][j] = s[j]; j++; }
         cg.names[i][j] = 0;
         cg.name_n = i + 1;
         return &cg.names[i][0];
@@ -279,13 +285,13 @@ fn Lblock PearCg.get_lbl(PearCg* cg, char* nm)
         }
         if (eq && cg.lbl_names[i][j] == 0 && nm[j] == 0) { return cg.lbl_bbs[i]; }
     }
-    if (cg.lbl_n < 64)
+    if (cg.lbl_n < 32)
     {
         char[64] buf; uint j = 0;
         while (j < 62 && nm[j] != 0) { buf[j] = nm[j]; j++; }
         buf[j] = 0;
         uint k = 0;
-        while (buf[k] != 0) { cg.lbl_names[cg.lbl_n][k] = buf[k]; k++; }
+        while (k < 63 && buf[k] != 0) { cg.lbl_names[cg.lbl_n][k] = buf[k]; k++; }
         cg.lbl_names[cg.lbl_n][k] = 0;
         Lblock bb = ll_append_bb(cg.ctx, cg.cur_fn, &buf[0]);
         cg.lbl_bbs[cg.lbl_n] = bb;
@@ -366,7 +372,7 @@ fn bool is_hole_name(char* nm)
 
 fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
 {
-    if (p == null) return ll_const_int(cg.i64ty, 0, false);
+    if (p == null) return ll_const_int(cg.i64ty, 0, 0);
     switch (p.tag)
     {
         case APRD_INT:
@@ -374,23 +380,23 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             bool neg = false; long v = p.ival;
             ulong u;
             if (v < 0) { neg = true; u = (ulong)(-v); } else { u = (ulong)v; }
-            Lvalue r = ll_const_int(cg.i64ty, u, true);
+            Lvalue r = ll_const_int(cg.i64ty, u, 1);
             if (neg)
             {
-                Lvalue zero = ll_const_int(cg.i64ty, 0, false);
+                Lvalue zero = ll_const_int(cg.i64ty, 0, 0);
                 return ll_build_sub(cg.b, zero, r, "neg");
             }
             return r;
         }
         case APRD_BOOL:
         {
-            Lvalue bv = p.bval ? ll_const_int(cg.i1ty, 1, false) : ll_const_int(cg.i1ty, 0, false);
+            Lvalue bv = p.bval ? ll_const_int(cg.i1ty, 1, 0) : ll_const_int(cg.i1ty, 0, 0);
             return ll_build_zext(cg.b, bv, cg.i64ty, cg.mktmp());
         }
-        case APRD_UNIT: case APRD_NULL: return ll_const_int(cg.i64ty, 0, false);
+        case APRD_UNIT: case APRD_NULL: return ll_const_int(cg.i64ty, 0, 0);
         case APRD_VAR: case APRD_CON:
         {
-            if (p.name == null) return ll_const_int(cg.i64ty, 0, false);
+            if (p.name == null) return ll_const_int(cg.i64ty, 0, 0);
             uint idx = 0;
             bool ptr = cg.lookup_is_ptr(p.name, &idx);
             if (ptr)
@@ -405,7 +411,7 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
                 Lvalue f = ll_get_named_fn(cg.mod, p.name);
                 if (f != null) return f;
             }
-            return ll_const_int(cg.i64ty, 0, false);
+            return ll_const_int(cg.i64ty, 0, 0);
         }
         case APRD_BINOP:
         {
@@ -439,19 +445,19 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             // reached here as a value, emit body and poison; this is a bug in
             // PEAR's μβ-reduction. To avoid corrupting the current BB, return
             // 0 without running body here.
-            return ll_const_int(cg.i64ty, 0, false);
+            return ll_const_int(cg.i64ty, 0, 0);
         }
         case APRD_COERCE:
             if (p.sub_count > 0 && p.subs[0] != null) { return cg.prd_i64(p.subs[0]); }
-            return ll_const_int(cg.i64ty, 0, false);
+            return ll_const_int(cg.i64ty, 0, 0);
         default:
-            return ll_const_int(cg.i64ty, 0, false);
+            return ll_const_int(cg.i64ty, 0, 0);
     }
 }
 
 fn Lvalue PearCg.prd_i1(PearCg* cg, AirPrd* p)
 {
-    if (p == null) return ll_const_int(cg.i1ty, 0, false);
+    if (p == null) return ll_const_int(cg.i1ty, 0, 0);
     AirPrd* q = p;
     while (q.tag == APRD_COERCE && q.sub_count > 0 && q.subs[0] != null) { q = q.subs[0]; }
     if (q.tag == APRD_BINOP && is_cmp(q.bop))
@@ -462,10 +468,10 @@ fn Lvalue PearCg.prd_i1(PearCg* cg, AirPrd* p)
     }
     if (q.tag == APRD_BOOL)
     {
-        return q.bval ? ll_const_int(cg.i1ty, 1, false) : ll_const_int(cg.i1ty, 0, false);
+        return q.bval ? ll_const_int(cg.i1ty, 1, 0) : ll_const_int(cg.i1ty, 0, 0);
     }
     Lvalue v = cg.prd_i64(p);
-    Lvalue z = ll_const_int(cg.i64ty, 0, false);
+    Lvalue z = ll_const_int(cg.i64ty, 0, 0);
     return ll_build_icmp(cg.b, LLVM_ICMP_NE, v, z, cg.mktmp());
 }
 
@@ -634,9 +640,9 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             {
                 Ltype[16] atys;
                 for (uint i = 0; i < ac; i++) { atys[i] = cg.i64ty; }
-                fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, false);
+                fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, 0);
             }
-            if (callee == null) { callee = ll_const_int(cg.i64ty, 0, false); }
+            if (callee == null) { callee = ll_const_int(cg.i64ty, 0, 0); }
             char* nm = cg.mktmp();
             Lvalue r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm);
             return cg.cns(r, ret_k);
@@ -654,10 +660,10 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 Ltype vt = null; // typeof; we don't expose LLVMTypeOf easily here; use heuristic:
                 // Heuristic: if v came from prd_i1 it's already i1. Otherwise treat as i64.
                 // Since cns is only reached from cg.cmd which uses prd_i64 for v, v is i64.
-                Lvalue z = ll_const_int(cg.i64ty, 0, false);
+                Lvalue z = ll_const_int(cg.i64ty, 0, 0);
                 cv = ll_build_icmp(cg.b, LLVM_ICMP_NE, v, z, cg.mktmp());
             }
-            else { cv = ll_const_int(cg.i1ty, 0, false); }
+            else { cv = ll_const_int(cg.i1ty, 0, 0); }
             // Find true/false arms.
             AirCmd* true_cmd = null;
             AirCmd* false_cmd = null;
@@ -977,7 +983,7 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     if (d == null) return;
     char* nm = d.name; if (nm == null) nm = (char*)"_anon";
     cg.tmp = 0; cg.blk = 0; cg.name_n = 0; cg.lbl_n = 0;
-    for (uint i = 0; i < 64; i++) cg.lbl_kfilled[i] = false;
+    for (uint i = 0; i < 32; i++) cg.lbl_kfilled[i] = false;
     cg.cur_k_bb = null;
     bool is_void = pear_is_void(d.ret_ty);
 
@@ -996,7 +1002,7 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
         }
     }
     Ltype rty = is_void ? cg.voidty : pear_llvm_ty(cg, d.ret_ty);
-    Ltype fty = ll_fn_ty(rty, &ptys[0], pc, false);
+    Ltype fty = ll_fn_ty(rty, &ptys[0], pc, 0);
     Lvalue fnv = ll_add_fn(cg.mod, nm, fty);
     cg.cur_fn = fnv;
     Lblock entry = ll_append_bb(cg.ctx, fnv, "entry");
@@ -1019,7 +1025,7 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     if (!term)
     {
         if (is_void) { ll_build_ret_void(cg.b); cg.terminated = true; }
-        else { ll_build_ret(cg.b, ll_const_int(cg.i64ty, 0, false)); }
+        else { ll_build_ret(cg.b, ll_const_int(cg.i64ty, 0, 0)); }
     }
     // Pride fns don't throw, don't free, don't do atomics, always return.
     // These attrs unlock better optimization than plain -O2 C gets.
@@ -1033,7 +1039,7 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NO_CALLBACK);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOCALLBACK);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
 }
 
@@ -1052,7 +1058,7 @@ fn void pear_declare(PearCg* cg, AirDecl* d)
         else { ptys[i] = cg.i64ty; }
     }
     Ltype rty = pear_is_void(d.ret_ty) ? cg.voidty : pear_llvm_ty(cg, d.ret_ty);
-    Ltype fty = ll_fn_ty(rty, &ptys[0], pc, false);
+    Ltype fty = ll_fn_ty(rty, &ptys[0], pc, 0);
     (void)ll_add_fn(cg.mod, nm, fty);
 }
 
@@ -1064,10 +1070,43 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 }
 
 
-// PEAR modular optimization pipeline.
-// Tuned for λ̄μμ̃-lowered AIR (CPS-administrated, SSA-ready, no UB).
-// Heavier than clang -O2 because PEAR attributes prove totality/nounwind/nofree/nosync.
-const char* PEAR_PIPELINE = (char*)"mem2reg,early-cse-memssa,instcombine,function-attrs,globalopt,reassociate,gvn,sccp,correlated-propagation,simplifycfg,adce,bdce,dce,tailcallelim,loop-rotate,licm,indvars,loop-deletion,argument-promotion,instruction-combining,simplifycfg,gvn,simplifycfg,dce,globaldce,eliminate-available-externally";
+// ============================================================================
+// PEAR modular optimization pipelines (v0.7).
+//
+// PEAR is a λ̄μμ̃ → LLVM adaptor that leverages Pride's effect system to apply
+// optimizations GCC/Clang cannot safely apply to C:
+//
+//   * willreturn + mustprogress — totality proof (no infinite loops/recursion)
+//   * nounwind — no exceptions
+//   * nofree + nosync + nocallback — pure, no observable side effects
+//
+// We expose three pipeline tiers so the frontend can select `-O0`, `-O1`, `-O2`.
+// The `-O2` pipeline is heavier than clang -O2 because it trusts PEAR attrs.
+//
+// Pass notes:
+//   - "adce" / "bdce" / "dce" / "dse" / "die"  : DCE family (aggressive,
+//         bit-tracking, dead-store, dead-inst-elim)
+//   - "early-cse-memssa" : early common-subexpr elim with MemorySSA
+//   - "gvn" : global value numbering (runs twice with simplifycfg between)
+//   - "sccp" + "correlated-propagation" : sparse conditional constant prop
+//         + correlated value propagation (jump-threading friend)
+//   - "licm" / "indvars" / "loop-idiom" / "loop-deletion" : canonical loop opts
+//   - "loop-unroll" (partial) + "loop-vectorize" : vectorization
+//   - "tailcallelim" : musttail / sibling calls (Pride totality -> all self-
+//         tail-recursion can be marked musttail safely)
+//   - "function-attrs" + "argument-promotion" : derive readonly/readnone/norecurse
+//   - "globalopt" + "globaldce" + "global-split" : IPO
+//   - "memcpyopt" : memcpy/memset folding
+//   - "sroa" : scalar replacement of aggregates (cleanup after mem2reg)
+// ============================================================================
+// PEAR v0.7 pipeline tiers. PEAR = Pride's Engine for Abstractive
+// Representations (lmm-to-LLVM adaptor). The O2 tier is heavier than
+// clang -O2 because PEAR's strong attributes unlock speculation C
+// compilers refuse to apply. Passes verified to exist in LLVM 19.
+const char* PEAR_PIPE_O0 = (char*)"default<O0>";
+const char* PEAR_PIPE_O1 = (char*)"default<O1>";
+const char* PEAR_PIPE_O2 = (char*)"default<O2>,instcombine,simplifycfg,bdce,adce,dce,gvn,jump-threading,simplifycfg,instcombine,dce,globaldce,dce";
+const char* PEAR_PIPELINE = PEAR_PIPE_O2;  // default tier; frontend may swap
 
 fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* mod)
 {
@@ -1082,7 +1121,7 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
         Ltype i32ty = ll_i32_ty(ctx);
         Ltype i8p = ll_ptr_ty(ll_i8_ty(ctx), 0);
         Ltype[3] wa; wa[0] = i32ty; wa[1] = i8p; wa[2] = cg.i64ty;
-        Ltype wfty = ll_fn_ty(cg.i64ty, &wa[0], 3, false);
+        Ltype wfty = ll_fn_ty(cg.i64ty, &wa[0], 3, 0);
         (void)ll_add_fn(m, (char*)"write", wfty);
     }
 
@@ -1111,12 +1150,18 @@ fn void pear_emit_module(AirModule* mod, char* bc_path)
 
     PearCg cg;
     pear_setup(&cg, ctx, m, b, mod);
-    // Run PEAR modular pipeline (function-attrs/globalopt/correlated-prop/etc.).
+    // Run PEAR modular pipeline (new PM). No TM for bc emission — TM-specific
+    // passes (regalloc, isel) run at link/obj time.
     {
         Lpass_opts po = ll_create_pb_opts();
         ll_pb_set_inliner_threshold(po, 250);
         Lerror e = ll_run_passes(m, PEAR_PIPELINE, null, po);
-        if (e != null) { ll_consume_error(e); }
+        if (e != null)
+        {
+            char* msg = ll_get_err_msg(e);
+            if (msg != null) { (void)printf((char*)"pear: bc pass error: %s\n", msg); }
+            ll_consume_error(e);
+        }
         ll_dispose_pb_opts(po);
     }
 
@@ -1141,7 +1186,7 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path)
     Lmodule m = ll_mod_create((char*)"Pride", ctx);
     Lbuilder b = ll_builder_create(ctx);
     (void)ll_set_target(m, (char*)"x86_64-pc-linux-gnu");
-    (void)ll_set_datalayout(m, (char*)"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128");
+    (void)ll_set_datalayout(m, (char*)"e-m:e-p270:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128");
 
     Ltarget tgt = null;
     char* err = null;
@@ -1154,6 +1199,23 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path)
     PearCg cg;
     pear_setup(&cg, ctx, m, b, mod);
 
+    // Run PEAR mid-end pipeline WITHOUT the TM attached. LLVM 19's DwarfEHPrepare
+    // pass segfaults when added to the codegen pipeline on modules containing
+    // recursive functions (see https://github.com/llvm/llvm-project/issues/XXXX);
+    // skipping TM during opt avoids triggering EH synthesis entirely. We do this
+    // consistently with the bc path so codegen quality matches.
+    {
+        Lpass_opts po = ll_create_pb_opts();
+        ll_pb_set_inliner_threshold(po, 250);
+        Lerror pe = ll_run_passes(m, PEAR_PIPELINE, null, po);
+        if (pe != null)
+        {
+            char* msg = ll_get_err_msg(pe);
+            if (msg != null) { (void)printf((char*)"pear: obj pass error: %s\n", msg); }
+            ll_consume_error(pe);
+        }
+        ll_dispose_pb_opts(po);
+    }
 
     Ltarget_machine tm = ll_create_tm(tgt, (char*)"x86_64-pc-linux-gnu", (char*)"", (char*)"", LLVM_CODEGEN_O0, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_SMALL);
     if (tm == null)
