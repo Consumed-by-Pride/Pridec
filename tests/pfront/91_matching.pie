@@ -1,0 +1,49 @@
+-- Decision trees: enum signatures (complete switch), nested payload tests,
+-- or-pattern row expansion, guards as fallthrough leaves, dense integer
+-- switch (jump table), DAG sharing, and the tree/first-match agreement check.
+-- EXPECT: 0 errors
+
+enum Shape
+  | Circle(i64)
+  | Rect(i64, i64)
+  | Dot
+
+-- 1. complete switch over every variant: no default branch
+fn area : Shape -> i64
+  | Circle(r) -> r * r * 3i64
+  | Rect(w, h) -> w * h
+  | Dot -> 0i64
+
+-- 2. two columns, nested payload test, wildcard rows: shared subtrees
+fn classify : (Shape, bool) -> i64
+  | (Dot, true) -> 1i64
+  | (Dot, _) -> 2i64
+  | (Circle(0i64), _) -> 3i64
+  | (_, false) -> 4i64
+  | (Rect(1i64, _), _) -> 5i64
+  | (_, _) -> 6i64
+
+-- 3. dense integer dispatch: a jump table (N4210 --lint)
+fn digit_name : i64 -> i64
+  | 1i64 -> 10i64
+  | 2i64 -> 20i64
+  | 3i64 -> 30i64
+  | 4i64 -> 40i64
+  | 5i64 -> 50i64
+  | n -> n
+
+-- 4. or-pattern at the top: rows are duplicated, one leaf per alternative
+fn small : i64 -> bool
+  | 0i64 | 1i64 | 2i64 -> true
+  | _ -> false
+
+-- 5. guard: the arm is a leaf with a fallthrough to the rest
+fn guarded : (i64, i64) -> i64
+  | (a, b) if a > b -> a
+  | (a, _) -> a
+
+fn main : () -> ()
+  | () ->
+      let _a : i64 = area(Dot) + classify(Dot, true) + digit_name(3i64) + guarded(1i64, 2i64)
+      let _b : bool = small(1i64)
+      ()

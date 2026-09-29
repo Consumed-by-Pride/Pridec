@@ -558,6 +558,7 @@ struct TheoryPipeline
     bool timing;              // --time-passes: per-pass wall clock
     bool dump_cfg;            // --dump-cfg: print the last function's CFG
     bool emit_cps;            // --emit-cps: print every function's CPS term
+    bool emit_dtree;          // --emit-dtree: print every match decision DAG
     long[40] pass_ms;
     char*[40] pass_name;
     usz  timed;
@@ -687,7 +688,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.sct = (theory_sct::SctState*)malloc(SCT_SZ);
     tp.defun = (theory_defun::DefunState*)malloc(DEFUN_SZ);
     if (tp.reclat != null && tp.ts != null) tp.reclat.init(tp.ts, a);
-    if (tp.matcher != null) tp.matcher.init(a);
+    if (tp.matcher != null) { tp.matcher.init(a); tp.matcher.attach(d, it, file); }
     if (tp.hered != null) tp.hered.init(a);
     if (tp.dfb != null) tp.dfb.init(a);
     if (tp.uba != null) { tp.uba.init(a); tp.uba.attach(d, it, file); }
@@ -708,6 +709,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.timing = false;
     tp.dump_cfg = false;
     tp.emit_cps = false;
+    tp.emit_dtree = false;
     tp.timed = 0;
     tp.gradual.init(d, it, file);
     return true;
@@ -827,7 +829,7 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.issa != null) { tp.issa.walk_dialects(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.effc != null) { tp.effc.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.reclat != null) { tp.reclat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
-    if (tp.matcher != null) { tp.matcher.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.matcher != null) { tp.matcher.emit = tp.emit_dtree; tp.matcher.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.hered != null) { tp.hered.walk_ast(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.uba != null) { tp.uba.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.strat != null) { tp.strat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }

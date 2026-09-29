@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_matching.c3` | ~1000 | Maranget decision DAGs for every `match` and clause set: f/b/a heuristics, enum signatures, or-rows, guards, hash-consed sharing, tree-vs-first-match verification, NF_DENSE_SWITCH; `--emit-dtree`; N4210 |
 | `theory_cps.c3` | ~1300 | Danvy–Filinski one-pass CPS into a continuation IR; tail verdicts (NF_TAIL), join/loop continuations, η/β contraction, contification; `--emit-cps`; W4200/N4201/N4203 |
 | `theory_defun.c3` | ~600 | Closure analysis: free vars by binder identity, escape classification (NF_NOESCAPE), mutable captures of escaping closures marked NF_ADDR_TAKEN for boxing; W4190/N4191/N4192/W4193/W4194 |
 | `theory_effcont.c3` | ~800 | Handler discipline: lexical prompt stack, W4180 undeclared perform, W4181 call leaks an effect, N4182 multi-shot, W4183 stray / W4184 escaping resume, N4185 dead arm, W4186 arm arity, N4187 tail-resumptive (sets NF_TAIL) |
@@ -118,6 +119,29 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Match compilation (`theory_matching`).** Built a one-column matrix per
+`match`, picked the first non-wildcard column, turned or-patterns into
+wildcards, ignored guards, ranges, enum signatures and function clauses,
+and called a tree "exhaustive" whenever its root was not a Fail node. Now
+it is the match compiler: every `match` and every multi-clause function is
+compiled to a Maranget decision DAG over *occurrences* (`x`, `x.0`,
+`x.1.2`) with the f→b→a column heuristic, or-patterns expanded into rows,
+guards as leaves with a fallthrough tree, and constructor signatures
+(bool; enum variants looked up from the declarations, so a switch over
+every variant has no default; tuple/struct as a single UNPACK step).
+Nodes are hash-consed per site, so identical subtrees are emitted once
+(the classic blow-up of decision trees becomes sharing). Each DAG is then
+**verified**: a sample value per row (wildcards filled with a constructor
+of the right type when the matrix reveals one) plus a "none of the above"
+value are run through the DAG and through a naive first-match interpreter
+over the original rows; disagreements are reported as compiler bugs. This
+check caught two real defects during development (a 256-case cap that
+silently dropped cases, and ill-typed samples). Writeback:
+**`NF_DENSE_SWITCH`** (new flag) on a site whose root test is an int/enum
+switch with ≥ 4 cases spanning ≤ 2× their count — emit a jump table;
+**N4210** under `--lint`. `--emit-dtree` prints every DAG. Exhaustiveness
+and unreachable arms stay with `theory_pglcert` (W4090/W4091).
 
 **CPS translation (`theory_cps`).** Counted call sites and called the count
 "administrative redexes avoided"; nothing was translated. Now every
@@ -406,6 +430,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `91_matching` + `dtree` | complete enum switch (no default), two-column DAG sharing (16→13), dense jump table + N4210, or-expanded rows, guard fallthrough leaf, nested occurrence `x.0.0`, 0 tree/first-match disagreements |
 | `90_cps` + `cps` | self tail → loop, W4200 misuse, contified join (`letj`), while as `letk`, inline continuation for a non-tail call, escaping lambda stays `letf`, contraction census |
 | `89_closures` + `closures` | inline candidate, boxed mutable capture (returned), stale capture, lambda arity, escape/capture census; immutable-capture-as-argument and shadowing quiet |
 | `88_handlers` + `handlers` | undeclared perform, call leak, tail-resumptive, multi-shot (sequential and loop), dead arm, stray and escaping resume, arm arity; declared/handled performs quiet |
