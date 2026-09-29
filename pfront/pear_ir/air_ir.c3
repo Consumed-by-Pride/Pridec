@@ -397,6 +397,13 @@ fn AirCns* air_mk_field_cns(AirArena* a, char* f, AirCns* k)
     { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_FIELD; e.name=f; e.tail=k; return e; }
 fn AirCns* air_mk_index(AirArena* a, AirPrd* i, AirCns* k)
     { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_INDEX; e.prd=i; e.tail=k; return e; }
+fn AirCns* air_mk_deref(AirArena* a, AirCns* k)
+    { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_DEREF; e.prd=null; e.tail=k; return e; }
+// ACNS_STORE: the "prd" field holds the destination ADDRESS producer
+// (evaluated and bound before the store fires). k.tail is the continuation
+// after the store (which receives unit).
+fn AirCns* air_mk_store(AirArena* a, AirPrd* dst, AirCns* k)
+    { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_STORE; e.prd=dst; e.tail=k; return e; }
 fn AirCns* air_mk_call(AirArena* a, AirPrd** args, usz ac, AirCns* k) {
     // Build a STACK chain for the args (right-to-left push), then wrap the
     // entire thing in an explicit ACNS_CALL node whose .tail points to the

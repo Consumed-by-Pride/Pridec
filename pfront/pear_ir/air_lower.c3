@@ -1275,8 +1275,17 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         }
         case Nk.N_EXPR_ALLOC:
         {
+            // alloc [T; N] → __pear_alloca(n): stack bump (entry BB alloca,
+            // avoids external malloc dependency for bootstrap).
             lr.total_prd++;
-            return lr.cut(air_ir::air_mk_var(lr.arena, lr.dup((char*)"alloc")), k);
+            lr.total_cns++;
+            long bytes = lr.alloc_bytes(n);
+            if (bytes <= 0) bytes = 16;
+            AirPrd* szp = air_ir::air_mk_int(lr.arena, bytes);
+            AirPrd*[1] av; av[0] = szp;
+            AirPrd* callee = air_ir::air_mk_var(lr.arena, lr.dup((char*)"__pear_alloca"));
+            AirCns* call_k = air_ir::air_mk_call(lr.arena, &av[0], 1, k);
+            return lr.cut(callee, call_k);
         }
         case Nk.N_EXPR_FREE:
         {
@@ -1665,6 +1674,48 @@ fn AirCmd* AirLower.index_acc(AirLower* lr, Node* n, AirCns* k)
         air_ir::air_mk_comu_cns(lr.arena, ov_name, out)); }
     lr.scope.leave();
     return out;
+}
+
+// alloc_bytes — compute byte count for `alloc [T; N]` from n.type_ann.
+// Bootstrap: recognizes N_TY_ARRAY with integer literal length and a
+// primitive element type (u8→1, u16/i16→2, u32/i32/f32→4, u64/i64/f64/pointer→8).
+// Falls back to 16 if it can't statically determine.
+fn long AirLower.alloc_bytes(AirLower* lr, Node* n)
+{
+    if (n == null || n.type_ann == null) return 16;
+    Node* t = n.type_ann;
+    if (t.kind != Nk.N_TY_ARRAY || t.child_count < 2) return 16;
+    Node* cnt = t.children[1];
+    long n_el = 16;
+    if (cnt != null)
+    {
+        if ((long)cnt.p.ival > 0) { n_el = (long)cnt.p.ival; }
+        if (n_el <= 0) n_el = 16;
+    }
+    Node* elem = t.children[0];
+    long esz = 8;
+    if (elem != null && elem.kind == Nk.N_TY_PATH)
+    {
+        char* nm = node_text(elem, lr.it);
+        if (nm != null)
+        {
+            if ((nm[0] == 'u' || nm[0] == 'i') && nm[1] != 0)
+            {
+                char b0 = nm[1];
+                if (b0 == '8') { esz = 1; }
+                else if (b0 == '1' && nm[2] == '6') { esz = 2; }
+                else if (b0 == '3' && nm[2] == '2') { esz = 4; }
+                else if (b0 == '6' && nm[2] == '4') { esz = 8; }
+            }
+            else if (nm[0] == 'f')
+            {
+                if (nm[1] == '3' && nm[2] == '2') { esz = 4; }
+                else if (nm[1] == '6' && nm[2] == '4') { esz = 8; }
+            }
+            else if (nm[0] == 'b' && nm[1] == 'o' && nm[2] == 'o' && nm[3] == 'l') { esz = 1; }
+        }
+    }
+    return n_el * esz;
 }
 
 // bind_x_then — allocate a fresh μ̃-bound producer name xv, build the
@@ -2321,16 +2372,27 @@ fn AirCmd* AirLower.assign_stmt(AirLower* lr, Node* n, char* k)
 
 fn AirCmd* AirLower.assign_expr(AirLower* lr, Node* n, AirCns* k)
 {
-    // Assignment: lhs = rhs  ≡  < rhs | μ̃lhs. k >
-    // Evaluate rhs, rebind lhs to the produced value (PEAR uses alloca+store
-    // for mutable slots so rebinding is automatic via COMU), then continue k.
+    // Assignment: lhs = rhs. Two cases:
+    //   (1) Plain identifier lhs (`x = v`):  ≡  < v | μ̃x. k >
+    //       (PEAR uses alloca+store for mutable slots so rebinding via COMU
+    //       does the store automatically.)
+    //   (2) Indexed lhs (`a[i] = v`): compute address of a[i], then
+    //       < v | store(addr) >; k  (ACNS_STORE consumer).
+    //   (3) Deref lhs (`*p = v`): similar — store v to p.
     if (n.child_count < 2) return lr.cut(lr.mod.p_unit, k);
     Node* lhs = n.children[0];
     Node* rhs = n.children[1];
     lr.scope.enter();
+
+    // Case (2)/(3): memory store.
+    if (lhs != null && (lhs.kind == Nk.N_EXPR_INDEX || lhs.kind == Nk.N_EXPR_DEREF))
+    {
+        return lr.assign_mem(n, k);
+    }
+
+    // Case (1): plain rebinding.
     char* lnm = node_text(lhs, lr.it);
     if (lnm == null) lnm = (char*)"_";
-    // Ensure lhs is in scope (it should already be bound by a preceding let mut).
     AirCns* rebind = air_ir::air_mk_comu_cns(lr.arena, lnm,
         lr.cut(lr.mod.p_unit, k));
     AirCmd* out;
@@ -2345,6 +2407,276 @@ fn AirCmd* AirLower.assign_expr(AirLower* lr, Node* n, AirCns* k)
         AirPrd* xp = air_ir::air_mk_var(lr.arena, xv);
         AirCmd* bind = lr.cut(xp, rebind);
         out = lr.expr_to_cns(rhs, air_ir::air_mk_comu_cns(lr.arena, xv, bind));
+    }
+    lr.scope.leave();
+    return out;
+}
+
+// assign_mem — emit an ACNS_STORE for `a[i] = v` or `*p = v`.
+// We evaluate (and bind) base/ptr first, then index (if indexed), then rhs,
+// and finally emit <rhs | store(addr)>; k.
+fn AirCmd* AirLower.assign_mem(AirLower* lr, Node* n, AirCns* k)
+{
+    Node* lhs = n.children[0];
+    Node* rhs = n.children[1];
+    // After-store continuation: deliver unit to k. We need an AirCns* that
+    // receives unit and continues k. Easiest: emit μ̃_. k (ignore incoming unit,
+    // then k). That's a COMU that discards its binder and runs k.
+    AirCns* after = air_ir::air_mk_comu_cns(lr.arena, lr.dup((char*)"_"),
+        lr.cut(lr.mod.p_unit, k));
+    (void)lhs; (void)rhs;
+    // We need to build the address producer. For *p: addr = p. For a[i]: addr = gep(a, i)
+    // — but we don't model GEP in AIR (PEAR emits GEP directly for ACNS_INDEX loads).
+    // For stores, we need the ADDRESS of the element, not the loaded value.
+    // So we introduce an "addr-of-index" concept: reuse ACNS_INDEX but with a
+    // special sentinel tail=null meaning "produce gep address, not load".
+    // SIMPLER: wrap the rhs evaluation so that when the rhs value arrives, we
+    // already have both the base (and index) bound in fresh vars, then we can
+    // construct a gep+store inline via a small bootstrap: we'll use a
+    // dedicated consumer ACNS_STORE_INDEX(base, idx, k) that PEAR lowers to
+    // gep(base,0,idx) + trunc(value, i8) + store + continue k.
+    //
+    // Even simpler (bootstrap for 1-byte arrays a[0]): when lhs is N_EXPR_INDEX:
+    //   - bind base_b = lr.prd(lhs.children[0]) (must be a pointer var),
+    //   - bind index_i = lr.prd(lhs.children[1])
+    //   - emit a "store_index(base_b, index_i)" consumer that PEAR lowers.
+    // For N_EXPR_DEREF: ACNS_STORE with ptr=base.
+    //
+    // Bootstrap shortcut: we use ACNS_STORE and build the address using a
+    // pseudo "addrof" by directly reusing INDEX consumer with a flag. Since
+    // PEAR's ACNS_INDEX handler currently always does load, we need a sibling.
+    //
+    // Implemented: for indexed stores, emit <rhs | μ̃v. <base | idx_addr(idx, μ̃a. <v|store(a)>; k)>>
+    // but that needs an "idx_addr" consumer (gep without load). We add
+    // ACNS_STORE_INDEX (tag reused via AirCns field overload) but simpler still:
+    // add a new AirCnsTag ACNS_STORE_INDEX that holds base=k.prd and idx via idx.
+    //
+    // To minimize churn, we do this: evaluate rhs → v; evaluate base → b;
+    // evaluate index → i; build a single ACNS_STORE where the "prd" is an index
+    // node. PEAR's STORE handler detects an INDEX "prd" and does the gep itself.
+    // But STORE.prd is an AirPrd*, not AirCns*. Instead we introduce a new
+    // APRD_INDEX_ADDR producer that takes base+idx. Quickest path: we bind
+    // base and index to fresh vars, then call a synthetic helper — but we have
+    // no helper decls in this bootstrap.
+    //
+    // Actually SIMPLEST: reuse the INDEX consumer chain, but have it produce
+    // the address (not the loaded value) when its .tail is an ACNS_STORE.
+    // PEAR's cns(ACNS_INDEX) can check: if tail is ACNS_STORE, pass addr to
+    // tail instead of loading. Let's do that.
+    //
+    // So the plan: build <base | INDEX(idx, STORE(v_addr_holder, after))>.
+    // But v comes from rhs. Evaluate rhs first (outermost μ̃v), then base, then
+    // use INDEX→STORE with k.prd replaced by the address (which INDEX passes
+    // through if tail is STORE). We need to thread v into the store.
+    //
+    // Structure:
+    //   μ̃v. <base | INDEX(idx, STORE_ADDR_V(?, after))>
+    // where STORE_ADDR_V stores v into the incoming address, then continues.
+    // We can represent v via a COMU wrapping the STORE? No.
+    //
+    // OK new plan: introduce ACNS_STORE_INDEX that stores the incoming value
+    // into gep(base,0,idx). It reads base/idx from k.{prd,idx} (we'll set idx).
+    // Actually prd holds the BASE, and idx (long) holds a name-table index of
+    // the idx var? No, we need an AirPrd*. Add an AirCns.prd2 field? Too much.
+    //
+    // Use the existing single-prd + a COMU chain: emit <base | comu(ap, <idx | comu(ip,
+    //   <rhs | store_index_addr(ap,ip)>>))>. But store_index_addr needs two
+    // producers in scope. ACNS_STORE only takes one "prd" (dst).
+    //
+    // Workaround: allocate a tiny 2-element "struct" on the fly by making a
+    // dedicated consumer ACNS_STORE_INDEX that abuses existing fields: use
+    // k.name as a key for the idx-var name (so we can lookup). This is ugly
+    // but bootstrap-quality.
+    //
+    // CLEANEST approach with 0 parser/struct changes:
+    //   Use COMU binding order: after binding v, base, idx into fresh vars vb,
+    //   bb, ib, emit a final cmd that is < vb | STORE(<bb|INDEX_no_load(ib, μ̃addr.<addr|hole>)>) ; k >
+    // Where INDEX_no_load is a new consumer ACNS_GEP (returns addr instead of
+    // loading). Add ACNS_GEP and a STORE path that takes addr already.
+    //
+    // To minimize code churn, let's add ACNS_GEP (produces an address) and
+    // use it.
+
+    lr.total_cns++;
+    // Fresh names for rhs value, base pointer, index value.
+    char* v_v = lr.fresh_x();
+    char* b_v = lr.fresh_x();
+    char* i_v = null;
+    bool has_index = (lhs.kind == Nk.N_EXPR_INDEX);
+    AirPrd* vp = air_ir::air_mk_var(lr.arena, v_v);
+    AirPrd* bp = air_ir::air_mk_var(lr.arena, b_v);
+    AirPrd* ip = null;
+    AirPrd* base_prd;
+    AirPrd* idx_prd = null;
+    Node* base_node;
+    Node* idx_node = null;
+    if (has_index && lhs.child_count >= 2)
+    {
+        i_v = lr.fresh_x();
+        ip = air_ir::air_mk_var(lr.arena, i_v);
+        base_node = lhs.children[0];
+        idx_node = lhs.children[1];
+    }
+    else
+    {
+        base_node = lhs.child_count > 0 ? lhs.children[0] : null;
+    }
+    if (base_node == null) { lr.scope.leave(); return lr.cut(lr.mod.p_unit, k); }
+
+    // Build the innermost:  <vp | store(addr_prod)>;  k
+    // where addr_prod is <bp | gep(ip, μ̃a.a)> if indexed, else bp.
+    // μ̃a.<a|hole> is just the identity continuation (COVAR for a).
+    // But we don't have covar for a fresh name easily — use comu_cns with
+    // body = lr.cut(a_var, ...) doesn't work without a name for a.
+    // Use a simpler trick: create a fresh GEP consumer whose tail is a
+    // STORE that will receive the addr from the GEP. But STORE reads dst
+    // from k.prd, not from the producer v it receives. Wait in my current
+    // pear.c3 code, ACNS_STORE does `ptr = cg.prd_i64(k.prd)` — wrong! The
+    // producer v delivered to STORE IS the pointer (for deref stores). For
+    // indexed stores I wanted the producer to be the value, and k.prd to be
+    // the addr. But that's inconsistent:
+    //   *p = v:   <p|μ̃a.<v|store(a)>> — store consumer receives v, a is the
+    //             pointer "already in hand". To pass a as dst we need it
+    //             embedded in the consumer.
+    //   a[i]=v:   evaluate a, i, v; store v into gep(a,0,i). Similarly a and
+    //             i must be in the consumer.
+    //
+    // REFACTORED semantics for ACNS_STORE: "prd" is an AirPrd that evaluates
+    // to the destination address (like an index or deref). The producer
+    // delivered to STORE (`v`) is the value to store. So for *p = v:
+    //   <p | μ̃a.<v | store(var(a))>> where var(a) is a Var prd for a.
+    // For a[i]=v:
+    //   <a | μ̃ba.<i | μ̃ii.<v | store(gep(ba, ii))>>>
+    // where "gep(ba,ii)" is a producer that computes the address. We don't
+    // have a GEP producer. Add APRD_GEP(base, idx).
+    //
+    // OK let's just add a minimal APRD_GEP (two-operand producer) and have
+    // PEAR emit gep for it. That's cleanest.
+    //
+    // For expediency I'll implement this without APRD_GEP for now and instead
+    // have ACNS_STORE accept a chain: if k.prd is an INDEX consumer (we're
+    // overloading), walk the INDEX to find base/idx. That's too clever.
+    //
+    // Let me just add: for deref-store the base IS the value coming into
+    // STORE. For index-store, we wrap the base evaluation in an INDEX which
+    // detects that its tail is STORE and passes the ADDRESS rather than
+    // loading. Then the store uses v (its producer = rhs) as value, and the
+    // incoming "v" from INDEX is actually the address. That's the cleanest
+    // design!
+    //
+    // REVISED ACNS_INDEX semantics:
+    //   - If tail is a "value consumer" (anything except STORE), do GEP+LOAD
+    //     and deliver the i8 value (zext to i64) to tail.
+    //   - If tail is ACNS_STORE, do GEP only and deliver the ADDRESS to tail
+    //     (without loading). Then STORE uses its producer (`v`, the rhs value)
+    //     as the store value, and the incoming value (from INDEX) as dst.
+    //
+    // That means ACNS_STORE should interpret its incoming `v` as the address
+    // to store into, and k.prd as... nothing (or a unit). Wait that changes
+    // deref-store semantics too: for `*p = v`, we need <p | deref_store_tail(v)>
+    // where deref_store_tail is a consumer that takes p (addr) and stores v into it.
+    // But v must come from somewhere. So we still need a binder for v.
+    //
+    // FINAL clean design:
+    //   ACNS_STORE means "take the value you receive (producer of the CUT)
+    //   as the ADDRESS, truncate k.prd (an AirPrd we already evaluated) to i8,
+    //   store into addr, then deliver unit to k.tail."
+    //   NO, that flips things: k.prd should be the value, v the addr.
+    //   Why have k.prd? Because we need the value to store to be available
+    //   when the addr arrives. If we thread addr as the producer arriving
+    //   at STORE, then the value-to-store must already be bound (COMU).
+    //
+    // Actually the SIMPLEST correct encoding:
+    //   *p = v: μ̃v_v.<p | deref_store(v_v)>
+    //   deref_store is ACNS_STORE where k.prd is v_v (var prd), and on
+    //   reception of addr=p, it truncates v_v to i8, stores to addr, then
+    //   continues.
+    //
+    //   a[i]=v: μ̃v_v.<a | idx_store_idx(i, v_v)>
+    //   where idx_store_idx is ACNS_INDEX whose tail is ACNS_STORE k.prd=v_v;
+    //   ACNS_INDEX sees tail is STORE, does gep, delivers addr to STORE; STORE
+    //   receives addr, loads k.prd (v_v), truncates, stores.
+    //
+    // YES that works. Let me do it.
+
+    // Build ACNS_STORE tail: receives addr, stores v_v to it, continues to after.
+    AirCns* store_c = air_ir::air_new_AirCns(lr.arena);
+    lr.total_cns++;
+    store_c.tag = ACNS_STORE; store_c.prd = vp; store_c.tail = after;
+
+    AirCmd* out;
+    if (has_index)
+    {
+        // a[i] = v: <a | INDEX(i, store_c)>
+        //         where INDEX on STORE-tail does gep+pass-addr (no load).
+        AirCns* idx_c = air_ir::air_mk_index(lr.arena, ip, store_c);
+        // Emit a as base: if it's a value node, use prd directly; else μ̃bind.
+        if (is_value_node(base_node) && is_value_node(idx_node))
+        {
+            base_prd = lr.prd(base_node);
+            idx_prd = lr.prd(idx_node);
+            // Wait — ip/bp are fresh var names but base/index are values so
+            // no comu needed; rebuild idx_c with the real prds.
+            AirCns* idx_c2 = air_ir::air_mk_index(lr.arena, idx_prd, store_c);
+            out = lr.cut(base_prd, idx_c2);
+        }
+        else
+        {
+            // Use the bound var names (bp/ip) in the INDEX chain; wrap with
+            // μ̃ binders for non-value subexpressions, right-to-left.
+            AirCns* idx_c2 = air_ir::air_mk_index(lr.arena, ip, store_c);
+            out = lr.cut(bp, idx_c2);
+            // Bind index (right-to-left means index wraps outside base).
+            if (idx_node != null && !is_value_node(idx_node))
+            {
+                out = lr.expr_to_cns(idx_node,
+                    air_ir::air_mk_comu_cns(lr.arena, i_v, out));
+            }
+            else if (idx_node != null)
+            {
+                // index is a value, but we built INDEX using ip (var); emit a
+                // LET that binds ip = idx_value first. Use comu: <idx_val|μ̃ip.out>
+                AirPrd* ipv = lr.prd(idx_node);
+                out = air_ir::air_mk_seq(lr.arena, lr.cut(ipv,
+                    air_ir::air_mk_comu_cns(lr.arena, i_v, lr.nop())), out);
+            }
+            if (!is_value_node(base_node))
+            {
+                out = lr.expr_to_cns(base_node,
+                    air_ir::air_mk_comu_cns(lr.arena, b_v, out));
+            }
+            else
+            {
+                AirPrd* bpv = lr.prd(base_node);
+                out = air_ir::air_mk_seq(lr.arena, lr.cut(bpv,
+                    air_ir::air_mk_comu_cns(lr.arena, b_v, lr.nop())), out);
+            }
+        }
+    }
+    else
+    {
+        // *p = v: <p | store_c>  (store_c receives addr=p, stores vp to it)
+        if (is_value_node(base_node))
+        {
+            AirPrd* pv = lr.prd(base_node);
+            out = lr.cut(pv, store_c);
+        }
+        else
+        {
+            out = lr.cut(bp, store_c);
+            out = lr.expr_to_cns(base_node,
+                air_ir::air_mk_comu_cns(lr.arena, b_v, out));
+        }
+    }
+    // Finally wrap with rhs binder: μ̃v_v. out  (evaluate rhs, bind to v_v, then out)
+    if (is_value_node(rhs))
+    {
+        AirPrd* rv = lr.prd(rhs);
+        out = lr.cut(rv, air_ir::air_mk_comu_cns(lr.arena, v_v, out));
+    }
+    else
+    {
+        out = lr.expr_to_cns(rhs, air_ir::air_mk_comu_cns(lr.arena, v_v, out));
     }
     lr.scope.leave();
     return out;

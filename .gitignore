@@ -14,14 +14,12 @@
 /pear_a2
 /legacy/pride1/pride
 /obj/
-
 # ── Generated AIR / AST / S-expr outputs ────────────────────────────────
 *.air
 *.ast
 *.sexp
 !/docs/**/*.air
 !/legacy/**/*.air
-
 # ── Editor / tool detritus ──────────────────────────────────────────────
 .understand-anything/
 .vscode/
@@ -34,20 +32,16 @@ tmp/
 *.swo
 *~
 .DS_Store
-
 # ── Build byproducts ────────────────────────────────────────────────────
 build/
 dist/
 pfrontc
-pfrontc
 bench/*_c
-
 # ── exec-suite artifacts ────────────────────────────────────────────────
 # pfrontc writes the binary next to its source, so exec cases leave an
 # extensionless file beside the .pie. Keep the sources, ignore everything else.
 /tests/exec/pear/*
 !/tests/exec/pear/*.pie
-
 # ── bench binaries ──────────────────────────────────────────────────────
 # Built by bench/run.sh and bench/bench.sh; must never be committed.
 /bench/fib
@@ -56,3 +50,11 @@ bench/*_c
 /bench/fib_c
 /bench/tak_c
 /bench/sum_to_c
+bench/arr[0-9]*
+bench/fib
+bench/sum_to
+bench/tak
+bench/arr1
+bench/arr2
+bench/arr3
+bench/arr4

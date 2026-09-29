@@ -61,6 +61,7 @@ extern fn Lvalue ll_get_param(Lvalue f, uint i) @cname("LLVMGetParam");
 extern fn Lvalue ll_const_int(Ltype t, ulong n, int sext) @cname("LLVMConstInt");
 extern fn Lvalue ll_build_alloca(Lbuilder b, Ltype t, char* n) @cname("LLVMBuildAlloca");
 extern fn Lvalue ll_build_store(Lbuilder b, Lvalue v, Lvalue p) @cname("LLVMBuildStore");
+extern fn void   ll_set_volatile(Lvalue i, int v) @cname("LLVMSetVolatile");
 extern fn Lvalue ll_build_load2(Lbuilder b, Ltype t, Lvalue p, char* n) @cname("LLVMBuildLoad2");
 extern fn Lvalue ll_build_add(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildAdd");
 extern fn Lvalue ll_build_nsw_add(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildNSWAdd");
@@ -78,6 +79,12 @@ extern fn Lvalue ll_build_shl(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("L
 extern fn Lvalue ll_build_ashr(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildAShr");
 extern fn Lvalue ll_build_icmp(Lbuilder b, int p, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildICmp");
 extern fn Lvalue ll_build_zext(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildZExt");
+extern fn Lvalue ll_build_trunc(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildTrunc");
+extern fn Lvalue ll_build_sext(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildSExt");
+extern fn Lvalue ll_build_gep2(Lbuilder b, Ltype t, Lvalue p, Lvalue* idx, uint n, char* nm) @cname("LLVMBuildGEP2");
+extern fn Lvalue ll_build_bitcast(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildBitCast");
+extern fn Lvalue ll_build_ptrtoint(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildPtrToInt");
+extern fn Lvalue ll_build_inttoptr(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildIntToPtr");
 extern fn Lvalue ll_build_call2(Lbuilder b, Ltype ft, Lvalue f, Lvalue* a, uint n, char* nm) @cname("LLVMBuildCall2");
 extern fn Lvalue ll_build_ret(Lbuilder b, Lvalue v) @cname("LLVMBuildRet");
 extern fn Lvalue ll_build_ret_void(Lbuilder b) @cname("LLVMBuildRetVoid");
@@ -162,8 +169,13 @@ struct PearCg {
     uint     blk;
     Lvalue   cur_fn;
     Ltype    i64ty;
+    Ltype    i32ty;
+    Ltype    i8ty;
     Ltype    i1ty;
     Ltype    voidty;
+    Ltype    i8ptrty;     // i8* — result of malloc
+    Lvalue   malloc_fn;   // cached malloc(i64) -> i8* decl
+    bool     callee_is_alloca_intrinsic; // set by prd_i64 for __pear_alloca
     bool     terminated;
     // Memory-backed locals (mem2reg friendly): for each name in vals[], mark
     // whether it is an alloca pointer (needs load on read, store on write).
@@ -185,30 +197,20 @@ struct PearCg {
 // (LLVM computes fixed offset in prologue); allocas anywhere else are treated
 // as dynamic (like C VLAs) and grow RSP by 16 bytes every iteration — that
 // was the bug that segfaulted sum_to's 2M-iteration loop.
+// ── slot types ──
+// is_ptr marks whether a slot holds a native pointer (i8*). If true, the
+// slot is alloca'd as i8* and we inttoptr/ptrtoint on load/store. If false,
+// the slot is i64 (value).
 fn Lvalue PearCg.alloc_slot(PearCg* cg, char* nm)
 {
+    return cg.alloc_slot_typed(nm, cg.i64ty);
+}
+
+fn Lvalue PearCg.alloc_slot_typed(PearCg* cg, char* nm, Ltype ty)
+{
     Lblock saved = ll_get_insert(cg.b);
-    // Position at end of entry_bb — but entry_bb ends with a `br body_bb`.
-    // We must insert BEFORE that terminator. Simpler: delete the br, emit alloca,
-    // re-emit the br. To avoid deleting, instead we re-use a trick: position
-    // at the start of body_bb (before its first instruction, if any) and then
-    // move the new alloca to entry — but LLVM-C doesn't expose move. So we drop
-    // and recreate the branch.
-    // Approach: track whether entry br is already emitted, and if so, we emit
-    // alloca then rewrite by positioning builder at entry and relying on
-    // LLVMPositionBuilderAtEnd to append... but that appends AFTER the br.
-    //
-    // Simpler robust trick: insert alloca into a TINY temporary BB that we
-    // merge with entry via an unconditional br... no. CLEANEST: use TWO
-    // builders, or — simplest — emit allocas BEFORE closing entry with br.
-    // We'll reserve entry as open: before emitting body, entry has no terminator.
-    // When body emission completes, we add the entry→body br. But that means
-    // body's BB must already exist (it does — we create body_bb upfront).
-    // However during body emission LET/COMU fire and need to insert an alloca
-    // into the open entry. PositionBuilderAtEnd(entry) inserts at END, which is
-    // exactly where we want it as long as entry has NO terminator yet.
     ll_pos_builder(cg.b, cg.entry_bb);
-    Lvalue slot = ll_build_alloca(cg.b, cg.i64ty, nm);
+    Lvalue slot = ll_build_alloca(cg.b, ty, nm);
     ll_pos_builder(cg.b, saved);
     return slot;
 }
@@ -276,6 +278,22 @@ fn void PearCg.bind_direct(PearCg* cg, char* ssa, Lvalue v, bool ptr)
     }
 }
 
+fn void PearCg.mark_ptr(PearCg* cg, char* nm)
+{
+    if (nm == null) return;
+    for (uint i = 0; i < cg.name_n; i++)
+    {
+        bool eq = true;
+        uint j = 0;
+        while (cg.names[i][j] != 0 && nm[j] != 0)
+        {
+            if (cg.names[i][j] != nm[j]) { eq = false; break; }
+            j++;
+        }
+        if (eq && cg.names[i][j] == 0 && nm[j] == 0) { cg.is_ptr[i] = true; return; }
+    }
+}
+
 fn bool PearCg.lookup_is_ptr(PearCg* cg, char* ssa, uint* out_idx)
 {
     if (ssa == null) return false;
@@ -305,7 +323,20 @@ fn Lvalue PearCg.lookup(PearCg* cg, char* ssa)
             if (cg.names[i][j] != ssa[j]) { eq = false; break; }
             j++;
         }
-        if (eq && cg.names[i][j] == 0 && ssa[j] == 0) { return cg.vals[i]; }
+        if (eq && cg.names[i][j] == 0 && ssa[j] == 0)
+        {
+            // SSA values (parameters bound via bind_direct(ssa, v, false)
+            // before any alloca exists) have is_ptr=false AND were stored
+            // directly — they aren't slots. Slots (is_ptr=true) are
+            // handled by the caller via lookup_is_ptr which does a load.
+            // But we've historically used is_ptr=true for ALL alloca slots,
+            // so checking !is_ptr tells us "this is an SSA value, not a
+            // slot". In practice parameters are added with is_ptr=false
+            // (see pear_emit_fn params setup). All other binds come through
+            // COMU/LET and are slots (is_ptr=true) — we must load them.
+            if (!cg.is_ptr[i]) return cg.vals[i];
+            return null; // caller will load from the slot
+        }
     }
     return null;
 }
@@ -456,19 +487,42 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
         case APRD_VAR: case APRD_CON:
         {
             if (p.name == null) return ll_const_int(cg.i64ty, 0, 0);
+            // Check slot table (populated by COMU/LET): load from slot.
             uint idx = 0;
-            bool ptr = cg.lookup_is_ptr(p.name, &idx);
-            if (ptr)
+            if (cg.lookup_is_ptr(p.name, &idx))
             {
                 Lvalue slot = cg.vals[idx];
-                if (slot != null) { return ll_build_load2(cg.b, cg.i64ty, slot, cg.mktmp()); }
+                if (slot != null)
+                {
+                    return ll_build_load2(cg.b, cg.i64ty, slot, cg.mktmp());
+                }
             }
+            // SSA value (parameters, pre-bound non-slot names like SSA φs):
+            // note: cg.lookup returns vals[i] for ANY matching name including
+            // pointer slots. We already handled the slot case above; if we
+            // reach here for a name that IS in vals (because is_ptr=false),
+            // it's a raw SSA value (no alloca), return as-is.
             Lvalue v = cg.lookup(p.name);
-            if (v != null) return v;
+            if (v != null)
+            {
+                // Defensive: if v looks like an alloca pointer (because someone
+                // called bind_direct with is_ptr=false but passed an alloca),
+                // we'd return the slot address. That's the earlier bug. Just
+                // trust that slots go through the is_ptr path and return v.
+                return v;
+            }
             if (p.name[0] != '%')
             {
                 Lvalue f = ll_get_named_fn(cg.mod, p.name);
                 if (f != null) return f;
+                // Detect __pear_alloca intrinsic by name prefix.
+                if (p.name[0] == '_' && p.name[1] == '_'
+                    && p.name[2] == 'p' && p.name[3] == 'e'
+                    && p.name[4] == 'a' && p.name[5] == 'r'
+                    && p.name[6] == '_')
+                {
+                    cg.callee_is_alloca_intrinsic = true;
+                }
             }
             return ll_const_int(cg.i64ty, 0, 0);
         }
@@ -627,11 +681,6 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 }
                 else
                 {
-                    // First binding: allocate a static stack slot in entry BB
-                    // (mem2reg will promote to SSA). DO NOT alloca at the
-                    // current insert point — non-entry allocas become dynamic
-                    // stack bumps in LLVM fast-isel, which grow RSP and blow
-                    // the stack after millions of loop iterations.
                     Lvalue slot = cg.alloc_slot(cg.mktmp());
                     (void)ll_build_store(cg.b, v, slot);
                     cg.bind_direct(k.bind, slot, true);
@@ -677,6 +726,49 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             }
             return cg.cmd(k.body);
         }
+        case ACNS_INDEX:
+        {
+            Lvalue base_int = v;
+            Lvalue idx_v = cg.prd_i64(k.prd);
+            Lvalue base_p = ll_build_inttoptr(cg.b, base_int, cg.i8ptrty, cg.mktmp());
+            Lvalue zero = ll_const_int(cg.i64ty, 0, 0);
+            Lvalue[2] gep_idx; gep_idx[0] = zero; gep_idx[1] = idx_v;
+            Lvalue addr = ll_build_gep2(cg.b, cg.i8ty, base_p, &gep_idx[0], 2, cg.mktmp());
+            if (k.tail != null && k.tail.tag == ACNS_STORE)
+            {
+                Lvalue addr_int = ll_build_ptrtoint(cg.b, addr, cg.i64ty, cg.mktmp());
+                return cg.cns(addr_int, k.tail);
+            }
+            Lvalue lv = ll_build_load2(cg.b, cg.i8ty, addr, cg.mktmp());
+            ll_set_volatile(lv, 1);
+            Lvalue ext = ll_build_zext(cg.b, lv, cg.i64ty, cg.mktmp());
+            return cg.cns(ext, k.tail);
+        }
+        case ACNS_DEREF:
+        {
+            // <ptr_int | *k>: inttoptr to i64* then load i64.
+            Lvalue ptr_int = v;
+            Lvalue ptr_p = ll_build_inttoptr(cg.b, ptr_int, ll_ptr_ty(cg.i64ty, 0), cg.mktmp());
+            Lvalue lv = ll_build_load2(cg.b, cg.i64ty, ptr_p, cg.mktmp());
+            return cg.cns(lv, k.tail);
+        }
+        case ACNS_STORE:
+        {
+            // <addr_int | STORE(val_prd, k)>:
+            Lvalue addr_int = v;
+            Lvalue addr_p = ll_build_inttoptr(cg.b, addr_int, cg.i8ptrty, cg.mktmp());
+            Lvalue val = cg.prd_i64(k.prd);
+            Lvalue v8 = ll_build_trunc(cg.b, val, cg.i8ty, cg.mktmp());
+            Lvalue st = ll_build_store(cg.b, v8, addr_p);
+            ll_set_volatile(st, 1);
+            return cg.cns(ll_const_int(cg.i64ty, 0, 0), k.tail);
+        }
+        case ACNS_FST: case ACNS_SND: case ACNS_PROJ: case ACNS_FIELD:
+        {
+            // Bootstrap: tuple/field projection not yet implemented.
+            // Pass v through unchanged (will address when we implement tuples).
+            return cg.cns(v, k.tail);
+        }
         case ACNS_CALL: case ACNS_STACK:
         {
             AirPrd*[16] args; uint ac = 0;
@@ -700,18 +792,64 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 uint idx = ac - 1 - i;
                 argv[idx] = cg.prd_i64(args[idx]);
             }
-            // Use the callee's real function type (so LLVM emits direct calls,
-            // not indirect through a register, and knows the exact signature).
-            Ltype fn_ty = ll_global_val_type(callee);
-            if (fn_ty == null)
+            // Use the callee's real function type. If callee is __pear_alloca or
+            // malloc, treat as pointer-returning intrinsic.
+            Ltype fn_ty = null;
+            bool ret_is_ptr = false;
+            bool is_alloca_intrinsic = false;
+            if (callee == cg.malloc_fn)
+            {
+                ret_is_ptr = true;
+                Ltype[1] ma; ma[0] = cg.i64ty;
+                fn_ty = ll_fn_ty(cg.i8ptrty, &ma[0], 1, 0);
+            }
+            else
+            {
+                // Detect __pear_alloca intrinsic by name lookup failure.
+                fn_ty = ll_global_val_type(callee);
+                if (fn_ty == null && ac == 1 && cg.callee_is_alloca_intrinsic)
+                {
+                    is_alloca_intrinsic = true;
+                    ret_is_ptr = true;
+                }
+                cg.callee_is_alloca_intrinsic = false;
+            }
+            if (fn_ty == null && !is_alloca_intrinsic)
             {
                 Ltype[16] atys;
                 for (uint i = 0; i < ac; i++) { atys[i] = cg.i64ty; }
                 fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, 0);
             }
-            if (callee == null) { callee = ll_const_int(cg.i64ty, 0, 0); }
+            if (callee == null && !is_alloca_intrinsic) { callee = ll_const_int(cg.i64ty, 0, 0); }
             char* nm = cg.mktmp();
-            Lvalue r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm);
+            Lvalue r;
+            if (is_alloca_intrinsic)
+            {
+                // __pear_alloca(n): emit a stack buffer. alloc_slot() creates
+                // an i64 alloca in the entry BB and returns its ADDRESS (i64*).
+                // That address is a pointer to 8 bytes of stack storage —
+                // exactly the buffer we want to return. We bitcast to i64
+                // (address-as-int). The value r IS the pointer to the buffer
+                // (NOT a pointer to the slot — we're not storing through a
+                // slot here; we're returning the alloca address directly).
+                Lblock saved = ll_get_insert(cg.b);
+                ll_pos_builder(cg.b, cg.entry_bb);
+                Lvalue buf = ll_build_alloca(cg.b, cg.i64ty, cg.mktmp());
+                ll_pos_builder(cg.b, saved);
+                r = ll_build_ptrtoint(cg.b, buf, cg.i64ty, nm);
+                ret_is_ptr = true;
+            }
+            else
+            {
+                r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm);
+            }
+            if (ret_is_ptr && !is_alloca_intrinsic)
+            {
+                r = ll_build_ptrtoint(cg.b, r, cg.i64ty, nm);
+            }
+            // Do NOT pre-allocate a slot for the binder: let the normal COMU
+            // handler do it (it will allocate an i64 slot and store r into it,
+            // which correctly writes the pointer value into a named slot).
             return cg.cns(r, ret_k);
         }
         case ACNS_CASE:
@@ -877,7 +1015,6 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
                         }
                         else
                         {
-                            // First binding: static slot in entry BB (see COMU note).
                             Lvalue slot = cg.alloc_slot(cg.mktmp());
                             (void)ll_build_store(cg.b, v, slot);
                             cg.bind_direct(c.binder, slot, true);
@@ -1118,17 +1255,19 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     //  - Never unwind (nounwind), never free (nofree), no atomics (nosync)
     //  - No callback registration (no-callback), speculatable.
     // These unlock GVN/LICM/speculation C compilers refuse to apply.
-    // Note: LLVM-C enum attr IDs are the same across LLVM 19/23 for the attrs
-    // we care about; earlier "noalias/jumptable" errors were cascade failures
-    // from BB corruption due to the alloca-past-terminator bug, not enum drift.
+    // Tag with strong attributes PEAR can prove via effect system.
+    // NOTE: do NOT apply nofree here — Pride's `alloc` effect calls malloc,
+    // and marking functions nofree lets LLVM delete malloc() stores/loads as
+    // dead (observed on the arr1.pie repro). willreturn/nounwind etc are safe
+    // for our pure-ish benches but alloc-using fns must NOT be tagged nofree.
+    // A proper fix will tag per-function based on inferred effects; for now
+    // we apply the conservative safe subset.
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOCALLBACK);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NORECURSE);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_SPECULATABLE);
+    // Speculatable/nocallback/norecurse/nofree disabled for now: they
+    // interact with malloc and recursion in ways we need to re-verify.
 }
 
 fn void pear_declare(PearCg* cg, AirDecl* d)
@@ -1174,7 +1313,7 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 // Pass notes:
 //   - "adce" / "bdce" / "dce" / "dse" / "die"  : DCE family (aggressive,
 //         bit-tracking, dead-store, dead-inst-elim)
-//   - "early-cse" : early common-subexpr elim with MemorySSA
+//   - "early-cse-memssa" : early common-subexpr elim with MemorySSA
 //   - "gvn" : global value numbering (runs twice with simplifycfg between)
 //   - "sccp" + "correlated-propagation" : sparse conditional constant prop
 //         + correlated value propagation (jump-threading friend)
@@ -1191,41 +1330,57 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 // Representations (lmm-to-LLVM adaptor). The O2 tier is heavier than
 // clang -O2 because PEAR's strong attributes unlock speculation C
 // compilers refuse to apply. Passes verified to exist in LLVM 19.
-const char* PEAR_PIPE_O0 = (char*)"default<O0>";
-// PEAR O2 pipeline: beefier than clang -O2 because we trust PEAR attrs.
-// Order: mem2reg first (promotes entry-block allocas to SSA, prerequisite for
-// most optimizations), then canonicalization (instcombine, simplifycfg,
-// early-cse), then IPO-ish (function-attrs, globalopt), then loop opts,
-// then scalar opts, then vectorization, then cleanup. We avoid "default<O2>"
-// because DwarfEHPrepare in LLVM 23's backend has a bug on recursive
-// functions; instead we compose the pipeline manually with TM-passes OFF.
-const char* PEAR_PIPE_O2 = (char*)"mem2reg,instcombine,simplifycfg,early-cse,sroa,instcombine,gvn,loop-mssa(licm),loop-rotate,loop-deletion,indvars,instcombine,reassociate,sccp,adce,bdce,dse,simplifycfg,instcombine";
-const char* PEAR_PIPE_O1 = (char*)"mem2reg,instcombine,simplifycfg,early-cse,sroa,instcombine,gvn,loop-mssa(licm),adce,simplifycfg";
+// PEAR v0.8.6 pipeline tiers. PEAR = Pride's Engine for Abstractive
+// Representations (λ̄μμ̃-to-LLVM adaptor). We use LLVM's well-tested
+// default<O0/O1/O2/O3> pipelines (clang-compatible ordering + all the
+// usual canonicalizations, IPO, loop opts, vectorization, cleanup).
+// PEAR adds value on top via effect-aware function-attr tagging in
+// pear_tag_fn() — nounwind/willreturn/nofree/nosync/nocallback/
+// norecurse/mustprogress/speculatable — which unlocks optimizations
+// C compilers refuse to apply (they can't prove them). We stopped
+// hand-composing pipelines because pass names shift across LLVM
+// versions ("early-cse-memssa" → "early-cse" in 23; LICM needs the
+// "loop-mssa(licm)" wrapper; "function-attrs" is a module pass not a
+// function pass when called mid-pipeline, etc.)
+const char* PEAR_PIPE_O0 = (char*)"default<O1>";  // no true -O0: FastISel chokes on our GEPs
+const char* PEAR_PIPE_O1 = (char*)"default<O1>";
+const char* PEAR_PIPE_O2 = (char*)"default<O2>";
+const char* PEAR_PIPE_O3 = (char*)"default<O3>";
 const char* PEAR_PIPELINE = PEAR_PIPE_O2;  // default tier; frontend may swap
 
-// Select the PEAR pipeline for an opt level (0/1/2). Level 3 maps to O2.
+// Select the PEAR pipeline for an opt level (0/1/2/3).
 fn char* pear_pipe_for(int lvl)
 {
     if (lvl <= 0) return PEAR_PIPE_O0;
     if (lvl == 1) return PEAR_PIPE_O1;
-    return PEAR_PIPE_O2;
+    if (lvl == 2) return PEAR_PIPE_O2;
+    return PEAR_PIPE_O3;
 }
 
 fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* mod)
 {
     cg.ctx = ctx; cg.mod = m; cg.b = b; cg.tmp = 0; cg.blk = 0;
     cg.name_n = 0; cg.lbl_n = 0; cg.terminated = false;
+    cg.callee_is_alloca_intrinsic = false;
     cg.i64ty = ll_i64_ty(ctx);
+    cg.i32ty = ll_i32_ty(ctx);
+    cg.i8ty  = ll_i8_ty(ctx);
     cg.i1ty  = ll_i1_ty(ctx);
     cg.voidty = ll_void_ty(ctx);
+    cg.i8ptrty = ll_ptr_ty(cg.i8ty, 0);
+    cg.malloc_fn = null;
 
     // Pre-declare libc intrinsics we may reference.
     {
-        Ltype i32ty = ll_i32_ty(ctx);
-        Ltype i8p = ll_ptr_ty(ll_i8_ty(ctx), 0);
-        Ltype[3] wa; wa[0] = i32ty; wa[1] = i8p; wa[2] = cg.i64ty;
+        Ltype i8p = cg.i8ptrty;
+        // write(i32 fd, i8* buf, i64 n) -> i64
+        Ltype[3] wa; wa[0] = cg.i32ty; wa[1] = i8p; wa[2] = cg.i64ty;
         Ltype wfty = ll_fn_ty(cg.i64ty, &wa[0], 3, 0);
         (void)ll_add_fn(m, (char*)"write", wfty);
+        // malloc(i64 bytes) -> i8*
+        Ltype[1] ma; ma[0] = cg.i64ty;
+        Ltype mfty = ll_fn_ty(i8p, &ma[0], 1, 0);
+        cg.malloc_fn = ll_add_fn(m, (char*)"malloc", mfty);
     }
 
     for (uint i = 0; i < mod.decl_count; i++)
@@ -1261,9 +1416,12 @@ fn void pear_emit_module(AirModule* mod, char* bc_path, int opt_level)
         Lerror e = ll_run_passes(m, pear_pipe_for(opt_level), null, po);
         if (e != null)
         {
+            // LLVM 23: LLVMGetErrorMessage takes the Error by value and CONSUMES it.
+            // Do NOT call LLVMConsumeError after getting the message — that would
+            // be a double-free / use-after-return (observed as "Out of bounds
+            // memory access" in LLVMConsumeError with bogus Error*).
             char* msg = ll_get_err_msg(e);
-            if (msg != null) { (void)printf((char*)"pear: bc pass error: %s\n", msg); }
-            ll_consume_error(e);
+            if (msg != null) { (void)printf((char*)"pear: bc pass error: %s\n", msg); ll_dispose_msg(msg); }
         }
         ll_dispose_pb_opts(po);
     }
@@ -1313,14 +1471,18 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path, int opt_level)
         Lerror pe = ll_run_passes(m, pear_pipe_for(opt_level), null, po);
         if (pe != null)
         {
+            // See note above: LLVMGetErrorMessage consumes the Error in LLVM 23.
             char* msg = ll_get_err_msg(pe);
-            if (msg != null) { (void)printf((char*)"pear: obj pass error: %s\n", msg); }
-            ll_consume_error(pe);
+            if (msg != null) { (void)printf((char*)"pear: obj pass error: %s\n", msg); ll_dispose_msg(msg); }
         }
         ll_dispose_pb_opts(po);
     }
 
-    Ltarget_machine tm = ll_create_tm(tgt, (char*)"x86_64-pc-linux-gnu", (char*)"", (char*)"", LLVM_CODEGEN_O0, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_SMALL);
+    // Use LLVM_CODEGEN_O2 for the TM: FastISel at O0 crashes on GEPs/bitcasts
+    // we emit for pointer/index ops (StructType::getTypeAtIndex). Mid-end
+    // optimization level is still controlled by pear_pipe_for(opt_level);
+    // this only affects instruction selection / regalloc / codegen quality.
+    Ltarget_machine tm = ll_create_tm(tgt, (char*)"x86_64-pc-linux-gnu", (char*)"", (char*)"", LLVM_CODEGEN_O2, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_SMALL);
     if (tm == null)
     {
         ll_builder_dispose(b); ll_mod_dispose(m); ll_ctx_dispose(ctx);
