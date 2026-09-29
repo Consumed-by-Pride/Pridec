@@ -1658,7 +1658,7 @@ hneed '88_handlers.pie:80:27: note\[N4182\]: the continuation of `ask` is resume
 hdeny '88_handlers.pie:1[6-8]:[0-9]*: warning\[W418'                                                        "declared row reported"
 hdeny '88_handlers.pie:3[0-3]:[0-9]*: warning\[W418'                                                        "lexically handled perform reported"
 hdeny '88_handlers.pie:5[89]:[0-9]*: \(warning\|note\)\[[WN]418[27]'                                        "mixed abort/resume arm given a verdict"
-hdeny 'W4072'                                                                                               "phantom `op` operation (parser)"
+hdeny 'W4072'                                                                                               "phantom op operation (parser)"
 if [ $eh_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (undeclared/leaked effects; tail/multi-shot/stray/escaping resume; dead arm; arity)\n' "handlers"
 else
