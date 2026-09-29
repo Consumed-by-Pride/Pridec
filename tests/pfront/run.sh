@@ -102,6 +102,7 @@ declare -A EXPECT=(
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
   [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
+  [94_strata]=3               # type strata: alias cycles are errors (Loop, Ping, Pong); variant/negative/non-regular recursion diagnosed
   [93_commute]=0              # commutativity: reductions (counter/maxmin), LWW pins order, FNV mixed monoids, impure call, heap write, NF_INDEPENDENT
   [92_quals]=0                # qualifiers: purity fixpoint, param writes via callees, read-only params, discarded pure results
 )
@@ -1791,11 +1792,37 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "commute" "$cm_why"
 fi
 
+# Type strata: alias cycles rejected (also the fuzz case `type T = T`),
+# recursive decls flagged for the backend, by-value recursion through a
+# variant / negative occurrence / non-regular generic recursion each named.
+sa=$("$BIN" tests/pfront/94_strata.pie -I stdlib -I . --lint --emit-ast 2>&1)
+sa_ok=1; sa_why=""
+sneed() { echo "$sa" | grep -q "$1" || { sa_ok=0; sa_why="$sa_why missing[$2]"; }; }
+sdeny() { echo "$sa" | grep -q "$1" && { sa_ok=0; sa_why="$sa_why noise[$2]"; }; }
+sneed '94_strata.pie:18:1: error\[E4240\]: type alias `Loop` is defined in terms of itself:'                 "self alias cycle"
+sneed '94_strata.pie:21:1: error\[E4240\]: type alias `Ping` is defined in terms of itself (through `Pong`)' "mutual alias cycle"
+sneed '94_strata.pie:30:15: note\[N4241\]: enum `List` embeds itself by value through a variant payload'      "variant by-value recursion"
+sneed '94_strata.pie:34:17: note\[N4242\]: struct `Handler` occurs in negative position'                     "non-positive"
+sneed '94_strata.pie:44:16: warning\[W4243\]: non-regular recursive type: `Nest`'                            "non-regular"
+sneed "^  struct 'Tree' recursive"                                                                          "NF_RECURSIVE_TY on Tree"
+sneed "^  struct 'Link' recursive"                                                                          "NF_RECURSIVE_TY on Link"
+sdeny "^  struct 'Box' recursive"                                                                           "Box marked recursive"
+sdeny "TreeRef.*E4240"                                                                                      "alias of a recursive struct rejected"
+sdeny "Link.*W4243"                                                                                         "regular recursion called non-regular"
+sneed 'strata           : 13 type decls in 11 strata (depth 1): 11 recursive (7 guarded, 1 by value, 1 via variant), 3 alias cycles, 1 non-regular, 1 non-positive' "census"
+fz=$("$BIN" tests/pfront/fuzz/recursive_type.pie 2>&1)
+echo "$fz" | grep -q 'error\[E4240\]: type alias `T` is defined in terms of itself' || { sa_ok=0; sa_why="$sa_why missing[fuzz type T = T]"; }
+if [ $sa_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (alias cycles E4240 incl. fuzz `type T = T`, recursive flags, variant/negative/non-regular named, regular generics quiet)\n' "strata"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "strata" "$sa_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200|W4220|W4221)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200|W4220|W4221|W4243)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
