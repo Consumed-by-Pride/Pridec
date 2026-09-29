@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_cps.c3` | ~1300 | Danvy–Filinski one-pass CPS into a continuation IR; tail verdicts (NF_TAIL), join/loop continuations, η/β contraction, contification; `--emit-cps`; W4200/N4201/N4203 |
 | `theory_defun.c3` | ~600 | Closure analysis: free vars by binder identity, escape classification (NF_NOESCAPE), mutable captures of escaping closures marked NF_ADDR_TAKEN for boxing; W4190/N4191/N4192/W4193/W4194 |
 | `theory_effcont.c3` | ~800 | Handler discipline: lexical prompt stack, W4180 undeclared perform, W4181 call leaks an effect, N4182 multi-shot, W4183 stray / W4184 escaping resume, N4185 dead arm, W4186 arm arity, N4187 tail-resumptive (sets NF_TAIL) |
 | `theory_linearity.c3` | ~900 | Ownership of `alloc`: flow-sensitive LIVE/FREED/MAYBE/ESCAPED per resource with aliases, defer, loops; W4160 double free, W4161 use-after-free, W4162 leak, W4166 overwritten while owned, N4163–N4165 path-dependent |
@@ -117,6 +118,32 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**CPS translation (`theory_cps`).** Counted call sites and called the count
+"administrative redexes avoided"; nothing was translated. Now every
+function is translated by the Danvy–Filinski one-pass call-by-value CPS
+into a small continuation IR (Kennedy's normal form: applications carry a
+continuation variable or an inline `λx.`, `letk` for continuations, `letf`
+for local functions, `if`/`case`). Branches in tail position go straight to
+the current continuation; in value position they get a `letk` join point —
+the one-pass discipline means no administrative redex is ever built. Loops
+are continuations (`letk loop(_) = … loop(()) …`), `break`/`continue`/
+`return` are jumps, `and`/`or` are branches, `perform`/`resume` are
+applications of the operation with the current continuation. On the built
+term: **tail-call verdicts** (a call is a tail call iff its CPS form passes
+`k_ret`; each such `N_EXPR_CALL` gets `NF_TAIL` — the parser's bit for an
+explicit `tail` — so the backend may release the frame), **W4200** an
+explicit `tail` on a call whose value flows into an enclosing expression or
+sits under a `handle` prompt (the flag is also cleared so the backend is
+not lied to), **N4201** (`--lint`) unannotated self tail call, **η/β
+contraction** of joins (single-use join inlined, `letk j(x) = k(x)`
+eliminated, dead joins dropped — counted as term mutations), and
+**contification**: a `letf` never used as a value and always called with
+the same continuation variable becomes a jump target (`letj`, **N4203**
+under `--lint`). Per function the largest continuation (values live across
+a call) is measured. `--emit-cps` prints every term after contraction; the
+pass runs before NbE so it sees source lambdas. Corpus: 0 W4200, no
+crashes over stdlib/tests/conformance/examples.
 
 **Closure analysis (`theory_defun`).** Compared free variables by *name*
 (an inner `n` shadowing an outer `n` counted as a capture) and reported
@@ -379,6 +406,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `90_cps` + `cps` | self tail → loop, W4200 misuse, contified join (`letj`), while as `letk`, inline continuation for a non-tail call, escaping lambda stays `letf`, contraction census |
 | `89_closures` + `closures` | inline candidate, boxed mutable capture (returned), stale capture, lambda arity, escape/capture census; immutable-capture-as-argument and shadowing quiet |
 | `88_handlers` + `handlers` | undeclared perform, call leak, tail-resumptive, multi-shot (sequential and loop), dead arm, stray and escaping resume, arm arity; declared/handled performs quiet |
 | `87_ownership` + `ownership` | double free, UAF, one-path leak, full leak, alias, escape (quiet), defer+free, loop-carried double free, overwrite-while-owned, parameter UAF |

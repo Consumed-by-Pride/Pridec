@@ -100,6 +100,7 @@ declare -A EXPECT=(
   [87_ownership]=0            # alloc/free ownership: double free, use-after-free, leaks, path-dependent notes
   [88_handlers]=0             # effect handlers: undeclared performs, resume discipline, dead arms, arity
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
+  [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
 )
 
 # ---------------------------------------------------------------------------
@@ -1688,15 +1689,39 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "closures" "$cl_why"
 fi
 
+# CPS: the translation must produce the right shapes (loop continuations,
+# contified local fn, inline continuation for a non-tail call) and the right
+# verdicts (W4200 on a misplaced `tail`, N4201 on an unannotated self tail
+# call, N4203 on a contified local fn); an escaping lambda stays a letf.
+cp=$("$BIN" tests/pfront/90_cps.pie -I stdlib -I . --lint --emit-cps 2>&1)
+cp_ok=1; cp_why=""
+pneed() { echo "$cp" | grep -q "$1" || { cp_ok=0; cp_why="$cp_why missing[$2]"; }; }
+pdeny() { echo "$cp" | grep -q "$1" && { cp_ok=0; cp_why="$cp_why noise[$2]"; }; }
+pneed '90_cps.pie:12:58: warning\[W4200\]: `tail` here is not a tail call: its result flows into the enclosing expression' "tail misuse"
+pneed '90_cps.pie:8:27: note\[N4201\]: this self-call to `count_down` is in tail position'                           "self tail call"
+pneed '90_cps.pie:17:18: note\[N4203\]: `done` is called 3 times, always with the same continuation'                 "contified"
+pneed 'count_down(t[0-9]*, t[0-9]*; k_ret)   ; self tail call → loop'                                                 "self tail call in the term"
+pneed 'letj done_[0-9]*(r_[0-9]*; k[0-9]*) =   ; contified'                                                            "letj in the term"
+pneed 'letf add_[0-9]*(x_[0-9]*; k[0-9]*) =$'                                                                         "escaping lambda stays letf"
+pneed 'bad_tail(t[0-9]*; λt[0-9]*\.)'                                                                                 "inline continuation for non-tail call"
+pneed 'let t[0-9]* = < i_[0-9]* limit_[0-9]*'                                                                          "while as loop continuation (param resolved)"
+pneed 'cps-contract     : 0 η, 2 β (join inlined), 0 dead joins, 1 contified'                                          "contraction census"
+if [ "$(echo "$cp" | grep -c 'warning\[W4200\]')" != "1" ]; then cp_ok=0; cp_why="$cp_why W4200-count"; fi
+if [ $cp_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (self tail → loop, W4200 misuse, contified join, while as letk, non-tail inline continuation)\n' "cps"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "cps" "$cp_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x/W419x across stdlib)\n' "flow_noise_floor"
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x/W419x/W4200 across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi
