@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_mu.c3` | ~830 | Iso-recursive μ-types built from the declarations (struct/enum/newtype → μ; `*T` → option); contractivity, least-fixpoint inhabitation W4250, coinductive shape equality between nominal recursive types N4251 |
 | `theory_stratified.c3` | ~680 | Type-definition strata: dependency graph (value/guarded/alias edges, polarity), Tarjan SCCs + levels, NF_RECURSIVE_TY; alias cycles E4240, by-value recursion via variant N4241, non-positive N4242, non-regular generic recursion W4243 |
 | `theory_crdt.c3` | ~900 | Commutativity (CALM/CRDT): per-statement read/write location sets, block dependence DAG + critical path, NF_INDEPENDENT; loop accumulators classified counter/product/join/max-min/register/mixed, commutative reductions flagged NF_REDUCTION; N4230/N4231 |
 | `theory_quals.c3` | ~750 | Whole-program qualifier fixpoint: purity classes with reasons, parameter write/escape via callees, NF_PURE_FN / NF_READONLY_PARAM; W4220 discarded pure result, W4221 never-written mutable param, N4222/N4223 |
@@ -122,6 +123,28 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**μ-types (`theory_mu`).** The contractivity / De Bruijn shift‑subst /
+coinductive‑subtyping machinery was real but ran on a hard‑coded demo
+(`μX. unit ∨ int×X` and `μα.α`), and two of its parts were broken: `shift`
+and `subst` never descended into `ST_OPTION`, so any recursion under a
+pointer was never unfolded, and the structural comparison delegated
+nominal atoms to the set‑theoretic layer, which compares them by node id
+(so `Nil` ≠ `Nil`). Now every recursive declaration in the module is
+translated to a closed μ‑type — struct → product, enum → sum of
+constructor‑tagged tuples, newtype → body, `*T`/`&T` → `T?` (nullable: the
+base case), aliases transparent, the binder on the stack → De Bruijn
+variable — and three things are decided: contractivity; **inhabitation**
+in the least‑fixpoint reading (μX.B has a finite value iff B[X:=∅] is
+non‑empty, arrows erased since a closure can always be written) — an enum
+whose every constructor embeds itself by value is **W4250**, the struct
+case being already E3020; and **structural equality/subtyping** between
+distinct recursive nominal types by the Brandt–Henglein algorithm
+(assumption kept while the unfolding is examined, unions summand‑wise,
+constructors componentwise, arrows contravariant) — two enums with the
+same constructors, payload shapes and recursion are one type with two
+names, **N4251** (`--lint`). Memo hits are now non‑zero on real input,
+i.e. coinduction actually engages.
 
 **Type strata (`theory_stratified`).** Was a Kernel‑F<: sketch that
 compared every function type against itself (`predicative=N`); Pride's
@@ -511,6 +534,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `95_mu` + `mu` | IntList ≡ IntList2 (N4251) while BoolList / IntSeq are not; Stream W4250; Chain / Server quiet; memo hits > 0 |
 | `94_strata` + `strata` | E4240 ×3 (self + mutual alias cycles, plus fuzz `type T = T`), NF_RECURSIVE_TY on Tree/Link, N4241 variant recursion, N4242 negative occurrence, W4243 `Nest<Box<T>>`; Box / TreeRef / Link quiet |
 | `93_commute` + `commute` | sum+max loop flagged NF_REDUCTION + N4230, `last =` N4231, FNV mixed monoids, impure call / heap write / control-carried accumulator stay ordered, NF_INDEPENDENT on an independent `let` |
 | `92_quals` + `quals` | interprocedural purity (bump → bump_twice), recursive fn pure, NF_PURE_FN / NF_READONLY_PARAM in the dump, W4220 ×2, N4223, externs/alloc/effects never pure |

@@ -661,7 +661,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.eca = (theory_eclass::EClassAnalyses*)malloc(theory_eclass::EClassAnalyses::size);
     tp.effc = (theory_effcont::EffCont*)malloc(theory_effcont::EffCont::size);
     if (tp.ts != null) tp.ts.init();
-    if (tp.ts != null && tp.mustate != null) tp.mustate.init(a, tp.ts);
+    if (tp.ts != null && tp.mustate != null) { tp.mustate.init(a, tp.ts); tp.mustate.attach(d, it, file); }
     if (tp.meta != null) tp.meta.init(a);
     if (tp.issa != null) tp.issa.init(a);
     if (tp.eca != null) tp.eca.attach(tp.saturator);
@@ -819,7 +819,6 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.mustate != null)
     {
         tp.mustate.scan_ast(root, 0);
-        tp.mustate.run_demo();
         tp.passes_run = tp.passes_run + 1;
     }
     if (tp.meta != null) { tp.meta.scan(root, 0); tp.meta.run_hered(root); tp.passes_run = tp.passes_run + 1; }

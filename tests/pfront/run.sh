@@ -102,6 +102,7 @@ declare -A EXPECT=(
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
   [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
+  [95_mu]=0                   # μ-types from declarations: IntList ≡ IntList2 (N4251), Stream uninhabited (W4250), Bool/Seq/Chain/Server quiet
   [94_strata]=3               # type strata: alias cycles are errors (Loop, Ping, Pong); variant/negative/non-regular recursion diagnosed
   [93_commute]=0              # commutativity: reductions (counter/maxmin), LWW pins order, FNV mixed monoids, impure call, heap write, NF_INDEPENDENT
   [92_quals]=0                # qualifiers: purity fixpoint, param writes via callees, read-only params, discarded pure results
@@ -1818,11 +1819,31 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "strata" "$sa_why"
 fi
 
+# μ-types: recursive declarations are translated to closed μ-types; two
+# enums that differ only by name are found equal by the coinductive
+# algorithm (and only those), and an enum with no base case is uninhabited.
+mu=$("$BIN" tests/pfront/95_mu.pie -I stdlib -I . --lint 2>&1)
+mu_ok=1; mu_why=""
+mneed() { echo "$mu" | grep -q "$1" || { mu_ok=0; mu_why="$mu_why missing[$2]"; }; }
+mdeny() { echo "$mu" | grep -q "$1" && { mu_ok=0; mu_why="$mu_why noise[$2]"; }; }
+mneed '95_mu.pie:11:1: note\[N4251\]: `IntList2` is structurally identical to `IntList`'   "shape equality"
+mneed '95_mu.pie:26:1: warning\[W4250\]: recursive enum `Stream` has no finite value'      "uninhabited enum"
+mdeny 'BoolList.*N4251\|N4251.*BoolList'                                                  "different payload called equal"
+mdeny 'IntSeq.*N4251\|N4251.*IntSeq'                                                      "different constructors called equal"
+mdeny 'W4250.*`Chain`\|W4250.*`Server`'                                                   "pointer/function-guarded type called empty"
+mneed 'mu-types         : 7 type decls, 7 recursive → μ-types: 7 contractive, 0 non-contractive, 1 uninhabited; 11 pairs compared: 1 structurally equal' "census"
+mneed 'mu-unfold        : L=[1-9][0-9]* R=[1-9][0-9]* unfold steps, [0-9]* subtype calls, [1-9][0-9]* memo hits' "coinduction engaged (memo hits > 0)"
+if [ $mu_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (μ-types from decls: shape equality by coinduction, least-fixpoint inhabitation, no false equalities)\n' "mu"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "mu" "$mu_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200|W4220|W4221|W4243)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200|W4220|W4221|W4243|W4250)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
