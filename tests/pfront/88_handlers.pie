@@ -1,0 +1,88 @@
+-- Algebraic effect handlers: performs must be handled or declared, resume
+-- discipline inside arms, dead arms, arm arity, tail-resumptive arms.
+
+effect Ask
+  op ask : () -> i64
+
+effect Tell
+  op tell : i64 -> ()
+
+effect Yield
+  op yield : i64 -> bool
+
+extern fn sink : i64 -> () ! [IO]
+
+-- 1. declared row: fine
+fn asks : () -> i64 ! [Ask]
+  | () -> perform Ask.ask() + 1i64
+
+-- 2. row given but missing the effect that is performed
+fn forgets : () -> i64 ! [IO]
+  | () ->
+      sink(1i64)
+      perform Ask.ask()
+
+-- 3. calling an effectful fn from a row that lacks its effects
+fn calls_asks : () -> i64 ! [IO]
+  | () -> asks()
+
+-- 4. handled lexically: the perform is caught, nothing to declare
+fn handled : () -> i64
+  | () ->
+      handle perform Ask.ask() * 2i64
+        | Ask.ask() -> resume(21i64)
+
+-- 5. resume twice on one path: multi-shot; arm for an op the computation never performs
+fn twice : () -> i64
+  | () ->
+      handle asks()
+        | Ask.ask() ->
+            let a = resume(1i64)
+            resume(2i64) + a
+        | Tell.tell(v) -> resume(())
+
+-- 6. resume outside any handler arm
+fn stray : () -> i64
+  | () -> resume(3i64)
+
+-- 7. resume captured by a closure: the continuation escapes the arm
+fn escapes : () -> i64
+  | () ->
+      handle asks()
+        | Ask.ask() ->
+            let k = fn (x: i64) -> i64 { resume(x) }
+            k(5i64)
+
+-- 8. abort arm (no resume) and a tail-resumptive arm
+fn abort_or_tail : (bool) -> i64
+  | flag ->
+      handle asks()
+        | Ask.ask() ->
+            if flag
+              7i64
+            else
+              resume(8i64)
+
+-- 9. arm arity mismatch: tell takes one value
+fn arity : () -> () ! [IO]
+  | () ->
+      handle perform Tell.tell(1i64)
+        | Tell.tell(a, b) -> resume(())
+
+-- 10. resume in a loop: multi-shot
+fn looped : () -> i64
+  | () ->
+      handle asks()
+        | Ask.ask() ->
+            let mut i : i64 = 0i64
+            let mut acc : i64 = 0i64
+            while i < 3i64
+              acc = acc + resume(i)
+              i = i + 1i64
+            acc
+
+fn main : () -> () ! [IO]
+  | () ->
+      sink(handled() + twice() + stray() + escapes() + abort_or_tail(true) + looped())
+      arity()
+      sink(forgets() + calls_asks())
