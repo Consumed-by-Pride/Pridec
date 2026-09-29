@@ -54,7 +54,8 @@ item is withdrawn.
 | `theory_stage.c3` | 783 | Staged partial evaluation, binding-time analysis, loop unrolling |
 | `theory_modal.c3` | 764 | Scoped effects, continuation trees, UB tracking |
 | `theory_bidi.c3` | 748 | Bidirectional CMTT: box types become inferrable |
-| `theory_egraph.c3` | 740 | E-graphs: union-find + congruence closure, equality saturation, cost extraction |
+| `theory_egraph.c3` | ~830 | E-graphs: union-find + congruence closure, equality saturation from the ORIGINAL subject (TRS answer joins the root class), cost extraction |
+| `theory_eclass.c3` | ~260 | E-class constant analysis (egg §4) on the real graph: make/join/modify hooks, δ inside classes, literal materialisation, contradiction → W4034 |
 | `theory_subtype.c3` | 726 | Set-theoretic subtyping by reduction to DNF emptiness |
 | `theory_irdlverify.c3` | 725 | IRDL verification traits: SSA form, dominance, purity, termination |
 | `theory_effects.c3` | 722 | Handler coverage, linearity, effect rows |
@@ -111,6 +112,26 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**E-class analyses (`theory_eclass`).** The file used to hash AST node
+pointers into pretend classes and feed those to a lattice; it never touched
+the e-graph. It is now egg §4 on the real graph: a constant lattice per
+e-class, computed when an e-node is added (`make`: a literal, or an operator
+whose child classes are all constant — δ inside the graph), joined when
+classes merge (`join`), and re-propagated after congruence repair
+(`modify`), which also *materialises* the literal e-node in every constant
+class so extraction — which minimises cost — picks the literal. Two
+different constants in one class is the graph proving `1 = 0`: it can only
+come from an unsound rule set (`a * 0 ↦ a`), and it is reported at the
+`|>*` site as **W4034** (error under `--strict-types`) with the two values;
+the site then keeps the destructive result instead of extracting garbage.
+
+The `|>*` site was also changed to saturate from the **original subject**,
+with the TRS normal form added as one more member of the root class,
+rather than from the TRS answer. That is what gives the graph something to
+do: under `a + b ↦ b + a; (a + b) + c ↦ a + (b + c)` the TRS cannot
+normalise `(x + 2) + 3`; saturation reaches `x + (2 + 3)`, the analysis
+folds the inner class to 5, and extraction returns `x + 5` (cost 9 → 5).
 
 **Normalisation by evaluation (`theory_nbe`).** The file used to say
 "counting & demo only" in its header and ran an SKI toy on a private AST.
@@ -242,6 +263,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `35_egraph_rewrite` | e-graph builds classes and saturates |
 | `82_symexe_paths` + `symexe_paths` | W4050/W4052/N4051 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
+| `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
 | `flow_noise_floor` | 0 × W4050/W4052/N4051/W4120 across the stdlib |
 
 **A real parser bug fell out of this work.** `let x = comptime 3i64 * 4i64`

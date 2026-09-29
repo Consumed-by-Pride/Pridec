@@ -664,7 +664,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.ts != null && tp.mustate != null) tp.mustate.init(a, tp.ts);
     if (tp.meta != null) tp.meta.init(a);
     if (tp.issa != null) tp.issa.init(a);
-    if (tp.eca != null) tp.eca.attach(4096);
+    if (tp.eca != null) tp.eca.attach(tp.saturator);
     if (tp.effc != null) tp.effc.init(a);
     tp.reclat = (theory_records::RecordLattice*)malloc(theory_records::RecordLattice::size);
     tp.matcher = (theory_matching::MatchCompiler*)malloc(theory_matching::MatchCompiler::size);
@@ -829,7 +829,6 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.meta != null) { tp.meta.scan(root, 0); tp.meta.run_hered(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.issa != null) { tp.issa.walk_dialects(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.effc != null) { tp.effc.walk(root, false, 0); tp.passes_run = tp.passes_run + 1; }
-    if (tp.eca != null) { tp.eca.note_for_entry(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.reclat != null) { tp.reclat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.matcher != null) { tp.matcher.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.hered != null) { tp.hered.walk_ast(root, 0); tp.passes_run = tp.passes_run + 1; }

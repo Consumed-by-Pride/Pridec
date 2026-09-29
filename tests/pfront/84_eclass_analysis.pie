@@ -1,0 +1,18 @@
+-- E-class analysis (egg §4) on the real e-graph: constants fold inside
+-- classes that only become adjacent through equalities the destructive
+-- rewriter cannot use, and an unsound rule set is caught as a contradiction.
+fn main : (i64) -> i64
+  | x ->
+      let ac : Rewrite = rewrite
+        | a + b ↦ b + a
+        | (a + b) + c ↦ a + (b + c)
+      -- saturation reaches x + (2 + 3); the analysis folds 2 + 3 = 5 and
+      -- materialises the literal, so extraction yields `x + 5`.
+      let r = ((x + 2i64) + 3i64) |> ac*
+      -- `a * 0 ↦ a` equates 2 * 0 (a constant class, 0) with 2: W4034,
+      -- and the site keeps the destructive result instead of extracting.
+      let wrong : Rewrite = rewrite
+        | a + b ↦ b + a
+        | a * 0i64 ↦ a
+      let s = ((2i64 * 0i64) + x) |> wrong*
+      r + s

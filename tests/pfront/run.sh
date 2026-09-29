@@ -94,6 +94,7 @@ declare -A EXPECT=(
   [81_trs_confluence]=0       # non-confluence / non-termination are WARNINGS, not errors
   [82_symexe_paths]=0         # symbolic execution: faults only on feasible paths, with witness
   [83_nbe_normalise]=0        # NbE: β/δ/η on the λ-fragment; effects, capture, mut respected
+  [84_eclass_analysis]=0      # e-class constant analysis folds through saturation; W4034 on unsound rules
 )
 
 # ---------------------------------------------------------------------------
@@ -1535,6 +1536,23 @@ if [ $nb_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (beta/delta/eta real; effects once+ordered; capture+mut refused)\n' "nbe_normalise"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "nbe_normalise" "$nb_why"
+fi
+
+# E-class analysis: `x + 5` must come out of the e-graph (the TRS cannot
+# normalise under commutativity), the fold must be the ANALYSIS's, and the
+# unsound set must be reported as a contradiction rather than extracted.
+ea=$("$BIN" tests/pfront/84_eclass_analysis.pie -I stdlib -I . --emit-ast --quiet 2>&1 | sed -n "/let 'r'/,/let 'wrong'/p")
+er=$("$BIN" tests/pfront/84_eclass_analysis.pie -I stdlib -I . 2>&1)
+ea_ok=1; ea_why=""
+echo "$ea" | grep -q "int 5" || { ea_ok=0; ea_why="$ea_why no-x+5"; }
+[ "$(echo "$ea" | grep -c "int 2i64\|int 3i64")" = 0 ] || { ea_ok=0; ea_why="$ea_why 2,3-survive"; }
+echo "$er" | grep -q "eclass-analysis .*[1-9][0-9]* folds" || { ea_ok=0; ea_why="$ea_why no-analysis-fold"; }
+echo "$er" | grep -q "warning\[W4034\].*constants 0 and 2" || { ea_ok=0; ea_why="$ea_why no-W4034"; }
+echo "$er" | grep -q "1 contradictions" || { ea_ok=0; ea_why="$ea_why contradiction-count"; }
+if [ $ea_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (x+5 via saturation+analysis fold; unsound set -> W4034)\n' "eclass_analysis"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "eclass_analysis" "$ea_why"
 fi
 
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
