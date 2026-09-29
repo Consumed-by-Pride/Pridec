@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_nbe.c3` | ~900 | Normalisation by evaluation over the AST: closures/neutrals, β with fresh binders and capture check, effect-safe argument `let`s, δ on β-created redexes, η, dead-lambda sweep |
 | `theory_symexe.c3` | ~1000 | Bounded symbolic execution: per-function path sets, interval + disequality decision procedure, witnessed diagnostics |
 | `theory_check.c3` | 907 | Pipeline driver, gradual sort checking, per-pass timing |
 | `theory_rowinfer.c3` | 834 | Principal-type effect-row inference |
@@ -110,6 +111,33 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Normalisation by evaluation (`theory_nbe`).** The file used to say
+"counting & demo only" in its header and ran an SKI toy on a private AST.
+It is now a normaliser for the language's λ-fragment: `eval` maps syntax to
+values — literals, closures ⟨λ, env⟩, and *neutrals* (syntax that cannot
+reduce, normalised underneath) — and `reify` reads values back. A
+`let f = fn (…) { … }` that is immutable, not `&`-taken and not recursive
+puts a closure in the environment for the statements after it; every
+application of a closure with matching arity is a β. Higher-order chains
+reduce all the way (`add(inc(1), twice(inc)) + k` → `7 + k`), and
+lambda-lets with no remaining uses are deleted.
+
+Soundness is the whole point, and it is specific: (1) substitution is by
+binder pointer, and the lambda body is cloned with **fresh binders** per β,
+so two inlinings never share a `let`; (2) before a β, every free
+identifier of every value that will land at the call site is checked
+against the call site's scope — if a `let n` between definition and use
+would capture the lambda's `n`, the β is **refused** and counted; (3) only
+*values* (literals, lambdas, identifiers of immutable bindings) are
+substituted for parameters; anything else — a call, a read of a `mut`
+binding — becomes `let p = arg` in front of the body, evaluated once and in
+argument order, so `dbl(read())` reads once and `sub(emit(1), emit(2))`
+emits in order; (4) `mut` bindings are never values; (5) δ (literal
+arithmetic, `if` on a literal) fires only on redexes that β *created* —
+source-level `1 > 100` is left to constfold and the optimizer so their
+counts stay honest; (6) fuel of 2048 β per function. On the stdlib, which
+has almost no lambdas, it makes a handful of δ-steps and nothing else.
 
 **Symbolic execution (`theory_symexe`).** Runs each function over symbolic
 parameters, forking at `if`/`match`/`while` and carrying the path condition.
@@ -213,6 +241,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `34_exhaustive_witness` | missing variant → warning naming the witness |
 | `35_egraph_rewrite` | e-graph builds classes and saturates |
 | `82_symexe_paths` + `symexe_paths` | W4050/W4052/N4051 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
+| `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `flow_noise_floor` | 0 × W4050/W4052/N4051/W4120 across the stdlib |
 
 **A real parser bug fell out of this work.** `let x = comptime 3i64 * 4i64`
@@ -253,7 +282,8 @@ each pass sits where it does. The shape:
  7c PGL certificates
  7d semantic subtyping / match refinement
  7e abstract interpretation             intervals, signs, nullness, branch narrowing
- 7f symbolic execution                  feasible-path faults with witnesses
+ 7f normalisation by evaluation         β/δ/η on the λ-fragment (before the optimizer)
+ 7g symbolic execution                  feasible-path faults with witnesses
  7e′ LIVENESS + semi-pruned split       ← builds the CFG
  7f THE OPTIMIZER                       ← consumes everything above
  8  handler-arm linearity

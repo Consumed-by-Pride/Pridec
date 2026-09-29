@@ -93,6 +93,7 @@ declare -A EXPECT=(
   [80_trs_guards]=0           # spec §16: guards, log2 folding, ++, |> and |>*
   [81_trs_confluence]=0       # non-confluence / non-termination are WARNINGS, not errors
   [82_symexe_paths]=0         # symbolic execution: faults only on feasible paths, with witness
+  [83_nbe_normalise]=0        # NbE: β/δ/η on the λ-fragment; effects, capture, mut respected
 )
 
 # ---------------------------------------------------------------------------
@@ -1508,6 +1509,32 @@ if [ $sx_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (W4050/W4052/N4051 with witnesses; no noise on pruned paths)\n' "symexe_paths"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "symexe_paths" "$sx_why"
+fi
+
+# Normalisation by evaluation on tests/pfront/83_nbe_normalise.pie: the shape
+# of each function's normal form, including the reductions that must NOT
+# happen (capture, mut) and the ones that must be done carefully (effects).
+nb=$("$BIN" tests/pfront/83_nbe_normalise.pie -I stdlib -I . --emit-ast --quiet 2>&1)
+sect() { echo "$nb" | sed -n "/^  fn '$1'/,/^  fn '$2'/p"; }
+nb_ok=1; nb_why=""
+chk() { [ "$1" = "1" ] || { nb_ok=0; nb_why="$nb_why $2"; }; }
+pc=$(sect pure_chain once)
+chk $([ "$(echo "$pc" | grep -c "lambda")" = 0 ] && [ "$(echo "$pc" | grep -c "int 7i64")" = 1 ] && [ "$(echo "$pc" | grep -c "int 10i64")" = 1 ] && echo 1) "pure_chain->7+k(10),no lambdas"
+on=$(sect once ordered)
+chk $([ "$(echo "$on" | grep -c "ident 'read'")" = 1 ] && [ "$(echo "$on" | grep -c "let 'x'")" = 1 ] && echo 1) "once:read() bound by ONE let"
+od=$(sect ordered capture | grep -n "int 1i64\|int 2i64" | head -2 | cut -d: -f1 | tr '\n' ' ')
+chk $([ "$(sect ordered capture | grep -c "ident 'emit'")" = 2 ] && [ "$(echo $od | awk '{print ($1<$2)?1:0}')" = 1 ] && echo 1) "ordered:emit(1) before emit(2), each once"
+chk $([ "$(sect capture mutable | grep -c "ident 'addn'")" -ge 1 ] && echo 1) "capture:beta refused, call kept"
+chk $([ "$(sect mutable eta | grep -c "ident 'g'")" -ge 2 ] && echo 1) "mutable:mut lambda never inlined"
+chk $([ "$(sect eta escape | grep -c "ident 'emit'")" = 1 ] && [ "$(sect eta escape | grep -c "lambda")" = 0 ] && echo 1) "eta:e(7)->emit(7)"
+es=$(sect escape use)
+chk $([ "$(echo "$es" | grep -c "lambda")" = 1 ] && [ "$(echo "$es" | grep -c "int 5i64")" = 1 ] && [ "$(echo "$es" | grep -c "ident 'n'")" = 0 ] && echo 1) "escape:closure materialised with n:=5"
+nbr=$("$BIN" tests/pfront/83_nbe_normalise.pie -I stdlib -I . 2>&1 | grep "nbe-rewrites")
+chk $(echo "$nbr" | grep -q "refused: 1 capture" && echo 1) "exactly one capture refusal counted"
+if [ $nb_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (beta/delta/eta real; effects once+ordered; capture+mut refused)\n' "nbe_normalise"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "nbe_normalise" "$nb_why"
 fi
 
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
