@@ -677,16 +677,13 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.crdt = (theory_crdt::CrdtAnalysis*)malloc(theory_crdt::CrdtAnalysis::size);
     tp.ssa = (theory_ssa::SsaBuilder*)malloc(theory_ssa::SsaBuilder::size);
     tp.lin = (theory_linearity::LinAnalysis*)malloc(theory_linearity::LinAnalysis::size);
-    const usz SYMSTATE_SZ = 16384;
-    const usz QUAL_SZ = 256;
-    const usz SESS_SZ = 4096;
-    const usz SCT_SZ = 4096;
-    const usz DEFUN_SZ = 4096;
-    tp.sym = (theory_symexe::SymState*)malloc(SYMSTATE_SZ);
-    tp.qual = (theory_quals::QualAnalysis*)malloc(QUAL_SZ);
-    tp.sess = (theory_session::SessionCheck*)malloc(SESS_SZ);
-    tp.sct = (theory_sct::SctState*)malloc(SCT_SZ);
-    tp.defun = (theory_defun::DefunState*)malloc(DEFUN_SZ);
+    // sizes come from the types: a hard-coded byte count silently truncates
+    // the struct the moment a pass grows (QualAnalysis was 256 bytes here).
+    tp.sym = (theory_symexe::SymState*)malloc(theory_symexe::SymState::size);
+    tp.qual = (theory_quals::QualAnalysis*)malloc(theory_quals::QualAnalysis::size);
+    tp.sess = (theory_session::SessionCheck*)malloc(theory_session::SessionCheck::size);
+    tp.sct = (theory_sct::SctState*)malloc(theory_sct::SctState::size);
+    tp.defun = (theory_defun::DefunState*)malloc(theory_defun::DefunState::size);
     if (tp.reclat != null && tp.ts != null) tp.reclat.init(tp.ts, a);
     if (tp.matcher != null) { tp.matcher.init(a); tp.matcher.attach(d, it, file); }
     if (tp.hered != null) tp.hered.init(a);
@@ -699,7 +696,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.ssa != null) { tp.ssa.init(a, null); tp.ssa.run(); }
     if (tp.lin != null) { tp.lin.init(a); tp.lin.attach(d, it, file); }
     if (tp.sym != null) { tp.sym.init(a); tp.sym.attach(d, it, file); }
-    if (tp.qual != null) tp.qual.init(a);
+    if (tp.qual != null) { tp.qual.init(a); tp.qual.attach(d, it, file); }
     if (tp.sess != null) tp.sess.init(a);
     if (tp.sct != null) { tp.sct.init(a); tp.sct.attach(d, it, file); }
     if (tp.defun != null) { tp.defun.init(a); tp.defun.attach(d, it, file); }

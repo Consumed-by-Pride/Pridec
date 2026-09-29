@@ -84,7 +84,7 @@ fn uring_handler_submit_read : (*UringEffectHandler, i64, ptr, i64) -> i64
       p.len     = req.len;
       p.op_kind = req.op_kind;
       vec.vec_push(&h.suspended, p as ptr);
-      native_uring_submit(&h.uring);
+      let _submitted : i64 = native_uring_submit(&h.uring);   -- native shim: result is the only effect
       id
     } else {
       0i64
