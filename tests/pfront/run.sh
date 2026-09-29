@@ -102,6 +102,7 @@ declare -A EXPECT=(
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
   [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
+  [92_quals]=0                # qualifiers: purity fixpoint, param writes via callees, read-only params, discarded pure results
 )
 
 # ---------------------------------------------------------------------------
@@ -1738,15 +1739,42 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "dtree" "$dt_why"
 fi
 
+# Qualifiers: purity must be interprocedural (bump_twice impure only through
+# bump; wasted stays pure), recursion must not break purity, pointer
+# parameters that are only read are flagged, discarded pure results warn,
+# and extern/bodiless declarations are never called pure.
+ql=$("$BIN" tests/pfront/92_quals.pie -I stdlib -I . --lint --emit-ast 2>&1)
+ql_ok=1; ql_why=""
+qneed() { echo "$ql" | grep -q "$1" || { ql_ok=0; ql_why="$ql_why missing[$2]"; }; }
+qdeny() { echo "$ql" | grep -q "$1" && { ql_ok=0; ql_why="$ql_why noise[$2]"; }; }
+qneed '92_quals.pie:45:13: warning\[W4220\]: the result of `square` is discarded, and `square` has no side effects'   "discarded pure result"
+qneed '92_quals.pie:46:10: warning\[W4220\]: the result of `tri` is discarded.*except possibly not terminating'      "discarded recursive pure result"
+qneed '92_quals.pie:25:5: note\[N4223\]: pointer parameter `c` is only read and never retained'                    "read-only pointer param"
+qneed '92_quals.pie:11:1: note\[N4222\]: `tri` is pure: its result depends only on its arguments (but it may not terminate)' "recursive fn pure"
+qneed "^  fn 'square' pure"                                                                                          "NF_PURE_FN on square"
+qneed "^  fn 'peek' pure"                                                                                            "NF_PURE_FN on peek"
+qneed "pat-ident 'c' readonly"                                                                                       "NF_READONLY_PARAM"
+qdeny "^  fn 'bump' pure"                                                                                            "bump (writes through param) marked pure"
+qdeny "^  fn 'bump_twice' pure"                                                                                      "bump_twice (calls bump) marked pure"
+qdeny "^  fn 'shout' pure"                                                                                           "shout (calls extern) marked pure"
+qdeny "^  fn 'fresh' pure"                                                                                           "fresh (allocates) marked pure"
+qdeny 'note\[N4222\]: `emit` is pure'                                                                                "extern marked pure"
+qneed 'quals            : 10 fns in 2 rounds: 4 pure, 0 read-only, 1 allocating, 4 impure (3 may diverge)'          "census"
+if [ $ql_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (interprocedural purity, recursion stays pure, read-only params flagged, W4220 discarded results, externs impure)\n' "quals"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "quals" "$ql_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200|W4220|W4221)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x/W419x/W4200 across stdlib)\n' "flow_noise_floor"
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x/W419x/W4200/W422x across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi

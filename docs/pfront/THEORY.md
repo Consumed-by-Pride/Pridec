@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_quals.c3` | ~750 | Whole-program qualifier fixpoint: purity classes with reasons, parameter write/escape via callees, NF_PURE_FN / NF_READONLY_PARAM; W4220 discarded pure result, W4221 never-written mutable param, N4222/N4223 |
 | `theory_matching.c3` | ~1000 | Maranget decision DAGs for every `match` and clause set: f/b/a heuristics, enum signatures, or-rows, guards, hash-consed sharing, tree-vs-first-match verification, NF_DENSE_SWITCH; `--emit-dtree`; N4210 |
 | `theory_cps.c3` | ~1300 | Danvy–Filinski one-pass CPS into a continuation IR; tail verdicts (NF_TAIL), join/loop continuations, η/β contraction, contification; `--emit-cps`; W4200/N4201/N4203 |
 | `theory_defun.c3` | ~600 | Closure analysis: free vars by binder identity, escape classification (NF_NOESCAPE), mutable captures of escaping closures marked NF_ADDR_TAKEN for boxing; W4190/N4191/N4192/W4193/W4194 |
@@ -119,6 +120,33 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Qualifier inference (`theory_quals`).** Carried a "qualifier word"
+through a walk and cleared PURE on any assignment or call; every call was
+opaque, parameters were never examined, nothing was reported. Now a
+whole-program **greatest-fixpoint** over the call graph derives, per
+function, the *reasons* it is not pure — writes outside its frame, reads
+of a `static`, writes through a parameter (per parameter), effects/system
+operations, allocation, unknown (extern/indirect) callee, impure callee,
+loops, recursion — each remembered with the node that first caused it.
+Callee facts flow to callers (a function that only calls `bump` inherits
+`bump`'s write to the pointer it passes along); recursion does not break
+purity (optimistic start, facts only grow). Parameters are tracked as
+*written* (directly, through field/index/deref, `&mut`, or via a callee
+that writes that position) and *escaping* (returned, stored, captured,
+passed to an unknown callee). Classes: PURE (referentially transparent),
+READONLY (reads statics), ALLOC, IMPURE, each ± may-diverge. Writeback:
+**`NF_PURE_FN`** on PURE/READONLY functions and **`NF_READONLY_PARAM`** on
+every binder of a parameter position that is neither written nor
+retained — exactly LLVM's `readnone`/`readonly` and `noalias readonly`.
+Diagnostics: **W4220** a statement-position call to a pure function (the
+result is discarded, so the call does nothing — it found a real no-op in
+`stdlib/effect_async/uring_handler.pie` and three in the test corpus),
+**W4221** a `mut`/`&mut` parameter never written, **N4222**/**N4223**
+(`--lint`) pure function / read-only pointer parameter. Bodiless
+`#extern` declarations are foreign, never pure. Also fixed: the pipeline
+allocated `QualAnalysis` (and SymState/SessionCheck/SctState) with
+hard-coded byte counts; they now use the types' sizes.
 
 **Match compilation (`theory_matching`).** Built a one-column matrix per
 `match`, picked the first non-wildcard column, turned or-patterns into
@@ -430,6 +458,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `92_quals` + `quals` | interprocedural purity (bump → bump_twice), recursive fn pure, NF_PURE_FN / NF_READONLY_PARAM in the dump, W4220 ×2, N4223, externs/alloc/effects never pure |
 | `91_matching` + `dtree` | complete enum switch (no default), two-column DAG sharing (16→13), dense jump table + N4210, or-expanded rows, guard fallthrough leaf, nested occurrence `x.0.0`, 0 tree/first-match disagreements |
 | `90_cps` + `cps` | self tail → loop, W4200 misuse, contified join (`letj`), while as `letk`, inline continuation for a non-tail call, escaping lambda stays `letf`, contraction census |
 | `89_closures` + `closures` | inline candidate, boxed mutable capture (returned), stale capture, lambda arity, escape/capture census; immutable-capture-as-argument and shadowing quiet |
