@@ -100,6 +100,26 @@ extern fn void ll_set_module_dl(Lmodule m, void* dl) @cname("LLVMSetModuleDataLa
 extern fn void* ll_create_tm_dl(Ltarget_machine tm) @cname("LLVMCreateTargetDataLayout");
 extern fn void ll_dispose_msg(char* m) @cname("LLVMDisposeMessage");
 
+// LLVM-C: function attributes + new pass manager (v0.5 codegen upgrades).
+alias Lpass_opts = void*;
+alias Lerror = void*;
+
+extern fn Ltype      ll_global_val_type(Lvalue g) @cname("LLVMGlobalGetValueType");
+extern fn Lvalue    ll_create_enum_attr(Lcontext c, uint id, ulong v) @cname("LLVMCreateEnumAttribute");
+extern fn void      ll_add_attr_at_idx(Lvalue f, uint idx, Lvalue a) @cname("LLVMAddAttributeAtIndex");
+extern fn Lpass_opts ll_create_pb_opts() @cname("LLVMCreatePassBuilderOptions");
+extern fn void      ll_dispose_pb_opts(Lpass_opts o) @cname("LLVMDisposePassBuilderOptions");
+extern fn void      ll_pb_set_inliner_threshold(Lpass_opts o, int t) @cname("LLVMPassBuilderOptionsSetInlinerThreshold");
+extern fn Lerror    ll_run_passes(Lmodule m, char* passes, Ltarget_machine tm, Lpass_opts o) @cname("LLVMRunPasses");
+extern fn char*     ll_get_err_msg(Lerror e) @cname("LLVMGetErrorMessage");
+extern fn void      ll_consume_error(Lerror e) @cname("LLVMConsumeError");
+
+const uint LLVM_ATTR_FN_INDEX = ~0u;
+const int  LLVM_ATTR_NOUNWIND   = 4;
+const int  LLVM_ATTR_WILLRETURN = 67;
+const int  LLVM_ATTR_NOFREE     = 43;
+const int  LLVM_ATTR_NOSYNC     = 62;
+
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
 
 // ── Codegen state ─────────────────────────────────────────────────────
@@ -591,9 +611,15 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 uint idx = ac - 1 - i;
                 argv[idx] = cg.prd_i64(args[idx]);
             }
-            Ltype[16] atys;
-            for (uint i = 0; i < ac; i++) { atys[i] = cg.i64ty; }
-            Ltype fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, false);
+            // Use the callee's real function type (so LLVM emits direct calls,
+            // not indirect through a register, and knows the exact signature).
+            Ltype fn_ty = ll_global_val_type(callee);
+            if (fn_ty == null)
+            {
+                Ltype[16] atys;
+                for (uint i = 0; i < ac; i++) { atys[i] = cg.i64ty; }
+                fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, false);
+            }
             if (callee == null) { callee = ll_const_int(cg.i64ty, 0, false); }
             char* nm = cg.mktmp();
             Lvalue r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm);
@@ -975,6 +1001,12 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
         if (is_void) { ll_build_ret_void(cg.b); cg.terminated = true; }
         else { ll_build_ret(cg.b, ll_const_int(cg.i64ty, 0, false)); }
     }
+    // Pride fns don't throw, don't free, don't do atomics, always return.
+    // These attrs unlock better optimization than plain -O2 C gets.
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
 }
 
 fn void pear_declare(PearCg* cg, AirDecl* d)
@@ -997,6 +1029,12 @@ fn void pear_declare(PearCg* cg, AirDecl* d)
 }
 
 // ── Entry points ──────────────────────────────────────────────────────
+fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
+{
+    Lvalue a = ll_create_enum_attr(cg.ctx, (uint)kind, 0);
+    ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, a);
+}
+
 
 fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* mod)
 {
@@ -1040,6 +1078,16 @@ fn void pear_emit_module(AirModule* mod, char* bc_path)
 
     PearCg cg;
     pear_setup(&cg, ctx, m, b, mod);
+    // Run the standard O2 pipeline: mem2reg, instcombine, gvn, simplifycfg,
+    // sccp, dce, tailcallelim, inliner, loop opts, etc.
+    {
+        Lpass_opts po = ll_create_pb_opts();
+        ll_pb_set_inliner_threshold(po, 250);
+        Lerror e = ll_run_passes(m, (char*)"default<O2>", null, po);
+        if (e != null) { ll_consume_error(e); }
+        ll_dispose_pb_opts(po);
+    }
+
     (void)ll_write_bc(m, bc_path);
     ll_builder_dispose(b);
     ll_mod_dispose(m);
@@ -1081,6 +1129,15 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path)
 
     PearCg cg;
     pear_setup(&cg, ctx, m, b, mod);
+
+    // O2 pipeline with TM (cost model knows target features).
+    {
+        Lpass_opts po = ll_create_pb_opts();
+        ll_pb_set_inliner_threshold(po, 250);
+        Lerror e = ll_run_passes(m, (char*)"default<O2>", tm, po);
+        if (e != null) { ll_consume_error(e); }
+        ll_dispose_pb_opts(po);
+    }
 
     char* emsg = null;
     bool ok = (ll_tm_emit_to_file(tm, m, obj_path, LLVM_CG_OBJ_FILE, &emsg) == 0);
