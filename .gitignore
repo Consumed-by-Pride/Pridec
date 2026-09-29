@@ -40,3 +40,4 @@ build/
 dist/
 pfrontc
 pfrontc
+bench/*_c
