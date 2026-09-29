@@ -95,6 +95,7 @@ declare -A EXPECT=(
   [82_symexe_paths]=0         # symbolic execution: faults only on feasible paths, with witness
   [83_nbe_normalise]=0        # NbE: β/δ/η on the λ-fragment; effects, capture, mut respected
   [84_eclass_analysis]=0      # e-class constant analysis folds through saturation; W4034 on unsound rules
+  [85_ub_poison]=0            # UB lattice: poison is UB when USED; use point + origin reported
 )
 
 # ---------------------------------------------------------------------------
@@ -1495,19 +1496,19 @@ sx_ok=1
 sx_why=""
 need() { echo "$sx" | grep -q "$1" || { sx_ok=0; sx_why="$sx_why missing[$2]"; }; }
 deny() { echo "$sx" | grep -q "$1" && { sx_ok=0; sx_why="$sx_why noise[$2]"; }; }
-need '82_symexe_paths.pie:15:27: warning\[W4050\].*divisor is 0 when a != 0' "W4050 a%z with witness"
-need '82_symexe_paths.pie:29:5: warning\[W4052\].*when n > 10'                "W4052 assert on path"
-need '82_symexe_paths.pie:8:27: note\[N4051\].*requires x > 5'                "N4051 nested contradiction"
-deny '82_symexe_paths.pie:8:[0-9]*: warning\[W4050\]'                          "W4050 on pruned path"
-deny '82_symexe_paths.pie:22:[0-9]*: warning\[W4050\]'                         "W4050 y/x with x!=0"
-deny '82_symexe_paths.pie:38:[0-9]*: note\[N4051\]'                            "N4051 after break-loop"
-deny '82_symexe_paths.pie:50:[0-9]*: note\[N4051\]'                            "N4051 after rejoin"
+need '82_symexe_paths.pie:15:27: warning\[W4055\].*divisor is 0 when a != 0' "W4055 a%z with witness"
+need '82_symexe_paths.pie:29:5: warning\[W4057\].*when n > 10'                "W4057 assert on path"
+need '82_symexe_paths.pie:8:27: note\[N4056\].*requires x > 5'                "N4056 nested contradiction"
+deny '82_symexe_paths.pie:8:[0-9]*: warning\[W4055\]'                          "W4055 on pruned path"
+deny '82_symexe_paths.pie:22:[0-9]*: warning\[W4055\]'                         "W4055 y/x with x!=0"
+deny '82_symexe_paths.pie:38:[0-9]*: note\[N4056\]'                            "N4056 after break-loop"
+deny '82_symexe_paths.pie:50:[0-9]*: note\[N4056\]'                            "N4056 after rejoin"
 deny '82_symexe_paths.pie:8:10: warning\[W4120\]'                              "narrow: then-facts leaked into else"
 deny '82_symexe_paths.pie:42:[0-9]*: warning\[W4120\]'                         "narrow: while exit ignores break"
 deny '82_symexe_paths.pie:50:[0-9]*: warning\[W4120\]'                         "narrow: else sees then"
 deny '82_symexe_paths.pie:15:17: warning\[W4130\]'                             "absint: 10/a after a==0 return"
 if [ $sx_ok = 1 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (W4050/W4052/N4051 with witnesses; no noise on pruned paths)\n' "symexe_paths"
+  pass=$((pass+1)); printf '  PASS  %-26s (W4055/W4057/N4056 with witnesses; no noise on pruned paths)\n' "symexe_paths"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "symexe_paths" "$sx_why"
 fi
@@ -1555,15 +1556,37 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "eclass_analysis" "$ea_why"
 fi
 
+# UB lattice: poison flows through bindings and arithmetic; the USE is the
+# diagnostic point, with the origin and the binding it came through. A
+# re-tagged `mut` must be silent; statements after `ub!` are dead.
+ub=$("$BIN" tests/pfront/85_ub_poison.pie -I stdlib -I . 2>&1)
+ub_ok=1; ub_why=""
+uneed() { echo "$ub" | grep -q "$1" || { ub_ok=0; ub_why="$ub_why missing[$2]"; }; }
+udeny() { echo "$ub" | grep -q "$1" && { ub_ok=0; ub_why="$ub_why noise[$2]"; }; }
+uneed '85_ub_poison.pie:11:12: warning\[W4140\].*branch condition.*from `poison` at 7:17 via `q`'  "branch via q"
+uneed '85_ub_poison.pie:13:12: warning\[W4140\].*call argument.*via `bad`'                          "call arg"
+uneed '85_ub_poison.pie:15:19: warning\[W4141\]: shift by 8 on a 8-bit value is poison'              "shift width"
+uneed '85_ub_poison.pie:18:12: warning\[W4140\].*from a poison shift at 15:19 via `m`'               "shift poison via mut"
+udeny '85_ub_poison.pie:21:[0-9]*: warning\[W4140\]'                                                  "re-tagged mut reported"
+uneed '85_ub_poison.pie:23:15: warning\[W4140\].*written to memory'                                   "store of poison"
+uneed '85_ub_poison.pie:25:43: warning\[W4140\].*branch condition'                                    "lambda body scanned"
+uneed '85_ub_poison.pie:27:16: note\[N4142\]: 2 statements after this `ub!` can never run'           "dead after ub!"
+udeny '85_ub_poison.pie:9:[0-9]*: warning\[W4140\]'                                                   "arithmetic on poison is not yet UB"
+if [ $ub_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (poison tracked to its USE with origin; mut re-tag silent; dead after ub!)\n' "ub_poison"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "ub_poison" "$ub_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4050|W4052|N4051|W4120)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (0 W4050/W4052/N4051/W4120 across stdlib)\n' "flow_noise_floor"
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141 across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi

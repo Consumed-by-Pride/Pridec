@@ -692,7 +692,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.matcher != null) tp.matcher.init(a);
     if (tp.hered != null) tp.hered.init(a);
     if (tp.dfb != null) tp.dfb.init(a);
-    if (tp.uba != null) tp.uba.init(a);
+    if (tp.uba != null) { tp.uba.init(a); tp.uba.attach(d, it, file); }
     if (tp.efffull != null) tp.efffull.init(a);
     if (tp.cps != null) tp.cps.init(a);
     if (tp.strat != null) tp.strat.init(a);

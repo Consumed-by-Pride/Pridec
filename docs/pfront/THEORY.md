@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_ub.c3` | ~520 | UB lattice (Lee et al.): poison flows through bindings/arithmetic; the USE is the diagnostic (W4140 with origin + binding), poison shifts (W4141), dead code after `ub!` (N4142) |
 | `theory_nbe.c3` | ~900 | Normalisation by evaluation over the AST: closures/neutrals, β with fresh binders and capture check, effect-safe argument `let`s, δ on β-created redexes, η, dead-lambda sweep |
 | `theory_symexe.c3` | ~1000 | Bounded symbolic execution: per-function path sets, interval + disequality decision procedure, witnessed diagnostics |
 | `theory_check.c3` | 907 | Pipeline driver, gradual sort checking, per-pass timing |
@@ -113,6 +114,21 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
 
+**UB lattice (`theory_ub`).** Tagged every node DEF/POISON/UB and never
+reported anything — and since identifiers were never tracked, poison could
+not reach a use. Spec §14 says `poison` is a value that is UB *if used*, so
+that is what the pass now checks, per function in statement order: `poison`
+and shifts by ≥ the operand width (`1i8 << 8`) are sources; arithmetic,
+casts and `let`/assignment carry it (mutable bindings are re-tagged by
+later assignments, in order); the **use** — branch or loop condition, match
+scrutinee, dereference, index, call argument, return value, divisor, value
+stored to memory, assert/assume — is the diagnostic point: **W4140** "poison
+is used here (as a branch condition): undefined behaviour; it came from
+`poison` at 7:17 via `q`". **W4141** names the shift and the width, and
+**N4142** counts the statements after `ub!`/`unreachable` (through `unsafe`)
+that can never run. No interprocedural or memory tracking: a call result
+and a load are DEF. Silent on the stdlib.
+
 **E-class analyses (`theory_eclass`).** The file used to hash AST node
 pointers into pretend classes and feed those to a lattice; it never touched
 the e-graph. It is now egg §4 on the real graph: a constant lattice per
@@ -176,12 +192,12 @@ assume `¬guard` only if the body has no `break`. Calls, field/index writes
 and anything unmodelled are havoc: unknown never means zero.
 
 It reports three things, all with the path condition printed as witness
-and only when the path is feasible and the fact is definite: **W4050**
+and only when the path is feasible and the fact is definite: **W4055**
 division/modulo by a divisor that is exactly 0 on that path (`a % z` after
-`if a == 0 { return }` → "when a != 0"); **N4051** a branch condition
+`if a == 0 { return }` → "when a != 0"); **N4056** a branch condition
 decided the same way on *every* path reaching it by the path facts (never
 by constants alone — that is narrow's — and never inside a loop iteration,
-where iteration-1 facts prove nothing); **W4052** an assertion that is
+where iteration-1 facts prove nothing); **W4057** an assertion that is
 false on a feasible path. Bounds: 64 paths per function, depth 64, 64 atoms
 per path; a bound ends a path, it never trades soundness for coverage. On
 the 260-module stdlib it says nothing at all, which is the correct answer
@@ -261,10 +277,11 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `33_comptime_let` | `let x = comptime 3*4` evaluates *(found a real parser bug)* |
 | `34_exhaustive_witness` | missing variant → warning naming the witness |
 | `35_egraph_rewrite` | e-graph builds classes and saturates |
-| `82_symexe_paths` + `symexe_paths` | W4050/W4052/N4051 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
+| `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
-| `flow_noise_floor` | 0 × W4050/W4052/N4051/W4120 across the stdlib |
+| `85_ub_poison` + `ub_poison` | branch/call/store/lambda uses with origin + nearest binding; shift-by-width; re-tagged `mut` silent; arithmetic on poison silent; dead after `ub!` |
+| `flow_noise_floor` | 0 × W4055/W4057/N4056/W4120 across the stdlib |
 
 **A real parser bug fell out of this work.** `let x = comptime 3i64 * 4i64`
 reported "not computable at compile time" while the same expression inline
