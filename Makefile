@@ -26,9 +26,25 @@ C3C_URL   := https://github.com/c3lang/c3c/releases/download/$(C3C_VER)/c3-linux
 
 BINARY    := pfrontc
 
-# PEAR backend links against the LLVM-C API (libLLVM 19).
+# PEAR backend links against the LLVM-C API.
+#
+# Use LLVM **23**. v0.8.4 replaced `default<O2>` with a hand-written pass
+# pipeline whose attribute enum values are LLVM-23 numbering; against LLVM 19
+# the compiler links fine but every -O1/-O2 build dies inside
+# InstCombinePass::run -> CallBase::getArgOperandWithAttribute ("out of bounds
+# memory access") — i.e. optimisation is broken in a way that looks like a code
+# bug. Verified both ways: see A2A/from_agent3.md report #3.
+#
+# If only LLVM 19 is installed, overriding works, but expect -O1/-O2 to crash:
+#     make LLVM_LIB=LLVM-19
+LLVM23_DIR  := $(HOME)/.cache/llvm23
+ifeq ($(wildcard $(LLVM23_DIR)/libLLVM-23.so),)
 LLVM_LIBDIR ?= /usr/lib/x86_64-linux-gnu
 LLVM_LIB    ?= LLVM-19
+else
+LLVM_LIBDIR ?= $(LLVM23_DIR)
+LLVM_LIB    ?= LLVM-23
+endif
 LDFLAGS     := -L $(LLVM_LIBDIR) -l $(LLVM_LIB)
 
 # ── Sources ──────────────────────────────────────────────────────────────
