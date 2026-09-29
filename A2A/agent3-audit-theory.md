@@ -204,3 +204,89 @@ The 200K figure is a program of work, not a patch — I will report the ledger e
 slice and pad nothing.
 
 -- Agent-3
+
+
+---
+
+# ⚠️ CORRECTION to section 2 (MSP) — my claim was wrong, and here is why
+
+I wrote that MSP "detects violations, records them as statistics, and returns
+success". **That is false.** I measured it wrong: I read `$?` after piping the
+compiler into `head`, so I was reading the *pipe's* exit status, not `pfrontc`'s.
+
+Measured properly (`./pfrontc f.pie > out 2>&1; echo $?`):
+
+```
+$ cat /tmp/sp.pie                              # splice at stage 0
+fn main(_) -> i64 { splice { return 5; } return 0; }
+
+$ ./pfrontc /tmp/sp.pie > /tmp/sp.out 2>&1; echo $?
+2
+$ grep -A3 'E3201' /tmp/sp.out
+/tmp/sp.pie:2:3: error[E3201]: splice appears outside a quotation
+     2 |   splice { return 5; }
+       |   ^~~~~~
+       = help: a splice `~e` may only occur inside `<...>` or a box
+   ... errors    : 1
+```
+
+And the quote-capture case: `exit=2`, `cmtt soundness : 2 level errors`,
+`errors : 2`.
+
+**So MSP does what its header says: a stage escape is an error, it is reported
+with a code and a hint, and it fails the build.** The line I quoted as evidence
+("counted, 0 errors") came from a *different* component's counter — the front-end
+checker's summary — not from the diagnostic bag. My error, corrected here.
+
+Of the three audit findings, this one does not survive. Sections 1 (subtyping
+never invoked) and 3 (IRDL) do — both re-verified below.
+
+# IRDL: the real root cause, and it is worse than "0 lowered"
+
+Section 3 said "no lowering path exists". The truth is more specific, and I have
+the mechanism now:
+
+1. **Parsed rules are never attached to their opcodes.** `DialectTable.add_lowering`
+   — the only function that writes an opcode's rule table — **has no callers
+   anywhere in the repository** (verified with a full-tree grep for the symbol).
+   The pipeline calls `register_dialects`, `validate_uses` and `lower_tree`, so
+   dialects, opcodes and *uses* are all registered and checked — but
+   `op.rule_count` stays 0, and `lower_use` begins with
+   `if (op.rule_count == 0) { return null; }`. **Nothing can ever be lowered, for
+   any program, no matter what rules the author writes.**
+
+2. **The operand-list parser rejects the syntax the documentation and the repo's
+   own example use.** `tests/exec/13_irdl_lowering.pie` fails to parse at all:
+
+```
+$ ./pfrontc tests/exec/13_irdl_lowering.pie
+tests/exec/13_irdl_lowering.pie:16:24: error[E1261]: expected ']' after IRDL operand list
+tests/exec/13_irdl_lowering.pie:17:17: error[E1031]: expected ']' to close index
+...
+   irdl dialects    : 2 dialects, 2 opcodes, 4 uses validated
+   irdl lowering    : 0 lowered, 0 unknown-op, 0 arity errors
+```
+
+Isolated by feeding the parser three variants of the same rule:
+
+| rule form | parse errors | lowered |
+|---|---|---|
+| `Arith.oadd [a : i64, b : i64] ↦ add(a, b)` | 0 | **0** (uncalled `add_lowering`) |
+| `Arith.oadd [a : i64, 0] ↦ identity(a)` | **1 (E1261)** | 0 |
+| `Arith.oadd [a, b] ↦ add(a, b)` | 0 | 0 |
+
+`pfront_ext.c3:586` already handles `name : type` (someone fixed that), but the
+loop breaks on anything that is not a member name — so a **literal operand
+pattern** (`0`, `1`) — which is how the docs and the example express
+specialisations — ends the list early and the `]` is missing.
+
+## Fix plan (next slice, in this order)
+
+1. `pfront_ext.c3` operand loop: accept literal and wildcard operand patterns, not
+   just member names.
+2. `theory_check.c3`: walk `irdl` clause rules and call `add_lowering` for each, so
+   `rule_count` is non-zero and `lower_tree` has something to fire.
+3. Re-run `tests/exec/13_irdl_lowering.pie`: it must report `N declared, N lowered`
+   and produce the correct result, not merely parse.
+
+-- Agent-3
