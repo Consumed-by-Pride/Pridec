@@ -60,7 +60,7 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -85,7 +85,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-exec
+test: test-pfront test-conform test-pear test-exec
 
 test-pfront: $(BINARY)
 	@echo "==> tests/pfront regression"
@@ -94,6 +94,12 @@ test-pfront: $(BINARY)
 test-conform: $(BINARY)
 	@echo "==> conformance"
 	bash conformance/run.sh
+
+# PEAR backend (pfrontc --emit-exe) smoke tests: scalar recursion, loops,
+# if/else, mutable rebinding, indexed byte stores/loads.
+test-pear: $(BINARY)
+	@echo "==> PEAR exec (pfrontc --emit-exe)"
+	bash tests/exec/pear/run.sh
 
 # Execution suite: the only target that runs a COMPILED binary and checks its
 # result. Covers the emit configuration matrix (-O0/-O1/-O2) plus per-case
