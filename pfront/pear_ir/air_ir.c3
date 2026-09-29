@@ -398,9 +398,18 @@ fn AirCns* air_mk_field_cns(AirArena* a, char* f, AirCns* k)
 fn AirCns* air_mk_index(AirArena* a, AirPrd* i, AirCns* k)
     { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_INDEX; e.prd=i; e.tail=k; return e; }
 fn AirCns* air_mk_call(AirArena* a, AirPrd** args, usz ac, AirCns* k) {
-    AirCns* cur=k; if(ac==0)return cur;
-    long i=(long)ac-1; while(i>=0){cur=air_mk_stack(a,args[(usz)i],cur); i=i-1;}
-    if(cur!=null)cur.tag=ACNS_CALL; return cur;
+    // Build a STACK chain for the args (right-to-left push), then wrap the
+    // entire thing in an explicit ACNS_CALL node whose .tail points to the
+    // arg chain + k.  This works correctly even for ac==0 (zero-arg calls),
+    // which previously were returned as just `k` causing the emitter to see
+    // a plain covariable instead of a call site.
+    AirCns* cur = k;
+    long i = (long)ac - 1;
+    while (i >= 0) { cur = air_mk_stack(a, args[(usz)i], cur); i = i - 1; }
+    AirCns* call = air_new_AirCns(a);
+    if (call == null) return k;
+    call.tag = ACNS_CALL; call.prd = null; call.tail = cur;
+    return call;
 }
 fn AirCns* air_mk_case(AirArena* a, AirBranch** bs, usz bc) {
     AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_CASE; e.branch_count=0;

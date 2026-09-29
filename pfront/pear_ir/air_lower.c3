@@ -773,9 +773,13 @@ fn AirCmd* AirLower.cmd(AirLower* lr, Node* n, char* k)
         }
         case Nk.N_STMT_RETURN:
         {
-            // return v  =  < v | %ret >  (cut against the return covar).
-            if (n.child_count > 0) return lr.expr_to_cns(n.children[0], lr.cns_k(k));
-            return lr.cut(lr.mod.p_unit, lr.cns_k(k));
+            // return v  =  < v | %ret >  — ALWAYS cut to the innermost
+            // function's return covariable, regardless of what k is (k may
+            // be a μα α for a block-expr consumer; return does NOT honor α,
+            // it unwinds to the enclosing fn).
+            char* rk = lr.scope.current_ret();
+            if (n.child_count > 0) return lr.expr_to_cns(n.children[0], lr.cns_k(rk));
+            return lr.cut(lr.mod.p_unit, lr.cns_k(rk));
         }
         case Nk.N_STMT_BREAK:
         {
@@ -807,6 +811,30 @@ fn AirCmd* AirLower.cmd(AirLower* lr, Node* n, char* k)
         case Nk.N_STMT_COMPOUND_ASSIGN:
         {
             return lr.assign_stmt(n, k);
+        }
+        case Nk.N_DECL_LET:
+        case Nk.N_DECL_CONST:
+        case Nk.N_DECL_STATIC:
+        {
+            // Local let/const/static appearing as a single-stmt block or
+            // in a non-tail dispatch through cmd(): thread through letlike
+            // with a unit-cut as the rest (no following statement).
+            return lr.letlike(n, lr.cut(lr.mod.p_unit, lr.cns_k(k)));
+        }
+        case Nk.N_DECL_FN:
+        case Nk.N_DECL_EXTERN_FN:
+        case Nk.N_DECL_STRUCT:
+        case Nk.N_DECL_UNION:
+        case Nk.N_DECL_ENUM:
+        case Nk.N_DECL_TYPE:
+        case Nk.N_DECL_EFFECT:
+        case Nk.N_DECL_NEWTYPE:
+        case Nk.N_DECL_INTERFACE:
+        case Nk.N_DECL_IMPL:
+        {
+            // Local item declarations are side-effect-free at runtime (top-level
+            // registration only); emit nop so they don't cut to k.
+            return lr.nop();
         }
         default:
         {
@@ -948,6 +976,13 @@ fn AirCmd* AirLower.block(AirLower* lr, Node* n, char* k)
 // command that, when run, evaluates the body and cuts its result to the
 // consumer k. This bridges between the cmd-world (which threads a covariable
 // *name*) and the cns-world (which threads an AirCns*).
+//
+// If the cmd unconditionally transfers control (return/break/continue/ub),
+// then no μα wrapping is needed and no value will ever reach k — just emit
+// the body directly.  This avoids admin redices of the form
+//   <μα.<v|%ret>|μ̃x.dead_rest>
+// which were previously printed as `let _x5 = μα.<v|%ret>; dead_rest`,
+// leaking dead code inside the μα.
 fn AirCmd* AirLower.cmd_to_cns(AirLower* lr, Node* n, AirCns* k)
 {
     if (n == null) return lr.cut(lr.mod.p_unit, k);
@@ -956,6 +991,13 @@ fn AirCmd* AirLower.cmd_to_cns(AirLower* lr, Node* n, AirCns* k)
     char* alpha = lr.fresh_k();
     lr.mu++;
     AirCmd* body = lr.cmd(n, alpha);
+    // Only skip μα if body escapes out of α (e.g., return/jump/break).  If
+    // the only "terminal" cut is to α itself (the normal "produce a value"
+    // path), or if body is non-terminal, we need the wrapper.
+    if (terminal_escapes(body, alpha))
+    {
+        return body;
+    }
     AirPrd* mu = air_ir::air_mk_mu_prd(lr.arena, alpha, body);
     lr.total_prd++;
     return lr.cut(mu, k);
@@ -963,37 +1005,96 @@ fn AirCmd* AirLower.cmd_to_cns(AirLower* lr, Node* n, AirCns* k)
 
 // block_to_cns — block as an expression: evaluate the block, cutting the
 // tail to a fresh covariable α, then wrap in μα so the result is a producer
-// feeding into consumer k.
+// feeding into consumer k.  If the block unconditionally escapes (return /
+// jump / etc.) we skip the μα wrapper.
 fn AirCmd* AirLower.block_to_cns(AirLower* lr, Node* n, AirCns* k)
 {
     char* alpha = lr.fresh_k();
     lr.mu++;
     AirCmd* body = lr.stmts(n, alpha, true);
+    if (terminal_escapes(body, alpha))
+    {
+        return body;
+    }
     AirPrd* mu = air_ir::air_mk_mu_prd(lr.arena, alpha, body);
     lr.total_prd++;
     return lr.cut(mu, k);
 }
 
+// terminal_escapes — does `body` directly and unconditionally cut to
+// `%ret_N` (the enclosing function's return covariable), bypassing α?
+// That is: is body a SINGLE immediate cut `<v|%ret_N>` (modulo trivial
+// μα or ACMD_RET wrapping)?  If so, the outer μα wrapper is an admin
+// redex: the value never actually gets produced for α/k because return
+// unwinds the call frame.
+//
+// We deliberately keep this check simple (no recursion into seq/if/let
+// chains): those are handled by dead-code pruning at seq_cmds + emit
+// time, not by μα elision.
+fn bool terminal_escapes(AirCmd* c, char* alpha)
+{
+    if (c == null) return false;
+    // Peeling away outer μα / ACMD_RET wrappers (α binder shadowing):
+    while (c.tag == ACMD_MU) { c = c.body; }
+    if (c.tag == ACMD_RET) return true;
+    if (c.tag == ACMD_JUMP || c.tag == ACMD_TRAP || c.tag == ACMD_UB
+     || c.tag == ACMD_BREAK || c.tag == ACMD_CONTINUE) return true;
+    if (c.tag == ACMD_CUT
+     && c.cns != null && c.cns.tag == ACNS_COVAR
+     && c.cns.name != alpha
+     && c.cns.name != null
+     && c.cns.name[0] == '%'
+     && c.cns.name[1] == 'r'
+     && c.cns.name[2] == 'e'
+     && c.cns.name[3] == 't') { return true; }
+    return false;
+}
+
 // letlike — translate a let/const/static declaration (NOT top-level).
 // Produces `let x = init; rest` where `rest` is the continuation threaded
 // in by stmts (which already wraps the remainder of the block). The init
-// is evaluated right-to-left: if it is a compound expression we CPS it
-// into a μ̃x binder; for simple value nodes we use the prd directly.
+// is evaluated L→R: if it is a compound expression we CPS it into a μ̃x
+// binder; for simple value nodes we use the prd directly.
+//
+// Wildcard pattern (`let _ = init`) does NOT introduce a named binding —
+// we evaluate init for effect, discarding the value through μ̃_x with no
+// subsequent let.
 fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
 {
     if (s.child_count == 0) return rest;
+
+    // Detect wildcard pattern vs named binder.
+    bool wildcard = false;
     char* nm = node_text(s, lr.it);
-    if (nm == null) nm = (char*)"_let";
+    for (usz i = 0; i < s.child_count; i++)
+    {
+        Node* c = s.children[i];
+        if (c != null && c.kind == Nk.N_PAT_WILDCARD) { wildcard = true; break; }
+    }
+    // node_text on a wildcard pattern may legitimately return "_".
+    if (!wildcard && nm != null && nm[0] == '_' && nm[1] == 0) wildcard = true;
+
     Node* val = null;
     for (usz i = 0; i < s.child_count; i++)
     {
         Node* c = s.children[i];
         if (c == null) continue;
         if (c.kind == Nk.N_DECL_TYPEPARAM || c.kind == Nk.N_DECL_PARAM) continue;
-        if (c.kind == Nk.N_PAT_IDENT || c.kind == Nk.N_PAT_WILDCARD) continue;
+        if (pfront_core::is_pattern(c.kind)) continue;
         val = c;
         break;
     }
+
+    if (wildcard)
+    {
+        // Wildcard: evaluate init for effect, drop result, continue to rest.
+        if (val == null) return rest;
+        if (is_value_node(val)) return rest; // pure value, no side effect — drop
+        char* xv = lr.fresh_x();
+        return lr.expr_to_cns(val, air_ir::air_mk_comu_cns(lr.arena, xv, rest));
+    }
+
+    if (nm == null) nm = (char*)"_let";
     char* x = lr.scope.bind_var(nm, s);
     if (val == null)
     {
@@ -1006,7 +1107,7 @@ fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
         lr.lets++;
         return air_ir::air_mk_let(lr.arena, x, vp, rest);
     }
-    // Compound init: evaluate it into a fresh μ̃-bound x, then rest.
+    // Compound init: evaluate it into a fresh μ̃-bound xv, then let x=xv in rest.
     char* xv = lr.fresh_x();
     AirPrd* xp = air_ir::air_mk_var(lr.arena, xv);
     lr.lets++;
@@ -1402,61 +1503,81 @@ fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
 fn AirCmd* AirLower.call(AirLower* lr, Node* callee, Node** args, usz ac, AirCns* k)
 {
     lr.scope.enter();
-    // First snapshot: collect AirPrd slots for each arg (placeholders for
-    // non-value args), build the innermost <callee_var|call(slots; k)>, then
-    // wrap each compound subexpression right-to-left in μ̃x.<subexpr-code; ...>.
-    AirPrd*[16] avars;
-    char*[16]  anames;     // fresh var names for non-value args (index matches args)
-    bool[16]   is_comp;
-    usz vc = 0;
+
+    // Strategy: build <callee_var | call(arg_vars; k)> and wrap each non-value
+    // argument (right-to-left, so leftmost arg wraps outermost = evaluates last)
+    // and finally the callee, in μ̃ binders.  Each compound arg is bound to a
+    // fresh _xN via bind_x_then, which threads the continuation correctly.
+    //
+    // We use a clean two-pass approach: first snapshot arg variables (values
+    // inlined as prds, compounds as fresh var placeholders with their name
+    // remembered), then wrap.
+
+    AirPrd*[16] avars; usz vc = 0;
+    char*[16]  anames;
+
+    // Pass 1: collect prd slots. For compound args, mint a fresh name NOW
+    // (before any wrapping) so names are stable — otherwise fresh_x() calls
+    // during wrapping of inner compounds would desync.
     for (usz i = 0; i < ac && i < 16; i++)
     {
         Node* a = args[i];
-        if (a == null) { avars[vc] = lr.mod.p_unit; is_comp[vc] = false; }
-        else if (is_value_node(a)) { avars[vc] = lr.prd(a); is_comp[vc] = false; }
+        if (a == null)
+        {
+            avars[vc] = lr.mod.p_unit;
+            anames[vc] = null;
+        }
+        else if (is_value_node(a))
+        {
+            avars[vc] = lr.prd(a);
+            anames[vc] = null;
+        }
         else
         {
             char* xv = lr.fresh_x();
             avars[vc] = air_ir::air_mk_var(lr.arena, xv);
             anames[vc] = xv;
-            is_comp[vc] = true;
         }
         vc = vc + 1;
     }
-    lr.total_cns++;
-    AirCns* call_k = air_ir::air_mk_call(lr.arena, &avars[0], vc, k);
-    AirCmd* out;
+
+    // Callee placeholder (must be fresh'd BEFORE arg wrapping so arg
+    // compounds can take fresh_x names without colliding).
+    char* callee_x = null;
     AirPrd* cv_v;
     if (is_value_node(callee))
     {
         cv_v = lr.prd(callee);
-        out = lr.cut(cv_v, call_k);
     }
     else
     {
-        char* cx = lr.fresh_x();
-        cv_v = air_ir::air_mk_var(lr.arena, cx);
-        out = lr.cut(cv_v, call_k);
+        callee_x = lr.fresh_x();
+        cv_v = air_ir::air_mk_var(lr.arena, callee_x);
     }
-    // Wrap args right-to-left.
+
+    lr.total_cns++;
+    AirCns* call_k = air_ir::air_mk_call(lr.arena, &avars[0], vc, k);
+    AirCmd* out = lr.cut(cv_v, call_k);
+
+    // Pass 2: wrap compound args right-to-left.
     long i = (long)vc - 1;
     while (i >= 0)
     {
-        if (is_comp[(usz)i])
+        if (anames[(usz)i] != null)
         {
             out = lr.expr_to_cns(args[(usz)i],
                 air_ir::air_mk_comu_cns(lr.arena, anames[(usz)i], out));
         }
         i = i - 1;
     }
-    // Wrap callee last (outermost) if compound.
-    if (!is_value_node(callee))
+
+    // Wrap callee (outermost).
+    if (callee_x != null)
     {
-        // cx is the name we used for callee placeholder
-        // (it was the last fresh_x, but we didn't capture it — get it from cv_v.name).
         out = lr.expr_to_cns(callee,
-            air_ir::air_mk_comu_cns(lr.arena, cv_v.name, out));
+            air_ir::air_mk_comu_cns(lr.arena, callee_x, out));
     }
+
     lr.scope.leave();
     return out;
 }
@@ -1464,41 +1585,34 @@ fn AirCmd* AirLower.call(AirLower* lr, Node* callee, Node** args, usz ac, AirCns
 fn AirCmd* AirLower.method_generic(AirLower* lr, Node* recv, char* mname, Node** args, usz ac, AirCns* k)
 {
     lr.scope.enter();
-    AirPrd*[16] avars; char*[16] anames; bool[16] is_comp; usz vc = 0;
+    AirPrd*[16] avars; char*[16] anames; usz vc = 0;
     for (usz i = 0; i < ac && i < 16; i++)
     {
         Node* a = args[i];
-        if (a == null) { avars[vc] = lr.mod.p_unit; is_comp[vc] = false; }
-        else if (is_value_node(a)) { avars[vc] = lr.prd(a); is_comp[vc] = false; }
-        else { char*xv=lr.fresh_x(); avars[vc]=air_ir::air_mk_var(lr.arena,xv); anames[vc]=xv; is_comp[vc]=true; }
+        if (a == null) { avars[vc] = lr.mod.p_unit; anames[vc] = null; }
+        else if (is_value_node(a)) { avars[vc] = lr.prd(a); anames[vc] = null; }
+        else { char*xv=lr.fresh_x(); avars[vc]=air_ir::air_mk_var(lr.arena,xv); anames[vc]=xv; }
         vc = vc + 1;
     }
+    char* recv_x = null;
+    AirPrd* rv_v;
+    if (is_value_node(recv)) { rv_v = lr.prd(recv); }
+    else { recv_x = lr.fresh_x(); rv_v = air_ir::air_mk_var(lr.arena, recv_x); }
     AirCns* args_k = air_ir::air_mk_call(lr.arena, &avars[0], vc, k);
     AirCns* proj = air_ir::air_mk_field_cns(lr.arena, lr.dup(mname), args_k);
-    AirPrd* rv_v; AirCmd* out;
-    if (is_value_node(recv))
-    {
-        rv_v = lr.prd(recv);
-        out = lr.cut(rv_v, proj);
-    }
-    else
-    {
-        char* rx = lr.fresh_x();
-        rv_v = air_ir::air_mk_var(lr.arena, rx);
-        out = lr.cut(rv_v, proj);
-    }
+    AirCmd* out = lr.cut(rv_v, proj);
     long i = (long)vc - 1;
     while (i >= 0)
     {
-        if (is_comp[(usz)i]) {
+        if (anames[(usz)i] != null) {
             out = lr.expr_to_cns(args[(usz)i],
                 air_ir::air_mk_comu_cns(lr.arena, anames[(usz)i], out));
         }
         i = i - 1;
     }
-    if (!is_value_node(recv)) {
+    if (recv_x != null) {
         out = lr.expr_to_cns(recv,
-            air_ir::air_mk_comu_cns(lr.arena, rv_v.name, out));
+            air_ir::air_mk_comu_cns(lr.arena, recv_x, out));
     }
     lr.scope.leave();
     return out;
@@ -1584,27 +1698,35 @@ fn AirCmd* AirLower.binop(AirLower* lr, Node* n, AirCns* k)
     if ((Tk)op == Tk.TOKEN_PIPEPIPE) return lr.shortcircuit_or(n, k);
     AirBinop b = token_to_binop(op);
     lr.scope.enter();
-    AirPrd* lv_p; AirPrd* rv_p;
-    char* lx_n = null; char* rx_n = null;
-    bool lv_comp = false; bool rv_comp = false;
-    // RHS
-    if (is_value_node(n.children[1])) { rv_p = lr.prd(n.children[1]); }
-    else { rx_n = lr.fresh_x(); rv_p = air_ir::air_mk_var(lr.arena, rx_n); rv_comp = true; }
-    AirCmd* out;
-    // LHS
-    if (is_value_node(n.children[0])) { lv_p = lr.prd(n.children[0]); }
-    else { lx_n = lr.fresh_x(); lv_p = air_ir::air_mk_var(lr.arena, lx_n); lv_comp = true; }
+    // Evaluate left-to-right (C-like semantics):
+    //   <e_lhs|μ̃lv.<e_rhs|μ̃rv.<(lv op rv)|k>>>
+    char* rx = null; char* lx = null;
+    AirPrd* rv_p; AirPrd* lv_p;
+    bool rv_comp = !is_value_node(n.children[1]);
+    bool lv_comp = !is_value_node(n.children[0]);
+    // Inner: <(lv op rv) | k>
+    if (lv_comp) { lx = lr.fresh_x(); lv_p = air_ir::air_mk_var(lr.arena, lx); }
+    else         { lv_p = lr.prd(n.children[0]); }
+    if (rv_comp) { rx = lr.fresh_x(); rv_p = air_ir::air_mk_var(lr.arena, rx); }
+    else         { rv_p = lr.prd(n.children[1]); }
     lr.total_prd++;
     AirPrd* bp = air_ir::air_mk_binop(lr.arena, b, lv_p, rv_p);
-    out = lr.cut(bp, k);
-    if (rv_comp) { out = lr.expr_to_cns(n.children[1],
-        air_ir::air_mk_comu_cns(lr.arena, rx_n, out)); }
-    if (lv_comp) { out = lr.expr_to_cns(n.children[0],
-        air_ir::air_mk_comu_cns(lr.arena, lx_n, out)); }
+    AirCmd* out = lr.cut(bp, k);
+    // Wrap RHS first (evaluated after LHS is bound, so wrap closer to inner).
+    if (rv_comp)
+    {
+        out = lr.expr_to_cns(n.children[1],
+            air_ir::air_mk_comu_cns(lr.arena, rx, out));
+    }
+    // Wrap LHS outermost (evaluated first at runtime).
+    if (lv_comp)
+    {
+        out = lr.expr_to_cns(n.children[0],
+            air_ir::air_mk_comu_cns(lr.arena, lx, out));
+    }
     lr.scope.leave();
     return out;
 }
-
 fn AirCmd* AirLower.shortcircuit_and(AirLower* lr, Node* n, AirCns* k)
 {
     if (n.child_count < 2) return lr.cut(lr.mod.p_false, k);
@@ -2199,26 +2321,31 @@ fn AirCmd* AirLower.assign_stmt(AirLower* lr, Node* n, char* k)
 
 fn AirCmd* AirLower.assign_expr(AirLower* lr, Node* n, AirCns* k)
 {
-    // Placeholder assignment: evaluate RHS and cut against k.
-    // Full store semantics will come when we model ML-variables / ref cells.
+    // Assignment: lhs = rhs  ≡  < rhs | μ̃lhs. k >
+    // Evaluate rhs, rebind lhs to the produced value (PEAR uses alloca+store
+    // for mutable slots so rebinding is automatic via COMU), then continue k.
     if (n.child_count < 2) return lr.cut(lr.mod.p_unit, k);
+    Node* lhs = n.children[0];
     Node* rhs = n.children[1];
-    (void)n.children[0]; // lhs reserved
     lr.scope.enter();
-    AirPrd* rv; AirCmd* binds = null;
+    char* lnm = node_text(lhs, lr.it);
+    if (lnm == null) lnm = (char*)"_";
+    // Ensure lhs is in scope (it should already be bound by a preceding let mut).
+    AirCns* rebind = air_ir::air_mk_comu_cns(lr.arena, lnm,
+        lr.cut(lr.mod.p_unit, k));
+    AirCmd* out;
     if (is_value_node(rhs))
     {
-        rv = lr.prd(rhs);
+        AirPrd* rv = lr.prd(rhs);
+        out = lr.cut(rv, rebind);
     }
     else
     {
         char* xv = lr.fresh_x();
-        rv = air_ir::air_mk_var(lr.arena, xv);
-        binds = lr.expr_to_cns(rhs,
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
+        AirPrd* xp = air_ir::air_mk_var(lr.arena, xv);
+        AirCmd* bind = lr.cut(xp, rebind);
+        out = lr.expr_to_cns(rhs, air_ir::air_mk_comu_cns(lr.arena, xv, bind));
     }
-    AirCmd* store = lr.cut(rv, k);
-    AirCmd* out = binds == null ? store : air_ir::air_mk_seq(lr.arena, binds, store);
     lr.scope.leave();
     return out;
 }
@@ -2685,18 +2812,22 @@ fn bool is_terminal_cmd(AirCmd* c)
             return true;
         case ACMD_CUT:
         {
-            // A cut that targets a covariable starting with "%ret" is a return/terminal cut.
-            if (c.cns != null && c.cns.tag == ACNS_COVAR && c.cns.name != null)
-            {
-                char* s = c.cns.name;
-                if (s[0]=='%' && s[1]=='r' && s[2]=='e' && s[3]=='t') return true;
-            }
+            // A cut <v|k> is terminal when k is a covariable (named
+            // continuation point): %ret, α from a μα, %lbl, etc. This
+            // is a direct control transfer; anything after is dead.
+            //
+            // We do NOT look through μ̃/if/match here because those
+            // require a deeper analysis that we leave to PEAR passes.
+            if (c.cns != null && c.cns.tag == ACNS_COVAR) return true;
             return false;
         }
         case ACMD_SEQ:
-            // If the first command in the sequence is terminal the rest is dead.
             return is_terminal_cmd(c.body);
         case ACMD_MU:
+            return is_terminal_cmd(c.body);
+        case ACMD_MUTILDE:
+            return is_terminal_cmd(c.body);
+        case ACMD_LET:
             return is_terminal_cmd(c.body);
         default: return false;
     }
@@ -2731,26 +2862,36 @@ fn AirCmd* eval_then(AirLower* lr, Node* n, AirCns* k, AirCmd* rest)
 // walk_decls — recursive descent through the post-theory AST, collecting
 // N_MODULE/N_PROGRAM/N_BLOCK/N_STMT_EXPR children. N_MODULEs emit an
 // ADECL_MODULE followed by their contained decls.
+//
+// IMPORTANT: we must NOT blindly recurse into the children of every decl,
+// because that would drag local let-bindings (nested inside fn bodies,
+// block exprs, etc.) up to the top level as spurious `def _c { … }`
+// entries. We only recurse into structural "container" nodes that
+// legitimately hold more top-level decls.
 fn void AirLower.walk_decls(AirLower* lr, Node* n)
 {
     if (n == null) return;
     switch (n.kind)
     {
         case Nk.N_PROGRAM:
-        case Nk.N_BLOCK:
-        case Nk.N_STMT_EXPR:
+        case Nk.N_MODULE:
         {
+            if (n.kind == Nk.N_MODULE)
+            {
+                AirDecl* md = lr.decl(n);
+                if (md != null) lr.mod.add_decl(md);
+            }
             for (usz i = 0; i < n.child_count; i++)
             {
                 lr.walk_decls(n.children[i]);
             }
             return;
         }
-        case Nk.N_MODULE:
+        case Nk.N_USE:
         {
-            // Emit the module header decl itself, then its children.
-            AirDecl* md = lr.decl(n);
-            if (md != null) lr.mod.add_decl(md);
+            // `use` items may have nested use-tree children; recurse to
+            // find them, but `use` isn't itself a value decl so don't
+            // call decl_inner().
             for (usz i = 0; i < n.child_count; i++)
             {
                 lr.walk_decls(n.children[i]);
@@ -2759,16 +2900,15 @@ fn void AirLower.walk_decls(AirLower* lr, Node* n)
         }
         default:
         {
-            if (pfront_core::is_decl(n.kind) || n.kind == Nk.N_USE)
+            if (pfront_core::is_decl(n.kind))
             {
                 lr.decl_inner(n);
             }
-            // Recurse into children — we always walk down so that nested
-            // modules / comptime blocks / use-tree items are found.
-            for (usz i = 0; i < n.child_count; i++)
-            {
-                lr.walk_decls(n.children[i]);
-            }
+            // Do NOT recurse into children: any nested blocks / function
+            // bodies / let-inits will be reached via decl() which lowers
+            // them into their enclosing ADECL's body, not as separate
+            // top-level defs.  This prevents e.g. `fn main { let _ = f(); }`
+            // from leaking a stray `def _c { … }` into the module.
             return;
         }
     }

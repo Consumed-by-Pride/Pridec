@@ -16,6 +16,7 @@ import air_ir;
 import air_scope;
 import air_lower;
 import air_emit;
+import pear;
 
 alias PNode = pfront_core::PNode;
 
@@ -92,6 +93,72 @@ fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
     air_emit::emit_module(&mod, &lr, out_path);
 
     // ── Teardown ───────────────────────────────────────────────────────
+    sc.destroy();
+    arena.destroy();
+}
+
+fn char* derive_bc_path(char* src, char* buf, usz cap)
+{
+    if (src == null) return null;
+    int sl = -1; int dl = -1; int n = 0;
+    while (src[n] != 0) {
+        if (src[n] == '/') sl = n;
+        if (src[n] == '.') dl = n;
+        n++;
+    }
+    bool has_ext = (dl > sl) && (dl > 0) && (dl < n - 1);
+    usz base_len = (usz)(has_ext ? dl : n);
+    if (base_len + 4 >= cap) return null;
+    for (usz i = 0; i < base_len; i++) buf[i] = src[i];
+    buf[base_len+0] = '.';
+    buf[base_len+1] = 'b';
+    buf[base_len+2] = 'c';
+    buf[base_len+3] = 0;
+    return buf;
+}
+
+fn void emit_bc(PNode* root, pfront_core::Interner* it, char* path, int opt_level)
+{
+    char[AIR_PATH_MAX] buf;
+    char* out_path = null;
+    if (path != null && path[0] != 0)
+    {
+        if (path[0] == '-' && path[1] == 0) { out_path = null; }
+        else { out_path = derive_bc_path(path, &buf[0], AIR_PATH_MAX); }
+    }
+
+    AirArena arena;
+    if (!arena.init()) return;
+    AirModule mod;
+    char* mod_nm = module_name_of(root);
+    if (!mod.init(&arena, mod_nm, path)) { arena.destroy(); return; }
+    AirScope sc;
+    sc.init(&arena);
+    AirLower lr;
+    lr.init(&mod, &sc, it);
+    lr.module_body(root);
+
+    pear::pear_emit_module(&mod, out_path, opt_level);
+
+    sc.destroy();
+    arena.destroy();
+}
+
+fn void emit_exe(PNode* root, pfront_core::Interner* it, char* path, int opt_level)
+{
+    AirArena arena;
+    if (!arena.init()) return;
+    AirModule mod;
+    char* mod_nm = module_name_of(root);
+    if (!mod.init(&arena, mod_nm, path)) { arena.destroy(); return; }
+    AirScope sc;
+    sc.init(&arena);
+    AirLower lr;
+    lr.init(&mod, &sc, it);
+    lr.module_body(root);
+
+    (void)pear::pear_link_exe(&mod, path, opt_level);
+
     sc.destroy();
     arena.destroy();
 }

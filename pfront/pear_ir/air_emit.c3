@@ -79,15 +79,13 @@ fn bool is_terminal(AirCmd* c)
             return true;
         case ACMD_CUT:
         {
-            // <v|%ret…> is a return, hence terminal.
-            if (c.cns != null && c.cns.tag == ACNS_COVAR && c.cns.name != null
-                && c.cns.name[0] == '%'
-                && c.cns.name[1] == 'r'
-                && c.cns.name[2] == 'e'
-                && c.cns.name[3] == 't') return true;
+            if (c.cns != null && c.cns.tag == ACNS_COVAR) return true;
             return false;
         }
         case ACMD_SEQ: return is_terminal(c.body);
+        case ACMD_MU:  return is_terminal(c.body);
+        case ACMD_MUTILDE: return is_terminal(c.body);
+        case ACMD_LET: return is_terminal(c.body);
         default: return false;
     }
 }
@@ -685,30 +683,19 @@ fn void emit_cns(AirEmitter* e, AirCns* k)
         }
         case ACNS_CALL:
         {
-            // The call consumer is a STACK chain built by air_mk_call which
-            // pushes args[0] last (so args[0] is the top of the stack and
-            // comes first in surface syntax): a·b·c·k prints as call(a,b,c; k).
-            // Walk from top (this node) down collecting prds until we hit the
-            // final covar (ret_k); they are already in correct left-to-right
-            // order because we visit top-of-stack first.
+            // air_mk_call wraps args in an explicit ACNS_CALL node whose
+            // .tail is the STACK chain (right-to-left pushed, so args[0] is
+            // top-of-stack printed first). The chain terminates at the
+            // continuation consumer (usually a covar; sometimes another
+            // composite). Print generically: walk STACKs collecting args,
+            // then emit the final consumer.
             AirPrd*[16] args; usz ac = 0;
-            char* ret_k = null;
-            AirCns* cur = k;
-            // cur starts life as the ACNS_CALL-tagged node (whose tag was
-            // set to ACNS_CALL by air_mk_call; but its tag is ACNS_CALL not
-            // ACNS_STACK, and .prd is undefined — we must follow via...
-            // Actually air_mk_call sets the *outermost* node's tag to
-            // ACNS_CALL; that outermost node is the topmost stack frame
-            // (args[0]). So follow its tail and collect.
-            // The outermost STACK-turned-CALL has prd=args[0], tail=rest.
-            if (k.prd != null && ac < 16) { args[ac] = k.prd; ac++; }
-            cur = k.tail;
+            AirCns* cur = k.tail;
             while (cur != null && cur.tag == ACNS_STACK)
             {
                 if (ac < 16) { args[ac] = cur.prd; ac++; }
                 cur = cur.tail;
             }
-            if (cur != null && cur.tag == ACNS_COVAR) ret_k = cur.name;
             e.wr("call(");
             for (usz i = 0; i < ac; i++)
             {
@@ -716,7 +703,18 @@ fn void emit_cns(AirEmitter* e, AirCns* k)
                 emit_prd(e, args[i]);
             }
             e.wr("; ");
-            e.wr(ret_k != null ? ret_k : "%ret");
+            if (cur != null && cur.tag == ACNS_COVAR && cur.name != null)
+            {
+                e.wr(cur.name);
+            }
+            else if (cur != null)
+            {
+                emit_cns(e, cur);
+            }
+            else
+            {
+                e.wr("%ret");
+            }
             e.wr(")");
             return;
         }
@@ -827,6 +825,64 @@ fn void emit_binders_list(AirEmitter* e, AirBinder** bv, usz bc)
     }
 }
 
+// Helpers for detecting nested μ̃ bindings inside a consumer chain (used
+// to print `<f|call(a; μ̃x.body)>` as `let x = f(a); body`).
+fn AirCns* cns_terminal(AirCns* c)
+{
+    AirCns* cur = c;
+    while (cur != null)
+    {
+        switch (cur.tag)
+        {
+            case ACNS_CALL: case ACNS_STACK: case ACNS_FIELD: case ACNS_INDEX:
+            case ACNS_PROJ: case ACNS_FST: case ACNS_SND:
+                cur = cur.tail; continue;
+            default: return cur;
+        }
+    }
+    return null;
+}
+fn void emit_cns_prefix_up_to(AirEmitter* e, AirCns* c, AirCns* term)
+{
+    if (c == null || c == term) return;
+    switch (c.tag)
+    {
+        case ACNS_COMU: case ACNS_COVAR: return;
+        case ACNS_CALL:
+        {
+            AirPrd*[16] args; usz ac = 0;
+            AirCns* cur = c.tail;
+            while (cur != null && cur.tag == ACNS_STACK && cur != term)
+            {
+                if (ac < 16) { args[ac] = cur.prd; ac++; }
+                cur = cur.tail;
+            }
+            e.wr("call(");
+            for (usz i = 0; i < ac; i++)
+            {
+                if (i > 0) e.comma();
+                emit_prd(e, args[i]);
+            }
+            e.wr("; ");
+            return;
+        }
+        case ACNS_FIELD:
+            e.wr("."); e.wr(c.name != null ? c.name : "f"); e.wr("·");
+            emit_cns_prefix_up_to(e, c.tail, term); return;
+        case ACNS_INDEX:
+            e.wr("["); if (c.prd != null) emit_prd(e, c.prd); e.wr("]·");
+            emit_cns_prefix_up_to(e, c.tail, term); return;
+        case ACNS_PROJ:
+        {
+            char[16] b; (void)snprintf(&b[0], 16, "#%ld·", (long)c.idx);
+            e.wr(&b[0]); emit_cns_prefix_up_to(e, c.tail, term); return;
+        }
+        case ACNS_FST: e.wr("fst·"); emit_cns_prefix_up_to(e, c.tail, term); return;
+        case ACNS_SND: e.wr("snd·"); emit_cns_prefix_up_to(e, c.tail, term); return;
+        default: emit_cns(e, c); return;
+    }
+}
+
 fn void emit_cmd(AirEmitter* e, AirCmd* c)
 {
     if (c == null) { e.wr("()"); return; }
@@ -845,54 +901,102 @@ fn void emit_cmd(AirEmitter* e, AirCmd* c)
                 emit_cmd(e, c.cns.body);
                 return;
             }
-            // Detect <e|μ̃x.c> as a let-binding sugar:
-            //   <e|μ̃x.c>  ≡ let x = e; c
-            // (Right-to-left μ̃ wrapping produces these during lowering;
-            // printing them as `let` gives a much more readable surface.)
-            if (c.cns != null && c.cns.tag == ACNS_COMU
-                && c.cns.body != null
-                && c.cns.bind != null
-                && c.prd != null)
+            // Detect <v | … μ̃x.body> as a let-binding sugar, where the … may
+            // include a call(args;)/field/index/proj chain leading to μ̃x:
+            //   <f|call(a; μ̃x.body)>  ≡ let x = f(a); body
+            //   <e|μ̃x.body>           ≡ let x = e; body
+            // This fires for the standard right-to-left μ̃ wrapping produced
+            // by the lowerer for all compound subexpressions.
             {
-                char* xn = c.cns.bind;
-                bool is_discard = (xn[0] == '_' && xn[1] == 'x' && xn[2] == 0) // _x single fresh
-                               || (xn[0] == '_' && xn[1] == 0);
-                // If it's a `_x1`-style fresh name bound to () this drops to a
-                // bare expression statement (no let-visual noise).
-                if (is_discard && c.prd.tag == APRD_UNIT)
+                AirCns* term = cns_terminal(c.cns);
+                if (term != null && term.tag == ACNS_COMU
+                    && term.body != null && term.bind != null && c.prd != null)
                 {
-                    emit_cmd(e, c.cns.body);
+                    char* xn = term.bind;
+                    bool is_fresh = (xn[0] == '_' && xn[1] == 'x'); // fresh _xN
+                    bool is_wild  = (xn[0] == '_' && xn[1] == 0);
+                    if ((is_fresh || is_wild) && c.prd.tag == APRD_UNIT)
+                    {
+                        if (is_nop_cmd(term.body)) return;
+                        emit_cmd(e, term.body);
+                        return;
+                    }
+                    e.wr("let "); e.wr(xn); e.wr(" = ");
+                    // Emit the prd, then the consumer prefix up to μ̃.
+                    // Determine if the shape is a simple call:
+                    //   <f|call(args; μ̃x)>  where the outermost cns is ACNS_CALL
+                    //   or a value: <e|μ̃x>
+                    bool simple = (c.cns == term);
+                    bool is_call = (!simple && c.cns.tag == ACNS_CALL);
+                    // Nested field/index/proj/etc would need more work; fall
+                    // back to <...> for those.
+                    bool is_complex = (!simple && !is_call);
+                    // Walk to see if the path from cns to term is JUST the call
+                    // stack (no fields/indexes between CALL and STACKs).
+                    if (is_call)
+                    {
+                        AirCns* cc = c.cns.tail;
+                        while (cc != null && cc != term && cc.tag == ACNS_STACK) cc = cc.tail;
+                        if (cc != term) { is_call = false; is_complex = true; }
+                    }
+                    if (simple)
+                    {
+                        emit_prd(e, c.prd);
+                    }
+                    else if (is_call)
+                    {
+                        // Print `f(args)` directly (the μ̃ binder is already in
+                        // "let x = ..."); no wrapping <...>.
+                        emit_prd(e, c.prd);
+                        e.wr("(");
+                        AirPrd*[16] args; usz ac = 0;
+                        AirCns* cc = c.cns.tail;
+                        while (cc != null && cc != term && cc.tag == ACNS_STACK)
+                        {
+                            if (ac < 16) { args[ac] = cc.prd; ac++; }
+                            cc = cc.tail;
+                        }
+                        for (usz i = 0; i < ac; i++)
+                        {
+                            if (i > 0) e.comma();
+                            emit_prd(e, args[i]);
+                        }
+                        e.wr(")");
+                    }
+                    else
+                    {
+                        // Complex (field/index): print prefix then close.
+                        e.wr("<");
+                        emit_prd(e, c.prd);
+                        e.wr("|");
+                        emit_cns_prefix_up_to(e, c.cns, term);
+                        e.wr("μ̃"); e.wr(term.bind);
+                        AirCns* open_c = c.cns;
+                        while (open_c != null && open_c != term
+                            && open_c.tail != null && open_c.tail != term)
+                        { open_c = open_c.tail; }
+                        if (open_c != null && open_c.tag == ACNS_CALL) e.wr(")");
+                        e.wr(">");
+                    }
+                    if (is_nop_cmd(term.body)) return;
+                    bool body_is_seq = (term.body.tag == ACMD_SEQ)
+                                    || (term.body.tag == ACMD_LET)
+                                    || (term.body.tag == ACMD_IF)
+                                    || (term.body.tag == ACMD_MATCH)
+                                    || (term.body.tag == ACMD_WHILE)
+                                    || (term.body.tag == ACMD_HANDLE);
+                    if (body_is_seq)
+                    {
+                        e.semi(); e.nl(); e.ind(); emit_cmd(e, term.body);
+                    }
+                    else
+                    {
+                        e.wr("; "); emit_cmd(e, term.body);
+                    }
                     return;
                 }
-                // Inside a SEQ or at fn-body top, emit `let x = e;` and continue.
-                e.wr("let ");
-                e.wr(xn);
-                e.wr(" = ");
-                emit_prd(e, c.prd);
-                // If body is () or nop, stop here (no trailing semicolon-noop).
-                if (is_nop_cmd(c.cns.body)) return;
-                // Otherwise: chain as let-in. If the body is itself a SEQ of stmts
-                // we just emit `;` and continue at the same indent; nested let/if/match
-                // on their own line get indented so it reads like a block.
-                bool body_is_seq = (c.cns.body.tag == ACMD_SEQ)
-                                || (c.cns.body.tag == ACMD_LET)
-                                || (c.cns.body.tag == ACMD_IF)
-                                || (c.cns.body.tag == ACMD_MATCH)
-                                || (c.cns.body.tag == ACMD_WHILE)
-                                || (c.cns.body.tag == ACMD_HANDLE);
-                if (body_is_seq)
-                {
-                    e.semi(); e.nl(); e.ind();
-                    emit_cmd(e, c.cns.body);
-                }
-                else
-                {
-                    e.wr("; ");
-                    emit_cmd(e, c.cns.body);
-                }
-                return;
             }
-            // Detect <e|μ̃_. ()> as a bare expression-statement (discarded value).
+            // Default: print the raw cut.
             e.wr("<");
             emit_prd(e, c.prd);
             e.wr("|");
