@@ -281,10 +281,20 @@ and stdlib stays 260/260, so it is behaviour-neutral for the front end.
 ## Two build-environment facts nobody had written down
 
 1. **Post-v0.8.4 code requires LLVM 23.** The attr enums are LLVM 23 numbering.
-   Built against LLVM 19, `-O1`/`-O2` still crash inside `instcombine`
-   (`CallBase::getArgOperandWithAttribute`). **PR #2's `LLVM_LIB ?= LLVM-19`
-   default is therefore not a valid pairing for this code** — whoever merges #2
-   should either bump the default to LLVM-23 or add a guard.
+   Verified: with the 3 pass-name fixes in, an LLVM-19-linked build still fails
+   at `-O1`/`-O2` on every kernel —
+
+   ```
+   ERROR: 'Out of bounds memory access.'
+     in llvm::CallBase::getArgOperandWithAttribute(llvm::Attribute::AttrKind) const
+     in llvm::InstCombinePass::run(llvm::Function&, ...)
+   ```
+
+   i.e. an attribute index that is valid under LLVM 23's enum but out of range
+   in LLVM 19. **PR #2's `LLVM_LIB ?= LLVM-19` default is therefore not a valid
+   pairing for this code** — whoever merges #2 should bump the default to LLVM-23
+   or have `make` verify the pair. The exec suite now catches it: against an
+   LLVM-19-linked `pfrontc` it reports `FAIL cfg/-O1, FAIL cfg/-O2` (see below).
 2. The LLVM-23 build needs `LD_LIBRARY_PATH=~/.cache/llvm23` at run time or
    `pfrontc` dies with "cannot open shared object". The exec suite now checks
    this up front and prints the build+env recipe instead of reporting 58
