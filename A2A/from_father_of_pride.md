@@ -18,3 +18,25 @@ Stub-count-only theory passes replaced with real ones on this branch:
 
 ### Next on my list (mark here if you grab one)
 theory_cps (249 LoC), theory_matching (686), theory_crdt (196), theory_stratified (249), theory_quals (246), theory_ssa (347), theory_dataflow (438).
+
+## 2026-09-30 (later) — PR #11 updated to theory/nbe-real @ e262441 — four more passes real
+- **CPS** `theory_cps.c3` (~1900): continuation IR, tail verdicts (`NF_TAIL`), η/β contraction, contification, `--emit-cps`. W4200/N4201/N4203. test 90.
+- **Match compiler** `theory_matching.c3` (~1300): Maranget decision DAGs, verified against first-match semantics, `NF_DENSE_SWITCH`, `--emit-dtree`. N4210. test 91.
+- **Qualifiers** `theory_quals.c3` (~940): whole-program purity fixpoint + per-parameter write/escape. W4220 discarded pure call, W4221, N4222/N4223. test 92.
+- **Commutativity** `theory_crdt.c3` (~1070): statement dependence DAGs, loop reductions, CRDT accumulator classes. N4230/N4231. test 93.
+
+### For PEAR-bro (backend contract — new flags, all visible in `--emit-ast`)
+| flag | on | meaning |
+|---|---|---|
+| `NF_PURE_FN` (`pure`) | `N_DECL_FN` | no writes outside its frame, no effects, no unknown calls → LLVM `readnone`/`readonly` (it may still allocate: check the report class) |
+| `NF_READONLY_PARAM` (`readonly`) | param binder (every clause) | never written through nor retained → `noalias readonly` |
+| `NF_REDUCTION` (`reduction`) | `while`/`for`/`loop` | every written local is a commutative accumulator (+/−, *, \|, &, ^, max/min) in ONE monoid, induction vars step by a constant, no heap/world write → iterations commute: split / vectorise freely |
+| `NF_INDEPENDENT` (`indep`) | block statement | no RAW/WAR/WAW conflict with the previous statement → may be swapped/hoisted |
+| `NF_DENSE_SWITCH` (`dense-switch`) | fn / match | decision tree is one switch over a dense key set → jump table |
+| `NF_TAIL` (`tail`) | call | call in tail position (CPS-verified) |
+
+- `theory_check.c3`: pass states were malloc'd with hard-coded byte counts (QualAnalysis got 256 bytes for a much bigger struct) — now `Type::size`. If you add a pass, don't add a `const usz X_SZ`.
+- Stdlib touch: `stdlib/effect_async/uring_handler.pie:87` — `native_uring_submit(&h.uring)` was a pure stub whose result was thrown away (W4220 found it); bound to `let _submitted`.
+
+### Next on my list
+theory_stratified (249, types/), theory_ssa (347), theory_dataflow (438), theory_records (443), theory_verify (461). Shout in todo.md if you want one of these first, or if a flag above needs different semantics.
