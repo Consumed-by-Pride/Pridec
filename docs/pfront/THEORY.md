@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_stratified.c3` | ~680 | Type-definition strata: dependency graph (value/guarded/alias edges, polarity), Tarjan SCCs + levels, NF_RECURSIVE_TY; alias cycles E4240, by-value recursion via variant N4241, non-positive N4242, non-regular generic recursion W4243 |
 | `theory_crdt.c3` | ~900 | Commutativity (CALM/CRDT): per-statement read/write location sets, block dependence DAG + critical path, NF_INDEPENDENT; loop accumulators classified counter/product/join/max-min/register/mixed, commutative reductions flagged NF_REDUCTION; N4230/N4231 |
 | `theory_quals.c3` | ~750 | Whole-program qualifier fixpoint: purity classes with reasons, parameter write/escape via callees, NF_PURE_FN / NF_READONLY_PARAM; W4220 discarded pure result, W4221 never-written mutable param, N4222/N4223 |
 | `theory_matching.c3` | ~1000 | Maranget decision DAGs for every `match` and clause set: f/b/a heuristics, enum signatures, or-rows, guards, hash-consed sharing, tree-vs-first-match verification, NF_DENSE_SWITCH; `--emit-dtree`; N4210 |
@@ -121,6 +122,28 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Type strata (`theory_stratified`).** Was a Kernel‑F<: sketch that
+compared every function type against itself (`predicative=N`); Pride's
+corpus has no bounded quantification, so it had nothing to act on. Now it
+does the stratification a compiler actually needs: one node per type
+declaration (struct/union/enum/newtype/alias, generics included), an edge
+for every mention in its body labelled *value* (field, tuple/array
+element, variant payload, newtype body, generic argument), *guarded*
+(`*T`, `&T`, `[T]`, `fn`) or *alias*, with the polarity of the occurrence
+(function parameters flip it). Tarjan's SCCs give the recursive families —
+every member is flagged **`NF_RECURSIVE_TY`** (forward‑declare / opaque
+pointer) — and the condensation's longest path gives each type's level
+(bottom‑up layout order). Per SCC: a cycle that runs only through aliases
+is not a type at all (**E4240** — `type T = T` in the fuzz corpus had been
+sailing through; `type A = B; type B = A` likewise); a by‑value cycle
+through an enum variant, which the resolver's E3020 does not see, is
+**N4241** (`--lint`); a recursive occurrence in negative position is
+**N4242** (`--lint`: not strictly positive, so `theory_sct`'s structural
+argument does not apply); a generic family that refers to itself at a
+larger instance (`struct Nest<T> { inner : *Nest<Box<T>> }`) is
+**W4243** — monomorphisation cannot terminate on it. Aliases of recursive
+structs and regular generic recursion (`Link<T>` → `*Link<T>`) stay quiet.
 
 **Commutativity analysis (`theory_crdt`).** Was a token counter: every
 `+` was a "counter CRDT", every assignment "LWW", every call whose name
@@ -488,6 +511,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `94_strata` + `strata` | E4240 ×3 (self + mutual alias cycles, plus fuzz `type T = T`), NF_RECURSIVE_TY on Tree/Link, N4241 variant recursion, N4242 negative occurrence, W4243 `Nest<Box<T>>`; Box / TreeRef / Link quiet |
 | `93_commute` + `commute` | sum+max loop flagged NF_REDUCTION + N4230, `last =` N4231, FNV mixed monoids, impure call / heap write / control-carried accumulator stay ordered, NF_INDEPENDENT on an independent `let` |
 | `92_quals` + `quals` | interprocedural purity (bump → bump_twice), recursive fn pure, NF_PURE_FN / NF_READONLY_PARAM in the dump, W4220 ×2, N4223, externs/alloc/effects never pure |
 | `91_matching` + `dtree` | complete enum switch (no default), two-column DAG sharing (16→13), dense jump table + N4210, or-expanded rows, guard fallthrough leaf, nested occurrence `x.0.0`, 0 tree/first-match disagreements |

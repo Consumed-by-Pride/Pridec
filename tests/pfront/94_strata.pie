@@ -1,0 +1,52 @@
+-- Stratification of type definitions: strata/levels, guarded vs by-value
+-- recursion, alias cycles, positivity, regularity of generic recursion.
+-- EXPECT: 3 errors
+
+-- ordinary guarded recursion: fine, flagged `recursive` for the backend
+struct Tree
+  val : i64
+  left : *Tree
+  right : *Tree
+
+-- mutual recursion through a pointer: one stratum, two decls
+struct Expr
+  args : *Stmt
+struct Stmt
+  e : *Expr
+
+-- an alias cycle is not a type at all (E4240)
+type Loop = *Loop
+
+-- two aliases through each other (E4240 once per alias — both are reported)
+type Ping = Pong
+type Pong = Ping
+
+-- an alias that merely names a recursive struct is fine
+type TreeRef = *Tree
+
+-- by-value recursion through a variant: needs boxing (N4241 under --lint)
+enum List
+  | Nil
+  | Cons(i64, List)
+
+-- negative occurrence: not strictly positive (N4242 under --lint)
+struct Handler
+  on_event : fn(Handler, i64) -> i64
+
+-- positive function-typed field is fine
+struct Thunk
+  force : fn(i64) -> *Thunk
+
+-- non-regular: Nest<T> mentions Nest<Box<T>> (W4243)
+struct Box<T>
+  v : T
+struct Nest<T>
+  inner : *Nest<Box<T>>
+
+-- regular generic recursion is fine
+struct Link<T>
+  v : T
+  next : *Link<T>
+
+fn main : () -> ()
+  | () -> ()

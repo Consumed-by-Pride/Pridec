@@ -690,7 +690,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.dfb != null) tp.dfb.init(a);
     if (tp.uba != null) { tp.uba.init(a); tp.uba.attach(d, it, file); }
     if (tp.cps != null) { tp.cps.init(a); tp.cps.attach(d, it, file); }
-    if (tp.strat != null) tp.strat.init(a);
+    if (tp.strat != null) { tp.strat.init(a); tp.strat.attach(d, it, file); }
     if (tp.nbe != null) { tp.nbe.init(a); tp.nbe.run_demo(); }
     if (tp.crdt != null) { tp.crdt.init(a); tp.crdt.attach(d, it, file); }
     if (tp.ssa != null) { tp.ssa.init(a, null); tp.ssa.run(); }

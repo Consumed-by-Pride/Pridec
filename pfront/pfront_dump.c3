@@ -181,6 +181,7 @@ fn void print_flags(Node* n)
     if ((f & pfront_core::NF_READONLY_PARAM) != 0) { printf(" readonly"); }
     if ((f & pfront_core::NF_INDEPENDENT) != 0) { printf(" indep"); }
     if ((f & pfront_core::NF_REDUCTION) != 0) { printf(" reduction"); }
+    if ((f & pfront_core::NF_RECURSIVE_TY) != 0) { printf(" recursive"); }
     if ((f & pfront_core::NF_ERROR) != 0)      { printf(" ERR"); }
 }
 
