@@ -83,6 +83,7 @@ alias Ltarget = void*;
 alias Ltarget_machine = void*;
 
 const int LLVM_CG_OBJ_FILE = 1;
+const int LLVM_CODEGEN_O0 = 0;
 const int LLVM_CODEGEN_O2 = 2;
 const int LLVM_RELOC_STATIC = 1;
 const int LLVM_CODE_MODEL_SMALL = 1;
@@ -128,6 +129,7 @@ struct PearCg {
     Lcontext ctx;
     Lmodule  mod;
     Lbuilder b;
+    Lblock   entry_bb;
     uint     tmp;
     uint     blk;
     Lvalue   cur_fn;
@@ -543,7 +545,10 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 }
                 else
                 {
+                    Lblock _cb = ll_get_insert(cg.b);
+                    ll_pos_builder(cg.b, cg.entry_bb);
                     Lvalue slot = ll_build_alloca(cg.b, cg.i64ty, cg.mktmp());
+                    ll_pos_builder(cg.b, _cb);
                     (void)ll_build_store(cg.b, v, slot);
                     cg.bind_direct(k.bind, slot, true);
                 }
@@ -788,8 +793,11 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
                         }
                         else
                         {
-                            // First binding: allocate a stack slot.
+                            // First binding: allocate a stack slot in the ENTRY block (mem2reg-friendly).
+                            Lblock _cb2 = ll_get_insert(cg.b);
+                            ll_pos_builder(cg.b, cg.entry_bb);
                             Lvalue slot = ll_build_alloca(cg.b, cg.i64ty, cg.mktmp());
+                            ll_pos_builder(cg.b, _cb2);
                             (void)ll_build_store(cg.b, v, slot);
                             cg.bind_direct(c.binder, slot, true);
                         }
@@ -981,6 +989,7 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     Lvalue fnv = ll_add_fn(cg.mod, nm, fty);
     cg.cur_fn = fnv;
     Lblock entry = ll_append_bb(cg.ctx, fnv, "entry");
+    cg.entry_bb = entry;
     ll_pos_builder(cg.b, entry);
     cg.terminated = false;
     for (uint i = 0; i < pc; i++)
@@ -1109,6 +1118,7 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path)
     Lmodule m = ll_mod_create((char*)"Pride", ctx);
     Lbuilder b = ll_builder_create(ctx);
     (void)ll_set_target(m, (char*)"x86_64-pc-linux-gnu");
+    (void)ll_set_datalayout(m, (char*)"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128");
 
     Ltarget tgt = null;
     char* err = null;
@@ -1118,26 +1128,14 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path)
         ll_builder_dispose(b); ll_mod_dispose(m); ll_ctx_dispose(ctx);
         return false;
     }
-    Ltarget_machine tm = ll_create_tm(tgt, (char*)"x86_64-pc-linux-gnu", (char*)"", (char*)"", LLVM_CODEGEN_O2, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_SMALL);
+    Ltarget_machine tm = ll_create_tm(tgt, (char*)"x86_64-pc-linux-gnu", (char*)"", (char*)"", LLVM_CODEGEN_O0, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_SMALL);
     if (tm == null)
     {
         ll_builder_dispose(b); ll_mod_dispose(m); ll_ctx_dispose(ctx);
         return false;
     }
-    void* dl = ll_create_tm_dl(tm);
-    ll_set_module_dl(m, dl);
-
     PearCg cg;
     pear_setup(&cg, ctx, m, b, mod);
-
-    // O2 pipeline with TM (cost model knows target features).
-    {
-        Lpass_opts po = ll_create_pb_opts();
-        ll_pb_set_inliner_threshold(po, 250);
-        Lerror e = ll_run_passes(m, (char*)"default<O2>", tm, po);
-        if (e != null) { ll_consume_error(e); }
-        ll_dispose_pb_opts(po);
-    }
 
     char* emsg = null;
     bool ok = (ll_tm_emit_to_file(tm, m, obj_path, LLVM_CG_OBJ_FILE, &emsg) == 0);

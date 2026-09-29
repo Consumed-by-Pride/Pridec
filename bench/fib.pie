@@ -1,2 +1,2 @@
 fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n-1) + fib(n-2); }
-fn main(argc: i64) -> i64 { let n: i64 = 38 + (argc & 1); let mut s: i64 = 0; let mut i: i64 = 0; while i < 5 { s = s + fib(n); i = i + 1; } return s; }
+fn main(_) -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while i < 5 { s = s + fib(30); i = i + 1; } return s; }

@@ -1,2 +1,2 @@
 fn tak(x: i64, y: i64, z: i64) -> i64 { if y < x { return tak(tak(x-1,y,z), tak(y-1,z,x), tak(z-1,x,y)); } return z; }
-fn main(argc: i64) -> i64 { let x: i64 = 24 + (argc & 1); let mut s: i64 = 0; let mut i: i64 = 0; while i < 20 { s = s + tak(x, 16, 8); i = i + 1; } return s; }
+fn main(_) -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while i < 20 { s = s + tak(18, 10, 4); i = i + 1; } return s; }
