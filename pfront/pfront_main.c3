@@ -594,6 +594,11 @@ fn int main(String[] args)
         printf("  --dead-code    warn about functions no entry point reaches\n");
         printf("  --strict-vis   enforce pub/private across module boundaries\n");
         printf("  --no-theory    skip the MSP/TRS/IRDL/effects theory layer\n");
+        printf("  --lint         surface advisory notes (purity, reductions, read-only params, ...)\n");
+        printf("  --emit-ast     print the annotated AST with pass flags (pure, readonly, reduction, indep, ...)\n");
+        printf("  --emit-sexp    print the AST as s-expressions\n");
+        printf("  --emit-cps     print every function's CPS term after eta/beta contraction\n");
+        printf("  --emit-dtree   print the decision DAG compiled for every match / clause set\n");
         printf("  --quiet        summary only\n");
         return 2;
     }
