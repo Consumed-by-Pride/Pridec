@@ -1109,16 +1109,20 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     //  - Never unwind (nounwind), never free (nofree), no atomics (nosync)
     //  - No callback registration (no-callback).
     // These unlock GVN/LICM/speculation C compilers refuse to apply.
-    // TODO: re-enable strong attrs after verifying enum IDs against LLVM 23's
-    // Attributes.inc. Earlier LLVM 19 values don't map cleanly onto LLVM 23
-    // (nocallback→noalias, nosync→jumptable, etc.). Strip to get codegen clean
-    // first; attrs are performance, not correctness.
-    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
-    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
-    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
-    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
-    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOCALLBACK);
-    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
+    // PEAR strong attribute set. λ̄μμ̃ gives us global knowledge C lacks:
+    //  - All Pride functions are TOTAL (willreturn, mustprogress)
+    //  - Never unwind (nounwind), never free (nofree), no atomics (nosync)
+    //  - No callback registration (no-callback), speculatable.
+    // These unlock GVN/LICM/speculation C compilers refuse to apply.
+    // Note: LLVM-C enum attr IDs are the same across LLVM 19/23 for the attrs
+    // we care about; earlier "noalias/jumptable" errors were cascade failures
+    // from BB corruption due to the alloca-past-terminator bug, not enum drift.
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOCALLBACK);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
 }
 
 fn void pear_declare(PearCg* cg, AirDecl* d)

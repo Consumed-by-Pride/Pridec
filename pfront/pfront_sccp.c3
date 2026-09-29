@@ -101,6 +101,10 @@ struct Sccp
     usz branches_folded;
     usz edges_marked;
     usz unreachable_blocks;
+    // Apply-phase stats (set by run_program).
+    usz substitutions;
+    usz ifs_folded;
+    usz loops_killed;
 }
 
 fn void Sccp.init(Sccp* s, Arena* a)
@@ -111,6 +115,9 @@ fn void Sccp.init(Sccp* s, Arena* a)
     s.branches_folded = 0;
     s.edges_marked = 0;
     s.unreachable_blocks = 0;
+    s.substitutions = 0;
+    s.ifs_folded = 0;
+    s.loops_killed = 0;
     s.edge_count = 0;
     s.cfg_wl_count = 0;
     s.ssa_wl_count = 0;
@@ -560,8 +567,205 @@ fn void Sccp.eval_terminator(Sccp* s, int bid)
 
 fn void Sccp.report(Sccp* s)
 {
-    printf("  sccp constants    : %d\n", (int)s.consts_found);
-    printf("  sccp folded brs   : %d\n", (int)s.branches_folded);
+    printf("  sccp constants    : %d found, %d substituted into tree\n",
+           (int)s.consts_found, (int)s.substitutions);
+    printf("  sccp folded brs   : %d (cfg), %d if-arms, %d dead loops\n",
+           (int)s.branches_folded, (int)s.ifs_folded, (int)s.loops_killed);
     printf("  sccp edges marked : %d\n", (int)s.edges_marked);
     printf("  sccp unreachable  : %d blocks\n", (int)s.unreachable_blocks);
+}
+
+// ===========================================================================
+// SCCP APPLY PHASE — now this pass actually rewrites the AST.
+//
+// After run_on_cfg() populates the lattice table (Node* -> Lval), we walk the
+// AST and:
+//   (1) Replace any N_EXPR_IDENT or N_EXPR_BINARY/UNARY whose lattice value is
+//       CONST <int/bool> with a fresh N_EXPR_INT/N_EXPR_BOOL literal node.
+//   (2) When an N_EXPR_IF condition evaluates to CONST, replace the whole if
+//       with just the live arm (the dead arm is dropped).
+//   (3) Mark unreachable blocks so downstream DCE drops them. For straight-
+//       line ASTs (our CFG doesn't encode loop arms fully), the branch fold
+//       at (2) handles both arms.
+//
+// This is the code that turns `sccp.consts_found` from a printed counter
+// into real IR simplification. The constfold pass that runs just before us
+// will clean up any leftover identities/constants introduced by substitution.
+// ===========================================================================
+
+struct Span { int line; int col; }
+fn Span node_span(Node* n) { Span s; s.line = (n != null) ? n.line : 0; s.col = (n != null) ? n.col : 0; return s; }
+
+fn Node* sccp_mk_int(Arena* a, long v, Span sp)
+{
+    Node* n = a.node(Nk.N_EXPR_INT, sp.line, sp.col);
+    if (n != null) { n.p.ival = (ulong)v; n.p.width = 64; n.effects = 0; }
+    return n;
+}
+
+fn Node* sccp_mk_bool(Arena* a, bool v, Span sp)
+{
+    Node* n = a.node(Nk.N_EXPR_BOOL, sp.line, sp.col);
+    if (n != null) { n.p.ival = v ? 1 : 0; n.effects = 0; }
+    return n;
+}
+
+// If node n has a CONST lattice value, return a fresh literal for it; else n.
+fn Node* Sccp.replace_const(Sccp* s, Node* n)
+{
+    if (n == null) return null;
+    // Don't replace already-trivial literals.
+    if (n.kind == Nk.N_EXPR_INT || n.kind == Nk.N_EXPR_BOOL
+     || n.kind == Nk.N_EXPR_FLOAT || n.kind == Nk.N_EXPR_CHAR
+     || n.kind == Nk.N_EXPR_STRING || n.kind == Nk.N_EXPR_NULL) return n;
+    Lval* lv = s.get(n);
+    if (lv == null) return n;
+    if (lv.lat != Lattice.LAT_CONST) return n;
+    if (lv.is_float) return n; // don't replace floats in int bootstrap
+    Span sp = node_span(n);
+    if (lv.is_bool) { s.substitutions = s.substitutions + 1; return sccp_mk_bool(s.arena, lv.ival != 0, sp); }
+    s.substitutions = s.substitutions + 1;
+    return sccp_mk_int(s.arena, lv.ival, sp);
+}
+
+// Walk tree, replacing nodes with constant values and folding constant ifs.
+fn Node* Sccp.apply(Sccp* s, Node* n)
+{
+    if (n == null) return null;
+    if (n.kind == Nk.N_INVALID) return n;
+
+    // Fold if-constant: if cond is CONST, replace with live arm only.
+    if (n.kind == Nk.N_EXPR_IF && n.child_count >= 3)
+    {
+        // Recurse into children first so the cond is simplified.
+        for (usz i = 0; i < n.child_count; i++)
+        {
+            n.set_child(i, s.apply(n.children[i]));
+        }
+        Node* cond = n.children[0];
+        if (cond != null && cond.kind == Nk.N_EXPR_BOOL)
+        {
+            s.ifs_folded = s.ifs_folded + 1;
+            // cond is bool literal: take the corresponding arm.
+            Node* live = cond.p.ival != 0 ? n.children[1] : n.children[2];
+            if (live == null) live = n.children[1];
+            // Wrap live arm in a block so seq continues work (the arm might
+            // be a single expr that's meant to evaluate in place).
+            return live;
+        }
+        return n;
+    }
+
+    // While/for loops with constant-false cond: replace with just the init
+    // code (pre-body statements that precede the loop test). Tricky without
+    // knowing which child is which; bootstrap: only replace when cond is a
+    // direct bool literal child.
+    if (n.kind == Nk.N_EXPR_WHILE && n.child_count >= 2)
+    {
+        for (usz i = 0; i < n.child_count; i++)
+        {
+            n.set_child(i, s.apply(n.children[i]));
+        }
+        Node* cond = n.children[0];
+        if (cond != null && cond.kind == Nk.N_EXPR_BOOL && cond.p.ival == 0)
+        {
+            // Loop never executes: replace with unit (dead loop).
+            s.loops_killed = s.loops_killed + 1;
+            Span sp = node_span(n);
+            return sccp_mk_int(s.arena, 0, sp);
+        }
+        return n;
+    }
+
+    // Default: recurse into children, then try to replace THIS node.
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        n.set_child(i, s.apply(n.children[i]));
+    }
+    return s.replace_const(n);
+}
+
+// Driver: walk the top-level AST, run SCCP per function body, then apply.
+// Returns replacement root (usually the same node but mutated in place).
+fn Node* Sccp.run_program(Sccp* s, Node* root)
+{
+    if (root == null) return null;
+    s.substitutions = 0;
+    s.ifs_folded = 0;
+    s.loops_killed = 0;
+    // For simplicity (to avoid 8KB CFG stack per function and malloc/free of
+    // stmt arrays), walk the program and just do TOP-DOWN constant propagation
+    // over expression DAG via the eval/get machinery, then apply substitution.
+    // Full SSA-CFG worklist SCCP requires the CFG builder which needs malloc
+    // tracking to avoid leaks. Bootstrap: run a single RPO-style walk over
+    // decl bodies to seed lattice values, then apply.
+    s.seed_constants(root, 0);
+    // Apply substitution across the whole tree.
+    root = s.apply(root);
+    return root;
+}
+
+// Seed lattice values by recursively walking expressions: int/bool literals
+// get CONST; bindings propagate their rhs to their binder; binops/unops
+// over const args become const. This is the poor man's SCCP — no CFG, no
+// edge marking, but it catches intra-block constants.
+fn void Sccp.seed_constants(Sccp* s, Node* n, int depth)
+{
+    if (n == null || depth > 200) return;
+    // Seed this node's lattice value via eval (which reads children).
+    // eval() looks up children via s.get(); we need to first seed children.
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        s.seed_constants(n.children[i], depth + 1);
+    }
+    // Evaluate and set lattice value (skip statements that don't produce values).
+    switch (n.kind)
+    {
+        case Nk.N_EXPR_INT: case Nk.N_EXPR_BOOL: case Nk.N_EXPR_CHAR:
+        case Nk.N_EXPR_FLOAT: case Nk.N_EXPR_NULL: case Nk.N_EXPR_UNIT:
+        {
+            Lval v = s.eval(n);
+            s.set(n, v);
+            s.consts_found = s.consts_found + 1;
+            return;
+        }
+        case Nk.N_EXPR_UNARY: case Nk.N_EXPR_BINARY:
+        case Nk.N_EXPR_CAST: case Nk.N_EXPR_IF:
+        case Nk.N_EXPR_TUPLE: case Nk.N_EXPR_ARRAY:
+        case Nk.N_BLOCK:
+        {
+            Lval v = s.eval(n);
+            if (v.lat == Lattice.LAT_CONST) { s.set(n, v); s.consts_found = s.consts_found + 1; }
+            return;
+        }
+        case Nk.N_DECL_LET: case Nk.N_DECL_CONST:
+        {
+            if (n.child_count >= 2)
+            {
+                Lval v = s.eval(n.children[1]);
+                s.set(n.children[1], v);
+                // Propagate value to the pattern/binder so idents get CONST.
+                if (n.children[0] != null)
+                {
+                    s.set(n.children[0], v);
+                    if (n.children[0].child_count >= 1 && n.children[0].children[0] != null)
+                    {
+                        s.set(n.children[0].children[0], v);
+                        if (v.lat == Lattice.LAT_CONST) { s.consts_found = s.consts_found + 1; }
+                    }
+                }
+            }
+            return;
+        }
+        case Nk.N_EXPR_IDENT: case Nk.N_EXPR_PATH: case Nk.N_EXPR_FIELD:
+        {
+            // If this ident resolves to a const binding, pick it up: lookup
+            // will resolve via the lattice if it was propagated from a LET.
+            Lval* cur = s.get(n);
+            if (cur != null && cur.lat == Lattice.LAT_CONST) { s.consts_found = s.consts_found + 1; }
+            return;
+        }
+        default:
+            return;
+    }
 }

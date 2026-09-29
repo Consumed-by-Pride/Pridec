@@ -32,6 +32,7 @@ import pfront_narrow;
 import pfront_check;
 import pfront_dump;
 import pfront_constfold;
+import pfront_sccp;
 import air;
 
 extern fn void* malloc(usz size);
@@ -400,6 +401,8 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
         int  cf_folded = 0;
         int  cf_identities = 0;
         int  cf_killed = 0;
+        // (cf_folded/identities/killed declared above — kept initialized to 0;
+        //  post-sccp constfold run adds to the same totals.)
         if (optimize && entry.ast != null)
         {
             cf.init(arena, diags, it, &ce, path);
@@ -427,10 +430,45 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
                 entry.ast = tp.run(entry.ast);
             }
         }
+        // ---- SCCP (sparse conditional constant propagation) — real rewrites ----
+        // Sccp is heap-allocated: its l_key/l_val/worklist arrays exceed C3's
+        // default 64 KB stack-object limit.
+        pfront_sccp::Sccp* sccp =
+            (pfront_sccp::Sccp*)malloc(pfront_sccp::Sccp::size);
+        int sccp_consts = 0;
+        int sccp_subs = 0;
+        int sccp_ifs = 0;
+        int sccp_loops = 0;
+        if (sccp != null && optimize && entry.ast != null)
+        {
+            sccp.init(arena);
+            entry.ast = sccp.run_program(entry.ast);
+            sccp_consts = (int)sccp.consts_found;
+            sccp_subs = (int)sccp.substitutions;
+            sccp_ifs = (int)sccp.ifs_folded;
+            sccp_loops = (int)sccp.loops_killed;
+            free((void*)sccp);
+        }
+        else if (sccp != null) { free((void*)sccp); }
+
+        // Run constfold again AFTER SCCP substitution to clean up identities
+        // introduced by replaced constants (e.g. (5+3)->8, x+0->x).
+        if (optimize && entry.ast != null)
+        {
+            cf.init(arena, diags, it, &ce, path);
+            cf.max_iter = 4;
+            cf.run(entry.ast);
+            cf_folded = cf_folded + cf.folded;
+            cf_identities = cf_identities + cf.identities;
+            cf_killed = cf_killed + cf.branches_killed;
+        }
+
         if (optimize && !quiet)
         {
-            printf("  const-fold (pre) : %d folded, %d identities, %d branches killed\n",
-                   (int)cf_folded, (int)cf_identities, (int)cf_killed);
+            printf("  const-fold       : %d folded, %d identities, %d branches killed\n",
+                   cf_folded, cf_identities, cf_killed);
+            printf("  sccp             : %d consts, %d substituted, %d ifs folded, %d dead loops\n",
+                   sccp_consts, sccp_subs, sccp_ifs, sccp_loops);
         }
 
         // The FINAL tree: after rewriting, partial evaluation, e-graph
