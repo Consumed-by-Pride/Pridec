@@ -1,0 +1,9 @@
+-- EXIT: 3
+-- BLOCKER (XFAIL): array writes in a loop are dropped, so the loop cannot make
+-- progress and the program hangs. Also the shape all bench/*_kernel.pie use.
+fn main(_) -> i64 ! [Alloc] {
+  let a : *i64 = alloc [i64; 8];
+  let mut i : i64 = 0;
+  while i < 8 { a[i] = i; i = i + 1; }
+  return a[3];
+}

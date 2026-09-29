@@ -1,0 +1,3 @@
+-- EXIT: 42
+-- Smallest possible end-to-end case: does a native exe come out and run?
+fn main(_) -> i64 { return 42; }
