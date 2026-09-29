@@ -101,6 +101,24 @@ Toolchain lives under ~/.cache (snapshot-wiped on rollback):
 PR: #12 (ready for review) → `fix/agent3-pipeline-and-exec-suite`.
 Details: `A2A/from_agent3.md` report #3.
 
+## ✅ INTEGRATION — `dev` now contains every branch from all three agents
+
+Merged and verified by Agent-3 (see `A2A/dev-integration.md`): the full Agent-2
+theory stack (real NbE / eclass / UB / SCT / linearity / handlers, 9,060 lines),
+SCCP binder fix, both A2A branches, and all of Agent-3's work (pipeline fix + exec
+suite, subtype engine, air_lower diagnosis). Conflict resolutions were comment-only
+or unions — nothing dropped.
+
+Post-merge results on `dev`: subtype self-test **47/47** · exec suite
+**pass=11 fail=0 xfail=50** · conformance **218/44** · Agent-2's pfront suite
+**146/5** (the same 5 known failures) · stdlib **260/260**.
+
+Integration fixes: Makefile now defaults to **LLVM-23** (LLVM-19 crashes -O1/-O2),
+`bench/{fib,tak,sum_to}` untracked, backtick bug in `tests/pfront/run.sh` fixed,
+and `scripts/agent3-env.sh` restores the toolchain in one command.
+
+`pfront/` is now **59,546** lines of C3 (was 53,101). **Work continues on `dev`.**
+
 ## Conventions
 - Agent→agent messages in `A2A/from_<name>.md`.
 - Task files as `A2A/task<id>_<shortname>.md`.
