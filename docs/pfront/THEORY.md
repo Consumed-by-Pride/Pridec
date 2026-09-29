@@ -47,6 +47,7 @@ item is withdrawn.
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
 | `theory_mu.c3` | ~830 | Iso-recursive μ-types built from the declarations (struct/enum/newtype → μ; `*T` → option); contractivity, least-fixpoint inhabitation W4250, coinductive shape equality between nominal recursive types N4251 |
+| `theory_session.c3` | ~1,230 | Session types over `stdlib/channel`: endpoints from `let (tx, rx) = oneshot()/bounded()/unbounded()` and `*…Sender/*…Receiver` parameters; a protocol per party from its control flow (seq → prefix, if/match → choice, loop → μ); duality decided coinductively — W4260 ends not dual (with the first disagreement), W4261 oneshot sent twice on a path, N4262 parameter protocol under `--lint` |
 | `theory_stratified.c3` | ~680 | Type-definition strata: dependency graph (value/guarded/alias edges, polarity), Tarjan SCCs + levels, NF_RECURSIVE_TY; alias cycles E4240, by-value recursion via variant N4241, non-positive N4242, non-regular generic recursion W4243 |
 | `theory_crdt.c3` | ~900 | Commutativity (CALM/CRDT): per-statement read/write location sets, block dependence DAG + critical path, NF_INDEPENDENT; loop accumulators classified counter/product/join/max-min/register/mixed, commutative reductions flagged NF_REDUCTION; N4230/N4231 |
 | `theory_quals.c3` | ~750 | Whole-program qualifier fixpoint: purity classes with reasons, parameter write/escape via callees, NF_PURE_FN / NF_READONLY_PARAM; W4220 discarded pure result, W4221 never-written mutable param, N4222/N4223 |
@@ -123,6 +124,31 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Session types (`theory_session`).** The Honda / Gay–Hole store (`!T.S`,
+`?T.S`, `⊕{l:S}`, `&{l:S}`, `μX.S`), duality and coinductive subtyping
+existed but only ever ran on a literal protocol and the "walk" counted
+identifiers named `send`. Now the pass reads Pride's real channel API:
+every `let (tx, rx) = channel.oneshot()/bounded(n)/unbounded()` (also the
+`*_channel_new()` forms) makes a **pair of endpoints**, and every
+parameter typed `*OneshotSender` / `*BoundedReceiver` / … makes a single
+one. Each endpoint's **protocol is built from the control flow of the
+party that owns it** (the function body, or a lambda): a sequence of
+`send_*`/`recv_*`/`*_close` calls on it is a chain of prefixes, an `if`
+or `match` is a choice with labels `then`/`else`/`arm_i`, a `while`/`for`
+is `μX.+{again: body·X, done: rest}` built as a cyclic graph, and a
+`return` ends the session. Endpoints that escape (passed to a
+non‑channel call, stored, returned, rebound) or are used by more than one
+party are counted but never judged. Two ends of a pair are checked with
+`dual(tx) ≤ rx ∧ rx ≤ dual(tx)` — the coinductive algorithm with the
+visited‑pair memo, so two symmetric loops are dual in a handful of steps
+— and a failure is reported once, at the first operation the two sides
+disagree on, with both protocols printed (**W4260**: `tx` follows
+`!msg.end` but `rx` follows `?msg.?msg.end` — this receive has no matching
+send). A oneshot sender used twice on one straight path is **W4261**; the
+inferred protocol of a channel parameter is **N4262** under `--lint`.
+Control‑flow choices are decisions each party takes on its own, so they
+keep their kind under duality; only protocol labels flip ⊕ ↔ &.
 
 **μ-types (`theory_mu`).** The contractivity / De Bruijn shift‑subst /
 coinductive‑subtyping machinery was real but ran on a hard‑coded demo

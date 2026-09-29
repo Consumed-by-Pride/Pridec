@@ -93,6 +93,7 @@ extern fn void* malloc(usz size);
 extern fn void* calloc(usz nmemb, usz size);
 extern fn void  free(void* ptr);
 extern fn int   printf(char* fmt, ...);
+extern fn int   snprintf(char* buf, usz n, char* fmt, ...);
 
 const usz SESS_MAX_NODES   = 4096;
 const usz SESS_MAX_LABELS  = 256;
@@ -130,6 +131,7 @@ struct Snode
     usz  lbl_count;  // number of labels
     int  var_idx;    // for SK_VAR: de Bruijn index
     uint hash;
+    Node* at;        // the source operation / construct this node came from
 }
 
 struct SPair
@@ -171,6 +173,17 @@ struct SessionCheck
     usz      n_sub_fail;
     usz      n_unclosed;
     usz      n_linearity_err;
+    // endpoints
+    Endpoint* eps;
+    usz       n_eps;
+    usz       n_pairs_found, n_pairs_skipped, n_param_eps;
+    usz       n_w4260, n_w4261, n_n4262;
+    pfront_core::DiagBag*  diags;
+    pfront_core::Interner* interner;
+    char*     file;
+    uint      lbl_then, lbl_else, lbl_again, lbl_done, lbl_arm_base;
+    int*      dual_memo;      // per-dual μ memo (cyclic graphs)
+    usz       dual_memo_cap;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -261,40 +274,63 @@ fn int sess_mk_choice(SessionCheck* sc, Sk k, Slbl* arr, usz count)
 // ═══════════════════════════════════════════════════════════════════════════
 // Duality (the heart of session types).
 // ═══════════════════════════════════════════════════════════════════════════
+// Control-flow choices (then/else, again/done, arm_i) are decisions each
+// party takes on its own — the dual keeps their kind; protocol labels
+// flip ⊕ ↔ &.  μ-nodes are memoised so cyclic graphs dualise in one pass.
+fn bool SessionCheck.is_flow_label(SessionCheck* sc, uint id)
+{
+    return id == sc.lbl_then || id == sc.lbl_else || id == sc.lbl_again || id == sc.lbl_done
+        || (id >= sc.lbl_arm_base && id < sc.lbl_arm_base + 64);
+}
+
 fn int sess_dual(SessionCheck* sc, int s, int depth)
 {
+    if (depth == 0)
+    {
+        usz cap = sc.n_nodes + 1;
+        sc.dual_memo = (int*)malloc(cap * 4);
+        sc.dual_memo_cap = cap;
+        for (usz i = 0; i < cap; i++) { sc.dual_memo[i] = -1; }
+    }
+    int r = sess_dual_rec(sc, s, depth);
+    if (depth == 0 && sc.dual_memo != null) { free(sc.dual_memo); sc.dual_memo = null; sc.dual_memo_cap = 0; }
+    return r;
+}
+
+fn int sess_dual_rec(SessionCheck* sc, int s, int depth)
+{
     if (s < 0 || (usz)s >= sc.n_nodes || depth > SESS_MAX_DEPTH) return sess_mk_end(sc);
+    if (sc.dual_memo != null && (usz)s < sc.dual_memo_cap && sc.dual_memo[s] >= 0) return sc.dual_memo[s];
     Snode n = sc.nodes[s];
     switch (n.kind)
     {
         case Sk.SK_END: return sess_mk_end(sc);
-        case Sk.SK_SEND: return sess_mk_pref(sc, Sk.SK_RECV, n.payload, sess_dual(sc, n.cont, depth + 1));
-        case Sk.SK_RECV: return sess_mk_pref(sc, Sk.SK_SEND, n.payload, sess_dual(sc, n.cont, depth + 1));
+        case Sk.SK_SEND: return sess_mk_pref(sc, Sk.SK_RECV, n.payload, sess_dual_rec(sc, n.cont, depth + 1));
+        case Sk.SK_RECV: return sess_mk_pref(sc, Sk.SK_SEND, n.payload, sess_dual_rec(sc, n.cont, depth + 1));
         case Sk.SK_SELECT:
-        {
-            Slbl[16] arr; usz k = 0;
-            usz base = (usz)n.lbl_start;
-            for (usz i = 0; i < n.lbl_count && i < 16; i++)
-            {
-                arr[k].name_id = sc.labels[base + i].name_id;
-                arr[k].cont = sess_dual(sc, sc.labels[base + i].cont, depth + 1);
-                k = k + 1;
-            }
-            return sess_mk_choice(sc, Sk.SK_BRANCH, &arr[0], k);
-        }
         case Sk.SK_BRANCH:
         {
             Slbl[16] arr; usz k = 0;
             usz base = (usz)n.lbl_start;
+            bool flow = n.lbl_count > 0 && sc.is_flow_label(sc.labels[base].name_id);
             for (usz i = 0; i < n.lbl_count && i < 16; i++)
             {
                 arr[k].name_id = sc.labels[base + i].name_id;
-                arr[k].cont = sess_dual(sc, sc.labels[base + i].cont, depth + 1);
+                arr[k].cont = sess_dual_rec(sc, sc.labels[base + i].cont, depth + 1);
                 k = k + 1;
             }
-            return sess_mk_choice(sc, Sk.SK_SELECT, &arr[0], k);
+            Sk dk = flow ? n.kind : (n.kind == Sk.SK_SELECT ? Sk.SK_BRANCH : Sk.SK_SELECT);
+            return sess_mk_choice(sc, dk, &arr[0], k);
         }
-        case Sk.SK_MU: return sess_mk_mu(sc, sess_dual(sc, n.cont, depth + 1));
+        case Sk.SK_MU:
+        {
+            int d = sess_mk_mu(sc, -1);
+            if (sc.dual_memo != null && (usz)s < sc.dual_memo_cap) { sc.dual_memo[s] = d; }
+            int c = sess_dual_rec(sc, n.cont, depth + 1);
+            sc.nodes[d].cont = c;
+            sc.nodes[d].at = n.at;
+            return d;
+        }
         case Sk.SK_VAR: return sess_mk_var(sc, n.var_idx);
     }
 }
@@ -357,6 +393,7 @@ fn bool sess_subtype(SessionCheck* sc, int a, int b, int depth)
         return sess_subtype(sc, a, nb.cont, depth + 1);
     }
     if (na.kind == Sk.SK_END && nb.kind == Sk.SK_END) { return true; }
+    if (na.kind == Sk.SK_VAR && nb.kind == Sk.SK_VAR) { return na.var_idx == nb.var_idx; }
     if (na.kind == Sk.SK_SEND && nb.kind == Sk.SK_SEND)
     {
         // Covariant in payload: a.payload >= b.payload (we simplify by always
@@ -409,203 +446,784 @@ fn bool sess_subtype(SessionCheck* sc, int a, int b, int depth)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// AST-level channel tracking: identify send/recv/select/offer/close by name.
+// From Pride code to sessions
+// ───────────────────────────────────────────────────────────────────────────
+// ENDPOINTS. Two sources:
+//   • `let (tx, rx) = channel.oneshot()` / `bounded(n)` / `unbounded()` /
+//     `*_channel_new(..)` — a PAIR of endpoints created together; both are
+//     tracked, and their protocols must be dual.
+//   • a parameter whose declared type names a `…Sender` / `…Receiver` — a
+//     single endpoint whose protocol is inferred and (under --lint) shown.
+// OPERATIONS. A call whose callee's last name segment is `send`, `…_send`,
+// `send_…`, `try_send` (SEND); `recv`, `…_recv`, `recv_…`, `try_recv`
+// (RECV); `close`, `…_close` (END) and whose first argument is (a
+// reference to / a field of) the endpoint binder.
+// PARTIES. A function body is one party; every lambda inside it is another.
+// An endpoint's protocol is built per party from the statement structure:
+//     s1; s2; …            ⟼  prefixes in order
+//     if c then A else B   ⟼  +{then: A, else: B}   (when either arm acts)
+//     match … arms         ⟼  +{arm_i: …}
+//     while / for / loop   ⟼  μX. +{again: body·X, done: rest}
+//     return               ⟼  end
+//     ops in a lambda      ⟼  belong to the lambda's party
+// Any other use of the endpoint (passed to a function, stored, returned)
+// makes its protocol unknown from here: the pair is not judged.
+//
+// JUDGEMENTS
+//   W4260  the two ends of one channel are not dual: printed protocols and
+//          the first point of disagreement (a recv with no send blocks
+//          forever on a oneshot/bounded channel; a send with no recv is a
+//          message nobody reads)
+//   W4261  a oneshot sender is used twice on one straight path: the second
+//          `send` can only return false
+//   N4262  (--lint) inferred protocol of a channel parameter
 // ═══════════════════════════════════════════════════════════════════════════
-fn uint sess_chk_name(Node* n)
+
+const usz SESS_MAX_EPS   = 256;
+const usz SESS_MAX_OPS   = 4096;
+
+enum ChanKind : char { CK_UNKNOWN, CK_ONESHOT, CK_BOUNDED, CK_UNBOUNDED }
+enum Role : char { ROLE_UNKNOWN, ROLE_SENDER, ROLE_RECEIVER }
+
+struct Endpoint
 {
-    if (n == null) return 0;
-    if (n.kind == Nk.N_EXPR_IDENT) return n.name_id;
-    if (n.child_count >= 1 && n.children[0] != null) return sess_chk_name(n.children[0]);
-    return 0;
+    Node*    binder;
+    ChanKind kind;
+    Role     role;
+    int      pair;        // index of the other end, -1 for a lone endpoint
+    Node*    party;       // the (single) fn/lambda whose body acts on it; null if several
+    bool     multi_party;
+    bool     escapes;
+    int      session;     // built protocol, -1 if none
+    usz      n_ops;
+    Node*    fn_decl;
 }
 
-fn int sess_chan_find(SessionCheck* sc, uint name)
+fn bool name_has_suffix(char* s, usz n, char* suf)
 {
-    for (usz i = 0; i < sc.n_chans; i++)
-    {
-        if (sc.chans[i].active && sc.chans[i].name_id == name) return (int)i;
-    }
-    return -1;
+    usz m = 0;
+    while (suf[m] != 0) { m = m + 1; }
+    if (n < m) { return false; }
+    for (usz i = 0; i < m; i++) { if (s[n - m + i] != suf[i]) { return false; } }
+    return true;
 }
 
-fn int sess_chan_new(SessionCheck* sc, uint name, int ssn)
+fn bool name_has_prefix(char* s, usz n, char* pre)
 {
-    if (sc.n_chans >= SESS_CHANS) return -1;
-    int i = (int)sc.n_chans; sc.n_chans = sc.n_chans + 1;
-    sc.chans[i].name_id = name;
-    sc.chans[i].ssn = ssn;
-    sc.chans[i].uses = 0;
-    sc.chans[i].active = true;
-    return i;
+    usz m = 0;
+    while (pre[m] != 0) { m = m + 1; }
+    if (n < m) { return false; }
+    for (usz i = 0; i < m; i++) { if (s[i] != pre[i]) { return false; } }
+    return true;
 }
 
-// Advance a channel's session by one prefix — if current ssn doesn't match
-// the expected action, counts as mismatch.
-fn void sess_do_op(SessionCheck* sc, uint ch_name, Sk expect)
+fn bool name_contains(char* s, usz n, char* sub)
 {
-    if (ch_name == 0) return;
-    int ci = sess_chan_find(sc, ch_name);
-    int end0 = 0;
-    // If not yet tracked, lazily create a fresh μ-recursive session
-    // ?(!(end)).  … we just start with END as the unknown and always succeed,
-    // counting the op against linearity. Real inference would be bidirectional.
-    if (ci < 0)
+    usz m = 0;
+    while (sub[m] != 0) { m = m + 1; }
+    if (n < m) { return false; }
+    for (usz i = 0; i + m <= n; i++)
     {
-        end0 = sess_mk_end(sc);
-        ci = sess_chan_new(sc, ch_name, end0);
+        bool ok = true;
+        for (usz j = 0; j < m; j++) { if (s[i + j] != sub[j]) { ok = false; break; } }
+        if (ok) { return true; }
     }
-    if (ci < 0) return;
-    sc.chans[ci].uses = sc.chans[ci].uses + 1;
-    if (sc.chans[ci].ssn < 0 || (usz)sc.chans[ci].ssn >= sc.n_nodes) return;
-    Snode* cur = &sc.nodes[sc.chans[ci].ssn];
-    if (cur.kind == expect)
-    {
-        sc.chans[ci].ssn = cur.cont;   // advance
-        sc.n_dual_ok = sc.n_dual_ok + 1;
-    }
-    else if (cur.kind == Sk.SK_END && expect == Sk.SK_END)
-    {
-        sc.chans[ci].active = false;
-        sc.n_dual_ok = sc.n_dual_ok + 1;
-    }
-    else
-    {
-        // Operation out-of-order with session — counts as a protocol mismatch.
-        sc.n_dual_fail = sc.n_dual_fail + 1;
-    }
-    sc.n_dual_checks = sc.n_dual_checks + 1;
+    return false;
 }
 
-fn void sess_walk(SessionCheck* sc, Node* n, int depth)
+// last dotted segment of a callee's source text
+fn void last_segment(Node* callee, char** out_s, usz* out_n)
 {
-    if (n == null || depth > SESS_MAX_DEPTH) return;
-    if (n.kind == Nk.N_EXPR_CALL && n.child_count >= 1)
+    *out_s = null; *out_n = 0;
+    if (callee == null || callee.p.sptr == null) { return; }
+    char* s = callee.p.sptr; usz n = callee.p.slen;
+    usz start = 0;
+    for (usz i = 0; i < n; i++) { if (s[i] == '.' || s[i] == ':') { start = i + 1; } }
+    *out_s = s + start; *out_n = n - start;
+}
+
+// callee text and first-argument index of a call; `mod.f(x)` parses as a
+// METHOD whose receiver resolves to a module — then `x` is argument 0
+fn bool callee_text(Node* call, char** s, usz* n, usz* first_arg)
+{
+    *s = null; *n = 0; *first_arg = 0;
+    if (call == null) { return false; }
+    if (call.kind == Nk.N_EXPR_CALL)
     {
-        Node* callee = n.children[0];
-        if (callee != null && callee.kind == Nk.N_EXPR_IDENT)
+        last_segment(call.child_count > 0 ? call.children[0] : null, s, n);
+        *first_arg = 1;
+        return *s != null;
+    }
+    if (call.kind == Nk.N_EXPR_METHOD)
+    {
+        *s = call.p.sptr; *n = call.p.slen;
+        Node* recv = call.child_count > 0 ? call.children[0] : null;
+        // anything that is not a value binder (module, use-alias, type) is a path prefix
+        Node* rb = recv != null ? recv.resolved : null;
+        bool recv_is_module = recv != null && (recv.kind == Nk.N_EXPR_IDENT || recv.kind == Nk.N_EXPR_PATH)
+            && (rb == null || !(rb.kind == Nk.N_PAT_IDENT || rb.kind == Nk.N_DECL_PARAM || rb.kind == Nk.N_DECL_LET || rb.kind == Nk.N_DECL_STATIC));
+        *first_arg = recv_is_module ? 1 : 0;
+        return *s != null;
+    }
+    return false;
+}
+
+// SK_SEND / SK_RECV / SK_END for a channel primitive, SK_VAR (unused kind) for "not an op"
+fn Sk op_kind_of(char* s, usz n)
+{
+    if (s == null || n == 0) { return Sk.SK_VAR; }
+    if ((n == 4 && s[0] == 's' && s[1] == 'e' && s[2] == 'n' && s[3] == 'd') || name_has_suffix(s, n, "_send") || name_has_prefix(s, n, "send_") || (n == 8 && name_has_prefix(s, n, "try_send"))) { return Sk.SK_SEND; }
+    if ((n == 4 && s[0] == 'r' && s[1] == 'e' && s[2] == 'c' && s[3] == 'v') || name_has_suffix(s, n, "_recv") || name_has_prefix(s, n, "recv_") || (n == 8 && name_has_prefix(s, n, "try_recv"))) { return Sk.SK_RECV; }
+    if ((n == 5 && s[0] == 'c' && s[1] == 'l' && s[2] == 'o' && s[3] == 's' && s[4] == 'e') || name_has_suffix(s, n, "_close") || name_has_prefix(s, n, "close_")) { return Sk.SK_END; }
+    return Sk.SK_VAR;
+}
+
+fn ChanKind chan_kind_of(char* s, usz n)
+{
+    if (s == null) { return ChanKind.CK_UNKNOWN; }
+    if (name_contains(s, n, "oneshot")) { return ChanKind.CK_ONESHOT; }
+    if (name_contains(s, n, "unbounded")) { return ChanKind.CK_UNBOUNDED; }
+    if (name_contains(s, n, "bounded")) { return ChanKind.CK_BOUNDED; }
+    return ChanKind.CK_UNKNOWN;
+}
+
+fn bool is_channel_ctor(char* s, usz n)
+{
+    if (s == null) { return false; }
+    if (n == 7 && name_has_prefix(s, n, "oneshot")) { return true; }
+    if (n == 7 && name_has_prefix(s, n, "bounded")) { return true; }
+    if (n == 9 && name_has_prefix(s, n, "unbounded")) { return true; }
+    return name_has_suffix(s, n, "_channel_new") || name_has_suffix(s, n, "channel_new");
+}
+
+// base binder of an argument: `tx`, `&tx`, `&mut tx`, `tx.field`, `*tx`
+fn Node* arg_binder(Node* a)
+{
+    int guard = 0;
+    while (a != null && guard < 32)
+    {
+        guard = guard + 1;
+        switch (a.kind)
         {
-            char* sp = callee.p.sptr;
-            usz sl = callee.p.slen;
-            uint ch = 0;
-            if (n.child_count >= 2 && n.children[1] != null) ch = sess_chk_name(n.children[1]);
-            bool matched = false;
-            if (sp != null && sl >= 4)
-            {
-                // Crude prefix match: "send"/"recv"/"select"/"offer"/"close"
-                if (sl == 4 && sp[0] == 's' && sp[1] == 'e' && sp[2] == 'n' && sp[3] == 'd')
-                {
-                    sess_do_op(sc, ch, Sk.SK_SEND); matched = true;
-                }
-                else if (sl == 4 && sp[0] == 'r' && sp[1] == 'e' && sp[2] == 'c' && sp[3] == 'v')
-                {
-                    sess_do_op(sc, ch, Sk.SK_RECV); matched = true;
-                }
-                else if (sl == 5 && sp[0] == 'c' && sp[1] == 'l' && sp[2] == 'o' && sp[3] == 's' && sp[4] == 'e')
-                {
-                    sess_do_op(sc, ch, Sk.SK_END); matched = true;
-                }
-                else if (sl == 6 && sp[0] == 's' && sp[1] == 'e' && sp[2] == 'l' && sp[3] == 'e' && sp[4] == 'c' && sp[5] == 't')
-                {
-                    sess_do_op(sc, ch, Sk.SK_SELECT); matched = true;
-                }
-                else if (sl == 5 && sp[0] == 'o' && sp[1] == 'f' && sp[2] == 'f' && sp[3] == 'e' && sp[4] == 'r')
-                {
-                    sess_do_op(sc, ch, Sk.SK_BRANCH); matched = true;
-                }
-            }
-            if (matched) { /* counted */ }
+            case Nk.N_EXPR_REF: case Nk.N_EXPR_DEREF: case Nk.N_EXPR_FIELD: case Nk.N_EXPR_CAST: case Nk.N_EXPR_UNSAFE:
+                a = a.child_count > 0 ? a.children[0] : null; break;
+            case Nk.N_EXPR_IDENT: case Nk.N_EXPR_PATH:
+                return a.resolved;
+            default:
+                return null;
         }
     }
-    for (usz i = 0; i < n.child_count; i++) sess_walk(sc, n.children[i], depth + 1);
+    return null;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Demo: build a small recursive session `μa.!int.a` (infinitely sending int)
-// and check subtyping against itself and its dual.
-// ═══════════════════════════════════════════════════════════════════════════
-fn void SessionCheck.run_demo(SessionCheck* sc)
+fn Endpoint* SessionCheck.ep_of(SessionCheck* sc, Node* binder)
 {
-    int end0 = sess_mk_end(sc);
-    // μa.!a.(...) — emulate by tying a knot: create MU pointing at a SEND
-    // whose cont points back to the MU. Because shift/subst is approximated
-    // in the subtype check via guarded coinduction, this is enough to
-    // exercise the MU unfold path.
-    int send1 = sess_mk_pref(sc, Sk.SK_SEND, 111u /*int*/, end0);
-    int mu1 = sess_mk_mu(sc, send1);
-    // Patch send1.cont to point at mu1 (the knot).
-    sc.nodes[send1].cont = mu1;
-    int end1 = sess_mk_end(sc);
-    // Non-subtype: send vs recv
-    int r1 = sess_mk_pref(sc, Sk.SK_RECV, 111u, end1);
-    sc.n_pairs = 0;
-    bool same = sess_subtype(sc, mu1, mu1, 0);
-    sc.n_pairs = 0;
-    bool diff = sess_subtype(sc, mu1, r1, 0);
-    if (same) sc.n_sub_ok = sc.n_sub_ok + 1;
-    if (!diff) sc.n_sub_fail = sc.n_sub_fail + 1;
-    // Duality check: dual(!int.end) = ?int.end
-    int snd = sess_mk_pref(sc, Sk.SK_SEND, 111u, sess_mk_end(sc));
-    int d = sess_dual(sc, snd, 0);
-    (void)d;
+    if (binder == null) { return null; }
+    for (usz i = 0; i < sc.n_eps; i++) { if (sc.eps[i].binder == binder) { return &sc.eps[i]; } }
+    return null;
+}
+
+fn int SessionCheck.ep_add(SessionCheck* sc, Node* binder, ChanKind k, Role r, Node* fn_decl)
+{
+    if (binder == null || sc.n_eps >= SESS_MAX_EPS || sc.ep_of(binder) != null) { return -1; }
+    Endpoint* e = &sc.eps[sc.n_eps];
+    int id = (int)sc.n_eps;
+    sc.n_eps = sc.n_eps + 1;
+    e.binder = binder; e.kind = k; e.role = r; e.pair = -1; e.party = null; e.multi_party = false;
+    e.escapes = false; e.session = -1; e.n_ops = 0; e.fn_decl = fn_decl;
+    return id;
+}
+
+fn Node* first_ident_pat(Node* pat)
+{
+    if (pat == null) { return null; }
+    if (pat.kind == Nk.N_PAT_IDENT) { return pat; }
+    return null;
+}
+
+// ── endpoint discovery within one function ──────────────────────────────
+fn void SessionCheck.discover(SessionCheck* sc, Node* n, Node* fn_decl, int depth)
+{
+    if (n == null || depth > SESS_MAX_DEPTH) { return; }
+    if (n.kind == Nk.N_DECL_LET)
+    {
+        Node* pat = null; Node* init = null;
+        for (usz i = 0; i < n.child_count; i++)
+        {
+            Node* c = n.children[i];
+            if (c == null) { continue; }
+            if (pfront_core::is_pattern(c.kind) && pat == null) { pat = c; }
+            else if (pfront_core::is_expr(c.kind)) { init = c; }
+        }
+        char* cs; usz cn; usz cfa;
+        if (pat != null && pat.kind == Nk.N_PAT_TUPLE && pat.child_count == 2 && init != null && callee_text(init, &cs, &cn, &cfa))
+        {
+            if (is_channel_ctor(cs, cn))
+            {
+                ChanKind k = chan_kind_of(cs, cn);
+                Node* tx = first_ident_pat(pat.children[0]);
+                Node* rx = first_ident_pat(pat.children[1]);
+                int a = sc.ep_add(tx, k, Role.ROLE_SENDER, fn_decl);
+                int b = sc.ep_add(rx, k, Role.ROLE_RECEIVER, fn_decl);
+                if (a >= 0 && b >= 0) { sc.eps[a].pair = b; sc.eps[b].pair = a; sc.n_pairs_found = sc.n_pairs_found + 1; }
+            }
+        }
+    }
+    if (n.kind == Nk.N_DECL_PARAM || (n.kind == Nk.N_PAT_IDENT && n.parent != null && (n.parent.kind == Nk.N_DECL_PARAM || n.parent.kind == Nk.N_CLAUSE || n.parent.kind == Nk.N_PAT_TUPLE)))
+    {
+        // parameter typed as an endpoint
+        Node* ty = n.type_ann;
+        if (ty == null && n.parent != null && n.parent.kind == Nk.N_DECL_PARAM) { ty = n.parent.type_ann; }
+        if (ty == null && n.kind == Nk.N_PAT_IDENT && fn_decl != null)
+        {
+            // clause-form fn: find the parameter position's declared type
+            ty = sc.clause_param_type(fn_decl, n);
+        }
+        int guard = 0;
+        while (ty != null && (ty.kind == Nk.N_TY_PTR || ty.kind == Nk.N_TY_REF) && guard < 8) { ty = ty.child_count > 0 ? ty.children[0] : null; guard = guard + 1; }
+        if (ty != null && ty.kind == Nk.N_TY_PATH && ty.child_count > 0) { ty = ty.children[ty.child_count - 1]; }   // last segment
+        if (ty != null && (ty.kind == Nk.N_TY_NAME || ty.kind == Nk.N_PATH_SEG) && ty.p.sptr != null)
+        {
+            Node* binder = n.kind == Nk.N_DECL_PARAM ? (n.child_count > 0 && n.children[0] != null && n.children[0].kind == Nk.N_PAT_IDENT ? n.children[0] : n) : n;
+            if (name_has_suffix(ty.p.sptr, ty.p.slen, "Sender"))   { if (sc.ep_add(binder, chan_kind_of(ty.p.sptr, ty.p.slen), Role.ROLE_SENDER, fn_decl) >= 0) { sc.n_param_eps = sc.n_param_eps + 1; } }
+            if (name_has_suffix(ty.p.sptr, ty.p.slen, "Receiver")) { if (sc.ep_add(binder, chan_kind_of(ty.p.sptr, ty.p.slen), Role.ROLE_RECEIVER, fn_decl) >= 0) { sc.n_param_eps = sc.n_param_eps + 1; } }
+        }
+    }
+    for (usz i = 0; i < n.child_count; i++) { sc.discover(n.children[i], fn_decl, depth + 1); }
+}
+
+// declared type of the parameter position a clause pattern binder occupies
+fn Node* SessionCheck.clause_param_type(SessionCheck* sc, Node* fn_decl, Node* binder)
+{
+    (void)sc;
+    Node* clause = binder.parent;
+    int pos = 0;
+    if (clause != null && clause.kind == Nk.N_PAT_TUPLE)
+    {
+        for (usz i = 0; i < clause.child_count; i++) { if (clause.children[i] == binder) { pos = (int)i; } }
+        clause = clause.parent;
+    }
+    if (clause == null || clause.kind != Nk.N_CLAUSE) { return null; }
+    // the fn's signature: an N_TY_FN child, or the type_ann
+    Node* sig = fn_decl.type_ann;
+    for (usz i = 0; sig == null && i < fn_decl.child_count; i++) { if (fn_decl.children[i] != null && fn_decl.children[i].kind == Nk.N_TY_FN) { sig = fn_decl.children[i]; } }
+    if (sig == null || sig.kind != Nk.N_TY_FN || sig.child_count == 0) { return null; }
+    Node* dom = sig.children[0];
+    if (dom != null && dom.kind == Nk.N_TY_TUPLE) { return pos < (int)dom.child_count ? dom.children[pos] : null; }
+    return pos == 0 ? dom : null;
+}
+
+// ── operations: (endpoint, kind, at) in evaluation order ────────────────
+struct Op { Endpoint* ep; Sk kind; Node* at; }
+
+// the channel operation a call performs, if any
+fn bool SessionCheck.call_op(SessionCheck* sc, Node* call, Endpoint** ep_out, Sk* kind_out)
+{
+    if (call == null) { return false; }
+    char* s; usz n; usz first_arg;
+    if (!callee_text(call, &s, &n, &first_arg)) { return false; }
+    Sk k = op_kind_of(s, n);
+    if (k == Sk.SK_VAR) { return false; }
+    Node* a0 = call.child_count > first_arg ? call.children[first_arg] : null;
+    Endpoint* ep = sc.ep_of(arg_binder(a0));
+    if (ep == null) { return false; }
+    *ep_out = ep; *kind_out = k;
+    return true;
+}
+
+// collect the ops an expression performs (not descending into lambdas /
+// nested statements-with-structure, which the builder handles itself);
+// any other mention of an endpoint is an escape
+fn void SessionCheck.expr_ops(SessionCheck* sc, Node* n, Op* ops, usz* n_ops, int depth)
+{
+    if (n == null || depth > SESS_MAX_DEPTH) { return; }
+    if (n.kind == Nk.N_EXPR_LAMBDA) { return; }
+    if (n.kind == Nk.N_EXPR_CALL || n.kind == Nk.N_EXPR_METHOD)
+    {
+        Endpoint* ep = null; Sk k = Sk.SK_VAR;
+        // arguments first (evaluation order), then the call itself
+        char* cs; usz cn; usz first_arg = n.kind == Nk.N_EXPR_CALL ? 1 : 0;
+        callee_text(n, &cs, &cn, &first_arg);
+        bool is_op = sc.call_op(n, &ep, &k);
+        for (usz i = 0; i < n.child_count; i++)
+        {
+            if (is_op && i == first_arg) { continue; }   // the endpoint argument is the op, not an escape
+            if (i == 0 && (n.kind == Nk.N_EXPR_CALL || first_arg == 1)) { continue; }   // callee / module receiver
+            sc.expr_ops(n.children[i], ops, n_ops, depth + 1);
+        }
+        if (is_op && *n_ops < SESS_MAX_OPS) { ops[*n_ops].ep = ep; ops[*n_ops].kind = k; ops[*n_ops].at = n; *n_ops = *n_ops + 1; ep.n_ops = ep.n_ops + 1; }
+        else if (!is_op)
+        {
+            // an endpoint handed to some other function escapes
+            for (usz i = first_arg; i < n.child_count; i++)
+            {
+                Endpoint* e2 = sc.ep_of(arg_binder(n.children[i]));
+                if (e2 != null) { e2.escapes = true; }
+            }
+        }
+        return;
+    }
+    if (n.kind == Nk.N_EXPR_IDENT || n.kind == Nk.N_EXPR_PATH)
+    {
+        Endpoint* e2 = sc.ep_of(n.resolved);
+        if (e2 != null)
+        {
+            // a bare mention outside an op: stored / returned / compared → escapes
+            Node* p = n.parent;
+            bool benign = p != null && (p.kind == Nk.N_EXPR_REF || p.kind == Nk.N_EXPR_FIELD || p.kind == Nk.N_EXPR_DEREF);
+            if (!benign) { e2.escapes = true; }
+            else
+            {
+                // `&tx` / `tx.x` used somewhere other than as an op argument
+                Node* q = p;
+                int g = 0;
+                while (q != null && g < 8 && (q.kind == Nk.N_EXPR_REF || q.kind == Nk.N_EXPR_FIELD || q.kind == Nk.N_EXPR_DEREF || q.kind == Nk.N_EXPR_CAST)) { q = q.parent; g = g + 1; }
+                if (q == null || (q.kind != Nk.N_EXPR_CALL && q.kind != Nk.N_EXPR_METHOD)) { e2.escapes = true; }
+            }
+        }
+        return;
+    }
+    for (usz i = 0; i < n.child_count; i++) { sc.expr_ops(n.children[i], ops, n_ops, depth + 1); }
+}
+
+// ── building one endpoint's protocol for one party ──────────────────────
+fn int SessionCheck.chain(SessionCheck* sc, Endpoint* ep, Op* ops, usz n_ops, int rest)
+{
+    // prefixes for this endpoint, in order, ending in `rest`
+    int cur = rest;
+    for (usz i = n_ops; i > 0; i--)
+    {
+        Op* o = &ops[i - 1];
+        if (o.ep != ep) { continue; }
+        if (o.kind == Sk.SK_END) { cur = sess_mk_end(sc); sc.nodes[cur].at = o.at; continue; }
+        int id = sess_mk_pref(sc, o.kind, 0, cur);
+        sc.nodes[id].at = o.at;
+        cur = id;
+    }
+    return cur;
+}
+
+fn bool SessionCheck.mentions_ep(SessionCheck* sc, Node* n, Endpoint* ep, bool into_lambdas, int depth)
+{
+    if (n == null || depth > SESS_MAX_DEPTH) { return false; }
+    if (n.kind == Nk.N_EXPR_LAMBDA && !into_lambdas) { return false; }
+    if ((n.kind == Nk.N_EXPR_IDENT || n.kind == Nk.N_EXPR_PATH) && n.resolved == ep.binder) { return true; }
+    for (usz i = 0; i < n.child_count; i++) { if (sc.mentions_ep(n.children[i], ep, into_lambdas, depth + 1)) { return true; } }
+    return false;
+}
+
+fn int SessionCheck.build_stmts(SessionCheck* sc, Endpoint* ep, Node* blk, usz from, int rest, int depth)
+{
+    if (blk == null || depth > SESS_MAX_DEPTH) { return rest; }
+    if (from >= blk.child_count) { return rest; }
+    int after = sc.build_stmts(ep, blk, from + 1, rest, depth + 1);
+    return sc.build_stmt(ep, blk.children[from], after, depth + 1);
+}
+
+fn int SessionCheck.build_body(SessionCheck* sc, Endpoint* ep, Node* body, int rest, int depth)
+{
+    if (body == null) { return rest; }
+    if (body.kind == Nk.N_BLOCK) { return sc.build_stmts(ep, body, 0, rest, depth + 1); }
+    return sc.build_stmt(ep, body, rest, depth + 1);
+}
+
+fn int SessionCheck.build_stmt(SessionCheck* sc, Endpoint* ep, Node* s, int rest, int depth)
+{
+    if (s == null || depth > SESS_MAX_DEPTH) { return rest; }
+    if (!sc.mentions_ep(s, ep, false, 0)) { return rest; }
+    Op[64] ops; usz n_ops = 0;
+    switch (s.kind)
+    {
+        case Nk.N_BLOCK:
+            return sc.build_stmts(ep, s, 0, rest, depth + 1);
+        case Nk.N_EXPR_IF:
+        {
+            Node* cond = s.child_count > 0 ? s.children[0] : null;
+            Node* thn = s.child_count > 1 ? s.children[1] : null;
+            Node* els = s.child_count > 2 ? s.children[2] : null;
+            bool t_acts = sc.mentions_ep(thn, ep, false, 0);
+            bool e_acts = sc.mentions_ep(els, ep, false, 0);
+            int body = rest;
+            if (t_acts || e_acts)
+            {
+                Slbl[2] arr;
+                arr[0].name_id = sc.lbl_then; arr[0].cont = sc.build_body(ep, thn, rest, depth + 1);
+                arr[1].name_id = sc.lbl_else; arr[1].cont = sc.build_body(ep, els, rest, depth + 1);
+                body = sess_mk_choice(sc, Sk.SK_SELECT, &arr[0], 2);
+                sc.nodes[body].at = s;
+            }
+            sc.expr_ops(cond, &ops[0], &n_ops, 0);
+            return sc.chain(ep, &ops[0], n_ops, body);
+        }
+        case Nk.N_EXPR_MATCH:
+        {
+            Node* subj = s.child_count > 0 ? s.children[0] : null;
+            Slbl[16] arr; usz k = 0;
+            for (usz i = 1; i < s.child_count && k < 16; i++)
+            {
+                Node* arm = s.children[i];
+                if (arm == null) { continue; }
+                Node* body = arm.child_count > 0 ? arm.children[arm.child_count - 1] : null;
+                arr[k].name_id = sc.lbl_arm_base + (uint)k;
+                arr[k].cont = sc.build_body(ep, body, rest, depth + 1);
+                k = k + 1;
+            }
+            int body2 = k > 0 ? sess_mk_choice(sc, Sk.SK_SELECT, &arr[0], k) : rest;
+            if (k > 0) { sc.nodes[body2].at = s; }
+            sc.expr_ops(subj, &ops[0], &n_ops, 0);
+            return sc.chain(ep, &ops[0], n_ops, body2);
+        }
+        case Nk.N_EXPR_WHILE:
+        case Nk.N_EXPR_FOR:
+        case Nk.N_EXPR_LOOP:
+        {
+            Node* body = s.child_count > 0 ? s.children[s.child_count - 1] : null;
+            if (!sc.mentions_ep(body, ep, false, 0))
+            {
+                // only the header acts (e.g. `while recv(rx).1`) — a loop of that op
+                for (usz i = 0; i + 1 < s.child_count; i++) { if (s.children[i] != null && !pfront_core::is_pattern(s.children[i].kind)) { sc.expr_ops(s.children[i], &ops[0], &n_ops, 0); } }
+                if (n_ops == 0) { return rest; }
+            }
+            int mu = sess_mk_mu(sc, -1);
+            sc.nodes[mu].at = s;
+            Op[64] hops; usz n_hops = 0;
+            for (usz i = 0; i + 1 < s.child_count; i++) { if (s.children[i] != null && !pfront_core::is_pattern(s.children[i].kind)) { sc.expr_ops(s.children[i], &hops[0], &n_hops, 0); } }
+            int again = sc.build_body(ep, body, mu, depth + 1);
+            Slbl[2] arr;
+            arr[0].name_id = sc.lbl_again; arr[0].cont = again;
+            arr[1].name_id = sc.lbl_done;  arr[1].cont = rest;
+            int choice = sess_mk_choice(sc, Sk.SK_SELECT, &arr[0], 2);
+            // header ops happen before every decision
+            sc.nodes[mu].cont = sc.chain(ep, &hops[0], n_hops, choice);
+            return mu;
+        }
+        case Nk.N_STMT_RETURN:
+        {
+            for (usz i = 0; i < s.child_count; i++) { sc.expr_ops(s.children[i], &ops[0], &n_ops, 0); }
+            int e = sess_mk_end(sc);
+            return sc.chain(ep, &ops[0], n_ops, e);
+        }
+        case Nk.N_EXPR_LAMBDA:
+            return rest;
+        default:
+            break;
+    }
+    // a plain statement / expression: its ops in evaluation order
+    if (s.kind == Nk.N_DECL_LET || s.kind == Nk.N_STMT_ASSIGN || s.kind == Nk.N_STMT_COMPOUND_ASSIGN || s.kind == Nk.N_EXPR_ASSIGN)
+    {
+        for (usz i = 0; i < s.child_count; i++)
+        {
+            Node* c = s.children[i];
+            if (c == null || pfront_core::is_pattern(c.kind) || pfront_core::is_type(c.kind)) { continue; }
+            // an endpoint copied into another name escapes our tracking
+            if (s.kind == Nk.N_DECL_LET && (c.kind == Nk.N_EXPR_IDENT || c.kind == Nk.N_EXPR_PATH)) { Endpoint* e2 = sc.ep_of(c.resolved); if (e2 != null) { e2.escapes = true; } }
+            sc.expr_ops(c, &ops[0], &n_ops, 0);
+        }
+        return sc.chain(ep, &ops[0], n_ops, rest);
+    }
+    // nested structure inside an expression statement (blocks in arms etc.)
+    bool structured = false;
+    for (usz i = 0; i < s.child_count; i++)
+    {
+        Node* c = s.children[i];
+        if (c != null && (c.kind == Nk.N_BLOCK || c.kind == Nk.N_EXPR_IF || c.kind == Nk.N_EXPR_MATCH || c.kind == Nk.N_EXPR_WHILE || c.kind == Nk.N_EXPR_FOR || c.kind == Nk.N_EXPR_LOOP)) { structured = true; }
+    }
+    if (structured)
+    {
+        int cur = rest;
+        for (usz i = s.child_count; i > 0; i--) { cur = sc.build_stmt(ep, s.children[i - 1], cur, depth + 1); }
+        return cur;
+    }
+    sc.expr_ops(s, &ops[0], &n_ops, 0);
+    return sc.chain(ep, &ops[0], n_ops, rest);
+}
+
+// the party (fn body or lambda) a node belongs to
+fn Node* party_of(Node* n)
+{
+    Node* p = n != null ? n.parent : null;
+    while (p != null)
+    {
+        if (p.kind == Nk.N_EXPR_LAMBDA || p.kind == Nk.N_DECL_FN) { return p; }
+        p = p.parent;
+    }
+    return null;
+}
+
+// determine which party acts on an endpoint (all op sites must agree)
+fn void SessionCheck.find_party(SessionCheck* sc, Node* n, Endpoint* ep, int depth)
+{
+    if (n == null || depth > SESS_MAX_DEPTH) { return; }
+    if ((n.kind == Nk.N_EXPR_IDENT || n.kind == Nk.N_EXPR_PATH) && n.resolved == ep.binder)
+    {
+        Node* p = party_of(n);
+        if (ep.party == null) { ep.party = p; }
+        else if (ep.party != p) { ep.multi_party = true; }
+        return;
+    }
+    for (usz i = 0; i < n.child_count; i++) { sc.find_party(n.children[i], ep, depth + 1); }
+}
+
+fn Node* body_of(Node* party)
+{
+    if (party == null) { return null; }
+    if (party.kind == Nk.N_EXPR_LAMBDA) { return party.child_count > 0 ? party.children[party.child_count - 1] : null; }
+    // fn: clause bodies / block
+    return party;
+}
+
+fn int SessionCheck.build_for(SessionCheck* sc, Endpoint* ep)
+{
+    Node* party = ep.party;
+    if (party == null) { return -1; }
+    int e = sess_mk_end(sc);
+    if (party.kind == Nk.N_EXPR_LAMBDA) { return sc.build_body(ep, body_of(party), e, 0); }
+    // a fn: the clause containing the binder (or the block body)
+    int cur = e;
+    for (usz i = party.child_count; i > 0; i--)
+    {
+        Node* c = party.children[i - 1];
+        if (c == null) { continue; }
+        if (c.kind == Nk.N_CLAUSE)
+        {
+            Node* body = c.child_count > 0 ? c.children[c.child_count - 1] : null;
+            if (sc.mentions_ep(c, ep, true, 0)) { cur = sc.build_body(ep, body, e, 0); }
+        }
+        else if (c.kind == Nk.N_BLOCK) { cur = sc.build_body(ep, c, e, 0); }
+    }
+    return cur;
+}
+
+// ── printing ────────────────────────────────────────────────────────────
+fn int SessionCheck.show(SessionCheck* sc, int s, char* buf, int off, int cap, int* mus, int n_mus, int depth)
+{
+    if (off >= cap - 8 || depth > 24) { return off; }
+    if (s < 0 || (usz)s >= sc.n_nodes) { return off + snprintf(buf + off, (usz)(cap - off), "?"); }
+    Snode* n = &sc.nodes[s];
+    switch (n.kind)
+    {
+        case Sk.SK_END:  return off + snprintf(buf + off, (usz)(cap - off), "end");
+        case Sk.SK_SEND: off = off + snprintf(buf + off, (usz)(cap - off), "!msg."); return sc.show(n.cont, buf, off, cap, mus, n_mus, depth + 1);
+        case Sk.SK_RECV: off = off + snprintf(buf + off, (usz)(cap - off), "?msg."); return sc.show(n.cont, buf, off, cap, mus, n_mus, depth + 1);
+        case Sk.SK_MU:
+        {
+            for (int i = 0; i < n_mus; i++) { if (mus[i] == s) { return off + snprintf(buf + off, (usz)(cap - off), "X%d", i); } }
+            if (n_mus < 8) { mus[n_mus] = s; }
+            off = off + snprintf(buf + off, (usz)(cap - off), "μX%d.", n_mus);
+            return sc.show(n.cont, buf, off, cap, mus, n_mus < 8 ? n_mus + 1 : n_mus, depth + 1);
+        }
+        case Sk.SK_SELECT:
+        case Sk.SK_BRANCH:
+        {
+            off = off + snprintf(buf + off, (usz)(cap - off), n.kind == Sk.SK_SELECT ? "+{" : "&{");
+            for (usz i = 0; i < n.lbl_count && off < cap - 8; i++)
+            {
+                Slbl* l = &sc.labels[(usz)n.lbl_start + i];
+                char* nm = l.name_id == sc.lbl_then ? "then" : (l.name_id == sc.lbl_else ? "else" : (l.name_id == sc.lbl_again ? "again" : (l.name_id == sc.lbl_done ? "done" : "arm")));
+                off = off + snprintf(buf + off, (usz)(cap - off), "%s%s: ", i > 0 ? ", " : "", nm);
+                off = sc.show(l.cont, buf, off, cap, mus, n_mus, depth + 1);
+            }
+            return off + snprintf(buf + off, (usz)(cap - off), "}");
+        }
+        default: return off + snprintf(buf + off, (usz)(cap - off), "X");
+    }
+}
+
+fn char* SessionCheck.name(SessionCheck* sc, Node* binder)
+{
+    if (binder == null || sc.interner == null || binder.name_id == 0) { return "_"; }
+    char* s = sc.interner.text(binder.name_id);
+    return s == null ? "_" : s;
+}
+
+// count straight-line prefixes of one kind from a root (no choices crossed)
+fn int SessionCheck.straight_count(SessionCheck* sc, int s, Sk k, Node** second)
+{
+    int c = 0; int guard = 0;
+    while (s >= 0 && (usz)s < sc.n_nodes && guard < 256)
+    {
+        guard = guard + 1;
+        Snode* n = &sc.nodes[s];
+        if (n.kind == Sk.SK_SEND || n.kind == Sk.SK_RECV)
+        {
+            if (n.kind == k) { c = c + 1; if (c == 2) { *second = n.at; } }
+            s = n.cont;
+        }
+        else { break; }
+    }
+    return c;
+}
+
+// first point where two sessions stop being dual (for the message)
+fn Node* SessionCheck.first_disagreement(SessionCheck* sc, int a, int b_dual, int depth)
+{
+    if (depth > 64 || a < 0 || b_dual < 0) { return null; }
+    Snode* na = &sc.nodes[a]; Snode* nb = &sc.nodes[b_dual];
+    if (na.kind == Sk.SK_MU) { return sc.first_disagreement(na.cont, b_dual, depth + 1); }
+    if (nb.kind == Sk.SK_MU) { return sc.first_disagreement(a, nb.cont, depth + 1); }
+    if (na.kind != nb.kind) { return na.at != null ? na.at : nb.at; }
+    if (na.kind == Sk.SK_SEND || na.kind == Sk.SK_RECV) { return sc.first_disagreement(na.cont, nb.cont, depth + 1); }
+    if ((na.kind == Sk.SK_SELECT || na.kind == Sk.SK_BRANCH) && na.lbl_count == nb.lbl_count)
+    {
+        for (usz i = 0; i < na.lbl_count; i++)
+        {
+            Node* r = sc.first_disagreement(sc.labels[(usz)na.lbl_start + i].cont, sc.labels[(usz)nb.lbl_start + i].cont, depth + 1);
+            if (r != null) { return r; }
+        }
+    }
+    return null;
+}
+
+// ── driver ──────────────────────────────────────────────────────────────
+fn void SessionCheck.per_fn(SessionCheck* sc, Node* fn_decl)
+{
+    usz first = sc.n_eps;
+    sc.discover(fn_decl, fn_decl, 0);
+    if (sc.n_eps == first) { return; }
+    for (usz i = first; i < sc.n_eps; i++) { sc.find_party(fn_decl, &sc.eps[i], 0); }
+    // collect escapes (expr_ops marks them) and build protocols
+    for (usz i = first; i < sc.n_eps; i++)
+    {
+        Endpoint* ep = &sc.eps[i];
+        if (ep.multi_party || ep.party == null) { continue; }
+        ep.session = sc.build_for(ep);
+    }
+    for (usz i = first; i < sc.n_eps; i++)
+    {
+        Endpoint* ep = &sc.eps[i];
+        if (ep.session < 0) { continue; }
+        // oneshot: a second send on the same straight path is dead
+        if (ep.kind == ChanKind.CK_ONESHOT && ep.role == Role.ROLE_SENDER)
+        {
+            Node* second = null;
+            if (sc.straight_count(ep.session, Sk.SK_SEND, &second) >= 2 && second != null && sc.diags != null)
+            {
+                char* m = (char*)sc.arena.alloc(512, 1);
+                snprintf(m, 512, "oneshot sender `%s` is used a second time on this path: a oneshot carries one value, so this send can only return false", sc.name(ep.binder));
+                sc.diags.warn(pfront_core::Phase.PH_RESOLVE, 4261, second.line, second.col, m, sc.file);
+                sc.n_w4261 = sc.n_w4261 + 1;
+            }
+        }
+        // parameters: show the inferred protocol
+        if (ep.pair < 0 && sc.diags != null && sc.diags.advisories && ep.n_ops > 0)
+        {
+            char* buf = (char*)sc.arena.alloc(256, 1);
+            int[8] mus;
+            int off = sc.show(ep.session, buf, 0, 256, &mus[0], 0, 0);
+            (void)off;
+            char* m = (char*)sc.arena.alloc(512, 1);
+            snprintf(m, 512, "channel parameter `%s` follows the protocol %s%s", sc.name(ep.binder), buf, ep.escapes ? " (and is also passed on, so this is a lower bound)" : "");
+            sc.diags.note(pfront_core::Phase.PH_RESOLVE, 4262, ep.binder.line, ep.binder.col, m, sc.file);
+            sc.n_n4262 = sc.n_n4262 + 1;
+        }
+    }
+    // duality of pairs created together
+    for (usz i = first; i < sc.n_eps; i++)
+    {
+        Endpoint* tx = &sc.eps[i];
+        if (tx.pair < 0 || tx.role != Role.ROLE_SENDER) { continue; }
+        Endpoint* rx = &sc.eps[tx.pair];
+        if (tx.session < 0 || rx.session < 0 || tx.escapes || rx.escapes || tx.multi_party || rx.multi_party) { sc.n_pairs_skipped = sc.n_pairs_skipped + 1; continue; }
+        if (tx.n_ops == 0 && rx.n_ops == 0) { sc.n_pairs_skipped = sc.n_pairs_skipped + 1; continue; }
+        sc.n_dual_checks = sc.n_dual_checks + 1;
+        int want_rx = sess_dual(sc, tx.session, 0);
+        sc.n_pairs = 0;
+        bool ok1 = sess_subtype(sc, want_rx, rx.session, 0);
+        sc.n_pairs = 0;
+        bool ok2 = sess_subtype(sc, rx.session, want_rx, 0);
+        if (ok1 && ok2) { sc.n_dual_ok = sc.n_dual_ok + 1; continue; }
+        sc.n_dual_fail = sc.n_dual_fail + 1;
+        if (sc.diags == null) { continue; }
+        char* b1 = (char*)sc.arena.alloc(256, 1);
+        char* b2 = (char*)sc.arena.alloc(256, 1);
+        int[8] m1; int[8] m2;
+        sc.show(tx.session, b1, 0, 256, &m1[0], 0, 0);
+        sc.show(rx.session, b2, 0, 256, &m2[0], 0, 0);
+        Node* at = sc.first_disagreement(want_rx, rx.session, 0);
+        char* m = (char*)sc.arena.alloc(768, 1);
+        char* why = "the two ends disagree here";
+        if (at != null)
+        {
+            // classify the disagreement by what the failing side does
+            Endpoint* ep_at = null; Sk k_at = Sk.SK_VAR;
+            if (sc.call_op(at, &ep_at, &k_at))
+            {
+                if (k_at == Sk.SK_RECV) { why = tx.kind == ChanKind.CK_UNBOUNDED ? "this receive has no matching send" : "this receive has no matching send and will block forever"; }
+                else if (k_at == Sk.SK_SEND) { why = "this send has no matching receive: the message is never read"; }
+            }
+        }
+        snprintf(m, 768, "the two ends of this channel are not dual: `%s` follows %s but `%s` follows %s — %s",
+                 sc.name(tx.binder), b1, sc.name(rx.binder), b2, why);
+        Node* where = at != null ? at : tx.binder;
+        sc.diags.warn(pfront_core::Phase.PH_RESOLVE, 4260, where.line, where.col, m, sc.file);
+        sc.n_w4260 = sc.n_w4260 + 1;
+    }
+}
+
+fn void SessionCheck.walk_fns(SessionCheck* sc, Node* n, int depth)
+{
+    if (n == null || depth > SESS_MAX_DEPTH) { return; }
+    if (n.kind == Nk.N_DECL_FN) { sc.per_fn(n); return; }
+    for (usz i = 0; i < n.child_count; i++) { sc.walk_fns(n.children[i], depth + 1); }
+}
+
+fn void SessionCheck.attach(SessionCheck* sc, pfront_core::DiagBag* d, pfront_core::Interner* it, char* file)
+{
+    sc.diags = d; sc.interner = it; sc.file = file;
+    if (it != null)
+    {
+        sc.lbl_then = it.intern("then", 4);
+        sc.lbl_else = it.intern("else", 4);
+        sc.lbl_again = it.intern("again", 5);
+        sc.lbl_done = it.intern("done", 4);
+        sc.lbl_arm_base = 0x40000000u;
+    }
 }
 
 fn void SessionCheck.init(SessionCheck* sc, Arena* a)
 {
     sc.arena = a;
-    sc.nodes = (Snode*)calloc(SESS_MAX_NODES, SESS_NODE_SZ);
-    sc.labels = (Slbl*)calloc(SESS_MAX_LABELS, SESS_LABEL_SZ);
-    sc.pairs = (SPair*)calloc(SESS_MAX_PAIRS, SESS_PAIR_SZ);
-    sc.chans = (ChanState*)calloc(SESS_CHANS, 64);
+    sc.nodes = (Snode*)calloc(SESS_MAX_NODES, Snode::size);
+    sc.labels = (Slbl*)calloc(SESS_MAX_LABELS, Slbl::size);
+    sc.pairs = (SPair*)calloc(SESS_MAX_PAIRS, SPair::size);
+    sc.chans = null;
+    sc.eps = (Endpoint*)calloc(SESS_MAX_EPS, Endpoint::size);
+    sc.n_eps = 0;
     sc.n_nodes = 0; sc.n_labels = 0; sc.n_pairs = 0; sc.n_chans = 0;
     sc.n_end = 0; sc.n_send = 0; sc.n_recv = 0; sc.n_select = 0; sc.n_branch = 0;
     sc.n_mu = 0;
     sc.n_dual_checks = 0; sc.n_dual_ok = 0; sc.n_dual_fail = 0;
     sc.n_sub_checks = 0; sc.n_sub_ok = 0; sc.n_sub_fail = 0;
     sc.n_unclosed = 0; sc.n_linearity_err = 0;
-    sc.run_demo();
+    sc.n_pairs_found = 0; sc.n_pairs_skipped = 0; sc.n_param_eps = 0;
+    sc.n_w4260 = 0; sc.n_w4261 = 0; sc.n_n4262 = 0;
+    sc.diags = null; sc.interner = null; sc.file = null;
+    sc.lbl_then = 1; sc.lbl_else = 2; sc.lbl_again = 3; sc.lbl_done = 4; sc.lbl_arm_base = 0x40000000u;
 }
 
 fn void SessionCheck.scan(SessionCheck* sc, Node* root, int depth)
 {
     (void)depth;
     sc.n_pairs = 0;
-    sc.n_chans = 0;
-    if (sc.chans != null)
-    {
-        for (usz i = 0; i < SESS_CHANS; i++)
-        {
-            sc.chans[i].active = false;
-            sc.chans[i].uses = 0;
-            sc.chans[i].ssn = -1;
-            sc.chans[i].name_id = 0;
-        }
-    }
-    sess_walk(sc, root, 0);
-    // Linearity check: every active channel must have uses >= 1 (consumed).
-    for (usz i = 0; i < sc.n_chans; i++)
-    {
-        if (!sc.chans[i].active) continue;
-        if (sc.chans[i].ssn >= 0
-            && (usz)sc.chans[i].ssn < sc.n_nodes
-            && sc.nodes[sc.chans[i].ssn].kind != Sk.SK_END)
-        {
-            sc.n_unclosed = sc.n_unclosed + 1;
-        }
-        if (sc.chans[i].uses > 1) sc.n_linearity_err = sc.n_linearity_err + 1;
-    }
+    sc.walk_fns(root, 0);
 }
 
 fn void SessionCheck.report(SessionCheck* sc)
 {
-    printf("  session-types    : %d nodes (end=%d !=%d ?=%d +=%d &=%d μ=%d)\n",
-           (int)sc.n_nodes, (int)sc.n_end, (int)sc.n_send, (int)sc.n_recv,
-           (int)sc.n_select, (int)sc.n_branch, (int)sc.n_mu);
-    printf("  session-duality  : %d checks, %d matched, %d protocol mis-orders\n",
-           (int)sc.n_dual_checks, (int)sc.n_dual_ok, (int)sc.n_dual_fail);
-    printf("  session-sub      : %d coinductive checks, %d ok, %d reject\n",
-           (int)sc.n_sub_checks, (int)sc.n_sub_ok, (int)sc.n_sub_fail);
-    printf("  session-linear   : %d unclosed chans, %d double-use\n",
-           (int)sc.n_unclosed, (int)sc.n_linearity_err);
+    usz oneshot = 0; usz bounded = 0; usz unbounded = 0; usz escaped = 0; usz multi = 0;
+    for (usz i = 0; i < sc.n_eps; i++)
+    {
+        if (sc.eps[i].kind == ChanKind.CK_ONESHOT) { oneshot = oneshot + 1; }
+        if (sc.eps[i].kind == ChanKind.CK_BOUNDED) { bounded = bounded + 1; }
+        if (sc.eps[i].kind == ChanKind.CK_UNBOUNDED) { unbounded = unbounded + 1; }
+        if (sc.eps[i].escapes) { escaped = escaped + 1; }
+        if (sc.eps[i].multi_party) { multi = multi + 1; }
+    }
+    printf("  session-types    : %d endpoints (%d oneshot, %d bounded, %d unbounded; %d parameters, %d pairs, %d escaping, %d multi-party); %d nodes (!=%d ?=%d +=%d &=%d μ=%d)\n",
+           (int)sc.n_eps, (int)oneshot, (int)bounded, (int)unbounded, (int)sc.n_param_eps, (int)sc.n_pairs_found, (int)escaped, (int)multi,
+           (int)sc.n_nodes, (int)sc.n_send, (int)sc.n_recv, (int)sc.n_select, (int)sc.n_branch, (int)sc.n_mu);
+    printf("  session-duality  : %d pairs judged: %d dual, %d not dual (W4260), %d not judged; %d oneshot double-sends (W4261); %d coinductive subtype steps\n",
+           (int)sc.n_dual_checks, (int)sc.n_dual_ok, (int)sc.n_dual_fail, (int)sc.n_pairs_skipped, (int)sc.n_w4261, (int)sc.n_sub_checks);
 }
 
 fn void SessionCheck.destroy(SessionCheck* sc)
@@ -613,5 +1231,5 @@ fn void SessionCheck.destroy(SessionCheck* sc)
     if (sc.nodes != null) { free((void*)sc.nodes); sc.nodes = null; }
     if (sc.labels != null) { free((void*)sc.labels); sc.labels = null; }
     if (sc.pairs != null) { free((void*)sc.pairs); sc.pairs = null; }
-    if (sc.chans != null) { free((void*)sc.chans); sc.chans = null; }
+    if (sc.eps != null) { free((void*)sc.eps); sc.eps = null; }
 }

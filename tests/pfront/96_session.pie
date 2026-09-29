@@ -1,0 +1,63 @@
+-- 96_session: Honda/Gay-Hole session types over stdlib channels.
+-- Expected under --lint: W4260 at 17:38 and 23:12, W4261 at 25:30, N4262 at 47:5.
+use channel
+
+-- dual: one send, one receive
+fn ok_pair : () -> ()
+  | () ->
+      let (tx, rx) = channel.oneshot()
+      let _s : bool = channel.send_oneshot(&tx, 0 as ptr)
+      let _r : (ptr, bool) = channel.recv_oneshot(&rx)
+      ()
+
+-- the receiver expects two messages but only one is ever sent
+fn starved : () -> ()
+  | () ->
+      let (tx, rx) = channel.bounded(4i64)
+      let _s : bool = channel.send_bounded(&tx, 0 as ptr)
+      let _r1 : (ptr, bool) = channel.recv_bounded(&rx)
+      let _r2 : (ptr, bool) = channel.recv_bounded(&rx)
+      ()
+
+-- a oneshot sent twice on one path
+fn twice : () -> ()
+  | () ->
+      let (tx, rx) = channel.oneshot()
+      let _a : bool = channel.send_oneshot(&tx, 0 as ptr)
+      let _b : bool = channel.send_oneshot(&tx, 1 as ptr)
+      let _r : (ptr, bool) = channel.recv_oneshot(&rx)
+      ()
+
+-- a loop on both sides: μ-protocols compared coinductively
+fn pump : (i64) -> ()
+  | n ->
+      let (tx, rx) = channel.unbounded()
+      let mut i : i64 = 0i64
+      while i < n do {
+        let _s : bool = channel.send_unbounded(&tx, 0 as ptr)
+        i = i + 1i64
+      }
+      let mut j : i64 = 0i64
+      while j < n do {
+        let _r : (ptr, bool) = channel.recv_unbounded(&rx)
+        j = j + 1i64
+      }
+      ()
+
+-- a parameter: protocol inferred and shown under --lint
+fn worker : (*channel.bounded.BoundedReceiver) -> i64
+  | rx ->
+      let (_v1, ok1) = channel.recv_bounded(rx)
+      if ok1 then
+        let (_v2, _ok2) = channel.recv_bounded(rx)
+        2i64
+      else
+        1i64
+
+fn main : () -> ()
+  | () ->
+      ok_pair()
+      starved()
+      twice()
+      pump(3i64)
+      ()

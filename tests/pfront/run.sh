@@ -102,6 +102,7 @@ declare -A EXPECT=(
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
   [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
+  [96_session]=0              # session types over channels: starved receiver + extra send (W4260), oneshot double send (W4261), μ-loops dual, param protocol (N4262)
   [95_mu]=0                   # μ-types from declarations: IntList ≡ IntList2 (N4251), Stream uninhabited (W4250), Bool/Seq/Chain/Server quiet
   [94_strata]=3               # type strata: alias cycles are errors (Loop, Ping, Pong); variant/negative/non-regular recursion diagnosed
   [93_commute]=0              # commutativity: reductions (counter/maxmin), LWW pins order, FNV mixed monoids, impure call, heap write, NF_INDEPENDENT
@@ -1839,11 +1840,34 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "mu" "$mu_why"
 fi
 
+# Session types: each end of a channel pair gets a protocol from its own
+# control flow; the ends must be dual.  Symmetric loops are dual by
+# coinduction, a starved receiver / extra send is not, a oneshot sent
+# twice on one path is flagged, and a channel parameter's protocol is
+# shown under --lint.
+ss=$("$BIN" tests/pfront/96_session.pie -I stdlib -I . --lint 2>&1)
+ss_ok=1; ss_why=""
+ssneed() { echo "$ss" | grep -q "$1" || { ss_ok=0; ss_why="$ss_why missing[$2]"; }; }
+ssdeny() { echo "$ss" | grep -q "$1" && { ss_ok=0; ss_why="$ss_why noise[$2]"; }; }
+ssneed '96_session.pie:19:38: warning\[W4260\].*`tx` follows !msg.end but `rx` follows ?msg.?msg.end'        "starved receiver"
+ssneed '96_session.pie:25:12: warning\[W4260\].*`tx` follows !msg.!msg.end but `rx` follows ?msg.end'        "extra send"
+ssneed '96_session.pie:27:30: warning\[W4261\]: oneshot sender `tx` is used a second time on this path'      "oneshot double send"
+ssneed '96_session.pie:49:5: note\[N4262\]: channel parameter `rx` follows the protocol ?msg.+{then: ?msg.end, else: end}' "parameter protocol"
+ssdeny '96_session.pie:3[0-9]:.*W4260'                                                                        "dual μ-loops called non-dual"
+ssdeny '96_session.pie:[6-9]:.*W4260\|96_session.pie:1[0-2]:.*W4260'                                          "dual pair called non-dual"
+ssneed 'session-types    : 9 endpoints (4 oneshot, 2 bounded, 2 unbounded; 1 parameters, 4 pairs, 0 escaping, 0 multi-party)' "census"
+ssneed 'session-duality  : 4 pairs judged: 2 dual, 2 not dual (W4260), 0 not judged; 1 oneshot double-sends (W4261); [1-9][0-9]* coinductive subtype steps' "duality census"
+if [ $ss_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (channel ends dual by coinduction; starved/extra/double-send flagged; parameter protocols inferred)\n' "session"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "session" "$ss_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200|W4220|W4221|W4243|W4250)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200|W4220|W4221|W4243|W4250|W4260|W4261)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
