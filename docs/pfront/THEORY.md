@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_linearity.c3` | ~900 | Ownership of `alloc`: flow-sensitive LIVE/FREED/MAYBE/ESCAPED per resource with aliases, defer, loops; W4160 double free, W4161 use-after-free, W4162 leak, W4166 overwritten while owned, N4163–N4165 path-dependent |
 | `theory_sct.c3` | ~900 | Size-change termination (Lee/Jones/Ben-Amram): structural descent through patterns, integer descent only under a guard bound, closure over mutual recursion; W4150 proved loop, N4152 not proved (why), N4151 proved (`--lint`) |
 | `theory_ub.c3` | ~520 | UB lattice (Lee et al.): poison flows through bindings/arithmetic; the USE is the diagnostic (W4140 with origin + binding), poison shifts (W4141), dead code after `ub!` (N4142) |
 | `theory_nbe.c3` | ~900 | Normalisation by evaluation over the AST: closures/neutrals, β with fresh binders and capture check, effect-safe argument `let`s, δ on β-created redexes, η, dead-lambda sweep |
@@ -114,6 +115,27 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Ownership / linearity (`theory_linearity`).** Counted identifier uses
+by name and guessed "moves" from function-name prefixes (`take_`, `free_`),
+which never matched anything. Pride has one resource that is linear by
+construction — the block returned by `alloc` must be `free`d exactly once
+on every path and never touched after — so the pass is now a flow-sensitive
+ownership analysis, per function in statement order: every `alloc` is a
+resource, `let q = p` / `p = q` alias it, states go LIVE → FREED / ESCAPED
+(returned, stored into an aggregate, passed to a call, `&`-borrowed,
+captured by a lambda), and paths that disagree join to MAYBE-FREED
+remembering which branch freed it. `defer free p` releases at scope exit;
+loop bodies are analysed twice so a `free` of an outer block is caught on
+the second iteration. **W4160** double free ("already freed at 19:7", or
+"and again by the `defer` at 63:7"), **W4161** use after free (through
+aliases and for parameters too), **W4162** leak at scope end / `return`,
+**W4166** an owning binder reassigned while it still owns, and notes
+**N4163/N4164/N4165** for the path-dependent versions ("freed only when
+the `if` at 33:7 takes its then branch"). Ownership through struct fields
+and across calls is not claimed. The stdlib is clean; the two corpus hits
+(`tests/exec/03_primes_sieve.pie`, `04_dynamic_alloc.pie`) are real leaks.
+The multiplicity census (unused/once/multi) is kept for the optimiser.
 
 **Size-change termination (`theory_sct`).** Matched arguments to
 parameters *by position and name* and called `n - 1` a descent; it found 0
@@ -303,6 +325,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `87_ownership` + `ownership` | double free, UAF, one-path leak, full leak, alias, escape (quiet), defer+free, loop-carried double free, overwrite-while-owned, parameter UAF |
 | `86_sct_termination` + `sct_termination`/`sct_quiet` | len/fib/ack/halve/ev-od proved; fact (unbounded) / swap (rotation) / shadow not proved; spin is a proved loop; proofs only under `--lint` |
 | `85_ub_poison` + `ub_poison` | branch/call/store/lambda uses with origin + nearest binding; shift-by-width; re-tagged `mut` silent; arithmetic on poison silent; dead after `ub!` |
 | `flow_noise_floor` | 0 × W4055/W4057/N4056/W4120 across the stdlib |

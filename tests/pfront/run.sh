@@ -97,6 +97,7 @@ declare -A EXPECT=(
   [84_eclass_analysis]=0      # e-class constant analysis folds through saturation; W4034 on unsound rules
   [85_ub_poison]=0            # UB lattice: poison is UB when USED; use point + origin reported
   [86_sct_termination]=0      # size-change termination: proved / not proved / proved loop
+  [87_ownership]=0            # alloc/free ownership: double free, use-after-free, leaks, path-dependent notes
 )
 
 # ---------------------------------------------------------------------------
@@ -1610,15 +1611,41 @@ else
   pass=$((pass+1)); printf '  PASS  %-26s (termination proofs only under --lint)\n' "sct_quiet"
 fi
 
+# Ownership of `alloc`-ed blocks: exactly one `free` on every path, nothing
+# after it. Aliases share the resource; escapes (call arg, return) are not
+# leaks; defer releases at scope exit; a loop body re-frees an outer block.
+own=$("$BIN" tests/pfront/87_ownership.pie -I stdlib -I . 2>&1)
+own_ok=1; own_why=""
+oneed() { echo "$own" | grep -q "$1" || { own_ok=0; own_why="$own_why missing[$2]"; }; }
+odeny() { echo "$own" | grep -q "$1" && { own_ok=0; own_why="$own_why noise[$2]"; }; }
+oneed '87_ownership.pie:20:7: warning\[W4160\]: `p` is freed here but was already freed at 19:7'          "double free"
+oneed '87_ownership.pie:27:7: warning\[W4161\]: `p` is used here but was freed at 26:7'                   "use after free"
+oneed '87_ownership.pie:35:11: note\[N4165\]: `p` allocated at 32:21 may leak.*`if` at 33:7 takes its then branch' "path-dependent leak"
+oneed '87_ownership.pie:41:12: warning\[W4162\]: `p` allocated at 40:21 is never freed'                   "leak"
+oneed '87_ownership.pie:49:7: warning\[W4161\]: `p` is used here but was freed at 48:7'                   "free through alias"
+oneed '87_ownership.pie:65:7: warning\[W4160\]: `p` is freed here and again by the `defer` at 63:7'       "defer + free"
+oneed '87_ownership.pie:73:9: note\[N4163\]: `p` may be freed twice: this `free` is inside the `while` at 72:7' "loop-carried double free"
+oneed '87_ownership.pie:80:9: warning\[W4166\]: `p` is reassigned here while it still owns'               "overwritten while owned"
+oneed '87_ownership.pie:87:7: warning\[W4161\]: `p` is used here but was freed at 86:7'                   "param use after free"
+odeny '87_ownership.pie:1[0-3]:[0-9]*: \(warning\|note\)\[[WN]416'                                        "the good case reported"
+odeny '87_ownership.pie:5[2-8]:[0-9]*: \(warning\|note\)\[[WN]416'                                        "escape reported as leak"
+odeny '87_ownership.pie:8[6-7]:[0-9]*: warning\[W4162\]'                                                  "parameter reported as leak"
+oneed 'ownership-bugs   : 2 double free, 3 use-after-free, 1 leaks, 1 overwritten-while-owned, 3 path-dependent notes' "counts"
+if [ $own_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (double free / UAF / leak / defer / alias / loop / overwrite; escapes and params quiet)\n' "ownership"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "ownership" "$own_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150 across stdlib)\n' "flow_noise_floor"
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi
