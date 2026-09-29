@@ -1,5 +1,7 @@
 rewrite algebra
-  | 0i64 -> 1i64
+  | x + 0 -> x
+  | x * 1 -> x
+  | x * 2 -> x << 1
 
-fn f : () -> i64
-  | () -> 0i64
+fn f : (i64) -> i64
+  | (n) -> ((n + 0) * 2 * 1) |> algebra*

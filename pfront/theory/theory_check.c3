@@ -42,6 +42,7 @@ import theory_cmtt;
 import theory_effects;
 import theory_verify;
 import theory_egraph;
+import theory_rwsite;
 import theory_stage;
 import theory_rowinfer;
 import theory_bidi;
@@ -505,6 +506,7 @@ struct TheoryPipeline
     theory_effects::Monomorphiser* mono;
     theory_verify::Verifier*      verifier;
     theory_egraph::Saturator*     saturator;
+    theory_rwsite::RwSites*       rwsites;
     theory_stage::PartialEvaluator* peval;
     theory_stage::ComptimeRunner* comptime;
     theory_rowinfer::RowInferencer* rowinfer;
@@ -633,6 +635,8 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.mono.init(a, d, it, file);
     tp.verifier.init(d, it, file);
     tp.saturator.init(a, tp.rules, d, file);
+    tp.rwsites = (theory_rwsite::RwSites*)malloc(theory_rwsite::RwSites::size);
+    if (tp.rwsites != null) { tp.rwsites.init(a, d, it, file, tp.rewriter, tp.saturator); }
     tp.peval.init(a, d, it, file);
     tp.comptime.init(tp.peval, d, file);
     tp.rowinfer.init(a, tp.handlers, d, it, file);
@@ -729,6 +733,7 @@ fn void TheoryPipeline.destroy(TheoryPipeline* tp)
     if (tp.mono != null) { free((void*)tp.mono); }
     if (tp.verifier != null) { free((void*)tp.verifier); }
     if (tp.saturator != null) { tp.saturator.destroy(); free((void*)tp.saturator); }
+    if (tp.rwsites != null) { tp.rwsites.destroy(); free((void*)tp.rwsites); }
     if (tp.peval != null) { free((void*)tp.peval); }
     if (tp.comptime != null) { free((void*)tp.comptime); }
     if (tp.rowinfer != null) { free((void*)tp.rowinfer); }
@@ -916,11 +921,25 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     t0 = tp.tick("pgen-trees", t0);
     tp.passes_run = tp.passes_run + 1;
 
+    /*
+     Rewrite rules are VALUES (spec §16), applied only at `expr |> r` and
+     `expr |> r*`. The census below counts every rule in the file for the
+     report; it does not drive rewriting. Rewriting is done by RwSites,
+     which evaluates `rewrite` blocks, `++` and named bindings in scope,
+     analyses each set once (LPO termination, critical pairs, confluence)
+     and replaces each `|>` node by its rewritten subject.
+
+     The previous design collected all rules into this one set and ran
+     run_fixpoint over the whole module: rules fired inside unrelated
+     functions, inside their own definitions, and never at the `|>` the
+     programmer wrote.
+    */
     tp.rules.collect(root, 0);
-    if (tp.rules.count > 0)
+    if (tp.rwsites != null)
     {
-        tp.rules.critical_pairs(tp.diags, tp.file, false);
-        root = tp.rewriter.run_fixpoint(root, 8);
+        tp.rwsites.use_egraph = tp.use_egraph;
+        tp.rwsites.strict = tp.strict_sorts;
+        root = tp.rwsites.run(root);
         t0 = tp.tick("trs-rewrite", t0);
         tp.passes_run = tp.passes_run + 1;
     }
@@ -931,15 +950,6 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     root = tp.peval.specialise(root, 0);
     t0 = tp.tick("comptime+peval", t0);
     tp.passes_run = tp.passes_run + 2;
-
-    // 3c. Equality saturation. Unlike the destructive rewriter this keeps every
-    //     equivalent form, so the outcome does not depend on rule order.
-    if (tp.rules.count > 0 && tp.use_egraph)
-    {
-        root = tp.saturator.optimise(root);
-        t0 = tp.tick("egraph", t0);
-        tp.passes_run = tp.passes_run + 1;
-    }
 
     /*
      4. Dialect LOWERING, after rewriting so the actions it substitutes
@@ -1109,6 +1119,7 @@ fn void TheoryPipeline.report(TheoryPipeline* tp)
     tp.stages.report();
     tp.rules.report();
     tp.rewriter.report();
+    if (tp.rwsites != null) { tp.rwsites.report(); }
     tp.hc.report();
     tp.dialects.report();
     tp.pgen.report();

@@ -59,7 +59,9 @@ item is withdrawn.
 | `theory_irdl.c3` | 688 | Dialect/opcode registry and lowering |
 | `theory_cmtt.c3` | 616 | Modal judgment `Γ ⊢^E e : □_{Γ'}^{L'} τ at L` |
 | `theory_msp.c3` | 602 | Stage lattice, cross-stage escape, quote hash-consing |
-| `theory_trs.c3` | 543 | Term rewriting: discrimination tree, critical pairs, fuel |
+| `theory_trs.c3` | ~1100 | Term rewriting engine: discrimination tree, guards + builtins, structural memo, fuel/node budgets |
+| `theory_trs_proof.c3` | ~600 | LPO termination proof, unification-based critical pairs, joinability, confluence verdict |
+| `theory_rwsite.c3` | ~400 | Rewrite values: scoped `rewrite`/`rule`/`++` evaluation, application at `|>` / `|>*` |
 | `theory_bridge.c3` | 525 | Parser↔theory bridge, feature scan, convention audit |
 | `theory_verify.c3` | 461 | AST integrity: 8 invariants, transform snapshot diff |
 | `theory_term.c3` | 387 | Structural hashing, hash-consing, substitution |
@@ -67,6 +69,38 @@ item is withdrawn.
 ---
 
 ## 2. Why each component earns its place
+
+**Term rewriting (`theory_trs`, `theory_trs_proof`, `theory_rwsite`).**
+Spec §16 makes rule sets *values*: built by `rewrite | l ↦ r` or
+`rule name = l ↦ r`, composed with `++`, applied with `e |> r` (one
+bottom-up pass) or `e |> r*` (to a normal form). `theory_rwsite` is the
+evaluator for that language: it walks the tree with a scope of
+rewrite-valued bindings and replaces each `|>` node by its rewritten
+subject. Nothing outside a `|>` is ever touched — the earlier design pooled
+every rule in the file and ran it over the whole module, which rewrote rule
+definitions into themselves and fired inside unrelated functions.
+
+Guards (`x * n, is_power_of_2(n) ↦ x << log2(n)`) are evaluated by a small
+total interpreter over the matched literals (arithmetic, comparison,
+`is_power_of_2`, `is_const`, `same(a,b)`, …); an undecided guard blocks the
+rule. Builtins in the right-hand side (`log2`, `popcount`, …) are folded
+after instantiation. The e-graph honours the same guards.
+
+Before a set is first applied it is analysed once:
+
+* **Termination** — every rule is checked for `l >lpo r` under a precedence
+  induced by the rules themselves (root(l) above every other symbol of r,
+  topologically ranked). LPO is a simplification order, so a fully oriented
+  set terminates for any strategy. Unproven sets still rewrite, but under a
+  small fuel *and* node budget; stalling is reported at the site (W4030) and
+  the subject is handed back unrewritten.
+* **Confluence** — proper critical pairs: rule j's lhs is unified (occurs
+  check, two variable namespaces) with every non-variable subterm of rule
+  i's lhs; each pair ⟨r_iσ, l_iσ[r_jσ]_p⟩ is normalised on both sides. All
+  joinable + terminating ⇒ confluent (Newman). A non-joinable pair is
+  printed as a witness (W4031, an error under `--strict-types`); overlaps
+  involving guarded rules are counted as conditional and leave the verdict
+  "undecided" (N4033).
 
 **E-graphs (`theory_egraph`).** The destructive rewriter throws away `a + 0`
 when it applies `a + 0 ↦ a`, so results depend on rule order. Given

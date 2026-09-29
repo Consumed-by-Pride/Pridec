@@ -1,0 +1,33 @@
+-- Confluence and termination verdicts are computed, not assumed.
+--   bad  : root overlap f(x) -> 1 / f(x) -> 2, not joinable -> W4031
+--   ok   : overlap h(h(x)), both sides reach 1 -> confluent, no diagnostic
+--   grow : g(x) -> g(g(x)) has no LPO orientation -> N4032, fuel-bounded
+rewrite bad
+  | f(x) ↦ 1
+  | f(x) ↦ 2
+
+rewrite ok
+  | h(x) ↦ 1
+  | h(h(x)) ↦ 1
+
+rewrite grow
+  | g(x) ↦ g(g(x))
+
+rule dbl = twice(x) ↦ x + x
+
+fn f : (i64) -> i64
+  | (x) -> x
+fn h : (i64) -> i64
+  | (x) -> x
+fn g : (i64) -> i64
+  | (x) -> x
+fn twice : (i64) -> i64
+  | (x) -> x + x
+
+fn main : () -> i64
+  | () ->
+      let a = f(3) |> bad
+      let b = h(h(4)) |> ok*
+      let c = g(5) |> grow
+      let d = twice(7) |> (dbl ++ ok)
+      a + b + c + d

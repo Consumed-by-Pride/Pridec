@@ -65,6 +65,7 @@ fn bool starts_declaration(Tk t)
         case TOKEN_KW_LET:
         case TOKEN_KW_MACRO:
         case TOKEN_KW_REWRITE:
+        case TOKEN_KW_RULE:
         case TOKEN_KW_DIALECT:
         case TOKEN_KW_PGEN:
         case TOKEN_KW_IRDL:
@@ -307,6 +308,24 @@ fn Node* Parser.parse_rewrite_decl(Parser* p)
         bool sv_bar = p.in_fn_sig;
         p.in_fn_sig = true;
         Node* lhs = p.parse_expr();
+        /*
+         Conditional rules, spec §16:
+             | x * n, is_power_of_2(n) ↦ x << log2(n)
+         Everything between the first comma and the arrow is a GUARD (up
+         to three, conjoined). Before this the comma ended the rule: the
+         lhs was filed as a bare pattern, and `is_power_of_2(n) ↦ ...`
+         became a second rule that rewrote every call to is_power_of_2.
+        */
+        Node*[3] guards;
+        usz guard_count = 0;
+        while (p.accept(Tk.TOKEN_COMMA))
+        {
+            if (p.check(Tk.TOKEN_MAPSTO) || p.check(Tk.TOKEN_ARROW)
+             || p.check(Tk.TOKEN_ARROW_ASCII) || p.check(Tk.TOKEN_FATARROW)) { break; }
+            Node* g = p.parse_expr();
+            if (g == null) { break; }
+            if (guard_count < 3) { guards[guard_count] = g; guard_count = guard_count + 1; }
+        }
         p.in_fn_sig = sv_bar;
         if (p.accept(Tk.TOKEN_MAPSTO) || p.accept(Tk.TOKEN_ARROW)
          || p.accept(Tk.TOKEN_ARROW_ASCII) || p.accept(Tk.TOKEN_FATARROW))
@@ -316,6 +335,7 @@ fn Node* Parser.parse_rewrite_decl(Parser* p)
                                             lhs == null ? 0 : lhs.col);
             p.add(rule, lhs);
             p.add(rule, rhs);
+            for (usz gi = 0; gi < guard_count; gi++) { p.add(rule, guards[gi]); }
             p.add(n, rule);
         }
         else { p.add(n, lhs); }
@@ -324,6 +344,56 @@ fn Node* Parser.parse_rewrite_decl(Parser* p)
     }
     if (indented) { while (p.accept(Tk.TOKEN_DEDENT)) {} }
     if (braced) { p.expect(Tk.TOKEN_RBRACE, 1230, "expected '}' to close rewrite block"); }
+    return n;
+}
+
+// `rule name = lhs ↦ rhs` / `rule name = lhs, guard ↦ rhs` — a single named
+// rule, spec §16. Produces the same synthetic N_DECL_FN as a one-rule
+// `rewrite name` block so every consumer treats the two spellings alike.
+fn Node* Parser.parse_rule_decl(Parser* p)
+{
+    Tok t = p.advance();
+    Node* n = p.mk_at(Nk.N_DECL_FN, t);
+    n.flags = n.flags | pfront_core::NF_SYNTHETIC;
+    if (pfront_parse::tok_is_member_name(p.ct()))
+    {
+        Tok nm = p.advance();
+        n.name_id = p.interner.intern(nm.start, nm.len);
+        n.p.sptr = nm.start;
+        n.p.slen = nm.len;
+    }
+    if (!p.accept(Tk.TOKEN_EQ)) { p.accept(Tk.TOKEN_COLON); }
+    p.accept(Tk.TOKEN_PIPE);
+    bool sv_bar = p.in_fn_sig;
+    p.in_fn_sig = true;
+    Node* lhs = p.parse_expr();
+    Node*[3] guards;
+    usz guard_count = 0;
+    while (p.accept(Tk.TOKEN_COMMA))
+    {
+        if (p.check(Tk.TOKEN_MAPSTO) || p.check(Tk.TOKEN_ARROW)
+         || p.check(Tk.TOKEN_ARROW_ASCII) || p.check(Tk.TOKEN_FATARROW)) { break; }
+        Node* g = p.parse_expr();
+        if (g == null) { break; }
+        if (guard_count < 3) { guards[guard_count] = g; guard_count = guard_count + 1; }
+    }
+    p.in_fn_sig = sv_bar;
+    if (p.accept(Tk.TOKEN_MAPSTO) || p.accept(Tk.TOKEN_ARROW)
+     || p.accept(Tk.TOKEN_ARROW_ASCII) || p.accept(Tk.TOKEN_FATARROW))
+    {
+        Node* rhs = p.parse_arm_body();
+        Node* rule = p.mk(Nk.N_CLAUSE, lhs == null ? t.line : lhs.line,
+                                        lhs == null ? t.col : lhs.col);
+        p.add(rule, lhs);
+        p.add(rule, rhs);
+        for (usz gi = 0; gi < guard_count; gi++) { p.add(rule, guards[gi]); }
+        p.add(n, rule);
+    }
+    else
+    {
+        p.err(1231, "expected '↦' in rule declaration");
+        if (lhs != null) { p.add(n, lhs); }
+    }
     return n;
 }
 

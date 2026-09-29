@@ -89,6 +89,9 @@ declare -A EXPECT=(
   [76_numeric_suffix_hex]=0   # width/sign suffixes on hex literals
   [77_field_types]=0          # struct field types reach the IR
   [78_inline_then_chain_siblings]=0  # if/then/else-if/then chains don't swallow sibling fns
+  [79_trs_scoped]=0           # rewrite rules fire only at `|>`, never elsewhere
+  [80_trs_guards]=0           # spec §16: guards, log2 folding, ++, |> and |>*
+  [81_trs_confluence]=0       # non-confluence / non-termination are WARNINGS, not errors
 )
 
 # ---------------------------------------------------------------------------
@@ -1427,6 +1430,58 @@ if [ -x ./pearc ]; then
   else
     fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "stdlib_width_sound" "$wx values exceed their own declared width"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# TERM REWRITING (spec §16). Rules are VALUES applied at `|>`; the verdicts
+# (termination by LPO, confluence by critical pairs) are real analyses.
+# Structural assertions: an error count would pass a rewriter that silently
+# did nothing, and the original bug was a rewriter that did far too much.
+trs_ast() { "$BIN" "tests/pfront/$1.pie" --emit-ast --quiet 2>&1; }
+
+# 79: `zero` keeps 0; `a` becomes 1; the rule's own lhs is still 0.
+z=$(trs_ast 79_trs_scoped | sed -n "/fn 'zero'/,/fn 'main'/p" | grep -c "int 0i64")
+a=$(trs_ast 79_trs_scoped | sed -n "/let 'a'/,/binary +/p" | grep -c "int 1i64")
+l=$(trs_ast 79_trs_scoped | sed -n "/let 'opt'/,/let 'a'/p" | grep -c "int 0i64")
+if [ "$z" -ge 1 ] && [ "$a" = "1" ] && [ "$l" -ge 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (scoped: zero keeps 0, a=1, rule lhs intact)\n' "trs_scoped"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s scoped: zero0=%s a1=%s lhs0=%s (want >=1/1/>=1)\n' "trs_scoped" "$z" "$a" "$l"
+fi
+
+# 80: a = n << 3 (guard evaluated, log2(8) folded), b = m, c = m * 3 untouched.
+a=$(trs_ast 80_trs_guards | sed -n "/let 'a'/,/let 'b'/p" | grep -c "binary <<")
+a3=$(trs_ast 80_trs_guards | sed -n "/let 'a'/,/let 'b'/p" | grep -c "int 3")
+b=$(trs_ast 80_trs_guards | sed -n "/let 'b'/,/let 'c'/p" | grep -c "binary")
+c=$(trs_ast 80_trs_guards | sed -n "/let 'c'/,/binary +/p" | grep -c "binary \*")
+v=$("$BIN" tests/pfront/80_trs_guards.pie 2>&1 | grep -c "trs full .*termination PROVED")
+if [ "$a" = "1" ] && [ "$a3" = "1" ] && [ "$b" = "0" ] && [ "$c" = "1" ] && [ "$v" = "1" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (guards: a=n<<3, b=m, c untouched, LPO proved)\n' "trs_guards"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s guards: shl=%s three=%s b_binary=%s c_mul=%s lpo=%s\n' "trs_guards" "$a" "$a3" "$b" "$c" "$v"
+fi
+
+# 81: exactly one non-confluence warning (bad), one termination note (grow),
+#     `ok` reported confluent with joinable pairs, `bad` NOT confluent.
+out=$("$BIN" tests/pfront/81_trs_confluence.pie 2>&1)
+w=$(echo "$out" | grep -c "warning\[W4031\]")
+n=$(echo "$out" | grep -c "note\[N4032\]")
+okc=$(echo "$out" | grep -c "trs ok .*=> confluent")
+badc=$(echo "$out" | grep -c "trs bad .*NOT confluent")
+d=$(trs_ast 81_trs_confluence | sed -n "/let 'd'/,/binary +  @/p" | grep -c "int 14\|binary +")
+if [ "$w" = "1" ] && [ "$n" = "1" ] && [ "$okc" = "1" ] && [ "$badc" = "1" ] && [ "$d" -ge 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (W4031 x1, N4032 x1, ok confluent, bad not, ++ applied)\n' "trs_confluence"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s confluence: W4031=%s N4032=%s ok=%s bad=%s d=%s\n' "trs_confluence" "$w" "$n" "$okc" "$badc" "$d"
+fi
+
+# 31/35 must actually FIRE at their `|>` sites.
+f31=$("$BIN" tests/pfront/31_trs_rule.pie 2>&1 | grep -oE '[0-9]+ firings' | grep -oE '^[0-9]+')
+f35=$(trs_ast 35_egraph_rewrite | sed -n "/fn 'f'/,\$p" | grep -c "binary <<")
+if [ "${f31:-0}" -ge 1 ] && [ "$f35" = "1" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (31 fires %s, 35 normalises to n << 1)\n' "trs_fires" "$f31"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s 31 firings=%s 35 shl=%s\n' "trs_fires" "${f31:-0}" "$f35"
 fi
 
 echo "---"

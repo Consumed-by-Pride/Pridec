@@ -94,6 +94,7 @@ fn char* op_text(int op)
         case TOKEN_MINUS_QUESTION:return "-?";
         case TOKEN_STAR_QUESTION: return "*?";
         case TOKEN_PIPELINE:      return "|>";
+        case TOKEN_PLUSPLUS:      return "++";
         default:                  return "?";
     }
 }
