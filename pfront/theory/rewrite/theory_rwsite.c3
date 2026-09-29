@@ -293,18 +293,23 @@ fn Node* RwSites.apply(RwSites* w, Node* pipe)
     if (fixpoint) { w.sites_fix = w.sites_fix + 1; }
     w.nodes_before = w.nodes_before + theory_term::term_size(subject, 0);
 
+    // The destructive pass mutates the subject; keep the original for the
+    // e-graph, which must search from the SUBJECT, not from the TRS answer.
+    Node* original = (fixpoint && w.use_egraph && w.sat != null && rs.count > 0)
+                   ? theory_term::clone_term(w.arena, subject, 0) : null;
+
     Node* out = w.rw.apply_site(subject, rs, fixpoint);
     if (out == null) { out = subject; }
 
-    // Equality saturation over the same rules: keeps every equivalent form
-    // and extracts the cheapest, so the answer does not depend on which
-    // rule the destructive pass happened to try first. Only for `*`: a
-    // single `|>` is one pass by definition.
-    if (fixpoint && w.use_egraph && w.sat != null && rs.count > 0)
+    // Equality saturation over the same rules from the original subject,
+    // with the TRS normal form added as one more member of the root class:
+    // every reachable form is kept and the cheapest is extracted, so the
+    // answer depends neither on rule order nor on where the TRS stalled.
+    // Only for `*`: a single `|>` is one pass by definition.
+    if (original != null)
     {
-        usz before = w.sat.improved;
-        Node* better = w.sat.optimise_with(out, rs);
-        if (better != null && w.sat.improved > before) { out = better; w.egraph_improved = w.egraph_improved + 1; }
+        Node* better = w.sat.search(original, out, rs);
+        if (better != null) { out = better; w.egraph_improved = w.egraph_improved + 1; }
     }
 
     w.nodes_after = w.nodes_after + theory_term::term_size(out, 0);

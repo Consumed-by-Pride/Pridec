@@ -41,6 +41,7 @@ module theory_egraph;
 import pfront_lex;
 import pfront_core;
 import theory_term;
+import theory_eclass;
 import theory_trs;
 
 alias Tk    = pfront_lex::TokenType;
@@ -117,6 +118,11 @@ struct EClass
     usz                 cost;     // best extraction cost
     int                 best_node;
     bool                dirty;
+    // E-class analysis data (theory_eclass): the constant lattice.
+    int                 cstate;   // CL_NONE / CL_CONST / CL_TOP
+    long                cval;
+    bool                cbool;
+    bool                cfolded;  // its literal e-node is in the class
 }
 
 struct EGraph
@@ -142,6 +148,14 @@ struct EGraph
     usz saturation_iters;
     bool saturated;
     usz nodes_added;
+    // Analysis counters (real: read from the graph) and reporting context.
+    usz   an_const_classes;
+    usz   an_folds;
+    usz   an_literals_added;
+    usz   an_contradictions;
+    bool  an_reported;
+    Node* site;
+    bool  strict;
 }
 
 fn void EGraph.init(EGraph* g, Arena* a, pfront_core::DiagBag* d, char* file)
@@ -160,6 +174,13 @@ fn void EGraph.init(EGraph* g, Arena* a, pfront_core::DiagBag* d, char* file)
     g.saturation_iters = 0;
     g.saturated = false;
     g.nodes_added = 0;
+    g.an_const_classes = 0;
+    g.an_folds = 0;
+    g.an_literals_added = 0;
+    g.an_contradictions = 0;
+    g.an_reported = false;
+    g.site = null;
+    g.strict = false;
 }
 
 // ── Union-find over classes ─────────────────────────────────────────────────
@@ -197,6 +218,10 @@ fn int EGraph.new_class(EGraph* g)
     c.cost = 0xFFFFFFFF;
     c.best_node = -1;
     c.dirty = false;
+    c.cstate = 0;
+    c.cval = 0;
+    c.cbool = false;
+    c.cfolded = false;
     return id;
 }
 
@@ -283,6 +308,7 @@ fn int EGraph.add_node(EGraph* g, ENode* probe)
             cc.parent_count = cc.parent_count + 1;
         }
     }
+    theory_eclass::on_add(g, nid);      // analysis `make`
     return cid;
 }
 
@@ -330,6 +356,7 @@ fn bool EGraph.merge(EGraph* g, int a, int b)
         g.classes[ra].rank = g.classes[ra].rank + 1;
     }
 
+    theory_eclass::on_merge(g, ra, rb);  // analysis `join` (ra survives)
     g.classes[rb].leader = ra;
 
     EClass* dst = &g.classes[ra];
@@ -533,6 +560,7 @@ fn bool EGraph.saturate(EGraph* g, theory_trs::RuleSet* rules, int max_iters)
         }
 
         g.rebuild();
+        theory_eclass::propagate(g);     // analysis `modify`: fold + materialise literals
 
         // A fixpoint: no new equality this round means saturation.
         if (g.merges == merges_before)
@@ -552,6 +580,23 @@ fn bool EGraph.saturate(EGraph* g, theory_trs::RuleSet* rules, int max_iters)
 // Pick the cheapest representative of each class. Cost is computed to a
 // fixpoint because a class's cost depends on its children's, which may be in
 // classes not yet costed.
+fn usz kind_base_cost(Nk kind, int op)
+{
+    ENode tmp;
+    tmp.kind = kind;
+    tmp.op = op;
+    return node_base_cost(&tmp);
+}
+
+// Cost of a plain AST term under the same model as the extractor.
+fn usz term_cost(Node* t, int depth)
+{
+    if (t == null || depth > EG_MAX_DEPTH) { return 0; }
+    usz c = kind_base_cost(t.kind, t.p.op);
+    for (usz i = 0; i < t.child_count; i++) { c = c + term_cost(t.children[i], depth + 1); }
+    return c;
+}
+
 fn usz node_base_cost(ENode* n)
 {
     switch (n.kind)
@@ -716,8 +761,10 @@ fn Node* Saturator.optimise(Saturator* s, Node* term)
     if (!s.enabled || term == null || s.rules.count == 0) { return term; }
     s.terms_optimised = s.terms_optimised + 1;
 
+    s.eg.site = term;
     int root = s.eg.add_term(term, 0);
     if (root < 0) { return term; }
+    theory_eclass::propagate(s.eg);     // constants present before any rule fires
 
     s.eg.compute_costs();
     int rc = s.eg.find(root);
@@ -732,8 +779,55 @@ fn Node* Saturator.optimise(Saturator* s, Node* term)
     s.cost_after = s.cost_after + after;
     if (after < before) { s.improved = s.improved + 1; }
 
+    if (s.eg.an_contradictions > 0) { return term; }   // unsound rule set: do not extract
     Node* out = s.eg.extract(root, 0);
     return out == null ? term : out;
+}
+
+// Equality saturation from the ORIGINAL subject, with the destructive
+// rewriter's normal form added to the root class as one more candidate.
+// The graph then holds every form the rules can reach — including the ones
+// the TRS could not (commutativity, associativity), and the e-class
+// analysis folds constants that only become adjacent through those
+// equalities — and extraction picks the cheapest of all of them. Returns
+// null when the rules proved a contradiction (caller keeps the TRS result).
+fn Node* Saturator.search(Saturator* s, Node* original, Node* trs_out, theory_trs::RuleSet* rules)
+{
+    if (!s.enabled || original == null || rules == null || rules.count == 0) { return null; }
+    theory_trs::RuleSet* saved = s.rules;
+    s.eg.init(s.arena, s.diags, s.file);
+    s.eg.site = original;
+    s.rules = rules;
+    s.terms_optimised = s.terms_optimised + 1;
+
+    int root = s.eg.add_term(original, 0);
+    if (root < 0) { s.rules = saved; return null; }
+    theory_eclass::propagate(s.eg);
+    s.eg.saturate(rules, EG_MAX_ITERS);
+
+    // The TRS answer is equal to the subject under the same rules.
+    usz before = trs_out != null ? term_cost(trs_out, 0) : term_cost(original, 0);
+    if (trs_out != null)
+    {
+        int oc = s.eg.add_term(trs_out, 0);
+        if (oc >= 0)
+        {
+            s.eg.merge(root, oc);
+            s.eg.rebuild();
+            theory_eclass::propagate(s.eg);
+        }
+    }
+    s.rules = saved;
+    if (s.eg.an_contradictions > 0) { return null; }
+
+    s.eg.compute_costs();
+    int rc = s.eg.find(root);
+    usz after = rc >= 0 ? s.eg.classes[rc].cost : before;
+    s.cost_before = s.cost_before + before;
+    s.cost_after = s.cost_after + after;
+    if (after < before) { s.improved = s.improved + 1; }
+    else { return null; }
+    return s.eg.extract(root, 0);
 }
 
 // Saturate ONE term under ONE rule set (a `|>*` site), on a fresh e-graph
