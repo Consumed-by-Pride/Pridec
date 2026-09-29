@@ -691,7 +691,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.uba != null) { tp.uba.init(a); tp.uba.attach(d, it, file); }
     if (tp.cps != null) { tp.cps.init(a); tp.cps.attach(d, it, file); }
     if (tp.strat != null) { tp.strat.init(a); tp.strat.attach(d, it, file); }
-    if (tp.nbe != null) { tp.nbe.init(a); tp.nbe.run_demo(); }
+    if (tp.nbe != null) { tp.nbe.init(a); }
     if (tp.crdt != null) { tp.crdt.init(a); tp.crdt.attach(d, it, file); }
     if (tp.ssa != null) { tp.ssa.init(a, null); tp.ssa.run(); }
     if (tp.lin != null) { tp.lin.init(a); tp.lin.attach(d, it, file); }
@@ -813,9 +813,9 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     t0 = tp.tick("stages", t0);
     tp.passes_run = tp.passes_run + 1;
 
-    // 2a. FCB μ-type machinery: TypeStore + μ-contractivity + coinductive
-    //     subtyping demo. Lives here so the set-theoretic universe is ready
-    //     before the later subtype/IRDL passes need it.
+    // 2a. FCB μ-type machinery: translate recursive declarations, check
+    //     contractivity/inhabitation and coinductive shape subtyping. Lives
+    //     here so the set-theoretic universe is ready for later passes.
     if (tp.mustate != null)
     {
         tp.mustate.scan_ast(root, 0);
