@@ -31,6 +31,7 @@ import pfront_infer;
 import pfront_narrow;
 import pfront_check;
 import pfront_dump;
+import pfront_constfold;
 import air;
 
 extern fn void* malloc(usz size);
@@ -391,6 +392,24 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
         tcc.init(diags, it, path);
         tcc.walk(entry.ast, 0);
 
+        // ---- TREE-LEVEL CONSTANT FOLDING (real rewrites) ----
+        // This pass lives HERE (between sema and the theory layer) so it
+        // simplifies the tree before analyses run. It does real mutation:
+        // 2+3->5, if-true->then, dead branches dropped, *1/+0 killed, etc.
+        pfront_constfold::Folder cf;
+        int  cf_folded = 0;
+        int  cf_identities = 0;
+        int  cf_killed = 0;
+        if (optimize && entry.ast != null)
+        {
+            cf.init(arena, diags, it, &ce, path);
+            cf.max_iter = 6;
+            cf.run(entry.ast);
+            cf_folded = cf.folded;
+            cf_identities = cf.identities;
+            cf_killed = cf.branches_killed;
+        }
+
         // ---- theory layer: MSP/CMTT, TRS, IRDL, PGL, effects, UB, sorts ----
         theory_check::TheoryPipeline* tp =
             (theory_check::TheoryPipeline*)malloc(theory_check::TheoryPipeline::size);
@@ -407,6 +426,11 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
                 tp.opt_level = opt_level;
                 entry.ast = tp.run(entry.ast);
             }
+        }
+        if (optimize && !quiet)
+        {
+            printf("  const-fold (pre) : %d folded, %d identities, %d branches killed\n",
+                   (int)cf_folded, (int)cf_identities, (int)cf_killed);
         }
 
         // The FINAL tree: after rewriting, partial evaluation, e-graph
