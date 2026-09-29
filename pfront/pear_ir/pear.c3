@@ -78,6 +78,28 @@ extern fn Lvalue ll_build_unreachable(Lbuilder b) @cname("LLVMBuildUnreachable")
 extern fn Lvalue ll_get_named_fn(Lmodule m, char* n) @cname("LLVMGetNamedFunction");
 extern fn int ll_write_bc(Lmodule m, char* p) @cname("LLVMWriteBitcodeToFile");
 
+// ── LLVM-C: Target machine (for native .o emission) ──────────────────
+alias Ltarget = void*;
+alias Ltarget_machine = void*;
+
+const int LLVM_CG_OBJ_FILE = 1;
+const int LLVM_CODEGEN_O2 = 2;
+const int LLVM_RELOC_STATIC = 1;
+const int LLVM_CODE_MODEL_SMALL = 1;
+
+extern fn void ll_init_x86_ti()    @cname("LLVMInitializeX86TargetInfo");
+extern fn void ll_init_x86_t()     @cname("LLVMInitializeX86Target");
+extern fn void ll_init_x86_tmc()   @cname("LLVMInitializeX86TargetMC");
+extern fn void ll_init_x86_asmp()  @cname("LLVMInitializeX86AsmPrinter");
+extern fn void ll_init_x86_asmpa() @cname("LLVMInitializeX86AsmParser");
+extern fn int  ll_get_target_from_triple(char* t, Ltarget* out, char** err) @cname("LLVMGetTargetFromTriple");
+extern fn Ltarget_machine ll_create_tm(Ltarget t, char* triple, char* cpu, char* feat, int lvl, int reloc, int cm) @cname("LLVMCreateTargetMachine");
+extern fn void ll_dispose_tm(Ltarget_machine tm) @cname("LLVMDisposeTargetMachine");
+extern fn int  ll_tm_emit_to_file(Ltarget_machine tm, Lmodule m, char* path, int cgft, char** err) @cname("LLVMTargetMachineEmitToFile");
+extern fn void ll_set_module_dl(Lmodule m, void* dl) @cname("LLVMSetModuleDataLayout");
+extern fn void* ll_create_tm_dl(Ltarget_machine tm) @cname("LLVMCreateTargetDataLayout");
+extern fn void ll_dispose_msg(char* m) @cname("LLVMDisposeMessage");
+
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
 
 // ── Codegen state ─────────────────────────────────────────────────────
@@ -974,18 +996,10 @@ fn void pear_declare(PearCg* cg, AirDecl* d)
     (void)ll_add_fn(cg.mod, nm, fty);
 }
 
-// ── Entry point ───────────────────────────────────────────────────────
+// ── Entry points ──────────────────────────────────────────────────────
 
-fn void pear_emit_module(AirModule* mod, char* bc_path)
+fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* mod)
 {
-    if (mod == null || bc_path == null) return;
-    Lcontext ctx = ll_ctx_create();
-    Lmodule m = ll_mod_create((char*)"Pride", ctx);
-    Lbuilder b = ll_builder_create(ctx);
-    (void)ll_set_target(m, (char*)"x86_64-pc-linux-gnu");
-    (void)ll_set_datalayout(m, (char*)"e-m:e-p270:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128");
-
-    PearCg cg;
     cg.ctx = ctx; cg.mod = m; cg.b = b; cg.tmp = 0; cg.blk = 0;
     cg.name_n = 0; cg.lbl_n = 0; cg.terminated = false;
     cg.i64ty = ll_i64_ty(ctx);
@@ -1005,17 +1019,76 @@ fn void pear_emit_module(AirModule* mod, char* bc_path)
     {
         AirDecl* d = mod.decls[i];
         if (d == null) continue;
-        if (d.tag == ADECL_DECLARE) { pear_declare(&cg, d); }
+        if (d.tag == ADECL_DECLARE) { pear_declare(cg, d); }
     }
     for (uint i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
         if (d == null) continue;
-        if (d.tag == ADECL_DEF) { pear_emit_fn(&cg, d); }
+        if (d.tag == ADECL_DEF) { pear_emit_fn(cg, d); }
     }
+}
 
+fn void pear_emit_module(AirModule* mod, char* bc_path)
+{
+    if (mod == null || bc_path == null) return;
+    Lcontext ctx = ll_ctx_create();
+    Lmodule m = ll_mod_create((char*)"Pride", ctx);
+    Lbuilder b = ll_builder_create(ctx);
+    (void)ll_set_target(m, (char*)"x86_64-pc-linux-gnu");
+    (void)ll_set_datalayout(m, (char*)"e-m:e-p270:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128");
+
+    PearCg cg;
+    pear_setup(&cg, ctx, m, b, mod);
     (void)ll_write_bc(m, bc_path);
     ll_builder_dispose(b);
     ll_mod_dispose(m);
     ll_ctx_dispose(ctx);
+}
+
+// Emit a native ELF .o via LLVMTargetMachineEmitToFile (in-process, no shell).
+// Returns true on success.
+fn bool pear_emit_obj(AirModule* mod, char* obj_path)
+{
+    if (mod == null || obj_path == null) return false;
+    ll_init_x86_ti();
+    ll_init_x86_t();
+    ll_init_x86_tmc();
+    ll_init_x86_asmp();
+    ll_init_x86_asmpa();
+
+    Lcontext ctx = ll_ctx_create();
+    Lmodule m = ll_mod_create((char*)"Pride", ctx);
+    Lbuilder b = ll_builder_create(ctx);
+    (void)ll_set_target(m, (char*)"x86_64-pc-linux-gnu");
+
+    Ltarget tgt = null;
+    char* err = null;
+    if (ll_get_target_from_triple((char*)"x86_64-pc-linux-gnu", &tgt, &err) != 0)
+    {
+        if (err != null) ll_dispose_msg(err);
+        ll_builder_dispose(b); ll_mod_dispose(m); ll_ctx_dispose(ctx);
+        return false;
+    }
+    Ltarget_machine tm = ll_create_tm(tgt, (char*)"x86_64-pc-linux-gnu", (char*)"", (char*)"", LLVM_CODEGEN_O2, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_SMALL);
+    if (tm == null)
+    {
+        ll_builder_dispose(b); ll_mod_dispose(m); ll_ctx_dispose(ctx);
+        return false;
+    }
+    void* dl = ll_create_tm_dl(tm);
+    ll_set_module_dl(m, dl);
+
+    PearCg cg;
+    pear_setup(&cg, ctx, m, b, mod);
+
+    char* emsg = null;
+    bool ok = (ll_tm_emit_to_file(tm, m, obj_path, LLVM_CG_OBJ_FILE, &emsg) == 0);
+    if (emsg != null) ll_dispose_msg(emsg);
+
+    ll_dispose_tm(tm);
+    ll_builder_dispose(b);
+    ll_mod_dispose(m);
+    ll_ctx_dispose(ctx);
+    return ok;
 }

@@ -143,3 +143,22 @@ fn void emit_bc(PNode* root, pfront_core::Interner* it, char* path)
     sc.destroy();
     arena.destroy();
 }
+
+fn void emit_exe(PNode* root, pfront_core::Interner* it, char* path)
+{
+    AirArena arena;
+    if (!arena.init()) return;
+    AirModule mod;
+    char* mod_nm = module_name_of(root);
+    if (!mod.init(&arena, mod_nm, path)) { arena.destroy(); return; }
+    AirScope sc;
+    sc.init(&arena);
+    AirLower lr;
+    lr.init(&mod, &sc, it);
+    lr.module_body(root);
+
+    (void)pear::pear_link_exe(&mod, path);
+
+    sc.destroy();
+    arena.destroy();
+}
