@@ -2321,26 +2321,31 @@ fn AirCmd* AirLower.assign_stmt(AirLower* lr, Node* n, char* k)
 
 fn AirCmd* AirLower.assign_expr(AirLower* lr, Node* n, AirCns* k)
 {
-    // Placeholder assignment: evaluate RHS and cut against k.
-    // Full store semantics will come when we model ML-variables / ref cells.
+    // Assignment: lhs = rhs  ≡  < rhs | μ̃lhs. k >
+    // Evaluate rhs, rebind lhs to the produced value (PEAR uses alloca+store
+    // for mutable slots so rebinding is automatic via COMU), then continue k.
     if (n.child_count < 2) return lr.cut(lr.mod.p_unit, k);
+    Node* lhs = n.children[0];
     Node* rhs = n.children[1];
-    (void)n.children[0]; // lhs reserved
     lr.scope.enter();
-    AirPrd* rv; AirCmd* binds = null;
+    char* lnm = node_text(lhs, lr.it);
+    if (lnm == null) lnm = (char*)"_";
+    // Ensure lhs is in scope (it should already be bound by a preceding let mut).
+    AirCns* rebind = air_ir::air_mk_comu_cns(lr.arena, lnm,
+        lr.cut(lr.mod.p_unit, k));
+    AirCmd* out;
     if (is_value_node(rhs))
     {
-        rv = lr.prd(rhs);
+        AirPrd* rv = lr.prd(rhs);
+        out = lr.cut(rv, rebind);
     }
     else
     {
         char* xv = lr.fresh_x();
-        rv = air_ir::air_mk_var(lr.arena, xv);
-        binds = lr.expr_to_cns(rhs,
-            air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
+        AirPrd* xp = air_ir::air_mk_var(lr.arena, xv);
+        AirCmd* bind = lr.cut(xp, rebind);
+        out = lr.expr_to_cns(rhs, air_ir::air_mk_comu_cns(lr.arena, xv, bind));
     }
-    AirCmd* store = lr.cut(rv, k);
-    AirCmd* out = binds == null ? store : air_ir::air_mk_seq(lr.arena, binds, store);
     lr.scope.leave();
     return out;
 }

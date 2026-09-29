@@ -97,7 +97,7 @@ fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
     arena.destroy();
 }
 
-fn char* derive_ll_path(char* src, char* buf, usz cap)
+fn char* derive_bc_path(char* src, char* buf, usz cap)
 {
     if (src == null) return null;
     int sl = -1; int dl = -1; int n = 0;
@@ -111,20 +111,20 @@ fn char* derive_ll_path(char* src, char* buf, usz cap)
     if (base_len + 4 >= cap) return null;
     for (usz i = 0; i < base_len; i++) buf[i] = src[i];
     buf[base_len+0] = '.';
-    buf[base_len+1] = 'l';
-    buf[base_len+2] = 'l';
+    buf[base_len+1] = 'b';
+    buf[base_len+2] = 'c';
     buf[base_len+3] = 0;
     return buf;
 }
 
-fn void emit_ll(PNode* root, pfront_core::Interner* it, char* path)
+fn void emit_bc(PNode* root, pfront_core::Interner* it, char* path)
 {
     char[AIR_PATH_MAX] buf;
     char* out_path = null;
     if (path != null && path[0] != 0)
     {
         if (path[0] == '-' && path[1] == 0) { out_path = null; }
-        else { out_path = derive_ll_path(path, &buf[0], AIR_PATH_MAX); }
+        else { out_path = derive_bc_path(path, &buf[0], AIR_PATH_MAX); }
     }
 
     AirArena arena;

@@ -243,7 +243,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
                          bool report_dead, bool strict_vis, bool run_theory,
                          bool lint, bool optimize, int opt_level,
                          bool emit_ast, bool emit_sexp, bool time_passes,
-                         bool dump_cfg, bool emit_air, bool emit_ll)
+                         bool dump_cfg, bool emit_air, bool emit_bc)
 {
     RunResult rr;
     rr.errors = 0; rr.warnings = 0; rr.modules = 0;
@@ -422,9 +422,9 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
             // emit_air derives the .air sibling path from `path` itself.
             air::emit_air(entry.ast, it, path);
         }
-        if (emit_ll)
+        if (emit_bc)
         {
-            air::emit_ll(entry.ast, it, path);
+            air::emit_bc(entry.ast, it, path);
         }
 
         pfront_ext::Stats st;
@@ -547,7 +547,7 @@ fn int main(String[] args)
     bool emit_ast = false;
     bool emit_sexp = false;
     bool emit_air = false;
-    bool emit_ll = false;
+    bool emit_bc = false;
     bool time_passes = false;
     bool dump_cfg = false;
     bool optimize = true;
@@ -578,7 +578,7 @@ fn int main(String[] args)
         else if (streq(a, "--emit-ast"))     { emit_ast = true; }
         else if (streq(a, "--emit-sexp"))    { emit_ast = true; emit_sexp = true; }
         else if (streq(a, "--emit-air"))     { emit_air = true; }
-        else if (streq(a, "--emit-ll"))      { emit_ll = true; }
+        else if (streq(a, "--emit-bc"))      { emit_bc = true; }
         else if (streq(a, "--time-passes"))  { time_passes = true; }
         else if (streq(a, "--dump-cfg"))     { dump_cfg = true; }
         else if (streq(a, "--no-opt"))       { optimize = false; }
@@ -614,7 +614,7 @@ fn int main(String[] args)
     RunResult rr = compile_one(input, roots[..], root_count,
                                dump_ast, dump_mods, verify, quiet,
                                rich, context_lines, strict_types, report_dead, strict_vis, run_theory,
-                               lint, optimize, opt_level, emit_ast, emit_sexp, time_passes, dump_cfg, emit_air, emit_ll);
+                               lint, optimize, opt_level, emit_ast, emit_sexp, time_passes, dump_cfg, emit_air, emit_bc);
 
     if (!quiet)
     {

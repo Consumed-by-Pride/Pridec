@@ -1,65 +1,130 @@
 // pear.c3 — PEAR: Pride's Engine for Abstractive Representations.
 //
-// v0.2 CFG/SSA emitter. AIR is in near-ANF form (lets + cuts + if/case), so
-// lowering to SSA basic blocks is straightforward. Emits clean LLVM IR text.
+// v0.3 Bitcode backend. PEAR does NOT emit LLVM IR text; it builds an
+// LLVM module directly via the LLVM-C API and writes a `.bc` bitcode
+// file using LLVMWriteBitcodeToFile.
 //
-// Supported:
-//   • def/declare, typed params, void returns
-//   • APRD_INT/BOOL/UNIT/VAR/CON/BINOP/MU
-//   • ACNS_COVAR (→ ret), ACNS_COMU (→ let + continue), ACNS_CALL/STACK
-//   • ACMD_CUT/SEQ/LET/NOP/MU/MUTILDE/RET/TRAP/UB/IF/BLOCK
-//   • Comparisons produce i1 natively for br, zext to i64 for value use
-//   • Direct @fn calls; indirect %fn calls
-//   • Diamond CFG for ACMD_IF (both arms cut to ret → no φ needed)
+// Linked against: libLLVM-19 (-lLLVM-19).
 
 module pear;
 import air_ir;
 import air_types;
 
-extern fn int   fprintf(void* f, char* fmt, ...);
-extern fn int   snprintf(char* buf, ulong n, char* fmt, ...);
-extern fn void* fopen(char* path, char* mode);
-extern fn int   fclose(void* f);
+// ── LLVM-C API (subset we need) ───────────────────────────────────────
 
-const uint NAMELEN = 64;
-const uint NAMES_N = 256;
-const uint DEFS_N  = 256;
+alias Lcontext = void*;
+alias Lmodule = void*;
+alias Lbuilder = void*;
+alias Ltype = void*;
+alias Lvalue = void*;
+alias Lblock = void*;
+
+// ICmp predicates (LLVM-C)
+const int LLVM_ICMP_EQ  = 32;
+const int LLVM_ICMP_NE  = 33;
+const int LLVM_ICMP_SGT = 38;
+const int LLVM_ICMP_SGE = 39;
+const int LLVM_ICMP_SLT = 40;
+const int LLVM_ICMP_SLE = 41;
+
+extern fn Lcontext ll_ctx_create() @cname("LLVMContextCreate");
+extern fn void ll_ctx_dispose(Lcontext c) @cname("LLVMContextDispose");
+extern fn Lmodule ll_mod_create(char* name, Lcontext c) @cname("LLVMModuleCreateWithNameInContext");
+extern fn void ll_mod_dispose(Lmodule m) @cname("LLVMDisposeModule");
+extern fn int ll_set_target(Lmodule m, char* t) @cname("LLVMSetTarget");
+extern fn int ll_set_datalayout(Lmodule m, char* dl) @cname("LLVMSetDataLayout");
+
+extern fn Ltype ll_void_ty(Lcontext c) @cname("LLVMVoidTypeInContext");
+extern fn Ltype ll_i1_ty(Lcontext c) @cname("LLVMInt1TypeInContext");
+extern fn Ltype ll_i8_ty(Lcontext c) @cname("LLVMInt8TypeInContext");
+extern fn Ltype ll_i16_ty(Lcontext c) @cname("LLVMInt16TypeInContext");
+extern fn Ltype ll_i32_ty(Lcontext c) @cname("LLVMInt32TypeInContext");
+extern fn Ltype ll_i64_ty(Lcontext c) @cname("LLVMInt64TypeInContext");
+extern fn Ltype ll_ptr_ty(Ltype el, uint a) @cname("LLVMPointerType");
+extern fn Ltype ll_fn_ty(Ltype ret, Ltype* args, uint n, bool v) @cname("LLVMFunctionType");
+
+extern fn Lvalue ll_add_fn(Lmodule m, char* n, Ltype t) @cname("LLVMAddFunction");
+extern fn Lblock ll_append_bb(Lcontext c, Lvalue f, char* n) @cname("LLVMAppendBasicBlockInContext");
+extern fn void ll_pos_builder(Lbuilder b, Lblock bb) @cname("LLVMPositionBuilderAtEnd");
+extern fn Lbuilder ll_builder_create(Lcontext c) @cname("LLVMCreateBuilderInContext");
+extern fn void ll_builder_dispose(Lbuilder b) @cname("LLVMDisposeBuilder");
+extern fn Lblock ll_get_insert(Lbuilder b) @cname("LLVMGetInsertBlock");
+
+
+extern fn Lvalue ll_get_param(Lvalue f, uint i) @cname("LLVMGetParam");
+extern fn Lvalue ll_const_int(Ltype t, ulong n, bool sext) @cname("LLVMConstInt");
+extern fn Lvalue ll_build_alloca(Lbuilder b, Ltype t, char* n) @cname("LLVMBuildAlloca");
+extern fn Lvalue ll_build_store(Lbuilder b, Lvalue v, Lvalue p) @cname("LLVMBuildStore");
+extern fn Lvalue ll_build_load2(Lbuilder b, Ltype t, Lvalue p, char* n) @cname("LLVMBuildLoad2");
+extern fn Lvalue ll_build_add(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildAdd");
+extern fn Lvalue ll_build_sub(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildSub");
+extern fn Lvalue ll_build_mul(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildMul");
+extern fn Lvalue ll_build_sdiv(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildSDiv");
+extern fn Lvalue ll_build_srem(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildSRem");
+extern fn Lvalue ll_build_and(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildAnd");
+extern fn Lvalue ll_build_or(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildOr");
+extern fn Lvalue ll_build_xor(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildXor");
+extern fn Lvalue ll_build_shl(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildShl");
+extern fn Lvalue ll_build_ashr(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildAShr");
+extern fn Lvalue ll_build_icmp(Lbuilder b, int p, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildICmp");
+extern fn Lvalue ll_build_zext(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildZExt");
+extern fn Lvalue ll_build_call2(Lbuilder b, Ltype ft, Lvalue f, Lvalue* a, uint n, char* nm) @cname("LLVMBuildCall2");
+extern fn Lvalue ll_build_ret(Lbuilder b, Lvalue v) @cname("LLVMBuildRet");
+extern fn Lvalue ll_build_ret_void(Lbuilder b) @cname("LLVMBuildRetVoid");
+extern fn Lvalue ll_build_br(Lbuilder b, Lblock bb) @cname("LLVMBuildBr");
+extern fn Lvalue ll_build_condbr(Lbuilder b, Lvalue c, Lblock t, Lblock e) @cname("LLVMBuildCondBr");
+extern fn Lvalue ll_build_unreachable(Lbuilder b) @cname("LLVMBuildUnreachable");
+
+extern fn Lvalue ll_get_named_fn(Lmodule m, char* n) @cname("LLVMGetNamedFunction");
+extern fn int ll_write_bc(Lmodule m, char* p) @cname("LLVMWriteBitcodeToFile");
+
+extern fn int snprintf(char* buf, usz n, char* fmt, ...);
+
+// ── Codegen state ─────────────────────────────────────────────────────
 
 struct PearCg {
-    AirModule* mod;
-    void*      fp;
-    uint       tmp;
-    uint       blk;
-    uint       name_n;
-    char[NAMELEN][NAMES_N] names;
-    bool       blk_open;
-    bool       fn_is_void;
-    uint       defn_n;
-    char[NAMELEN][DEFS_N] defbuf;
-    // Simple copy-prop alias map: aliases[i] is the target name for names[i].
-    // When we skip emitting `%x = add i64 0, %y`, we record x→y so subsequent
-    // reads of %x resolve to %y.
-    char*[NAMES_N] aliases;
+    Lcontext ctx;
+    Lmodule  mod;
+    Lbuilder b;
+    uint     tmp;
+    uint     blk;
+    Lvalue   cur_fn;
+    Ltype    i64ty;
+    Ltype    i1ty;
+    Ltype    voidty;
+    bool     terminated;
+    // Memory-backed locals (mem2reg friendly): for each name in vals[], mark
+    // whether it is an alloca pointer (needs load on read, store on write).
+    // Bootstrap: ALL let-bindings become alloca+store; params stay as SSA.
+    bool[256] is_ptr;
+    uint           name_n;
+    char[64][256]  names;
+    Lvalue[256]    vals;
+    uint           lbl_n;
+    char[64][32]   lbl_names;
+    Lblock[64]     lbl_bbs;
+    bool[64]       lbl_kfilled; // admin %k BB already has code started
+    Lblock         cur_k_bb;    // BB we are currently emitting into as %k continuation
 }
 
-fn bool seq_eq(char* a, char* b)
+// ── Helpers ───────────────────────────────────────────────────────────
+
+fn char* PearCg.mktmp(PearCg* cg)
 {
-    if (a == null || b == null) return a == b;
-    uint i = 0;
-    while (a[i] != 0 && b[i] != 0) { if (a[i] != b[i]) return false; i++; }
-    return a[i] == 0 && b[i] == 0;
+    char[64] b;
+    (void)snprintf(&b[0], 64, "_t%u", cg.tmp);
+    cg.tmp++;
+    return cg.add_name(&b[0]);
 }
 
-fn char* PearCg.intern(PearCg* cg, char* s)
+fn char* PearCg.add_name(PearCg* cg, char* s)
 {
-    if (s == null) return (char*)"0";
-    if (s[0] == '0' && s[1] == 0) return (char*)"0";
-    if (s[0] == '1' && s[1] == 0) return (char*)"1";
+    if (s == null) return (char*)"";
     uint i = cg.name_n;
-    if (i < NAMES_N)
+    if (i < 256)
     {
         uint j = 0;
-        while (j < NAMELEN - 1 && s[j] != 0) { cg.names[i][j] = s[j]; j++; }
+        while (j < 254 && s[j] != 0) { cg.names[i][j] = s[j]; j++; }
         cg.names[i][j] = 0;
         cg.name_n = i + 1;
         return &cg.names[i][0];
@@ -67,71 +132,133 @@ fn char* PearCg.intern(PearCg* cg, char* s)
     return s;
 }
 
-fn char* PearCg.mktmp(PearCg* cg)
+fn void PearCg.bind(PearCg* cg, char* ssa, Lvalue v)
 {
-    char[NAMELEN] b;
-    (void)snprintf(&b[0], NAMELEN, "%%_t%u", cg.tmp);
-    cg.tmp++;
-    return cg.intern(&b[0]);
+    // Direct bind (for params, covar results): store SSA value directly.
+    cg.bind_direct(ssa, v, false);
 }
 
-// Resolve an SSA name through the alias table (returns the ultimate name).
-fn char* PearCg.resolve(PearCg* cg, char* nm)
+fn void PearCg.bind_direct(PearCg* cg, char* ssa, Lvalue v, bool ptr)
 {
-    if (nm == null) return (char*)"0";
-    if (nm[0] != '%') return nm;
-    // Look up nm in names[]; if found and alias exists, follow chain.
-    for (uint iter = 0; iter < 8; iter++)
+    if (ssa == null || v == null) return;
+    for (uint i = 0; i < cg.name_n; i++)
     {
-        bool found = false;
-        for (uint i = 0; i < cg.name_n; i++)
+        bool eq = true;
+        uint j = 0;
+        while (cg.names[i][j] != 0 && ssa[j] != 0)
         {
-            if (seq_eq(&cg.names[i][0], nm))
-            {
-                if (cg.aliases[i] != null) { nm = cg.aliases[i]; found = true; }
-                break;
-            }
+            if (cg.names[i][j] != ssa[j]) { eq = false; break; }
+            j++;
         }
-        if (!found) break;
+        if (eq && cg.names[i][j] == 0 && ssa[j] == 0)
+        {
+            cg.vals[i] = v; cg.is_ptr[i] = ptr;
+            return;
+        }
     }
-    return nm;
+    char* nm = cg.add_name(ssa);
+    for (uint i = 0; i < cg.name_n; i++)
+    {
+        bool eq = true;
+        uint j = 0;
+        while (cg.names[i][j] != 0 && nm[j] != 0)
+        {
+            if (cg.names[i][j] != nm[j]) { eq = false; break; }
+            j++;
+        }
+        if (eq && cg.names[i][j] == 0 && nm[j] == 0) { cg.vals[i] = v; cg.is_ptr[i] = ptr; return; }
+    }
+}
+
+fn bool PearCg.lookup_is_ptr(PearCg* cg, char* ssa, uint* out_idx)
+{
+    if (ssa == null) return false;
+    for (uint i = 0; i < cg.name_n; i++)
+    {
+        bool eq = true;
+        uint j = 0;
+        while (cg.names[i][j] != 0 && ssa[j] != 0)
+        {
+            if (cg.names[i][j] != ssa[j]) { eq = false; break; }
+            j++;
+        }
+        if (eq && cg.names[i][j] == 0 && ssa[j] == 0) { *out_idx = i; return cg.is_ptr[i]; }
+    }
+    return false;
+}
+
+fn Lvalue PearCg.lookup(PearCg* cg, char* ssa)
+{
+    if (ssa == null) return null;
+    for (uint i = 0; i < cg.name_n; i++)
+    {
+        bool eq = true;
+        uint j = 0;
+        while (cg.names[i][j] != 0 && ssa[j] != 0)
+        {
+            if (cg.names[i][j] != ssa[j]) { eq = false; break; }
+            j++;
+        }
+        if (eq && cg.names[i][j] == 0 && ssa[j] == 0) { return cg.vals[i]; }
+    }
+    return null;
 }
 
 fn char* PearCg.mklbl(PearCg* cg, char* pfx)
 {
-    char[NAMELEN] b;
-    (void)snprintf(&b[0], NAMELEN, "%s.%u", pfx, cg.blk);
+    char[64] b;
+    (void)snprintf(&b[0], 64, "%s%u", pfx, cg.blk);
     cg.blk++;
-    return cg.intern(&b[0]);
+    return cg.add_name(&b[0]);
 }
 
-fn bool is_ret_covar(char* nm)
+fn Lblock PearCg.get_lbl(PearCg* cg, char* nm)
 {
-    if (nm == null) return false;
-    if (nm[0] != '%') return false;
-    if (nm[1] != 'r' || nm[2] != 'e' || nm[3] != 't') return false;
-    char c = nm[4];
-    if (c == 0) return true;
-    return c == '_';
+    for (uint i = 0; i < cg.lbl_n; i++)
+    {
+        bool eq = true; uint j = 0;
+        while (cg.lbl_names[i][j] != 0 && nm[j] != 0)
+        {
+            if (cg.lbl_names[i][j] != nm[j]) { eq = false; break; }
+            j++;
+        }
+        if (eq && cg.lbl_names[i][j] == 0 && nm[j] == 0) { return cg.lbl_bbs[i]; }
+    }
+    if (cg.lbl_n < 64)
+    {
+        char[64] buf; uint j = 0;
+        while (j < 62 && nm[j] != 0) { buf[j] = nm[j]; j++; }
+        buf[j] = 0;
+        uint k = 0;
+        while (buf[k] != 0) { cg.lbl_names[cg.lbl_n][k] = buf[k]; k++; }
+        cg.lbl_names[cg.lbl_n][k] = 0;
+        Lblock bb = ll_append_bb(cg.ctx, cg.cur_fn, &buf[0]);
+        cg.lbl_bbs[cg.lbl_n] = bb;
+        cg.lbl_n++;
+        return bb;
+    }
+    return null;
 }
 
-fn void pear_typ(PearCg* cg, AirTyp* t)
+// ── Type helpers ─────────────────────────────────────────────────────
+
+fn Ltype pear_llvm_ty(PearCg* cg, AirTyp* t)
 {
-    if (t == null) { (void)fprintf(cg.fp, "i64"); return; }
+    if (t == null) return cg.i64ty;
     switch (t.tag)
     {
-        case ATYP_I8: case ATYP_U8:    (void)fprintf(cg.fp, "i8"); return;
-        case ATYP_I16: case ATYP_U16:  (void)fprintf(cg.fp, "i16"); return;
-        case ATYP_I32: case ATYP_U32:  (void)fprintf(cg.fp, "i32"); return;
+        case ATYP_I8: case ATYP_U8:    return ll_i8_ty(cg.ctx);
+        case ATYP_I16: case ATYP_U16:  return ll_i16_ty(cg.ctx);
+        case ATYP_I32: case ATYP_U32:  return ll_i32_ty(cg.ctx);
         case ATYP_I64: case ATYP_U64:
         case ATYP_I128: case ATYP_U128:
         case ATYP_ISZ: case ATYP_USZ:
-        case ATYP_INFER:               (void)fprintf(cg.fp, "i64"); return;
-        case ATYP_BOOL:                (void)fprintf(cg.fp, "i1"); return;
-        case ATYP_UNIT: case ATYP_BOTTOM: (void)fprintf(cg.fp, "void"); return;
+        case ATYP_INFER:               return cg.i64ty;
+        case ATYP_BOOL:                return cg.i1ty;
+        case ATYP_UNIT: case ATYP_BOTTOM: return cg.voidty;
         case ATYP_PTR: case ATYP_REF: case ATYP_REF_MUT:
-            (void)fprintf(cg.fp, "i8*"); return;
-        default: (void)fprintf(cg.fp, "i64"); return;
+            return ll_ptr_ty(ll_i8_ty(cg.ctx), 0);
+        default: return cg.i64ty;
     }
 }
 
@@ -141,7 +268,7 @@ fn bool pear_is_void(AirTyp* t)
     return t.tag == ATYP_UNIT || t.tag == ATYP_BOTTOM;
 }
 
-fn bool is_cmp_binop(AirBinop op)
+fn bool is_cmp(AirBinop op)
 {
     switch (op)
     {
@@ -151,222 +278,280 @@ fn bool is_cmp_binop(AirBinop op)
     }
 }
 
-fn char* icode(AirBinop op)
+fn int cmp_pred(AirBinop op)
 {
     switch (op)
     {
-        case ABIN_ADD: return (char*)"add nsw i64";
-        case ABIN_SUB: return (char*)"sub nsw i64";
-        case ABIN_MUL: return (char*)"mul nsw i64";
-        case ABIN_DIV: return (char*)"sdiv i64";
-        case ABIN_MOD: return (char*)"srem i64";
-        case ABIN_AND: return (char*)"and i64";
-        case ABIN_OR:  return (char*)"or i64";
-        case ABIN_XOR: return (char*)"xor i64";
-        case ABIN_SHL: return (char*)"shl i64";
-        case ABIN_SHR: return (char*)"ashr i64";
-        case ABIN_LT:  return (char*)"icmp slt i64";
-        case ABIN_GT:  return (char*)"icmp sgt i64";
-        case ABIN_LE:  return (char*)"icmp sle i64";
-        case ABIN_GE:  return (char*)"icmp sge i64";
-        case ABIN_EQ:  return (char*)"icmp eq i64";
-        case ABIN_NEQ: return (char*)"icmp ne i64";
-        default:       return (char*)"add nsw i64";
+        case ABIN_LT:  return LLVM_ICMP_SLT;
+        case ABIN_GT:  return LLVM_ICMP_SGT;
+        case ABIN_LE:  return LLVM_ICMP_SLE;
+        case ABIN_GE:  return LLVM_ICMP_SGE;
+        case ABIN_EQ:  return LLVM_ICMP_EQ;
+        case ABIN_NEQ: return LLVM_ICMP_NE;
+        default:       return LLVM_ICMP_EQ;
     }
 }
 
-fn void pear_emit_ret(PearCg* cg, char* v)
+fn bool is_ret_name(char* nm)
 {
-    if (!cg.blk_open) return;
-    if (v != null)      { (void)fprintf(cg.fp, "  ret i64 %s\n", v); }
-    else if (cg.fn_is_void) { (void)fprintf(cg.fp, "  ret void\n"); }
-    else               { (void)fprintf(cg.fp, "  ret i64 0\n"); }
-    cg.blk_open = false;
+    if (nm == null || nm[0] != '%') return false;
+    if (nm[1] != 'r' || nm[2] != 'e' || nm[3] != 't') return false;
+    char c = nm[4];
+    if (c == 0) return true;
+    return c == '_';
 }
 
-fn void pear_open(PearCg* cg, char* lbl)
-{
-    if (cg.blk_open) pear_emit_ret(cg, null);
-    (void)fprintf(cg.fp, "%s:\n", lbl);
-    cg.blk_open = true;
-}
-
-fn void pear_br(PearCg* cg, char* tgt)
-{
-    if (!cg.blk_open) return;
-    (void)fprintf(cg.fp, "  br label %%%s\n", tgt);
-    cg.blk_open = false;
-}
-
-fn void pear_condbr(PearCg* cg, char* cv, char* t, char* e)
-{
-    if (!cg.blk_open) return;
-    (void)fprintf(cg.fp, "  br i1 %s, label %%%s, label %%%s\n", cv, t, e);
-    cg.blk_open = false;
-}
-
-fn void pear_trap(PearCg* cg)
-{
-    if (!cg.blk_open) return;
-    (void)fprintf(cg.fp, "  call void @llvm.trap()\n  unreachable\n");
-    cg.blk_open = false;
-}
-
-fn void PearCg.add_def(PearCg* cg, char* nm)
-{
-    if (nm == null) return;
-    if (cg.defn_n >= DEFS_N) return;
-    uint k = cg.defn_n;
-    uint j = 0;
-    while (j < NAMELEN - 1 && nm[j] != 0) { cg.defbuf[k][j] = nm[j]; j++; }
-    cg.defbuf[k][j] = 0;
-    cg.defn_n = k + 1;
-}
-
-fn bool PearCg.is_def(PearCg* cg, char* nm)
+fn bool is_hole_name(char* nm)
 {
     if (nm == null) return false;
-    char* s = nm;
-    if (s[0] == '%') s = &s[1];
-    for (uint i = 0; i < cg.defn_n; i++)
-    {
-        if (seq_eq(&cg.defbuf[i][0], s)) return true;
-    }
-    return false;
+    return nm[0] == (char)(0xc2) && nm[1] == (char)(0xb7);
 }
 
-fn char* pear_prd_i64(PearCg* cg, AirPrd* p)
+// ── Producers (methods so they can mutual-recurse freely) ────────────
+
+fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
 {
-    if (p == null) return (char*)"0";
+    if (p == null) return ll_const_int(cg.i64ty, 0, false);
     switch (p.tag)
     {
         case APRD_INT:
         {
-            char[NAMELEN] b;
-            (void)snprintf(&b[0], NAMELEN, "%ld", (long)p.ival);
-            return cg.intern(&b[0]);
-        }
-        case APRD_BOOL:
-            return p.bval ? (char*)"1" : (char*)"0";
-        case APRD_UNIT: case APRD_NULL: return (char*)"0";
-        case APRD_VAR: case APRD_CON:
-        {
-            if (p.name == null) return (char*)"0";
-            if (p.name[0] == '%') return cg.resolve(p.name);
-            char[NAMELEN] b;
-            (void)snprintf(&b[0], NAMELEN, "%%%s", p.name);
-            return cg.resolve(cg.intern(&b[0]));
-        }
-        case APRD_BINOP:
-        {
-            bool cmp = is_cmp_binop(p.bop);
-            char* a = pear_prd_i64(cg, p.subs[0]);
-            char* bb = pear_prd_i64(cg, p.subs[1]);
-            char* r = cg.mktmp();
-            (void)fprintf(cg.fp, "  %s = %s %s, %s\n", r, icode(p.bop), a, bb);
-            if (cmp)
+            bool neg = false; long v = p.ival;
+            ulong u;
+            if (v < 0) { neg = true; u = (ulong)(-v); } else { u = (ulong)v; }
+            Lvalue r = ll_const_int(cg.i64ty, u, true);
+            if (neg)
             {
-                char* z = cg.mktmp();
-                (void)fprintf(cg.fp, "  %s = zext i1 %s to i64\n", z, r);
-                return z;
+                Lvalue zero = ll_const_int(cg.i64ty, 0, false);
+                return ll_build_sub(cg.b, zero, r, "neg");
             }
             return r;
         }
+        case APRD_BOOL:
+        {
+            Lvalue bv = p.bval ? ll_const_int(cg.i1ty, 1, false) : ll_const_int(cg.i1ty, 0, false);
+            return ll_build_zext(cg.b, bv, cg.i64ty, cg.mktmp());
+        }
+        case APRD_UNIT: case APRD_NULL: return ll_const_int(cg.i64ty, 0, false);
+        case APRD_VAR: case APRD_CON:
+        {
+            if (p.name == null) return ll_const_int(cg.i64ty, 0, false);
+            uint idx = 0;
+            bool ptr = cg.lookup_is_ptr(p.name, &idx);
+            if (ptr)
+            {
+                Lvalue slot = cg.vals[idx];
+                if (slot != null) { return ll_build_load2(cg.b, cg.i64ty, slot, cg.mktmp()); }
+            }
+            Lvalue v = cg.lookup(p.name);
+            if (v != null) return v;
+            if (p.name[0] != '%')
+            {
+                Lvalue f = ll_get_named_fn(cg.mod, p.name);
+                if (f != null) return f;
+            }
+            return ll_const_int(cg.i64ty, 0, false);
+        }
+        case APRD_BINOP:
+        {
+            Lvalue a = cg.prd_i64(p.subs[0]);
+            Lvalue bv = cg.prd_i64(p.subs[1]);
+            char* nm = cg.mktmp();
+            switch (p.bop)
+            {
+                case ABIN_ADD: return ll_build_add(cg.b, a, bv, nm);
+                case ABIN_SUB: return ll_build_sub(cg.b, a, bv, nm);
+                case ABIN_MUL: return ll_build_mul(cg.b, a, bv, nm);
+                case ABIN_DIV: return ll_build_sdiv(cg.b, a, bv, nm);
+                case ABIN_MOD: return ll_build_srem(cg.b, a, bv, nm);
+                case ABIN_AND: return ll_build_and(cg.b, a, bv, nm);
+                case ABIN_OR:  return ll_build_or(cg.b, a, bv, nm);
+                case ABIN_XOR: return ll_build_xor(cg.b, a, bv, nm);
+                case ABIN_SHL: return ll_build_shl(cg.b, a, bv, nm);
+                case ABIN_SHR: return ll_build_ashr(cg.b, a, bv, nm);
+                case ABIN_LT: case ABIN_GT: case ABIN_LE: case ABIN_GE:
+                case ABIN_EQ: case ABIN_NEQ:
+                {
+                    Lvalue cmp = ll_build_icmp(cg.b, cmp_pred(p.bop), a, bv, nm);
+                    return ll_build_zext(cg.b, cmp, cg.i64ty, cg.mktmp());
+                }
+                default: return ll_build_add(cg.b, a, bv, nm);
+            }
+        }
         case APRD_MU:
         {
-            (void)pear_cmd(cg, p.body);
-            return (char*)"0";
+            // μα.c should ONLY appear as the prd of a CUT (handled in cmd). If
+            // reached here as a value, emit body and poison; this is a bug in
+            // PEAR's μβ-reduction. To avoid corrupting the current BB, return
+            // 0 without running body here.
+            return ll_const_int(cg.i64ty, 0, false);
         }
         case APRD_COERCE:
-        {
-            // Type ascription: emit the inner value, ignore the type cast for now.
-            if (p.sub_count > 0 && p.subs[0] != null) return pear_prd_i64(cg, p.subs[0]);
-            return (char*)"0";
-        }
+            if (p.sub_count > 0 && p.subs[0] != null) { return cg.prd_i64(p.subs[0]); }
+            return ll_const_int(cg.i64ty, 0, false);
         default:
-        {
-            (void)fprintf(cg.fp, "  ; prd tag %d NYI\n", (int)p.tag);
-            return (char*)"0";
-        }
+            return ll_const_int(cg.i64ty, 0, false);
     }
 }
 
-fn char* pear_prd_i1(PearCg* cg, AirPrd* p)
+fn Lvalue PearCg.prd_i1(PearCg* cg, AirPrd* p)
 {
-    if (p == null) return (char*)"0";
-    // Peel COERCE wrappers (type ascription).
+    if (p == null) return ll_const_int(cg.i1ty, 0, false);
     AirPrd* q = p;
-    while (q.tag == APRD_COERCE && q.sub_count > 0 && q.subs[0] != null) q = q.subs[0];
-    if (q.tag == APRD_BINOP && is_cmp_binop(q.bop))
+    while (q.tag == APRD_COERCE && q.sub_count > 0 && q.subs[0] != null) { q = q.subs[0]; }
+    if (q.tag == APRD_BINOP && is_cmp(q.bop))
     {
-        char* a = pear_prd_i64(cg, q.subs[0]);
-        char* bb = pear_prd_i64(cg, q.subs[1]);
-        char* r = cg.mktmp();
-        (void)fprintf(cg.fp, "  %s = %s %s, %s\n", r, icode(q.bop), a, bb);
-        return r;
+        Lvalue a = cg.prd_i64(q.subs[0]);
+        Lvalue bv = cg.prd_i64(q.subs[1]);
+        return ll_build_icmp(cg.b, cmp_pred(q.bop), a, bv, cg.mktmp());
     }
-    if (q.tag == APRD_BOOL) return q.bval ? (char*)"1" : (char*)"0";
-    // If the producer is a variable that was just assigned an i1 value we
-    // can't track yet; fall through to i64 + icmp.
-    char* v = pear_prd_i64(cg, p);
-    char* r = cg.mktmp();
-    (void)fprintf(cg.fp, "  %s = icmp ne i64 %s, 0\n", r, v);
-    return r;
+    if (q.tag == APRD_BOOL)
+    {
+        return q.bval ? ll_const_int(cg.i1ty, 1, false) : ll_const_int(cg.i1ty, 0, false);
+    }
+    Lvalue v = cg.prd_i64(p);
+    Lvalue z = ll_const_int(cg.i64ty, 0, false);
+    return ll_build_icmp(cg.b, LLVM_ICMP_NE, v, z, cg.mktmp());
 }
 
-fn bool pear_cns(PearCg* cg, char* v, AirCns* k)
+// ── Consumers ────────────────────────────────────────────────────────
+
+fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
 {
-    if (k == null) { pear_emit_ret(cg, v); return true; }
+    if (k == null)
+    {
+        if (v != null) { ll_build_ret(cg.b, v); cg.terminated = true; }
+        else { ll_build_ret_void(cg.b); cg.terminated = true; }
+        return true;
+    }
     switch (k.tag)
     {
         case ACNS_COVAR:
         {
-            if (is_ret_covar(k.name)) { pear_emit_ret(cg, v); return true; }
-            // The "·" (middle-dot) hole covariable means "continue with the
-            // next command in the SEQ chain". Fall through: do NOT terminate;
-            // return false so the enclosing SEQ/let proceeds to next.
-            if (k.name != null && k.name[0] == (char)(0xc2) && k.name[1] == (char)(0xb7))
+            char* nm = k.name;
+            if (is_ret_name(nm))
             {
-                return false;
+                if (v != null) { ll_build_ret(cg.b, v); cg.terminated = true; }
+                else { ll_build_ret_void(cg.b); cg.terminated = true; }
+                return true;
             }
-            // Any other covar is treated as a jump target. For bootstrap, ret.
-            pear_emit_ret(cg, v);
+            if (is_hole_name(nm)) { return false; }
+            char* lbl = nm;
+            if (lbl != null && lbl[0] == '%') { lbl = &lbl[1]; }
+            if (lbl != null)
+            {
+                // Admin covar "%kN": handle specially. When we jump to %k we
+                // MUST position builder at bb first (creating it fresh if this
+                // is the first occurrence), emit the br, then CONTINUE to
+                // emit subsequent commands into bb. If bb already exists with
+                // a terminator, just emit br and return true (closed path).
+                bool is_k = (lbl[0] == 'k' && lbl[1] >= '0' && lbl[1] <= '9');
+                Lblock bb = cg.get_lbl(lbl);
+                if (bb != null)
+                {
+                    if (is_k)
+                    {
+                        // Admin continuation "%kN". Find the lbl index.
+                        uint ki = 0;
+                        for (uint z = 0; z < cg.lbl_n; z++)
+                        {
+                            bool eq = true; uint jj = 0;
+                            while (cg.lbl_names[z][jj] != 0 && lbl[jj] != 0)
+                            {
+                                if (cg.lbl_names[z][jj] != lbl[jj]) { eq = false; break; }
+                                jj++;
+                            }
+                            if (eq && cg.lbl_names[z][jj] == 0 && lbl[jj] == 0) { ki = z; break; }
+                        }
+                        ll_build_br(cg.b, bb); cg.terminated = true;
+                        if (!cg.lbl_kfilled[ki] && cg.cur_k_bb != bb)
+                        {
+                            cg.lbl_kfilled[ki] = true;
+                            cg.cur_k_bb = bb;
+                            ll_pos_builder(cg.b, bb); cg.terminated = false;
+                            // Recursively emit body of continuation (the code
+                            // chained after this %k jump in SEQ). Since we've
+                            // br'd to bb, SEQ's "next" must be emitted into bb.
+                            // cg.cmd(next) is driven by the caller (this COVAR
+                            // returns false → SEQ proceeds to emit c.next in
+                            // the current builder position, which is now bb).
+                            return false;
+                        }
+                        return true;
+                    }
+                    ll_build_br(cg.b, bb); cg.terminated = true;
+                    return true;
+                }
+            }
+            if (v != null) { ll_build_ret(cg.b, v); cg.terminated = true; }
+            else { ll_build_ret_void(cg.b); cg.terminated = true; }
             return true;
         }
         case ACNS_COMU:
         {
-            bool wild = (k.bind == null)
-                     || (k.bind[0] == '_' && k.bind[1] == 0)
-                     || (v != null && seq_eq(v, (char*)"0"));   // unit/hole binder
+            bool wild = (k.bind == null) || (k.bind[0] == '_' && k.bind[1] == 0);
             if (!wild && v != null)
             {
-                char[NAMELEN] b;
-                (void)snprintf(&b[0], NAMELEN, "%%%s", k.bind);
-                char* bn = cg.intern(&b[0]);
-                char* rv = cg.resolve(v);
-                if (!seq_eq(rv, bn))
+                uint idx = 0;
+                bool ptr = cg.lookup_is_ptr(k.bind, &idx);
+                if (ptr)
                 {
-                    if (rv[0] == '%')
-                    {
-                        for (uint i = 0; i < cg.name_n; i++)
-                        {
-                            if (seq_eq(&cg.names[i][0], bn)) { cg.aliases[i] = rv; break; }
-                        }
-                    }
-                    else
-                    {
-                        (void)fprintf(cg.fp, "  %s = add i64 0, %s\n", bn, rv);
-                    }
+                    Lvalue slot = cg.vals[idx];
+                    if (slot != null) { (void)ll_build_store(cg.b, v, slot); }
+                }
+                else
+                {
+                    Lvalue slot = ll_build_alloca(cg.b, cg.i64ty, cg.mktmp());
+                    (void)ll_build_store(cg.b, v, slot);
+                    cg.bind_direct(k.bind, slot, true);
                 }
             }
-            return pear_cmd(cg, k.body);
+            // If the COMU body is a CUT directly to an admin %k covar we are
+            // already filling, don't recursively enter — that would create a
+            // self-loop. Instead, treat as terminated here (the value has
+            // been stored and flow continues at the branch we already placed).
+            if (k.body != null && k.body.tag == ACMD_CUT
+                && k.body.cns != null && k.body.cns.tag == ACNS_COVAR
+                && k.body.cns.name != null
+                && k.body.cns.name[0] == '%' && k.body.cns.name[1] == 'k'
+                && k.body.cns.name[2] >= '0' && k.body.cns.name[2] <= '9')
+            {
+                // This is a tail-comu (like <()|%k1> after the second let);
+                // we must NOT re-branch into k1 — that would create a br k1
+                // inside k1. The COMU already flows into k1 via the arm's
+                // initial br we emitted at the START of the true-arm. The
+                // remaining LETs are emitted in-place (we did stores above);
+                // control then falls through to k1 naturally via the br we
+                // already placed. So return false (unterminated here — but
+                // the arm WAS terminated by the earlier br to k1 that we
+                // haven't actually emitted yet because... wait).
+                //
+                // Actually the control flow IS: in case.t0, we emit the
+                // store to s, then hit <()|%k1> which emits br k1 and
+                // positions into k1. Then k1's body begins with LET i = i+1
+                // which stores i and then hits <()|%k1> AGAIN. We need to
+                // detect this SECOND <()|%k1> and NOT emit another br (the
+                // fallthrough after i's store is already inside k1, and
+                // after k1's body we want br loop2).
+                //
+                // So: if cur_k_bb == bb (we are already filling bb), just
+                // return true (terminated) with no extra br? No, k1's body
+                // isn't terminated after the second store — we need a br
+                // loop2. But we don't know loop2 is the target here.
+                //
+                // Simplest fix: detect we're already inside bb, don't emit
+                // br, return false (unterminated), and let SEQ continue
+                // (the next cmd is a JUMP %loop2 which terminates the BB).
+                return false;
+            }
+            return cg.cmd(k.body);
         }
         case ACNS_CALL: case ACNS_STACK:
         {
             AirPrd*[16] args; uint ac = 0;
             AirCns* cur = k;
             AirCns* ret_k = null;
-            if (cur.tag == ACNS_CALL) cur = cur.tail;
+            if (cur.tag == ACNS_CALL) { cur = cur.tail; }
             while (cur != null)
             {
                 if (cur.tag == ACNS_STACK)
@@ -374,46 +559,99 @@ fn bool pear_cns(PearCg* cg, char* v, AirCns* k)
                     if (ac < 16) { args[ac] = cur.prd; ac++; }
                     cur = cur.tail;
                 }
-                else if (cur.tag == ACNS_ASCRIBE)
-                {
-                    cur = cur.tail;
-                }
+                else if (cur.tag == ACNS_ASCRIBE) { cur = cur.tail; }
                 else { ret_k = cur; break; }
             }
-            char* callee = v;
-            bool direct = false;
-            if (callee != null && callee[0] == '%' && cg.is_def(&callee[1]))
-            {
-                callee = &callee[1];
-                direct = true;
-            }
-            char*[16] argn;
+            Lvalue callee = v;
+            Lvalue[16] argv;
             for (uint i = 0; i < ac; i++)
             {
                 uint idx = ac - 1 - i;
-                argn[idx] = pear_prd_i64(cg, args[idx]);
+                argv[idx] = cg.prd_i64(args[idx]);
             }
-            char* rn = cg.mktmp();
-            if (direct) { (void)fprintf(cg.fp, "  %s = call i64 @%s(", rn, callee); }
-            else        { (void)fprintf(cg.fp, "  %s = call i64 %s(", rn, callee != null ? callee : "0"); }
-            for (uint i = 0; i < ac; i++)
+            Ltype[16] atys;
+            for (uint i = 0; i < ac; i++) { atys[i] = cg.i64ty; }
+            Ltype fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, false);
+            if (callee == null) { callee = ll_const_int(cg.i64ty, 0, false); }
+            char* nm = cg.mktmp();
+            Lvalue r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm);
+            return cg.cns(r, ret_k);
+        }
+        case ACNS_CASE:
+        {
+            // Boolean or pattern-matching dispatch. Bootstrap: handle the
+            // 2-arm bool case used by if/while/for (true→…; false→…).
+            // Evaluate `v` as i1, then cond_br to arms. Fallthrough arm
+            // returns false (continues in parent).
+            Lvalue cv;
+            if (v != null)
             {
-                if (i > 0) { (void)fprintf(cg.fp, ", "); }
-                (void)fprintf(cg.fp, "i64 %s", argn[i] != null ? argn[i] : "0");
+                // v could be i1 (from a comparison producer) or i64. Normalize to i1.
+                Ltype vt = null; // typeof; we don't expose LLVMTypeOf easily here; use heuristic:
+                // Heuristic: if v came from prd_i1 it's already i1. Otherwise treat as i64.
+                // Since cns is only reached from cg.cmd which uses prd_i64 for v, v is i64.
+                Lvalue z = ll_const_int(cg.i64ty, 0, false);
+                cv = ll_build_icmp(cg.b, LLVM_ICMP_NE, v, z, cg.mktmp());
             }
-            (void)fprintf(cg.fp, ")\n");
-            return pear_cns(cg, rn, ret_k);
+            else { cv = ll_const_int(cg.i1ty, 0, false); }
+            // Find true/false arms.
+            AirCmd* true_cmd = null;
+            AirCmd* false_cmd = null;
+            for (uint i = 0; i < (uint)k.branch_count; i++)
+            {
+                AirBranch* br = k.branches[i];
+                if (br == null) continue;
+                AirPat* pat = br.pat;
+                if (pat == null) continue;
+                if (pat.tag == APAT_BOOL)
+                {
+                    if (pat.ival != 0) { true_cmd = br.body; }
+                    else { false_cmd = br.body; }
+                }
+                else if (pat.tag == APAT_WILD)
+                {
+                    // Wildcard applies to whichever arm isn't set yet (default).
+                    if (true_cmd == null) { true_cmd = br.body; }
+                    else { false_cmd = br.body; }
+                }
+            }
+            // Two-arm boolean case: condbr to tb/eb; each arm's body ends with
+            // a jump (terminator) that routes flow to the proper continuation.
+            // No merge block is needed because both arms explicitly jump away.
+            char[64] tb_n; char[64] eb_n;
+            (void)snprintf(&tb_n[0], 64, "case.t%u", cg.blk); cg.blk++;
+            (void)snprintf(&eb_n[0], 64, "case.f%u", cg.blk); cg.blk++;
+            Lblock tb = ll_append_bb(cg.ctx, cg.cur_fn, &tb_n[0]);
+            Lblock eb = ll_append_bb(cg.ctx, cg.cur_fn, &eb_n[0]);
+            ll_build_condbr(cg.b, cv, tb, eb); cg.terminated = true;
+            ll_pos_builder(cg.b, tb); cg.terminated = false;
+            bool tt = true_cmd != null ? cg.cmd(true_cmd) : false;
+            if (!tt) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            ll_pos_builder(cg.b, eb); cg.terminated = false;
+            bool et = false_cmd != null ? cg.cmd(false_cmd) : false;
+            if (!et) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            // After a case in boolean-form (if/while), BOTH arms end in a
+            // jump/return so control does NOT continue after the case. The
+            // μ-binder wraps the case and returns control to its enclosing
+            // CUT's consumer. Returning true (terminated) tells SEQ that
+            // this command "finished" — we've already positioned after
+            // eb's terminator, but there's no valid insert point; SEQ will
+            // not emit more into a terminated block (it will only be called
+            // if an outer μ or something forces continuation, which the
+            // CUT+μ structure prevents). Return true to indicate termination.
+            return true;
         }
         default:
         {
-            (void)fprintf(cg.fp, "  ; cns tag %d NYI\n", (int)k.tag);
-            pear_trap(cg);
+            ll_build_unreachable(cg.b); cg.terminated = true;
             return true;
         }
     }
 }
 
-fn bool pear_cmd(PearCg* cg, AirCmd* c)
+// ── Commands ─────────────────────────────────────────────────────────
+
+fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
 {
     if (c == null) return false;
     switch (c.tag)
@@ -422,184 +660,362 @@ fn bool pear_cmd(PearCg* cg, AirCmd* c)
         {
             if (c.prd != null && c.prd.tag == APRD_MU)
             {
-                return pear_cmd(cg, c.prd.body);
+                // <μα.c|k>  ≡  c[α := k]
+                // Bind α (p.name) to mean "deliver value to k", then execute c.
+                // In our IR α always appears as a covar consumer (ACNS_COVAR).
+                // Strategy: create a fresh join block "α_bb" where incoming value
+                // flows into k; record it via get_lbl-like table; but since
+                // covars can appear deeply nested we use the existing bind table
+                // keyed by "%α" with a special marker? Simpler: handle the two
+                // common shapes:
+                //   (a) η-redex: c = <v|α> → evaluate v, send to k directly.
+                //   (b) c is a command ending in <...|α> via any path — treat α as
+                //       a label bound to k by setting up a trampoline block.
+                char* alpha = c.prd.name;
+                AirCmd* body = c.prd.body;
+                // Shape (a): body is a CUT whose cns is ACNS_COVAR named alpha.
+                if (body != null && body.tag == ACMD_CUT
+                    && body.cns != null && body.cns.tag == ACNS_COVAR
+                    && body.cns.name != null && alpha != null)
+                {
+                    // Name compare: must be exact match (not just first char).
+                    bool same = true; uint ii = 0;
+                    while (body.cns.name[ii] != 0 && alpha[ii] != 0)
+                    {
+                        if (body.cns.name[ii] != alpha[ii]) { same = false; break; }
+                        ii++;
+                    }
+                    if (same && body.cns.name[ii] == 0 && alpha[ii] == 0)
+                    {
+                        Lvalue v = cg.prd_i64(body.prd);
+                        return cg.cns(v, c.cns);
+                    }
+                }
+                // General case: install α as a label-BB that dispatches to c.cns.
+                // Build a trampoline BB, stash it in our label table under α (no '%').
+                char* anm = alpha;
+                if (anm != null && anm[0] == '%') { anm = &anm[1]; }
+                if (anm != null)
+                {
+                    // Create a fresh BB that we'll fill later; but we need the
+                    // block to exist now so branches target it. We'll append a BB,
+                    // emit body first, then position at end and emit cns of the
+                    // phi'd value. Problem: value is what α carries, which is
+                    // computed at the <v|α> cut sites. This requires phi nodes.
+                    // For bootstrap: just emit body and assume all α-cuts are tail.
+                    // But a safer fallback is:
+                    (void)anm;
+                }
+                // Fallback: just emit body; if it never reaches α, return true.
+                // This is unsound but matches our existing text-emitter baseline.
+                return cg.cmd(body);
             }
-            char* v = pear_prd_i64(cg, c.prd);
-            return pear_cns(cg, v, c.cns);
+            Lvalue v = cg.prd_i64(c.prd);
+            return cg.cns(v, c.cns);
         }
         case ACMD_SEQ:
         {
-            bool t = pear_cmd(cg, c.body);
-            if (t) return true;
-            return pear_cmd(cg, c.next);
+            bool t = cg.cmd(c.body);
+            if (t) { return true; }
+            return cg.cmd(c.next);
         }
         case ACMD_LET:
         {
             if (c.prd != null && c.prd.tag != APRD_UNIT)
             {
                 bool wild = (c.binder == null) || (c.binder[0] == '_' && c.binder[1] == 0);
-                char* v = pear_prd_i64(cg, c.prd);
-                if (!wild && v != null)
+                if (!wild)
                 {
-                    char[NAMELEN] b;
-                    (void)snprintf(&b[0], NAMELEN, "%%%s", c.binder);
-                    char* bn = cg.intern(&b[0]);
-                    char* rv = cg.resolve(v);
-                    if (!seq_eq(rv, bn))
+                    Lvalue v = cg.prd_i64(c.prd);
+                    if (v != null)
                     {
-                        if (rv[0] == '%')
+                        uint idx = 0;
+                        bool existing = cg.lookup_is_ptr(c.binder, &idx);
+                        if (existing)
                         {
-                            for (uint i = 0; i < cg.name_n; i++)
-                            {
-                                if (seq_eq(&cg.names[i][0], bn)) { cg.aliases[i] = rv; break; }
-                            }
+                            // Rebinding an existing mutable slot (e.g. `s = s+i`
+                            // was lowered to `let s = (s+i)` through CPS).
+                            Lvalue slot = cg.vals[idx];
+                            if (slot != null) { (void)ll_build_store(cg.b, v, slot); }
                         }
                         else
                         {
-                            (void)fprintf(cg.fp, "  %s = add i64 0, %s\n", bn, rv);
+                            // First binding: allocate a stack slot.
+                            Lvalue slot = ll_build_alloca(cg.b, cg.i64ty, cg.mktmp());
+                            (void)ll_build_store(cg.b, v, slot);
+                            cg.bind_direct(c.binder, slot, true);
                         }
                     }
                 }
+                else { (void)cg.prd_i64(c.prd); }
             }
-            return pear_cmd(cg, c.body);
+            return cg.cmd(c.body);
+        }
+        case ACMD_LETREC:
+        {
+            return cg.cmd(c.body);
         }
         case ACMD_NOP: return false;
-        case ACMD_MU: case ACMD_MUTILDE: case ACMD_BLOCK:
-            return pear_cmd(cg, c.body);
+        case ACMD_BLOCK:
+            return cg.cmd(c.body);
+        case ACMD_MUTILDE:
+        {
+            // μ̃x.c — consumer binder (MUTILDE). Binds x in c to mean "the
+            // current continuation" and runs c. At the top of a function body
+            // this binds %ret to the return continuation; elsewhere it creates
+            // a join point. For top-level %ret binders, our ACMD_CUT → is_ret_name
+            // path fires returns. For other μ̃ (e.g. defer, assign), treat as
+            // a named binder that forwards to its surrounding context.
+            //
+            // Bootstrap: record in the label table as a synonym for "fallthrough
+            // returns to caller", which already works via is_ret_name for %ret.
+            // For non-ret μ̃ (rare in our lowered AIR currently), just run body.
+            return cg.cmd(c.body);
+        }
+        case ACMD_MU:
+            return cg.cmd(c.body);
         case ACMD_IF:
         {
-            char* cv = pear_prd_i1(cg, c.prd);
-            char* tl = cg.mklbl("if.then");
-            char* el = cg.mklbl("if.else");
-            pear_condbr(cg, cv, tl, el);
-            pear_open(cg, tl);
-            bool tt = pear_cmd(cg, c.then_c);
-            if (!tt && cg.blk_open) { pear_emit_ret(cg, null); }
-            else if (cg.blk_open) { cg.blk_open = false; }
-            pear_open(cg, el);
-            bool et = pear_cmd(cg, c.else_c);
-            if (!et && cg.blk_open) { pear_emit_ret(cg, null); }
-            else if (cg.blk_open) { cg.blk_open = false; }
-            if (!tt || !et)
-            {
-                char* cont = cg.mklbl("if.cont");
-                pear_open(cg, cont);
-            }
+            Lvalue cv = cg.prd_i1(c.prd);
+            char[64] tname; char[64] ename;
+            (void)snprintf(&tname[0], 64, "if.then%u", cg.blk); cg.blk++;
+            (void)snprintf(&ename[0], 64, "if.else%u", cg.blk); cg.blk++;
+            Lblock tb = ll_append_bb(cg.ctx, cg.cur_fn, &tname[0]);
+            Lblock eb = ll_append_bb(cg.ctx, cg.cur_fn, &ename[0]);
+            ll_build_condbr(cg.b, cv, tb, eb); cg.terminated = true;
+            ll_pos_builder(cg.b, tb); cg.terminated = false;
+            bool tt = cg.cmd(c.then_c);
+            if (!tt) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            ll_pos_builder(cg.b, eb); cg.terminated = false;
+            bool et = cg.cmd(c.else_c);
+            if (!et) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            return true;
+        }
+        case ACMD_WHILE: case ACMD_FOR:
+        {
+            char[64] cond_n; char[64] body_n; char[64] exit_n;
+            (void)snprintf(&cond_n[0], 64, "loop.cond%u", cg.blk);
+            (void)snprintf(&body_n[0], 64, "loop.body%u", cg.blk);
+            (void)snprintf(&exit_n[0], 64, "loop.exit%u", cg.blk);
+            cg.blk++;
+            Lblock cond_bb = ll_append_bb(cg.ctx, cg.cur_fn, &cond_n[0]);
+            Lblock body_bb = ll_append_bb(cg.ctx, cg.cur_fn, &body_n[0]);
+            Lblock exit_bb = ll_append_bb(cg.ctx, cg.cur_fn, &exit_n[0]);
+            ll_build_br(cg.b, cond_bb); cg.terminated = true;
+            ll_pos_builder(cg.b, cond_bb); cg.terminated = false;
+            Lvalue cv = cg.prd_i1(c.prd);
+            ll_build_condbr(cg.b, cv, body_bb, exit_bb); cg.terminated = true;
+            ll_pos_builder(cg.b, body_bb); cg.terminated = false;
+            bool bt = cg.cmd(c.body);
+            if (!bt) { ll_build_br(cg.b, cond_bb); cg.terminated = true; }
+            ll_pos_builder(cg.b, exit_bb); cg.terminated = false;
             return false;
+        }
+        case ACMD_LABEL:
+        {
+            // LABEL %l.body declares a named basic block "l" (creating it if a
+            // forward jump already referenced it via get_lbl). The label body
+            // must be emitted INTO that BB (any jump to %l arrives here).
+            // Fall-through code continues in a fresh successor BB.
+            char* nm = c.binder;
+            if (nm != null && nm[0] == '%') { nm = &nm[1]; }
+            if (nm != null)
+            {
+                Lblock bb = cg.get_lbl(nm);
+                if (bb != null)
+                {
+                    // If the currently-building block has no terminator, br to bb
+                    // is NOT automatic — label definitions are join points, not
+                    // fall-throughs. However, we must avoid leaving the previous
+                    // block unterminated, so insert an unconditional br to bb
+                    // only if we know control falls through (i.e. we didn't just
+                    // arrive from a jump). Detect by checking whether the current
+                    // insert block is still open (it will be if the previous
+                    // command returned "not terminated"). This is our situation:
+                    // we fall through from SEQ. Emit a br to bb? No — that would
+                    // mean "execute the label body here", which is wrong.
+                    //
+                    // The correct model: a label %l.body in the command stream is
+                    // a *definition* of a join point that is reached by JUMP.
+                    // Control does NOT flow through a label def in the source
+                    // (well-formed AIR uses JUMP to reach labels; seq does not
+                    // step into labels). The entry point jumps to the first
+                    // label it needs.
+                    //
+                    // For bootstrap we emit the body into bb and add a fresh BB
+                    // after (without br from current). But if current block is
+                    // unterminated we leave it for subsequent code to terminate
+                    // — but nothing should follow a label at SEQ level besides
+                    // LABEL defines a new BB (bb). Save current insert point,
+                    // emit label body into bb, then restore insert point so
+                    // subsequent SEQ commands (like a JUMP to this label, or
+                    // the next LABEL) continue in the original block.
+                    Lblock saved = ll_get_insert(cg.b);
+                    bool saved_term = cg.terminated;
+                    // Emit label body into bb.
+                    ll_pos_builder(cg.b, bb); cg.terminated = false;
+                    (void)cg.cmd(c.body);
+                    // After emitting label body, bb now ends in some terminator
+                    // (jump/ret/unreachable) inserted by cg.cmd recursing into
+                    // the body (which always ends in a CUT→jump/ret). Restore
+                    // insert point to the outer block but keep TERMINATED=false
+                    // if the outer block was still open (so subsequent SEQ
+                    // commands — e.g. another LABEL or a JUMP — can emit into
+                    // it). The label body itself is terminated; saved_term is
+                    // the pre-label state which is "not terminated".
+                    ll_pos_builder(cg.b, saved); cg.terminated = saved_term;
+                    return false;
+                }
+            }
+            return cg.cmd(c.body);
+        }
+        case ACMD_JUMP:
+        {
+            char* nm = c.target_label;
+            if (nm != null && nm[0] == '%') { nm = &nm[1]; }
+            if (nm != null)
+            {
+                Lblock bb = cg.get_lbl(nm);
+                if (bb != null) { ll_build_br(cg.b, bb); cg.terminated = true; }
+            }
+            return true;
         }
         case ACMD_RET:
         {
-            if (c.prd != null) { char* v = pear_prd_i64(cg, c.prd); pear_emit_ret(cg, v); }
-            else { pear_emit_ret(cg, null); }
+            if (c.prd != null) { Lvalue v = cg.prd_i64(c.prd); ll_build_ret(cg.b, v); cg.terminated = true; }
+            else { ll_build_ret_void(cg.b); cg.terminated = true; }
             return true;
         }
-        case ACMD_TRAP: pear_trap(cg); return true;
-        case ACMD_UB:
-            if (cg.blk_open) { (void)fprintf(cg.fp, "  unreachable\n"); cg.blk_open = false; }
-            return true;
-        default:
+        case ACMD_BREAK:
+        case ACMD_CONTINUE:
         {
-            (void)fprintf(cg.fp, "  ; cmd tag %d NYI (then_c=%p else_c=%p body=%p next=%p)\n",
-                (int)c.tag, (void*)c.then_c, (void*)c.else_c, (void*)c.body, (void*)c.next);
-            return false;
+            ll_build_unreachable(cg.b); cg.terminated = true;
+            return true;
         }
+        case ACMD_DEFER:
+        {
+            return cg.cmd(c.body);
+        }
+        case ACMD_TRAP: case ACMD_UB:
+            ll_build_unreachable(cg.b); cg.terminated = true; return true;
+        default:
+            ll_build_unreachable(cg.b); cg.terminated = true; return true;
     }
 }
+
+// ── Function emission ────────────────────────────────────────────────
 
 fn void pear_emit_fn(PearCg* cg, AirDecl* d)
 {
     if (d == null) return;
-    char* nm = d.name;
-    if (nm == null) nm = (char*)"_anon";
-    cg.tmp = 0; cg.blk = 0; cg.name_n = 0;
-    for (uint i = 0; i < NAMES_N; i++) cg.aliases[i] = null;
-    cg.fn_is_void = pear_is_void(d.ret_ty);
+    char* nm = d.name; if (nm == null) nm = (char*)"_anon";
+    cg.tmp = 0; cg.blk = 0; cg.name_n = 0; cg.lbl_n = 0;
+    for (uint i = 0; i < 64; i++) cg.lbl_kfilled[i] = false;
+    cg.cur_k_bb = null;
+    bool is_void = pear_is_void(d.ret_ty);
 
-    (void)fprintf(cg.fp, "define ");
-    if (cg.fn_is_void) { (void)fprintf(cg.fp, "void"); }
-    else { pear_typ(cg, d.ret_ty); }
-    (void)fprintf(cg.fp, " @%s(", nm);
-    for (uint i = 0; i < d.param_count; i++)
+    Ltype[16] ptys;
+    char*[16] pnms;
+    uint pc = (uint)d.param_count;
+    if (pc > 16) pc = 16;
+    for (uint i = 0; i < pc; i++)
     {
         AirBinder* p = d.params[i];
-        if (i > 0) { (void)fprintf(cg.fp, ", "); }
-        char* pnm = (p != null && p.name != null) ? p.name : "_";
-        AirTyp* pt = (p != null) ? p.ty : null;
-        if (pt != null && !pear_is_void(pt)) { pear_typ(cg, pt); }
-        else { (void)fprintf(cg.fp, "i64"); }
-        (void)fprintf(cg.fp, " %%%s", pnm);
-    }
-    (void)fprintf(cg.fp, ") #0 {\n");
-    cg.blk_open = false;
-    pear_open(cg, (char*)"entry");
-    bool term = false;
-    if (d.def_body != null) term = pear_cmd(cg, d.def_body);
-    if (!term && cg.blk_open)
-    {
-        if (cg.fn_is_void) { (void)fprintf(cg.fp, "  ret void\n"); }
-        else { (void)fprintf(cg.fp, "  ret i64 0\n"); }
-        cg.blk_open = false;
-    }
-    else if (cg.blk_open) { cg.blk_open = false; }
-    (void)fprintf(cg.fp, "}\n\n");
-}
-
-fn void pear_emit_module(AirModule* mod, char* ll_path)
-{
-    if (mod == null || ll_path == null) return;
-    void* fp = fopen(ll_path, "wb");
-    if (fp == null) return;
-
-    PearCg cg;
-    cg.mod = mod; cg.fp = fp;
-    cg.tmp = 0; cg.blk = 0; cg.name_n = 0;
-    cg.blk_open = false; cg.fn_is_void = false; cg.defn_n = 0;
-
-    for (uint i = 0; i < mod.decl_count; i++)
-    {
-        AirDecl* d = mod.decls[i];
-        if (d == null) continue;
-        if (d.tag == ADECL_DEF && d.name != null) cg.add_def(d.name);
-    }
-
-    (void)fprintf(fp, "; PEAR v0.2 -> LLVM IR (CFG/SSA)\n");
-    (void)fprintf(fp, "target triple = \"x86_64-pc-linux-gnu\"\n");
-    (void)fprintf(fp, "target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n\n");
-    (void)fprintf(fp, "declare void @llvm.trap() noreturn nounwind\n");
-    (void)fprintf(fp, "declare i64 @write(i32, i8*, i64)\n");
-    (void)fprintf(fp, "declare i8* @malloc(i64)\n");
-    (void)fprintf(fp, "declare void @free(i8*)\n");
-    (void)fprintf(fp, "declare void @exit(i32) noreturn\n\n");
-
-    for (uint i = 0; i < mod.decl_count; i++)
-    {
-        AirDecl* d = mod.decls[i];
-        if (d == null) continue;
-        if (d.tag == ADECL_DECLARE)
+        ptys[i] = cg.i64ty;
+        pnms[i] = (p != null && p.name != null) ? p.name : "_";
+        if (p != null && p.ty != null && !pear_is_void(p.ty))
         {
-            (void)fprintf(fp, "declare ");
-            if (pear_is_void(d.ret_ty)) { (void)fprintf(fp, "void"); }
-            else { pear_typ(&cg, d.ret_ty); }
-            (void)fprintf(fp, "@%s(", d.name != null ? d.name : "_ext");
-            for (uint j = 0; j < d.param_count; j++)
-            {
-                if (j > 0) { (void)fprintf(fp, ", "); }
-                AirBinder* p = d.params[j];
-                if (p != null && p.ty != null && !pear_is_void(p.ty)) { pear_typ(&cg, p.ty); }
-                else { (void)fprintf(fp, "i64"); }
-            }
-            (void)fprintf(fp, ")\n");
+            ptys[i] = pear_llvm_ty(cg, p.ty);
         }
     }
-    (void)fprintf(fp, "\n");
+    Ltype rty = is_void ? cg.voidty : pear_llvm_ty(cg, d.ret_ty);
+    Ltype fty = ll_fn_ty(rty, &ptys[0], pc, false);
+    Lvalue fnv = ll_add_fn(cg.mod, nm, fty);
+    cg.cur_fn = fnv;
+    Lblock entry = ll_append_bb(cg.ctx, fnv, "entry");
+    ll_pos_builder(cg.b, entry);
+    cg.terminated = false;
+    for (uint i = 0; i < pc; i++)
+    {
+        Lvalue arg = ll_get_param(fnv, i);
+        // User-level param names come through WITHOUT a '%' prefix (e.g. "n"),
+        // while internal covars ("%ret_2", "%k0") carry the '%'. Bind raw.
+        cg.bind(pnms[i], arg);
+    }
+    bool term = false;
+    if (d.def_body != null)
+    {
+        // Walk chain via body/next/then_c/else_c recursively.
+        term = cg.cmd(d.def_body);
+    }
+    if (!term)
+    {
+        if (is_void) { ll_build_ret_void(cg.b); cg.terminated = true; }
+        else { ll_build_ret(cg.b, ll_const_int(cg.i64ty, 0, false)); }
+    }
+}
+
+fn void pear_declare(PearCg* cg, AirDecl* d)
+{
+    if (d == null) return;
+    char* nm = d.name; if (nm == null) return;
+    if (ll_get_named_fn(cg.mod, nm) != null) return;
+    uint pc = (uint)d.param_count;
+    if (pc > 16) pc = 16;
+    Ltype[16] ptys;
+    for (uint i = 0; i < pc; i++)
+    {
+        AirBinder* p = d.params[i];
+        if (p != null && p.ty != null && !pear_is_void(p.ty)) { ptys[i] = pear_llvm_ty(cg, p.ty); }
+        else { ptys[i] = cg.i64ty; }
+    }
+    Ltype rty = pear_is_void(d.ret_ty) ? cg.voidty : pear_llvm_ty(cg, d.ret_ty);
+    Ltype fty = ll_fn_ty(rty, &ptys[0], pc, false);
+    (void)ll_add_fn(cg.mod, nm, fty);
+}
+
+// ── Entry point ───────────────────────────────────────────────────────
+
+fn void pear_emit_module(AirModule* mod, char* bc_path)
+{
+    if (mod == null || bc_path == null) return;
+    Lcontext ctx = ll_ctx_create();
+    Lmodule m = ll_mod_create((char*)"Pride", ctx);
+    Lbuilder b = ll_builder_create(ctx);
+    (void)ll_set_target(m, (char*)"x86_64-pc-linux-gnu");
+    (void)ll_set_datalayout(m, (char*)"e-m:e-p270:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128");
+
+    PearCg cg;
+    cg.ctx = ctx; cg.mod = m; cg.b = b; cg.tmp = 0; cg.blk = 0;
+    cg.name_n = 0; cg.lbl_n = 0; cg.terminated = false;
+    cg.i64ty = ll_i64_ty(ctx);
+    cg.i1ty  = ll_i1_ty(ctx);
+    cg.voidty = ll_void_ty(ctx);
+
+    // Pre-declare libc intrinsics we may reference.
+    {
+        Ltype i32ty = ll_i32_ty(ctx);
+        Ltype i8p = ll_ptr_ty(ll_i8_ty(ctx), 0);
+        Ltype[3] wa; wa[0] = i32ty; wa[1] = i8p; wa[2] = cg.i64ty;
+        Ltype wfty = ll_fn_ty(cg.i64ty, &wa[0], 3, false);
+        (void)ll_add_fn(m, (char*)"write", wfty);
+    }
 
     for (uint i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
         if (d == null) continue;
-        if (d.tag == ADECL_DEF) pear_emit_fn(&cg, d);
+        if (d.tag == ADECL_DECLARE) { pear_declare(&cg, d); }
+    }
+    for (uint i = 0; i < mod.decl_count; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d == null) continue;
+        if (d.tag == ADECL_DEF) { pear_emit_fn(&cg, d); }
     }
 
-    (void)fprintf(fp, "attributes #0 = { nounwind ssp uwtable \"frame-pointer\"=\"all\" }\n");
-    (void)fclose(fp);
+    (void)ll_write_bc(m, bc_path);
+    ll_builder_dispose(b);
+    ll_mod_dispose(m);
+    ll_ctx_dispose(ctx);
 }
