@@ -1174,7 +1174,7 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 // Pass notes:
 //   - "adce" / "bdce" / "dce" / "dse" / "die"  : DCE family (aggressive,
 //         bit-tracking, dead-store, dead-inst-elim)
-//   - "early-cse-memssa" : early common-subexpr elim with MemorySSA
+//   - "early-cse" : early common-subexpr elim with MemorySSA
 //   - "gvn" : global value numbering (runs twice with simplifycfg between)
 //   - "sccp" + "correlated-propagation" : sparse conditional constant prop
 //         + correlated value propagation (jump-threading friend)
@@ -1199,8 +1199,8 @@ const char* PEAR_PIPE_O0 = (char*)"default<O0>";
 // then scalar opts, then vectorization, then cleanup. We avoid "default<O2>"
 // because DwarfEHPrepare in LLVM 23's backend has a bug on recursive
 // functions; instead we compose the pipeline manually with TM-passes OFF.
-const char* PEAR_PIPE_O2 = (char*)"mem2reg,instcombine,simplifycfg,early-cse-memssa,function-attrs,sroa,instcombine,gvn,licm,loop-rotate,loop-deletion,indvars,instcombine,reassociate,sccp,adce,bdce,dse,simplifycfg,instcombine";
-const char* PEAR_PIPE_O1 = (char*)"mem2reg,instcombine,simplifycfg,early-cse-memssa,sroa,instcombine,gvn,licm,adce,simplifycfg";
+const char* PEAR_PIPE_O2 = (char*)"mem2reg,instcombine,simplifycfg,early-cse,sroa,instcombine,gvn,loop-mssa(licm),loop-rotate,loop-deletion,indvars,instcombine,reassociate,sccp,adce,bdce,dse,simplifycfg,instcombine";
+const char* PEAR_PIPE_O1 = (char*)"mem2reg,instcombine,simplifycfg,early-cse,sroa,instcombine,gvn,loop-mssa(licm),adce,simplifycfg";
 const char* PEAR_PIPELINE = PEAR_PIPE_O2;  // default tier; frontend may swap
 
 // Select the PEAR pipeline for an opt level (0/1/2). Level 3 maps to O2.

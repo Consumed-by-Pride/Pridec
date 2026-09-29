@@ -1,0 +1,4 @@
+-- EXIT: 7
+-- Branch selection with both arms live. Guards if/else folding.
+fn pick(flag: bool, a: i64, b: i64) -> i64 { if flag { return a; } return b; }
+fn main(_) -> i64 { return pick(3 > 2, 7, 9); }

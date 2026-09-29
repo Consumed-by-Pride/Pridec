@@ -1,0 +1,17 @@
+# tests/exec/XFAIL.tsv — cases known to fail, with the reason.
+#
+# Format:  <pattern><TAB><reason>
+# The pattern is a shell glob matched against the case id (path under
+# tests/exec/, no .pie). Keep entries here instead of annotating cases so the
+# known-broken set is reviewable in one place.
+#
+# A case listed here that STARTS PASSING is reported as XPASS and fails the
+# suite — that is the signal to delete its line. Do not leave stale entries.
+#
+# See A2A/from_agent3.md for the full diagnosis behind each reason.
+#
+[0-9]*	Legacy corpus (clause-style + syscall I/O). Blocked by: clause-style bodies trap at runtime and drop the return type; syscall(arg...) lowers to a bare 'syscall;' with no arguments (air_lower never fills c.prd/prds). See A2A/from_agent3.md.
+pear/p90_*	Indexed store silently dropped by air_lower (assign_expr has no non-identifier target path) and PEAR never dispatches ACNS_STORE/ACNS_INDEX. Returns 0 instead of 7.
+pear/p91_*	Indexed array write in a loop: store is dropped, so the loop makes no progress and the program hangs (killed by timeout).
+pear/p92_*	Clause-style function body: AIR wraps a single irrefutable clause in a match on the param and drops the '-> i64' return type; the emitted binary traps (SIGTRAP 133).
+test_*	Legacy corpus (clause-style + syscall I/O). Blocked by: clause-style bodies trap at runtime and drop the return type; syscall(arg...) lowers to a bare 'syscall;' with no arguments (air_lower never fills c.prd/prds). See A2A/from_agent3.md.

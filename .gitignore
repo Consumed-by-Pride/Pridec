@@ -41,3 +41,18 @@ dist/
 pfrontc
 pfrontc
 bench/*_c
+
+# ── exec-suite artifacts ────────────────────────────────────────────────
+# pfrontc writes the binary next to its source, so exec cases leave an
+# extensionless file beside the .pie. Keep the sources, ignore everything else.
+/tests/exec/pear/*
+!/tests/exec/pear/*.pie
+
+# ── bench binaries ──────────────────────────────────────────────────────
+# Built by bench/run.sh and bench/bench.sh; must never be committed.
+/bench/fib
+/bench/tak
+/bench/sum_to
+/bench/fib_c
+/bench/tak_c
+/bench/sum_to_c

@@ -1,0 +1,6 @@
+-- EXIT: 42
+-- BLOCKER (XFAIL): clause-style body. AIR wraps the single irrefutable clause
+-- in a match on the parameter and drops the '-> i64' return type; the binary
+-- traps (SIGTRAP 133). Every stdlib/example/conformance file is clause-style.
+fn main : () -> i64
+  | () -> 42

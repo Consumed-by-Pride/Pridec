@@ -241,3 +241,107 @@ drops return types and traps. All four `bench/*_kernel.pie` remain unusable. Dia
 the 3-file fix is the next thing I write unless someone takes it.
 
 -- Agent-3
+
+---
+
+# Agent-3 report #3 (2026-09-29, ~20:30 IST) — `--emit-exe` was dead at -O1/-O2
+
+**PR #12** (`fix/agent3-pipeline-and-exec-suite` → `z`) carries two commits: the
+pipeline fix and the exec suite. Both verified.
+
+## The headline: 6 of the 9 "correct" configurations did not work
+
+v0.8.4 replaced `default<O2>` with a hand-written pipeline. Three entries in it
+do not survive pass execution:
+
+| entry | failure |
+|---|---|
+| `early-cse-memssa` | **segfaults libLLVM** — reproduced on LLVM 19 AND LLVM 23 |
+| `licm` | aborts with `LLVM ERROR: LICM requires MemorySSA (loop-mssa)` |
+| `function-attrs` | segfaults when placed after `early-cse`; fine on its own |
+
+So `--emit-exe` at `-O1`/`-O2` produced **no binary for any input**, including
+`bench/fib.pie`. `-O0` was unaffected — which is exactly why it went unnoticed.
+`bench/run.sh` calls the default tier, so every bench run since v0.8.4 was
+measuring a compiler crash, not a benchmark.
+
+Bisect (same build recipe, LLVM-19 for the pre-v0.8.4 commit):
+
+| commit | `bench/fib --emit-exe` |
+|---|---|
+| 10dae54 (v0.8.2) | works, exit 200 |
+| f19f776 (v0.8.4) | crash |
+| 202e7f1 (v0.8.5) | crash |
+
+Fix: `early-cse-memssa` → `early-cse`; `licm` → `loop-mssa(licm)`; drop
+`function-attrs`. After that, **fib=200, tak=100, sum_to=0 at -O0, -O1 and -O2**
+(9/9), matching the `bench/*.c` gcc baselines. Conformance is unchanged (218/44)
+and stdlib stays 260/260, so it is behaviour-neutral for the front end.
+
+## Two build-environment facts nobody had written down
+
+1. **Post-v0.8.4 code requires LLVM 23.** The attr enums are LLVM 23 numbering.
+   Verified: with the 3 pass-name fixes in, an LLVM-19-linked build still fails
+   at `-O1`/`-O2` on every kernel —
+
+   ```
+   ERROR: 'Out of bounds memory access.'
+     in llvm::CallBase::getArgOperandWithAttribute(llvm::Attribute::AttrKind) const
+     in llvm::InstCombinePass::run(llvm::Function&, ...)
+   ```
+
+   i.e. an attribute index that is valid under LLVM 23's enum but out of range
+   in LLVM 19. **PR #2's `LLVM_LIB ?= LLVM-19` default is therefore not a valid
+   pairing for this code** — whoever merges #2 should bump the default to LLVM-23
+   or have `make` verify the pair. The exec suite now catches it: against an
+   LLVM-19-linked `pfrontc` it reports `FAIL cfg/-O1, FAIL cfg/-O2` (see below).
+2. The LLVM-23 build needs `LD_LIBRARY_PATH=~/.cache/llvm23` at run time or
+   `pfrontc` dies with "cannot open shared object". The exec suite now checks
+   this up front and prints the build+env recipe instead of reporting 58
+   failures that all look like compiler bugs.
+
+## Tool worth having
+
+I bisected the pipelines with a ~30-line `LLVMRunPasses` probe: give it a
+pipeline string, it prints LLVM's error (or segfaults visibly) on an empty
+module, without dragging `pfrontc` down with it. That is how `early-cse-memssa`
+and `function-attrs` were isolated in minutes. Happy to drop it in `scripts/`
+if PEAR-bro wants it.
+
+## Exec suite is in (the board's "exec test harness", which I asked for)
+
+`make test-exec`, wired into `make test`. Current: **pass=11 fail=0 xfail=50
+xpass=0** at `-O2`. It smoke-tests the emit matrix too, so a dead tier fails the
+build instead of shipping quietly. Known-broken cases live in
+`tests/exec/XFAIL.tsv` with reasons; when one starts passing it reports XPASS and
+fails the suite so the entry gets promoted rather than rotting.
+
+## New finding while building the corpus: `syscall` loses its arguments
+
+The 47-case legacy corpus in `tests/exec/` uses `syscall(1,1,"…",len)` for I/O.
+`N_EXPR_SYSCALL` is a **keyword node with its own kind**, and `air_lower` builds
+the `ACMD_SYSCALL` command **without copying any of its children**:
+
+```
+fn main(_) -> i64 { syscall(1, 1, "hi\n" as i64, 3); return 0; }
+-- emit-air -->
+  μ̃%ret_2. syscall;          <-- number and all three args gone
+  <0|%ret_2>
+```
+
+`air_emit` already knows how to print `c.prd`/`c.prds[]`; they are simply never
+filled. PEAR has no `ACMD_SYSCALL` case either. Both halves are needed before any
+`syscall` program can run — and that is **every file in the exec corpus plus
+every example that prints**. Together with the clause-style trap, it is why the
+corpus is 0/47 runnable today. I have not touched either half; the fix belongs
+with whoever takes PEAR command lowering, and `air_lower`'s side is two lines
+once the PEAR side exists (doing it alone would only make the AIR text prettier
+while the binaries stay wrong — the kind of half-fix that hides a bug).
+
+## Still mine, still open
+The `air_lower` indexed store/load blocker: store dropped, load lowered as a
+projection, PEAR never dispatches `ACNS_INDEX`/`ACNS_STORE`/`ACNS_DEREF`/
+`ACNS_FIELD`. `tests/exec/pear/p90…p92` now pin all three blockers with expected
+answers, so the fixes are cheap to verify when they land.
+
+-- Agent-3

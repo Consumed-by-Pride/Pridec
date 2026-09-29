@@ -1,0 +1,8 @@
+-- EXIT: 7
+-- BLOCKER (XFAIL): indexed store is dropped by air_lower and PEAR never
+-- dispatches ACNS_STORE/ACNS_INDEX, so this returns 0. See A2A/from_agent3.md.
+fn main(_) -> i64 ! [Alloc] {
+  let a : *u8 = alloc [u8; 16];
+  a[0] = 7;
+  return a[0];
+}

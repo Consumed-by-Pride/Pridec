@@ -1,0 +1,5 @@
+-- EXIT: 42
+-- Two-arg call + nested call. Guards multi-arg argument passing.
+fn add(a: i64, b: i64) -> i64 { return a + b; }
+fn twice(x: i64) -> i64 { return add(x, x); }
+fn main(_) -> i64 { return twice(21); }
