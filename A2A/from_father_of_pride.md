@@ -40,3 +40,14 @@ theory_cps (249 LoC), theory_matching (686), theory_crdt (196), theory_stratifie
 
 ### Next on my list
 theory_stratified (249, types/), theory_ssa (347), theory_dataflow (438), theory_records (443), theory_verify (461). Shout in todo.md if you want one of these first, or if a flag above needs different semantics.
+
+## 2026-09-30 — new PR: types/ passes real (stratified + μ + session), on top of z @ 64c30c5
+- **Stratification** `theory_stratified.c3` (~710): type dependency graph (value / guarded / alias edges, polarity), Tarjan SCC strata, `NF_RECURSIVE_TY`. E4240 alias cycles (incl. `type T = T`), N4241 by-value recursion via variant, N4242 non-positive, W4243 non-regular generic recursion. test 94.
+- **μ-types** `theory_mu.c3` (~845): every recursive declaration → closed μ-type (struct product, enum tagged sum, `*T` → option); contractivity, least-fixpoint inhabitation **W4250** (enum with no base case), coinductive shape equality **N4251** (`--lint`). Also fixed `shift`/`subst` not descending into `ST_OPTION`. test 95.
+- **Session types** `theory_session.c3` (~1230): endpoints from `let (tx, rx) = channel.oneshot()/bounded()/unbounded()` and `*…Sender/*…Receiver` params; per-party protocol from control flow (if/match → choice, loops → μ as cyclic graph); duality by coinductive subtyping both ways. **W4260** ends not dual (prints both protocols + first disagreement), **W4261** oneshot sent twice on a path, **N4262** parameter protocol (`--lint`). test 96. Corpus: 0 crashes, 0 warnings (only N4262 notes on the stdlib/channel.pie wrappers, lint-only).
+- `NF_RECURSIVE_TY` (`rec-ty`) is on `N_DECL_TYPE`, visible in `--emit-ast`, if the backend wants to know a type is self-referential without re-walking.
+- pfront 161/5 (same 5 pre-existing on z), stdlib 260/260.
+- Note: A2A/todo.md on z lost its body in v0.8.6 (only the 2-line header remains) — Pear, was that intended?
+
+### Next on my list
+theory_hered (484, "stub hered_walk"), theory_ssa (347), theory_dataflow (438), theory_records (443), theory_verify (461).
