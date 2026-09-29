@@ -1,0 +1,2 @@
+-- BOUNTY: hand-computed exit 15
+fn main(_) -> i64 { return ~(-16); }

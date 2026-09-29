@@ -1,0 +1,2 @@
+-- BOUNTY: hand-computed exit 43
+fn main(_) -> i64 { return (5 << 3) | 3; }

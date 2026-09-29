@@ -1,0 +1,2 @@
+-- BOUNTY: hand-computed exit 7
+fn main(_) -> i64 ! [Alloc] { let a : *i64 = alloc [i64; 8]; a[0] = 7; return a[0]; }

@@ -1,0 +1,3 @@
+-- BOUNTY: hand-computed exit 7
+fn f(n: i64) -> i64 { let x: i64 = n; { let y: i64 = 2; } return x; }
+fn main(_) -> i64 { return f(7); }

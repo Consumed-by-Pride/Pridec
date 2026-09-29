@@ -1,0 +1,2 @@
+-- BOUNTY: hand-computed exit 14
+fn main(_) -> i64 { let x: i64 = 7; return x + x; }

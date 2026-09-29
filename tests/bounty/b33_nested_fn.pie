@@ -1,0 +1,2 @@
+-- BOUNTY: hand-computed exit 3
+fn main(_) -> i64 { fn inner(a: i64) -> i64 { return a; } return inner(3); }

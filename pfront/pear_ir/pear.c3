@@ -719,10 +719,25 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 // isn't terminated after the second store — we need a br
                 // loop2. But we don't know loop2 is the target here.
                 //
-                // Simplest fix: detect we're already inside bb, don't emit
-                // br, return false (unterminated), and let SEQ continue
-                // (the next cmd is a JUMP %loop2 which terminates the BB).
-                return false;
+                // If we are ALREADY filling that join block, this is a second
+                // occurrence in the same body (e.g. `let a = …; <()|%k1>;
+                // let b = …; <()|%k1>`): emitting another br would branch the
+                // block to itself. Report "not terminated" and let the caller's
+                // sequence continue in place — the next command (typically
+                // `jump %loop`) terminates the block.
+                //
+                // Otherwise this occurrence must carry control into the join
+                // block: delegate to the covar handler so the br is emitted, the
+                // join marked filled, and the builder repositioned there. (The
+                // old code returned false WITHOUT emitting anything, assuming an
+                // earlier cut had already branched — false for the common shape
+                // `if (c) { return x; } i = i + 1;`, where this COMU tail is the
+                // only cut to the join; the enclosing if then closed the arm with
+                // `unreachable`, losing the loop back-edge → SIGTRAP.)
+                char* jn = k.body.cns.name;
+                Lblock jb = cg.get_lbl(&jn[1]);
+                if (jb != null && cg.cur_k_bb == jb) { return false; }
+                return cg.cns(v, k.body.cns);
             }
             return cg.cmd(k.body);
         }
@@ -900,11 +915,22 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             Lblock eb = ll_append_bb(cg.ctx, cg.cur_fn, &eb_n[0]);
             ll_build_condbr(cg.b, cv, tb, eb); cg.terminated = true;
             ll_pos_builder(cg.b, tb); cg.terminated = false;
+            // Same admin-join protocol as ACMD_IF: an arm that threaded into a
+            // %kN join block reports "not terminated" with the builder inside
+            // that block, and the caller's remaining commands belong there.
+            Lblock kb_before = cg.cur_k_bb;
             bool tt = true_cmd != null ? cg.cmd(true_cmd) : false;
-            if (!tt) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            bool t_fill = (cg.cur_k_bb != kb_before);
+            if (!tt && !t_fill) { ll_build_unreachable(cg.b); cg.terminated = true; }
             ll_pos_builder(cg.b, eb); cg.terminated = false;
             bool et = false_cmd != null ? cg.cmd(false_cmd) : false;
-            if (!et) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            bool e_fill = (cg.cur_k_bb != kb_before);
+            if (!et && !e_fill) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            if (t_fill || e_fill)
+            {
+                ll_pos_builder(cg.b, cg.cur_k_bb); cg.terminated = false;
+                return false;
+            }
             // After a case in boolean-form (if/while), BOTH arms end in a
             // jump/return so control does NOT continue after the case. The
             // μ-binder wraps the case and returns control to its enclosing
@@ -1057,12 +1083,30 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
             Lblock tb = ll_append_bb(cg.ctx, cg.cur_fn, &tname[0]);
             Lblock eb = ll_append_bb(cg.ctx, cg.cur_fn, &ename[0]);
             ll_build_condbr(cg.b, cv, tb, eb); cg.terminated = true;
+            // An arm that lowers to a cut on an admin join (%kN) reports "not
+            // terminated" AND leaves the builder inside that join block; the
+            // commands after the if belong there. Remember which join block was
+            // being filled so control can be handed back to the caller.
+            // (Previously `!terminated` was answered with an `unreachable`
+            // terminator in the CURRENT block — which after a join fill is the
+            // join block itself — and the command reported "terminated", so the
+            // caller's sequence dropped everything after the if. That produced
+            // `k1: unreachable` and a lost loop back-edge in the while+return
+            // repro, i.e. SIGTRAP.)
+            Lblock kb_before = cg.cur_k_bb;
             ll_pos_builder(cg.b, tb); cg.terminated = false;
             bool tt = cg.cmd(c.then_c);
-            if (!tt) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            bool t_fill = (cg.cur_k_bb != kb_before);
+            if (!tt && !t_fill) { ll_build_unreachable(cg.b); cg.terminated = true; }
             ll_pos_builder(cg.b, eb); cg.terminated = false;
             bool et = cg.cmd(c.else_c);
-            if (!et) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            bool e_fill = (cg.cur_k_bb != kb_before);
+            if (!et && !e_fill) { ll_build_unreachable(cg.b); cg.terminated = true; }
+            if (t_fill || e_fill)
+            {
+                ll_pos_builder(cg.b, cg.cur_k_bb); cg.terminated = false;
+                return false;
+            }
             return true;
         }
         case ACMD_WHILE: case ACMD_FOR:

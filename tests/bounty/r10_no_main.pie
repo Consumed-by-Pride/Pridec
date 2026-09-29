@@ -1,0 +1,2 @@
+-- ROBUSTNESS: must not crash the compiler
+fn helper(_) -> i64 { return 1; }

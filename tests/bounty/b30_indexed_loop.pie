@@ -1,0 +1,2 @@
+-- BOUNTY: hand-computed exit 3
+fn main(_) -> i64 ! [Alloc] { let a : *i64 = alloc [i64; 8]; let mut i : i64 = 0; while i < 8 { a[i] = i; i = i + 1; } return a[3]; }

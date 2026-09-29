@@ -1,0 +1,3 @@
+-- BOUNTY: hand-computed exit 42
+fn pick(a: i64, b: i64) -> i64 { return a * 10 + b; }
+fn main(_) -> i64 { return pick(4, 2); }

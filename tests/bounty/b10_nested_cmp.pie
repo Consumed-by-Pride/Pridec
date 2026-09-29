@@ -1,0 +1,2 @@
+-- BOUNTY: hand-computed exit 7
+fn main(_) -> i64 { return (1 < 2) + (3 < 4) * 6; }

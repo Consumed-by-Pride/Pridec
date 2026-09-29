@@ -1,0 +1,4 @@
+-- ROBUSTNESS: must not crash the compiler
+fn f(a: i64) -> i64 { return a; }
+fn f(a: i64) -> i64 { return a + 1; }
+fn main(_) -> i64 { return 1; }

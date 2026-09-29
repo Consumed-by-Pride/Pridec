@@ -1,0 +1,2 @@
+-- BOUNTY: hand-computed exit 5
+fn main(_) -> i64 { return (12 & 7) ^ 1; }

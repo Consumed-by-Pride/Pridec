@@ -1,0 +1,12 @@
+-- EXIT: 5
+-- Same shape with `break` (jump to the loop-exit label) followed by a
+-- fall-through assignment: the join block for the assignment must be entered by
+-- the branch the COMU tail cut emits, and the loop back-edge must survive.
+fn main(_) -> i64 {
+    let mut i: i64 = 0;
+    while (i < 100) {
+        i = i + 1;
+        if (i == 5) { break; }
+    }
+    return i;
+}

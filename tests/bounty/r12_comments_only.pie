@@ -1,0 +1,3 @@
+-- ROBUSTNESS: must not crash the compiler
+// nothing here
+/* or here */

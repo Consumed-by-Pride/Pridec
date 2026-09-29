@@ -1,0 +1,2 @@
+-- ROBUSTNESS: must not crash the compiler
+fn main(_) -> i64 { return nope; }

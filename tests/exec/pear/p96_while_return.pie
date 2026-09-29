@@ -1,0 +1,15 @@
+-- EXIT: 5
+-- `return` inside a while body. Before the fix the AIR lowered the post-if
+-- fall-through statement against a fresh admin join (%kN) but the LLVM backend
+-- closed the join block with `unreachable` and reported the if as terminated, so
+-- the loop back-edge was dropped and the binary trapped (SIGTRAP, exit 133).
+-- The backend now propagates the join protocol out of if/case arms, and a COMU
+-- tail cut that is the FIRST cut to a join emits the branch instead of skipping.
+fn main(_) -> i64 {
+    let mut i: i64 = 0;
+    while (i < 100) {
+        if (i == 5) { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
