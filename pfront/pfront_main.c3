@@ -245,7 +245,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
                          bool report_dead, bool strict_vis, bool run_theory,
                          bool lint, bool optimize, int opt_level,
                          bool emit_ast, bool emit_sexp, bool time_passes,
-                         bool dump_cfg, bool emit_air, bool emit_bc, bool emit_exe, bool emit_cps)
+                         bool dump_cfg, bool emit_air, bool emit_bc, bool emit_exe, bool emit_cps, bool emit_dtree)
 {
     RunResult rr;
     rr.errors = 0; rr.warnings = 0; rr.modules = 0;
@@ -426,6 +426,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
                 tp.timing = time_passes;
                 tp.dump_cfg = dump_cfg;
                 tp.emit_cps = emit_cps;
+                tp.emit_dtree = emit_dtree;
                 tp.optimize = optimize;
                 tp.opt_level = opt_level;
                 entry.ast = tp.run(entry.ast);
@@ -619,6 +620,7 @@ fn int main(String[] args)
     bool time_passes = false;
     bool dump_cfg = false;
     bool emit_cps = false;
+    bool emit_dtree = false;
     bool optimize = true;
     int  opt_level = 2;
 
@@ -652,6 +654,7 @@ fn int main(String[] args)
         else if (streq(a, "--time-passes"))  { time_passes = true; }
         else if (streq(a, "--dump-cfg"))     { dump_cfg = true; }
         else if (streq(a, "--emit-cps"))     { emit_cps = true; }
+        else if (streq(a, "--emit-dtree"))   { emit_dtree = true; }
         else if (streq(a, "--no-opt"))       { optimize = false; }
         else if (streq(a, "-O0")) { opt_level = 0; optimize = false; }
         else if (streq(a, "-O1")) { opt_level = 1; }
@@ -685,7 +688,7 @@ fn int main(String[] args)
     RunResult rr = compile_one(input, roots[..], root_count,
                                dump_ast, dump_mods, verify, quiet,
                                rich, context_lines, strict_types, report_dead, strict_vis, run_theory,
-                               lint, optimize, opt_level, emit_ast, emit_sexp, time_passes, dump_cfg, emit_air, emit_bc, emit_exe, emit_cps);
+                               lint, optimize, opt_level, emit_ast, emit_sexp, time_passes, dump_cfg, emit_air, emit_bc, emit_exe, emit_cps, emit_dtree);
 
     if (!quiet)
     {

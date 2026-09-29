@@ -101,6 +101,7 @@ declare -A EXPECT=(
   [88_handlers]=0             # effect handlers: undeclared performs, resume discipline, dead arms, arity
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
+  [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
 )
 
 # ---------------------------------------------------------------------------
@@ -1711,6 +1712,30 @@ if [ $cp_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (self tail → loop, W4200 misuse, contified join, while as letk, non-tail inline continuation)\n' "cps"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "cps" "$cp_why"
+fi
+
+# Decision trees: shapes and the self-check. A complete enum switch has no
+# default; the two-column function shares subtrees; the dense integer
+# dispatch is flagged for a jump table; or-patterns expand rows; a guard is a
+# leaf with a fallthrough; every sample the tree is run on agrees with naive
+# first-match.
+dt=$("$BIN" tests/pfront/91_matching.pie -I stdlib -I . --lint --emit-dtree 2>&1)
+dt_ok=1; dt_why=""
+dneed() { echo "$dt" | grep -q "$1" || { dt_ok=0; dt_why="$dt_why missing[$2]"; }; }
+ddeny() { echo "$dt" | grep -q "$1" && { dt_ok=0; dt_why="$dt_why noise[$2]"; }; }
+dneed '=== dtree: fn area @12:1 ===   \[3 rows, tree 4 → dag 4 nodes, worst 1 tests, 3/3 samples agree, complete\]' "complete enum switch"
+dneed '=== dtree: fn classify @18:1 ===   \[6 rows, tree 16 → dag 13 nodes, worst 3 tests, 6/6 samples agree, complete\]' "two-column DAG sharing"
+dneed '=== dtree: fn digit_name @27:1 ===   \[6 rows, tree 7 → dag 7 nodes, worst 1 tests, 7/7 samples agree, dense\]' "dense switch"
+dneed '=== dtree: fn small @36:1 ===   \[4 rows (or-expanded)'                                                     "or-pattern rows"
+dneed 'arm 0 if guard'                                                                                              "guard leaf"
+dneed '91_matching.pie:27:1: note\[N4210\]: these clauses dispatch on 5 values in one dense switch'               "N4210"
+dneed 'switch x.0.0'                                                                                                "nested payload occurrence"
+ddeny 'matching-BUG'                                                                                                "tree disagrees with first-match"
+if echo "$dt" | grep -q 'matching-verify  : [0-9]* samples run through the trees, [0-9]* agree with first-match, 0 disagree'; then :; else dt_ok=0; dt_why="$dt_why verify"; fi
+if [ $dt_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (complete enum switch, shared DAG, dense jump table, or-rows, guard fallthrough, 0 disagreements)\n' "dtree"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "dtree" "$dt_why"
 fi
 
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
