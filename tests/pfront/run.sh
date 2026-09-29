@@ -102,6 +102,7 @@ declare -A EXPECT=(
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
   [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
+  [93_commute]=0              # commutativity: reductions (counter/maxmin), LWW pins order, FNV mixed monoids, impure call, heap write, NF_INDEPENDENT
   [92_quals]=0                # qualifiers: purity fixpoint, param writes via callees, read-only params, discarded pure results
 )
 
@@ -1764,6 +1765,30 @@ if [ $ql_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (interprocedural purity, recursion stays pure, read-only params flagged, W4220 discarded results, externs impure)\n' "quals"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "quals" "$ql_why"
+fi
+
+# Commutativity: a sum+max loop is a reduction (flag + N4230), an LWW
+# assignment among commuting updates is named (N4231), xor-then-multiply
+# is NOT a monoid (mixed), an impure call or a heap write keeps the order,
+# and independent adjacent lets are flagged.
+cm=$("$BIN" tests/pfront/93_commute.pie -I stdlib -I . --lint --emit-ast 2>&1)
+cm_ok=1; cm_why=""
+cneed() { echo "$cm" | grep -q "$1" || { cm_ok=0; cm_why="$cm_why missing[$2]"; }; }
+cdeny() { echo "$cm" | grep -q "$1" && { cm_ok=0; cm_why="$cm_why noise[$2]"; }; }
+cneed '93_commute.pie:15:7: note\[N4230\]: loop is a commutative reduction: `s` is a counter (+/-), `m` is a max/min register, `i` steps by a constant (induction)' "sum+max reduction"
+cneed '93_commute.pie:29:14: note\[N4231\]: `last` is overwritten here (last writer wins) while every other update in this loop commutes' "LWW pins order"
+cneed "^        while reduction.*@15:7"                                                                    "NF_REDUCTION on the loop"
+cneed "^        let 'b' indep"                                                                            "NF_INDEPENDENT on independent let"
+cneed 'crdt-loops       : 6 loops: 1 commutative reductions, 1 counting, 4 ordered; accumulators .* 1 maxmin, 1 register, 1 mixed'  "census (fnv mixed, shouted ordered, count_up ordered)"
+cdeny '93_commute.pie:4[0-9]:.*N4230'                                                                     "fnv called a reduction"
+cdeny '93_commute.pie:5[0-9]:.*N4230'                                                                     "impure-call loop called a reduction"
+cdeny '93_commute.pie:3[0-9]:.*N4230'                                                                     "prefix-sum (heap write) called a reduction"
+c_n4230=$(echo "$cm" | grep -c 'N4230')
+[ "$c_n4230" = "1" ] || { cm_ok=0; cm_why="$cm_why n4230=$c_n4230(want 1)"; }
+if [ $cm_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (reduction flagged, LWW named, FNV mixed, impure/heap loops ordered, independent lets flagged)\n' "commute"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "commute" "$cm_why"
 fi
 
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.

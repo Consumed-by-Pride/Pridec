@@ -692,7 +692,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.cps != null) { tp.cps.init(a); tp.cps.attach(d, it, file); }
     if (tp.strat != null) tp.strat.init(a);
     if (tp.nbe != null) { tp.nbe.init(a); tp.nbe.run_demo(); }
-    if (tp.crdt != null) tp.crdt.init(a);
+    if (tp.crdt != null) { tp.crdt.init(a); tp.crdt.attach(d, it, file); }
     if (tp.ssa != null) { tp.ssa.init(a, null); tp.ssa.run(); }
     if (tp.lin != null) { tp.lin.init(a); tp.lin.attach(d, it, file); }
     if (tp.sym != null) { tp.sym.init(a); tp.sym.attach(d, it, file); }
@@ -833,10 +833,10 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.defun != null) { tp.defun.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.cps != null) { tp.cps.emit = tp.emit_cps; tp.cps.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.nbe != null) { tp.nbe.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
-    if (tp.crdt != null) { tp.crdt.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.lin != null) { tp.lin.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.sym != null) { tp.sym.run_on(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.qual != null) { tp.qual.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.crdt != null) { tp.crdt.walk(root, 0); tp.passes_run = tp.passes_run + 1; }   // after quals: uses NF_PURE_FN
     if (tp.sess != null) { tp.sess.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.sct != null) { tp.sct.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.dfb != null) { tp.dfb.scan(root, 0); tp.passes_run = tp.passes_run + 1; }

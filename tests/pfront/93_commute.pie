@@ -1,0 +1,83 @@
+-- Commutativity analysis (CALM/CRDT): loop reductions, order-pinning
+-- assignments, non-monoid updates, heap writes, statement independence.
+-- EXPECT: 0 errors
+
+extern fn emit(x: i64) -> i64
+
+fn sq : i64 -> i64
+  | x -> x * x
+
+fn sum_sq : (*i64, i64) -> i64
+  | (a, n) ->
+      let mut s : i64 = 0i64
+      let mut m : i64 = 0i64
+      let mut i : i64 = 0i64
+      while i < n do {
+        s = s + sq(a[i])
+        if a[i] > m then m = a[i]
+        i = i + 1i64
+      }
+      s + m
+
+fn last_and_sum : (*i64, i64) -> i64
+  | (a, n) ->
+      let mut s : i64 = 0i64
+      let mut last : i64 = 0i64
+      let mut i : i64 = 0i64
+      while i < n do {
+        s += a[i]
+        last = a[i]
+        i = i + 1i64
+      }
+      s + last
+
+fn prefix : (*i64, i64) -> () 
+  | (a, n) ->
+      let mut i : i64 = 1i64
+      while i < n do {
+        a[i] = a[i] + a[i - 1i64]
+        i = i + 1i64
+      }
+
+-- FNV: xor then multiply on one variable — two monoids, iterations do NOT commute
+fn fnv : (*u8, i64) -> i64
+  | (p, n) ->
+      let mut h : i64 = 1469598103934665603i64
+      let mut i : i64 = 0i64
+      while i < n do {
+        h = h ^ (p[i] as i64)
+        h = h * 1099511628211i64
+        i = i + 1i64
+      }
+      h
+
+-- an impure call in the body pins the order even though `s` is a counter
+fn shouted_sum : (*i64, i64) -> i64
+  | (a, n) ->
+      let mut s : i64 = 0i64
+      let mut i : i64 = 0i64
+      while i < n do {
+        s = s + emit(a[i])
+        i = i + 1i64
+      }
+      s
+
+-- the accumulator steers the trip count: loop-carried through control
+fn count_up : i64 -> i64
+  | lim ->
+      let mut c : i64 = 0i64
+      while c * c < lim do c = c + 1i64
+      c
+
+fn indep : (i64, i64) -> i64
+  | (x, y) ->
+      let a : i64 = sq(x)
+      let b : i64 = sq(y)
+      let c : i64 = a + b
+      let d : i64 = sq(c)
+      d
+
+fn main : () -> ()
+  | () ->
+      let _r : i64 = indep(1i64, 2i64) + count_up(10i64)
+      ()
