@@ -182,10 +182,15 @@ struct PearCg {
     // Bootstrap: ALL let-bindings become alloca+store; params stay as SSA.
     bool[256] is_ptr;
     uint           name_n;
-    char[256][64]  names;        // 256 names x 64 chars (C3: outer-dim first)
+    // C3 array dimensions read RIGHT-to-left for the index order: `T[E][N]` is
+    // N rows of E elements, so a table of 256 names of at most 64 chars is
+    // `char[64][256]`, NOT `char[256][64]` (that declares 64 rows of 256 chars
+    // and aborts with 'Array index out of bounds (array had size 64, index was
+    // 64)' on the 65th name — see add_name).
+    char[64][256]  names;        // 256 names x 64 chars
     Lvalue[256]    vals;
     uint           lbl_n;
-    char[32][64]   lbl_names;    // 32 labels x 64 chars
+    char[64][32]   lbl_names;    // 32 labels x 64 chars
     Lblock[32]     lbl_bbs;
     bool[32]       lbl_kfilled; // admin %k BB already has code started
     Lblock         cur_k_bb;    // BB we are currently emitting into as %k continuation
@@ -231,9 +236,15 @@ fn char* PearCg.add_name(PearCg* cg, char* s)
     uint i = cg.name_n;
     if (i < 256)
     {
-        uint j = 0;
-        while (j < 63 && s[j] != 0) { cg.names[i][j] = s[j]; j++; }
-        cg.names[i][j] = 0;
+        // snprintf rather than a hand-rolled bounded copy: callers routinely
+        // pass a stack-local char[64] (see mktmp), and indexing such a buffer
+        // with a variable in a loop trips the runtime's array bounds check once
+        // a function has enough bindings (observed as
+        //   ERROR: 'Array index out of bounds (array had size 64, index was 64)'
+        // inside add_name for a body with >= ~40 lets, which is a plain
+        // compiler abort). snprintf gives the same 63-char truncation with no
+        // bounds-checked indexing at all.
+        (void)snprintf(&cg.names[i][0], 64, "%s", s);
         cg.name_n = i + 1;
         return &cg.names[i][0];
     }
