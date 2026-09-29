@@ -241,10 +241,28 @@ fn Interval iv_widen(Interval old_v, Interval new_v)
 {
     if (old_v.is_bottom) { return new_v; }
     if (new_v.is_bottom) { return old_v; }
+    // Widening with THRESHOLDS: a bound that moved is pushed to the next
+    // threshold in {-1, 0, 1} before going to infinity. Counters and
+    // divisors live around zero; jumping straight to ±∞ loses `x >= 1` in
+    // every Newton-style loop and turns each `n / x` into a false alarm.
     Interval r;
     r.is_bottom = false;
-    r.lo = new_v.lo < old_v.lo ? AI_NEG_INF : old_v.lo;
-    r.hi = new_v.hi > old_v.hi ? AI_POS_INF : old_v.hi;
+    if (new_v.lo < old_v.lo)
+    {
+        if (new_v.lo >= 1) { r.lo = 1; }
+        else if (new_v.lo >= 0) { r.lo = 0; }
+        else if (new_v.lo >= -1) { r.lo = -1; }
+        else { r.lo = AI_NEG_INF; }
+    }
+    else { r.lo = old_v.lo; }
+    if (new_v.hi > old_v.hi)
+    {
+        if (new_v.hi <= -1) { r.hi = -1; }
+        else if (new_v.hi <= 0) { r.hi = 0; }
+        else if (new_v.hi <= 1) { r.hi = 1; }
+        else { r.hi = AI_POS_INF; }
+    }
+    else { r.hi = old_v.hi; }
     return r;
 }
 
@@ -290,10 +308,19 @@ fn Interval iv_add(Interval a, Interval b)
     return iv_range(sat_add(a.lo, b.lo), sat_add(a.hi, b.hi));
 }
 
+// Negation must not wrap: -AI_NEG_INF is AI_NEG_INF again in two's
+// complement, which turned `top - top` into the point [-∞, -∞].
+fn long sat_neg(long a)
+{
+    if (a == AI_NEG_INF) { return AI_POS_INF; }
+    if (a == AI_POS_INF) { return AI_NEG_INF; }
+    return -a;
+}
+
 fn Interval iv_sub(Interval a, Interval b)
 {
     if (a.is_bottom || b.is_bottom) { return iv_bottom(); }
-    return iv_range(sat_add(a.lo, -b.hi), sat_add(a.hi, -b.lo));
+    return iv_range(sat_add(a.lo, sat_neg(b.hi)), sat_add(a.hi, sat_neg(b.lo)));
 }
 
 // Multiplication must consider all four endpoint products: with negative
@@ -316,15 +343,30 @@ fn Interval iv_mul(Interval a, Interval b)
     return iv_range(lo, hi);
 }
 
+// ±∞ divided by anything finite is still ±∞; a finite quotient here would
+// masquerade as evidence in the range checks.
+fn long sat_div(long a, long b)
+{
+    if (b == 0) { return 0; }
+    if (a == AI_NEG_INF || a == AI_POS_INF)
+    {
+        if (b == AI_NEG_INF || b == AI_POS_INF) { return 0; }   // ∞/∞: unknown magnitude, keep it in range
+        return ((a < 0) != (b < 0)) ? AI_NEG_INF : AI_POS_INF;
+    }
+    if (b == AI_NEG_INF || b == AI_POS_INF) { return 0; }
+    if (a == AI_NEG_INF + 1 && b == -1) { return AI_POS_INF; }
+    return a / b;
+}
+
 fn Interval iv_div(Interval a, Interval b, bool* div_by_zero)
 {
     if (a.is_bottom || b.is_bottom) { return iv_bottom(); }
     // A divisor interval spanning zero may divide by zero.
     if (b.lo <= 0 && b.hi >= 0) { *div_by_zero = true; return iv_top(); }
-    long p1 = b.lo == 0 ? 0 : a.lo / b.lo;
-    long p2 = b.hi == 0 ? 0 : a.lo / b.hi;
-    long p3 = b.lo == 0 ? 0 : a.hi / b.lo;
-    long p4 = b.hi == 0 ? 0 : a.hi / b.hi;
+    long p1 = sat_div(a.lo, b.lo);
+    long p2 = sat_div(a.lo, b.hi);
+    long p3 = sat_div(a.hi, b.lo);
+    long p4 = sat_div(a.hi, b.hi);
     long lo = p1;
     if (p2 < lo) { lo = p2; }
     if (p3 < lo) { lo = p3; }
@@ -353,7 +395,11 @@ fn bool iv_fits(Interval* i, int bits, bool is_signed)
         lo = 0;
         hi = ((long)1 << (long)bits) - 1;
     }
-    return i.lo >= lo && i.hi <= hi;
+    // An infinite endpoint means "nothing known", not "out of range": only a
+    // FINITE endpoint outside the target is evidence that a value does not fit.
+    bool lo_bad = i.lo != AI_NEG_INF && i.lo < lo;
+    bool hi_bad = i.hi != AI_POS_INF && i.hi > hi;
+    return !lo_bad && !hi_bad;
 }
 
 fn void iv_print(Interval* i)
@@ -593,6 +639,32 @@ struct AbstractInterpreter
     usz bounds_always_bad;    // indices outside the array on every path
     usz branches_decided;     // conditions with a known outcome
     bool strict;
+    // Loop bookkeeping: states that `break`/`continue` out of the innermost
+    // loop, and a flag that silences "always true/false" while iterating —
+    // a verdict from iteration 1 is not a verdict about the loop.
+    AbstractState* brk;
+    AbstractState* cont;
+    int            quiet_decided;
+    // Loop bodies are re-evaluated to a fixpoint; a finding is reported once.
+    Node*[AI_REPORTED] reported_node;
+    int[AI_REPORTED]   reported_code;
+    usz                reported_count;
+}
+const usz AI_REPORTED = 512;
+
+fn bool AbstractInterpreter.first_report(AbstractInterpreter* ai, Node* at, int code)
+{
+    for (usz i = 0; i < ai.reported_count; i++)
+    {
+        if (ai.reported_node[i] == at && ai.reported_code[i] == code) { return false; }
+    }
+    if (ai.reported_count < AI_REPORTED)
+    {
+        ai.reported_node[ai.reported_count] = at;
+        ai.reported_code[ai.reported_count] = code;
+        ai.reported_count = ai.reported_count + 1;
+    }
+    return true;
 }
 
 fn bool AbstractInterpreter.init(AbstractInterpreter* ai, Arena* a,
@@ -607,6 +679,10 @@ fn bool AbstractInterpreter.init(AbstractInterpreter* ai, Arena* a,
     ai.diags = d;
     ai.interner = it;
     ai.file = file;
+    ai.reported_count = 0;
+    ai.brk = null;
+    ai.cont = null;
+    ai.quiet_decided = 0;
     ai.vars_tracked = 0;
     ai.transfers = 0;
     ai.joins = 0;
@@ -629,6 +705,15 @@ fn void AbstractInterpreter.destroy(AbstractInterpreter* ai)
 }
 
 // Evaluate an expression in the abstract domain.
+// The interval may straddle zero while the sign domain still excludes it.
+fn bool AbstractInterpreter.divisor_known_nonzero(AbstractInterpreter* ai, Node* d)
+{
+    if (d == null || d.kind != Nk.N_EXPR_IDENT || d.resolved == null) { return false; }
+    int vi = ai.state.find(d.resolved);
+    if (vi < 0) { return false; }
+    return !sign_maybe_zero(ai.state.vars[vi].sign);
+}
+
 fn Interval AbstractInterpreter.eval(AbstractInterpreter* ai, Node* e, int depth)
 {
     if (e == null || depth > AI_MAX_DEPTH) { return iv_top(); }
@@ -656,8 +741,7 @@ fn Interval AbstractInterpreter.eval(AbstractInterpreter* ai, Node* e, int depth
             if (op == Tk.TOKEN_MINUS)
             {
                 if (a.is_bottom) { return a; }
-                return iv_range(a.hi == AI_POS_INF ? AI_NEG_INF : -a.hi,
-                                a.lo == AI_NEG_INF ? AI_POS_INF : -a.lo);
+                return iv_range(sat_neg(a.hi), sat_neg(a.lo));
             }
             if (op == Tk.TOKEN_BANG || op == Tk.TOKEN_KW_NOT) { return iv_range(0, 1); }
             return iv_top();
@@ -677,7 +761,8 @@ fn Interval AbstractInterpreter.eval(AbstractInterpreter* ai, Node* e, int depth
                 {
                     bool dz = false;
                     Interval r = iv_div(a, b, &dz);
-                    if (dz)
+                    if (dz && ai.divisor_known_nonzero(e.child(1))) { dz = false; }
+                    if (dz && ai.first_report(e, 4130))
                     {
                         ai.div_by_zero = ai.div_by_zero + 1;
                         ai.diags.warn(pfront_core::Phase.PH_RESOLVE, 4130,
@@ -690,7 +775,8 @@ fn Interval AbstractInterpreter.eval(AbstractInterpreter* ai, Node* e, int depth
                 {
                     bool dz = false;
                     iv_div(a, b, &dz);
-                    if (dz)
+                    if (dz && ai.divisor_known_nonzero(e.child(1))) { dz = false; }
+                    if (dz && ai.first_report(e, 4130))
                     {
                         ai.div_by_zero = ai.div_by_zero + 1;
                         ai.diags.warn(pfront_core::Phase.PH_RESOLVE, 4130,
@@ -751,7 +837,7 @@ fn Interval AbstractInterpreter.eval(AbstractInterpreter* ai, Node* e, int depth
                         if (s[k] < '0' || s[k] > '9') { bits = 0; break; }
                         bits = bits * 10 + (int)(s[k] - '0');
                     }
-                    if (bits > 0 && !iv_fits(&a, bits, s[0] == 'i'))
+                    if (bits > 0 && !iv_fits(&a, bits, s[0] == 'i') && ai.first_report(e, 4131))
                     {
                         ai.overflow_risk = ai.overflow_risk + 1;
                         ai.diags.warn(pfront_core::Phase.PH_RESOLVE, 4131,
@@ -769,13 +855,156 @@ fn Interval AbstractInterpreter.eval(AbstractInterpreter* ai, Node* e, int depth
     }
 }
 
+
+// ── Branch narrowing ────────────────────────────────────────────────────────
+// Refine the state under `cond == polarity`. Handles `x rel e`, `e rel x`,
+// `!c`, and the short-circuit connectives in the polarity where they are a
+// conjunction. Anything else leaves the state as it is, which is sound.
+fn bool ai_has_break(Node* n, int depth)
+{
+    if (n == null || depth > AI_MAX_DEPTH) { return false; }
+    if (n.kind == Nk.N_STMT_BREAK) { return true; }
+    if (n.kind == Nk.N_EXPR_WHILE || n.kind == Nk.N_EXPR_FOR || n.kind == Nk.N_EXPR_LOOP
+     || n.kind == Nk.N_DECL_FN || n.kind == Nk.N_EXPR_LAMBDA) { return false; }
+    for (usz i = 0; i < n.child_count; i++) { if (ai_has_break(n.children[i], depth + 1)) { return true; } }
+    return false;
+}
+
+fn Tk ai_flip(Tk op)
+{
+    switch (op)
+    {
+        case TOKEN_LT: return Tk.TOKEN_GT;
+        case TOKEN_GT: return Tk.TOKEN_LT;
+        case TOKEN_LTEQ: return Tk.TOKEN_GTEQ;
+        case TOKEN_GTEQ: return Tk.TOKEN_LTEQ;
+        default: return op;
+    }
+}
+
+fn Tk ai_negate(Tk op)
+{
+    switch (op)
+    {
+        case TOKEN_LT: return Tk.TOKEN_GTEQ;
+        case TOKEN_GT: return Tk.TOKEN_LTEQ;
+        case TOKEN_LTEQ: return Tk.TOKEN_GT;
+        case TOKEN_GTEQ: return Tk.TOKEN_LT;
+        case TOKEN_EQEQ: return Tk.TOKEN_NEQ;
+        case TOKEN_NEQ: return Tk.TOKEN_EQEQ;
+        case TOKEN_NEQ_UNI: return Tk.TOKEN_EQEQ;
+        default: return op;
+    }
+}
+
+fn void AbstractInterpreter.assume_var(AbstractInterpreter* ai, Node* ident, Tk rel, Interval other)
+{
+    if (ident == null || ident.kind != Nk.N_EXPR_IDENT || ident.resolved == null || other.is_bottom) { return; }
+    Interval cur = ai.state.get_interval(ident.resolved);
+    Interval bound;
+    switch (rel)
+    {
+        case TOKEN_LT:   bound = iv_range(AI_NEG_INF, other.hi == AI_POS_INF ? AI_POS_INF : other.hi - 1);
+        case TOKEN_LTEQ: bound = iv_range(AI_NEG_INF, other.hi);
+        case TOKEN_GT:   bound = iv_range(other.lo == AI_NEG_INF ? AI_NEG_INF : other.lo + 1, AI_POS_INF);
+        case TOKEN_GTEQ: bound = iv_range(other.lo, AI_POS_INF);
+        case TOKEN_EQEQ: bound = other;
+        case TOKEN_NEQ:
+        case TOKEN_NEQ_UNI:
+        {
+            // Only an endpoint exclusion can be expressed in intervals; but
+            // `!= 0` is exactly what the SIGN domain is for.
+            if (other.lo != other.hi || cur.is_bottom) { return; }
+            if (cur.lo == other.lo && cur.hi == other.lo) { ai.state.reachable = false; return; }
+            if (other.lo == 0)
+            {
+                int vi = ai.state.declare(ident.resolved, ident.name_id);
+                if (vi >= 0)
+                {
+                    Sign sg = ai.state.vars[vi].sign;
+                    if (sg == Sign.SIGN_TOP || sg == Sign.SIGN_NONZERO) { ai.state.vars[vi].sign = Sign.SIGN_NONZERO; }
+                    else if (sg == Sign.SIGN_NONNEG) { ai.state.vars[vi].sign = Sign.SIGN_POS; }
+                    else if (sg == Sign.SIGN_NONPOS) { ai.state.vars[vi].sign = Sign.SIGN_NEG; }
+                    else if (sg == Sign.SIGN_ZERO) { ai.state.reachable = false; return; }
+                    ai.narrowings = ai.narrowings + 1;
+                }
+            }
+            if (cur.lo == other.lo) { bound = iv_range(cur.lo + 1, cur.hi); }
+            else if (cur.hi == other.lo) { bound = iv_range(cur.lo, cur.hi - 1); }
+            else { return; }
+        }
+        default: return;
+    }
+    Interval m = iv_meet(cur, bound);
+    if (m.is_bottom) { ai.state.reachable = false; return; }
+    if (!iv_eq(m, cur))
+    {
+        ai.state.declare(ident.resolved, ident.name_id);
+        ai.state.set_interval(ident.resolved, m);
+        ai.narrowings = ai.narrowings + 1;
+    }
+}
+
+fn void AbstractInterpreter.assume(AbstractInterpreter* ai, Node* cond, bool polarity, int depth)
+{
+    if (cond == null || depth > AI_MAX_DEPTH || !ai.state.reachable) { return; }
+    switch (cond.kind)
+    {
+        case N_EXPR_UNARY:
+        {
+            Tk op = (Tk)cond.p.op;
+            if (op == Tk.TOKEN_BANG || op == Tk.TOKEN_KW_NOT) { ai.assume(cond.child(0), !polarity, depth + 1); }
+            return;
+        }
+        case N_EXPR_TUPLE:
+            if (cond.child_count == 1) { ai.assume(cond.child(0), polarity, depth + 1); }
+            return;
+        case N_EXPR_BINARY:
+        {
+            Tk op = (Tk)cond.p.op;
+            bool is_and = op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_KW_AND;
+            bool is_or = op == Tk.TOKEN_PIPEPIPE || op == Tk.TOKEN_KW_OR;
+            if (is_and || is_or)
+            {
+                // `a && b` true, or `a || b` false, is a conjunction.
+                if (is_and == polarity)
+                {
+                    ai.assume(cond.child(0), polarity, depth + 1);
+                    ai.assume(cond.child(1), polarity, depth + 1);
+                }
+                return;
+            }
+            if (op != Tk.TOKEN_LT && op != Tk.TOKEN_GT && op != Tk.TOKEN_LTEQ && op != Tk.TOKEN_GTEQ
+             && op != Tk.TOKEN_EQEQ && op != Tk.TOKEN_NEQ && op != Tk.TOKEN_NEQ_UNI) { return; }
+            if (!polarity) { op = ai_negate(op); }
+            Node* l = cond.child(0);
+            Node* r = cond.child(1);
+            if (l != null && l.kind == Nk.N_EXPR_IDENT) { ai.assume_var(l, op, ai.eval(r, depth + 1)); }
+            if (r != null && r.kind == Nk.N_EXPR_IDENT) { ai.assume_var(r, ai_flip(op), ai.eval(l, depth + 1)); }
+            return;
+        }
+        default: return;
+    }
+}
+
 // Apply the effect of a statement to the state.
 fn void AbstractInterpreter.transfer(AbstractInterpreter* ai, Node* s, int depth)
 {
     if (s == null || depth > AI_MAX_DEPTH) { return; }
+    if (!ai.state.reachable) { return; }
 
     switch (s.kind)
     {
+        case N_STMT_RETURN:
+        case N_STMT_BREAK:
+        case N_STMT_CONTINUE:
+        {
+            for (usz i = 0; i < s.child_count; i++) { ai.eval(s.children[i], depth + 1); }
+            if (s.kind == Nk.N_STMT_BREAK && ai.brk != null) { ai.brk.join(&ai.state); }
+            if (s.kind == Nk.N_STMT_CONTINUE && ai.cont != null) { ai.cont.join(&ai.state); }
+            ai.state.reachable = false;
+            return;
+        }
         case N_DECL_LET:
         {
             Interval iv = iv_top();
@@ -850,7 +1079,7 @@ fn void AbstractInterpreter.transfer(AbstractInterpreter* ai, Node* s, int depth
             // A condition with a known value makes one branch dead.
             bool known_true = !c.is_bottom && c.lo == 1 && c.hi == 1;
             bool known_false = !c.is_bottom && c.lo == 0 && c.hi == 0;
-            if (known_true || known_false)
+            if ((known_true || known_false) && ai.quiet_decided == 0 && ai.first_report(s, 4132))
             {
                 ai.branches_decided = ai.branches_decided + 1;
                 ai.diags.add(pfront_core::Severity.SEV_NOTE,
@@ -875,10 +1104,14 @@ fn void AbstractInterpreter.transfer(AbstractInterpreter* ai, Node* s, int depth
                 return;
             }
             *entry = ai.state;
+            ai.assume(cond, true, depth + 1);
             ai.transfer(s.child(1), depth + 1);
             *then_state = ai.state;
             ai.state = *entry;
+            ai.assume(cond, false, depth + 1);
             if (s.child_count >= 3) { ai.transfer(s.child(2), depth + 1); }
+            // A branch that returned contributes nothing to the merge, so
+            // `if a == 0 { return }` leaves `a != 0` in force afterwards.
             ai.state.join(then_state);
             ai.joins = ai.joins + 1;
             free((void*)entry);
@@ -890,27 +1123,74 @@ fn void AbstractInterpreter.transfer(AbstractInterpreter* ai, Node* s, int depth
         {
             // Fixpoint with widening. Without the widening step this loop
             // would not terminate on a counter that grows each iteration.
+            // The loop head state is entry ⊔ body(head): the zero-iteration
+            // path must be part of it, or the first iteration's facts leak
+            // out as if they always held.
             AbstractState* prev = (AbstractState*)malloc(AbstractState::size);
-            if (prev == null) { return; }
+            AbstractState* head = (AbstractState*)malloc(AbstractState::size);
+            AbstractState* brk_acc = (AbstractState*)malloc(AbstractState::size);
+            AbstractState* cont_acc = (AbstractState*)malloc(AbstractState::size);
+            if (prev == null || head == null || brk_acc == null || cont_acc == null)
+            {
+                if (prev != null) { free((void*)prev); }
+                if (head != null) { free((void*)head); }
+                if (brk_acc != null) { free((void*)brk_acc); }
+                if (cont_acc != null) { free((void*)cont_acc); }
+                return;
+            }
+            Node* body = s.child(s.child_count - 1);
+            AbstractState* saved_brk = ai.brk;
+            AbstractState* saved_cont = ai.cont;
+            brk_acc.init(); brk_acc.reachable = false;
+            cont_acc.init(); cont_acc.reachable = false;
+            ai.brk = brk_acc;
+            ai.cont = cont_acc;
+            ai.quiet_decided = ai.quiet_decided + 1;
+            *head = ai.state;
             for (int iter = 0; iter < AI_MAX_ITERS; iter++)
             {
                 ai.iterations = ai.iterations + 1;
-                *prev = ai.state;
+                *prev = *head;
+                ai.state = *head;
                 ai.eval(s.child(0), depth + 1);
-                ai.transfer(s.child(1), depth + 1);
+                ai.assume(s.child(0), true, depth + 1);
+                if (!ai.state.reachable) { ai.state = *head; break; }   // loop never entered
+                ai.transfer(body, depth + 1);
+                // The end of the body and every `continue` flow back to the head.
+                if (cont_acc.reachable) { ai.state.join(cont_acc); cont_acc.reachable = false; }
+                ai.state.reachable = true;
+                head.join(&ai.state);
                 if (iter >= AI_WIDEN_AFTER)
                 {
-                    if (ai.state.widen(prev)) { ai.widenings = ai.widenings + 1; }
+                    if (head.widen(prev)) { ai.widenings = ai.widenings + 1; }
                 }
-                if (ai.state.equals(prev)) { break; }
+                if (head.equals(prev)) { break; }
             }
+            ai.quiet_decided = ai.quiet_decided - 1;
+            // One reporting pass over the body from the fixpoint: verdicts are
+            // only meaningful against the invariant, never against iteration 1.
+            if (ai.quiet_decided == 0)
+            {
+                ai.state = *head;
+                ai.assume(s.child(0), true, depth + 1);
+                if (ai.state.reachable) { ai.transfer(body, depth + 1); }
+            }
+            // Exit: the head with the guard false, joined with every `break`.
+            ai.state = *head;
+            ai.assume(s.child(0), false, depth + 1);
+            if (brk_acc.reachable) { ai.state.join(brk_acc); }
+            ai.brk = saved_brk;
+            ai.cont = saved_cont;
             free((void*)prev);
+            free((void*)head);
+            free((void*)brk_acc);
+            free((void*)cont_acc);
             return;
         }
 
         case N_BLOCK:
         {
-            for (usz i = 0; i < s.child_count; i++) { ai.transfer(s.children[i], depth + 1); }
+            for (usz i = 0; i < s.child_count && ai.state.reachable; i++) { ai.transfer(s.children[i], depth + 1); }
             return;
         }
 

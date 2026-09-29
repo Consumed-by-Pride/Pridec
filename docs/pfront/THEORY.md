@@ -45,7 +45,8 @@ item is withdrawn.
 | `theory_opt.c3` | 1,663 | **The optimizer.** Const folding, algebraic identities, branch folding, 3-way DCE, copy propagation, CSE, block flattening |
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
-| `theory_absint.c3` | 979 | Abstract interpretation: sign, interval (widen/narrow), nullness; fixpoint over loops |
+| `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_symexe.c3` | ~1000 | Bounded symbolic execution: per-function path sets, interval + disequality decision procedure, witnessed diagnostics |
 | `theory_check.c3` | 907 | Pipeline driver, gradual sort checking, per-pass timing |
 | `theory_rowinfer.c3` | 834 | Principal-type effect-row inference |
 | `theory_pglcert.c3` | 791 | PGL certificates: exhaustiveness with a named counter-example |
@@ -110,6 +111,50 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
 
+**Symbolic execution (`theory_symexe`).** Runs each function over symbolic
+parameters, forking at `if`/`match`/`while` and carrying the path condition.
+Every construct maps a *set* of live paths to a set (an `if` doubles it, a
+returning arm removes members), so both sides of a branch continue to the
+end of the function. Feasibility is decided by a small procedure that is
+sound for pruning: per path, each variable has an interval and a set of
+excluded constants, refined to a fixpoint from the atoms (`x > 5` raises
+the low bound; `x != 0` excludes; `x + 2 < 7` shifts), then every atom is
+re-evaluated under the facts and a FALSE one kills the path. Infinite
+endpoints never decide anything, and constants beyond 2⁶² are treated as
+unknown, so saturation cannot manufacture a contradiction. Loops run one
+iteration under the guard, then havoc everything the body assigns and
+assume `¬guard` only if the body has no `break`. Calls, field/index writes
+and anything unmodelled are havoc: unknown never means zero.
+
+It reports three things, all with the path condition printed as witness
+and only when the path is feasible and the fact is definite: **W4050**
+division/modulo by a divisor that is exactly 0 on that path (`a % z` after
+`if a == 0 { return }` → "when a != 0"); **N4051** a branch condition
+decided the same way on *every* path reaching it by the path facts (never
+by constants alone — that is narrow's — and never inside a loop iteration,
+where iteration-1 facts prove nothing); **W4052** an assertion that is
+false on a feasible path. Bounds: 64 paths per function, depth 64, 64 atoms
+per path; a bound ends a path, it never trades soundness for coverage. On
+the 260-module stdlib it says nothing at all, which is the correct answer
+for that corpus, and the noise-floor test pins that.
+
+Writing this exposed the same class of bug in the two older flow analyses,
+now fixed: `pfront_narrow` kept then-branch facts visible while deriving
+the else branch (so `if x > 5 … else …` "contradicted" itself — ~750 false
+W4120 on the stdlib), compacted its fact array on assignment kills (which
+shifted facts under the scope marks of enclosing `if`s), and assumed
+`¬guard` after every `while` regardless of `break`. `theory_absint` never
+narrowed the state by a branch condition, joined a `return`ing branch as
+if it fell through, dropped `break` states from the loop exit, decided
+"always false" on iteration 1 before the fixpoint, widened straight to ±∞
+(losing `x ≥ 1` in every Newton loop), and wrapped `-INT64_MIN` in
+`iv_sub` so `top - top` became the point `[-∞, -∞]`. It now narrows on
+`if`/`while` guards (`!= 0` goes through the sign lattice), treats
+`return`/`break`/`continue` as unreachable-after with proper accumulators,
+widens with thresholds {-1, 0, 1}, reports verdicts only in a final pass
+from the fixpoint, and only calls a cast "may not fit" on a *finite*
+out-of-range endpoint.
+
 **Partial evaluation (`theory_stage`).** Staging is only useful if stage-0 code
 actually runs. Binding-time analysis classifies each expression static or
 dynamic — conservatively, since refusing to evaluate is always safe and the
@@ -167,6 +212,8 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `33_comptime_let` | `let x = comptime 3*4` evaluates *(found a real parser bug)* |
 | `34_exhaustive_witness` | missing variant → warning naming the witness |
 | `35_egraph_rewrite` | e-graph builds classes and saturates |
+| `82_symexe_paths` + `symexe_paths` | W4050/W4052/N4051 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
+| `flow_noise_floor` | 0 × W4050/W4052/N4051/W4120 across the stdlib |
 
 **A real parser bug fell out of this work.** `let x = comptime 3i64 * 4i64`
 reported "not computable at compile time" while the same expression inline
@@ -205,7 +252,8 @@ each pass sits where it does. The shape:
  7b IRDL verification traits
  7c PGL certificates
  7d semantic subtyping / match refinement
- 7e abstract interpretation             intervals, signs, nullness
+ 7e abstract interpretation             intervals, signs, nullness, branch narrowing
+ 7f symbolic execution                  feasible-path faults with witnesses
  7e′ LIVENESS + semi-pruned split       ← builds the CFG
  7f THE OPTIMIZER                       ← consumes everything above
  8  handler-arm linearity
@@ -243,6 +291,11 @@ are documented and enforced in `theory_bridge.c3`.
 
 ## 6. Honest limits
 
+- **Symbolic execution is intra-procedural and linear-arithmetic only.**
+  Calls, shifts, bit operations, fields and indexing are havoc; two
+  variables are never related to each other (`x < y` is kept as an atom but
+  only refines when one side has a known interval). It proves absence of
+  nothing — it reports faults it can witness and stays silent otherwise.
 - **Arrow subtyping is conservative.** The full set-theoretic decomposition is
   more involved; unproven cases answer "not a subtype", which rejects rather
   than miscompiles.

@@ -1,0 +1,54 @@
+-- Symbolic execution: faults are reported only on FEASIBLE paths, with the
+-- path condition as witness; infeasible paths are pruned by the solver.
+
+-- (a) `x > 5` and `x < 3` contradict: the division inside is unreachable.
+--     No W4050 may be reported for line 8.
+fn pruned : (i64, i64) -> i64
+  | (x, y) ->
+    if x > 5i64 then if x < 3i64 then x / (y - y) else 1i64 else 2i64
+
+-- (b) after `if a == 0 { return }` the other path has a != 0, so the
+--     divisor `a` is fine, but `z` is 0 on that same path: W4050 on line 15.
+fn guarded(a: i64) -> i64 {
+  let z : i64 = 0i64;
+  if a == 0i64 { return 1i64; }
+  return (10i64 / a) + (a % z);
+}
+
+-- (c) match arms exclude earlier literals: `y / x` under `_` has x != 0.
+--     No W4050 for line 21.
+fn arms : (i64, i64) -> i64
+  | (x, y) ->
+    match x
+      | 0i64 -> 2i64
+      | _ -> y / x
+
+-- (d) an assertion that the path makes false: W4052 on line 27.
+fn asserted(n: i64) -> i64 {
+  if n > 10i64 {
+    assert n < 5i64;
+    return 1i64;
+  }
+  return 0i64;
+}
+
+-- (e) a `while` with `break` exits with the condition possibly TRUE, so
+--     `if i > 0` after it is NOT decided. No N4051 for line 38.
+fn breaks(len: i64) -> i64 {
+  let mut i : i64 = len;
+  while i > 0i64 {
+    if i == 3i64 { break; }
+    i = i - 1i64;
+  }
+  if i > 0i64 { return 1i64; }
+  return 0i64;
+}
+
+-- (f) both arms of an `if` continue: the second check is reached under
+--     both `k > 0` and `k <= 0`, so it must NOT be reported as decided.
+fn rejoin(k: i64) -> i64 {
+  let mut r : i64 = 0i64;
+  if k > 0i64 { r = 1i64; } else { r = 2i64; }
+  if k > 0i64 { r = r + 1i64; }
+  return r;
+}

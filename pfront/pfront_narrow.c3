@@ -58,6 +58,7 @@ extern fn void  free(void* ptr);
 extern fn int   printf(char* fmt, ...);
 
 const usz NR_MAX_FACTS   = 4096;
+const usz NR_STASH       = 64;      // then-branch facts set aside while deriving the else
 const usz NR_MAX_FRAMES  = 512;
 const usz NR_MAX_BINDERS = 2048;
 const int NR_MAX_DEPTH   = 300;
@@ -144,18 +145,19 @@ fn bool FlowEnv.add(FlowEnv* e, Fact f)
 // Writing to a binding invalidates everything known about it. Forgetting this
 // is the classic narrowing soundness hole: after `x = something_else`, a fact
 // proved before the assignment no longer holds.
+//
+// Killing must NOT compact the array: enclosing `if`/block walks hold index
+// marks into it, and shifting facts below a mark lets a branch-local fact
+// escape its branch (and then "contradict" the other branch). A killed fact
+// is tombstoned in place and skipped by every reader.
 fn usz FlowEnv.kill(FlowEnv* e, Node* binder)
 {
     if (binder == null) { return 0; }
     usz removed = 0;
-    usz w = 0;
     for (usz r = 0; r < e.count; r++)
     {
-        if (e.facts[r].binder == binder) { removed = removed + 1; continue; }
-        e.facts[w] = e.facts[r];
-        w = w + 1;
+        if (e.facts[r].binder == binder) { e.facts[r].binder = null; removed = removed + 1; }
     }
-    e.count = w;
     e.facts_killed = e.facts_killed + removed;
     return removed;
 }
@@ -210,7 +212,7 @@ fn bool FlowEnv.contradicts(FlowEnv* e, Fact* probe)
     for (usz i = 0; i < e.count; i++)
     {
         Fact* f = &e.facts[i];
-        if (f.binder != probe.binder) { continue; }
+        if (f.binder == null || f.binder != probe.binder) { continue; }
 
         if (f.kind == FactKind.F_IS_NULL && probe.kind == FactKind.F_NOT_NULL) { return true; }
         if (f.kind == FactKind.F_NOT_NULL && probe.kind == FactKind.F_IS_NULL) { return true; }
@@ -264,7 +266,7 @@ fn void FlowEnv.join(FlowEnv* e, usz base, usz then_end, usz else_end)
         for (usz k = then_end; k < else_end; k++)
         {
             Fact* b = &e.facts[k];
-            if (a.binder != b.binder) { continue; }
+            if (a.binder == null || a.binder != b.binder) { continue; }
             if (a.kind != b.kind) { continue; }
             if (a.kind == FactKind.F_IS_TYPE && a.type_id != b.type_id) { continue; }
             if (a.kind == FactKind.F_IS_VARIANT && a.variant != b.variant) { continue; }
@@ -655,15 +657,47 @@ fn void FlowWalker.walk(FlowWalker* w, Node* n, int depth)
             w.guards.derive(cond, true, 0);
             w.walk(n.child(1), depth + 1);
             usz then_end = w.env.count;
+            bool then_exits = always_exits(n.child(1), 0);
 
             if (n.child_count >= 3)
             {
-                // Else-branch: the condition fails.
+                // Else-branch: the condition fails. The then-branch's facts
+                // must NOT be visible while deriving it — `x > 5` on one side
+                // and `x <= 5` on the other is not a contradiction, it is an
+                // if/else. Set them aside, derive, then put them back for the
+                // join (which is symmetric).
+                usz then_len = then_end - base;
+                Fact[NR_STASH] stash;
+                bool stashed = then_len <= NR_STASH;
+                if (stashed)
+                {
+                    for (usz i = 0; i < then_len; i++) { stash[i] = w.env.facts[base + i]; }
+                    w.env.count = base;
+                }
                 w.guards.derive(cond, false, 0);
                 w.walk(n.child(2), depth + 1);
                 usz else_end = w.env.count;
-                // Only facts common to both branches survive the merge.
-                w.env.join(base, then_end, else_end);
+                bool else_exits = always_exits(n.child(2), 0);
+                if (stashed)
+                {
+                    usz room = NR_MAX_FACTS - else_end;
+                    usz put = then_len < room ? then_len : room;
+                    for (usz i = 0; i < put; i++) { w.env.facts[else_end + i] = stash[i]; }
+                    // A branch that always returns contributes nothing to the merge.
+                    if (then_exits && !else_exits) { w.env.count = else_end; }
+                    else if (else_exits && !then_exits) { for (usz i = 0; i < put; i++) { w.env.facts[base + i] = stash[i]; } w.env.count = base + put; }
+                    else { w.env.join(base, else_end, else_end + put); }
+                }
+                else
+                {
+                    w.env.join(base, then_end, else_end);
+                }
+            }
+            else if (then_exits)
+            {
+                // `if c { return }`: afterwards, ¬c holds.
+                w.env.reset(base);
+                w.guards.derive(cond, false, 0);
             }
             else
             {
@@ -685,8 +719,9 @@ fn void FlowWalker.walk(FlowWalker* w, Node* n, int depth)
             w.loops_widened = w.loops_widened + 1;
             w.walk(n.child(1), depth + 1);
             w.env.reset(base);
-            // After the loop the guard is false.
-            w.guards.derive(cond, false, 0);
+            // After the loop the guard is false — unless a `break` can leave
+            // it early, in which case nothing is known.
+            if (!has_break(n.child(1), 0)) { w.guards.derive(cond, false, 0); }
             return;
         }
 
@@ -747,6 +782,27 @@ fn void FlowWalker.walk(FlowWalker* w, Node* n, int depth)
             for (usz i = 0; i < n.child_count; i++) { w.walk(n.children[i], depth + 1); }
         }
     }
+}
+
+// Does this statement/block always leave the enclosing function or loop?
+fn bool always_exits(Node* n, int depth)
+{
+    if (n == null || depth > NR_MAX_DEPTH) { return false; }
+    if (n.kind == Nk.N_STMT_RETURN || n.kind == Nk.N_STMT_BREAK || n.kind == Nk.N_STMT_CONTINUE) { return true; }
+    if (n.kind == Nk.N_BLOCK && n.child_count > 0) { return always_exits(n.children[n.child_count - 1], depth + 1); }
+    if (n.kind == Nk.N_EXPR_IF && n.child_count >= 3) { return always_exits(n.child(1), depth + 1) && always_exits(n.child(2), depth + 1); }
+    return false;
+}
+
+// Does this loop body contain a `break` that targets it?
+fn bool has_break(Node* n, int depth)
+{
+    if (n == null || depth > NR_MAX_DEPTH) { return false; }
+    if (n.kind == Nk.N_STMT_BREAK) { return true; }
+    if (n.kind == Nk.N_EXPR_WHILE || n.kind == Nk.N_EXPR_FOR || n.kind == Nk.N_EXPR_LOOP
+     || n.kind == Nk.N_DECL_FN || n.kind == Nk.N_EXPR_LAMBDA) { return false; }
+    for (usz i = 0; i < n.child_count; i++) { if (has_break(n.children[i], depth + 1)) { return true; } }
+    return false;
 }
 
 // Kill every binding assigned anywhere in a subtree. Used at loop entry, where
