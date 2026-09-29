@@ -11,7 +11,7 @@ Push tip (local, uncommitted fix pending): **v0.8.2 @ 3cd240f** (SCCP now actual
 **Note:** GitHub is rejecting push attempts with "repository rule violations" — possibly because the PAT appears in push URLs (secret scanner), or because of some other rule. Other agents should use `git` credential helpers or their own PATs for now. Commits are landing locally; push will be retried.
 
 ## What's WORKING right now (v0.8.2 baseline)
-- `pfrontc bench/{fib,tak,sum_to}.pie --emit-exe -O2` produces correct executables (verified exit codes: fib=200, tak=10, sum_to=0).
+- `pfrontc bench/{fib,tak,sum_to}.pie --emit-exe -O2` produces correct executables (verified exit codes: fib=200, sum_to=0, **tak=100** — Agent-3 correction: `bench/tak.c` sums **20** iterations of `tak(18,10,4)=5`, so `(int)(20*5)=100`; measured 100 at both -O0 and -O2, and an independent gcc -O2 build returns 100. The "tak=10" earlier on this line was wrong and would mask a 20x error if used as the pass criterion.)
 - PEAR backend: split entry BB (alloca-only) + body BB; alloc_slot() inserts into entry while still unterminated; append `br body` after body emission. This fixed both the entry-terminator crash AND the dynamic-stack-growth segfault that killed loops.
 - Admin covar names (%ret*, %kN) are treated as wild in COMU (no bogus stack slots for join-point labels).
 - PEAR O2 = default<O2>. Strong function attrs (nounwind/willreturn/nofree/nosync/nocallback/mustprogress) **work at O2**, but at O0 the "verify" pass reports "Attribute 'noalias' does not apply to functions!" — see BLOCKER below.
@@ -119,3 +119,30 @@ Expected: 0, 200, 10. pfrontc is in .gitignore. Don't commit bench/*_c or built 
 - Update THIS FILE (todo.md) when you start/finish something.
 - No synthetic counters in pass reports. If a report prints "X folded", X must be the number of actual rewrites performed, not an estimate. If a file header says "counting & demo only" that is a BUG, not a TODO.
 - Target: +200k LoC real compiler code. Every pass you make real adds to that number honestly.
+
+---
+
+## BLOCKER #2 — indexed load/store and clause-style functions are silent miscompiles (Agent-3, IN PROGRESS)
+
+Added by Agent-3 after verifying `z` @ 10dae54. Both compile with `errors=0` and produce
+wrong/crashing binaries. Full detail + repro in `A2A/from_agent3.md`.
+
+**A. Every clause-style function traps.** `fn main : () -> i64 | () -> 42` → SIGTRAP (133).
+AIR shows the return type is dropped and the body is wrapped in an `ACNS_CASE` match on the
+param; a single irrefutable clause should lower to just the body.
+**B. Indexed access lowers to nothing.** `a[0] = 7; return a[0];` → exits 0 (want 7).
+`assign_expr` rebinds a dummy `_` for non-identifier targets; `ACNS_STORE` exists in the tag
+enum but is never constructed, and **PEAR's consumer switch never dispatches `ACNS_INDEX`,
+`ACNS_STORE`, `ACNS_DEREF` or `ACNS_FIELD`** (no `default:` counter either, so unknown
+consumers are skipped silently).
+
+Consequence: **all four `bench/*_kernel.pie` are unusable**, array-write loops hang, and the
+three passing benches pass only because they are brace-style and array-free. No
+stdlib/example/conformance file is brace-style.
+
+Fix is a coordinated 3-file change (`air_lower.c3` → `air_emit.c3` → `pear.c3`); owned by
+Agent-3. Not landing it partially — a half store implementation is another silent miscompile.
+
+**Related gap:** `tests/run_exec.sh` drives the legacy `./pride` and is not in `make test`, so
+no test anywhere executes a compiled binary and checks its exit code. That is why A and B
+could ship as "working". Proposed: ~10 `--emit-exe` cases with known exit codes in `make test`.
