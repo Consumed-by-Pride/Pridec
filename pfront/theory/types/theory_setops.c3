@@ -251,17 +251,27 @@ fn int ts_mk_fe(Field* flds, usz count)
 
 fn int TypeStore.mk_record(TypeStore* ts, Field* flds, usz count, int tail)
 {
-    // Build a StFieldEntry
+    // Build a StFieldEntry.
     if (ts.fentry_count >= ts.fentry_cap) { return ts.bot_idx; }
     int feid = (int)ts.fentry_count; ts.fentry_count = ts.fentry_count + 1;
     StFieldEntry* fe = &ts.field_entries[feid];
     fe.fields = null; fe.field_count = count; fe.next = -1; fe.hash = 0;
-    // We don't copy fields; we just stash count+tail; for the subtyping
-    // algorithm we consult per-field typing via the children array.
-    (void)flds;
+
+    // COPY the fields. Earlier this stored only the count and dropped the
+    // field array, which made every record type indistinguishable from every
+    // other record of the same arity — record subtyping could not be decided
+    // at all. The fields are the type; keep them.
+    if (count > 0 && flds != null)
+    {
+        Field* copy = (Field*)malloc((long)(count * Field::size));
+        if (copy == null) { return ts.bot_idx; }
+        for (usz i = 0; i < count; i++) { copy[i] = flds[i]; }
+        fe.fields = copy;
+    }
+
     int id = ts.mk_simple(ST_RECORD);
     ts.nodes[id].child_count = 1;
-    ts.nodes[id].children[0] = tail;
+    ts.nodes[id].children[0] = tail;   // -1 = closed record
     ts.nodes[id].fe_idx = feid;
     return id;
 }

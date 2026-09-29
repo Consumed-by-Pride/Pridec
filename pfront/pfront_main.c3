@@ -24,6 +24,7 @@ import pfront_resolve;
 import pfront_ext;
 import pfront_sema;
 import pfront_flow;
+import theory_subtype_engine;
 import theory_check;
 import pfront_source;
 import pfront_types;
@@ -616,6 +617,7 @@ fn int main(String[] args)
     bool emit_bc = false;
     bool emit_exe = false;
     bool time_passes = false;
+    bool subtype_selftest = false;
     bool dump_cfg = false;
     bool optimize = true;
     int  opt_level = 2;
@@ -635,6 +637,10 @@ fn int main(String[] args)
         else if (streq(a, "--dump-ast"))  { dump_ast = true; }
         else if (streq(a, "--dump-mods")) { dump_mods = true; }
         else if (streq(a, "--quiet"))     { quiet = true; }
+        // Runs the semantic-subtyping decision procedure against its own
+        // specification (see theory_subtype_engine.c3) and exits with the
+        // number of failed cases. No input file required.
+        else if (streq(a, "--subtype-selftest")) { subtype_selftest = true; }
         else if (streq(a, "--no-verify")) { verify = false; }
         else if (streq(a, "--plain"))     { rich = false; }
         else if (streq(a, "--strict-types")) { strict_types = true; }
@@ -670,6 +676,11 @@ fn int main(String[] args)
         else if (a[0] != '-')             { input = a; }
     }
 
+    if (subtype_selftest)
+    {
+        int fails = theory_subtype_engine::se_selftest();
+        return fails;
+    }
     if (input == null) { printf("error: no input file\n"); return 2; }
 
     if (root_count == 0)

@@ -142,3 +142,65 @@ Per instruction: **complete these, no stubs, verified.** Order, because correctn
 Tracked in `A2A/todo.md`. Every slice lands as a branch + ready PR with the test output pasted in.
 
 -- Agent-3
+
+
+---
+
+# Report #4 — what changed as a result (same branch, `feat/agent3-subtype-engine`)
+
+**Built: `theory_subtype_engine.c3`** — 780 lines of code, 160 of comment. A real
+decision procedure for `A ≤ B` (`⟺ A ∧ ¬B` empty) with the atom-level emptiness
+test the layer was missing:
+
+* primitives disjoint · nominals disjoint · products elementwise · arrays and
+  options elementwise · **closed records** fieldwise · arrows by the FCB rule
+  `(d→c) ∧ ¬(d'→c') ≅ ⊥ ⟺ d' ≤ d ∧ c ≤ c'`
+* **three-valued**: undecidable ⇒ `UNKNOWN`, counted and printed. Never a guess.
+* **the self-test is the specification**, run from the driver:
+
+```
+$ ./pfrontc --subtype-selftest
+=== subtype engine self-test ===
+  self-test: 47/47 passed, 0 failed
+  subtype engine   : 56 queries, 40 proved, 15 refuted, 1 unknown
+                     76 memo hits, 0 domain-escape decisions, 0 deferred, 0 overflows, widest clause 4
+  exit=0
+```
+
+`int ∧ bool ≃ ⊥`, `A ∧ ¬A ≃ ⊥`, `A ∨ ¬A ≃ ⊤`, both De Morgan laws,
+distributivity, nested products, arrays of products, label-mismatched records,
+arrow contravariance (`(⊤→int) ≤ (int→int)` holds; `(int→int) ≤ (⊤→int)` does
+not), and negative facts that must **not** be proved (`⊤ ≰ int`, `char ≰ int`).
+
+The single `unknown` is *asserted*: `μX.int ≤ int` needs the unfolding layer, and
+the suite fails if it ever answers definitively without one. Returning `false`
+there would have shown a prettier 48/48 and hidden exactly the thing this audit
+is about.
+
+**Fixed: `TypeStore.mk_record`** discarded the field array (`fe.fields = null;
+(void)flds;`) and stored only a count, so every record of a given arity was the
+same type — record subtyping was undecidable by construction.
+
+**Boundaries, stated and counted rather than stubbed:** one positive arrow vs one
+negative is decided; vs several, only when the positive's domain escapes the
+union of negative domains (else `deferred`). μ types and open records ⇒
+`UNKNOWN`. An earlier version looped on the splitting rule — 32,779 iterations,
+no conclusion — and is replaced by these explicit cases.
+
+**Regression:** conformance `218/44` and stdlib self-clean `260/260`, both
+identical to the pre-change baseline.
+
+## Next slices
+
+1. **Wire the engine in** so `semantic subtype: N queries` is non-zero on real
+   programs and refutations become diagnostics (annotated-binding assignability).
+2. **MSP**: reach the error path so stage violations are reported, not counted.
+3. **IRDL**: declared-op → AIR lowering via the PGL patterns.
+
+## Ledger (honest, same counter as always)
+
+`pfront/` was 53,101 lines of C3 before this slice; this adds 780 (+160 comment).
+The 200K figure is a program of work, not a patch — I will report the ledger each
+slice and pad nothing.
+
+-- Agent-3
