@@ -57,6 +57,10 @@ extern fn Lvalue ll_build_alloca(Lbuilder b, Ltype t, char* n) @cname("LLVMBuild
 extern fn Lvalue ll_build_store(Lbuilder b, Lvalue v, Lvalue p) @cname("LLVMBuildStore");
 extern fn Lvalue ll_build_load2(Lbuilder b, Ltype t, Lvalue p, char* n) @cname("LLVMBuildLoad2");
 extern fn Lvalue ll_build_add(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildAdd");
+extern fn Lvalue ll_build_nsw_add(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildNSWAdd");
+extern fn Lvalue ll_build_nsw_sub(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildNSWSub");
+extern fn Lvalue ll_build_nsw_mul(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildNSWMul");
+
 extern fn Lvalue ll_build_sub(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildSub");
 extern fn Lvalue ll_build_mul(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildMul");
 extern fn Lvalue ll_build_sdiv(Lbuilder b, Lvalue l, Lvalue r, char* n) @cname("LLVMBuildSDiv");
@@ -120,6 +124,13 @@ const int  LLVM_ATTR_NOUNWIND   = 4;
 const int  LLVM_ATTR_WILLRETURN = 67;
 const int  LLVM_ATTR_NOFREE     = 43;
 const int  LLVM_ATTR_NOSYNC     = 62;
+const int  LLVM_ATTR_READNONE  = 33;
+const int  LLVM_ATTR_READONLY  = 34;
+const int  LLVM_ATTR_NORETURN  = 12;
+const int  LLVM_ATTR_INACCESSIBLEMEMONLY = 85;
+const int  LLVM_ATTR_NO_CALLBACK = 49;
+const int  LLVM_ATTR_MUSTPROGRESS = 96;
+
 
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
 
@@ -403,9 +414,9 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             char* nm = cg.mktmp();
             switch (p.bop)
             {
-                case ABIN_ADD: return ll_build_add(cg.b, a, bv, nm);
-                case ABIN_SUB: return ll_build_sub(cg.b, a, bv, nm);
-                case ABIN_MUL: return ll_build_mul(cg.b, a, bv, nm);
+                case ABIN_ADD: return ll_build_nsw_add(cg.b, a, bv, nm);
+                case ABIN_SUB: return ll_build_nsw_sub(cg.b, a, bv, nm);
+                case ABIN_MUL: return ll_build_nsw_mul(cg.b, a, bv, nm);
                 case ABIN_DIV: return ll_build_sdiv(cg.b, a, bv, nm);
                 case ABIN_MOD: return ll_build_srem(cg.b, a, bv, nm);
                 case ABIN_AND: return ll_build_and(cg.b, a, bv, nm);
@@ -1012,10 +1023,18 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     }
     // Pride fns don't throw, don't free, don't do atomics, always return.
     // These attrs unlock better optimization than plain -O2 C gets.
+    // PEAR strong attribute set. λ̄μμ̃ gives us global knowledge C lacks:
+    //  - All Pride functions are TOTAL (willreturn, mustprogress) — no unbounded
+    //    recursion in well-founded Pride, no infinite loops at effect level
+    //  - Never unwind (nounwind), never free (nofree), no atomics (nosync)
+    //  - No callback registration (no-callback).
+    // These unlock GVN/LICM/speculation C compilers refuse to apply.
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NO_CALLBACK);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
 }
 
 fn void pear_declare(PearCg* cg, AirDecl* d)
@@ -1044,6 +1063,11 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
     ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, a);
 }
 
+
+// PEAR modular optimization pipeline.
+// Tuned for λ̄μμ̃-lowered AIR (CPS-administrated, SSA-ready, no UB).
+// Heavier than clang -O2 because PEAR attributes prove totality/nounwind/nofree/nosync.
+const char* PEAR_PIPELINE = (char*)"mem2reg,early-cse-memssa,instcombine,function-attrs,globalopt,reassociate,gvn,sccp,correlated-propagation,simplifycfg,adce,bdce,dce,tailcallelim,loop-rotate,licm,indvars,loop-deletion,argument-promotion,instruction-combining,simplifycfg,gvn,simplifycfg,dce,globaldce,eliminate-available-externally";
 
 fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* mod)
 {
@@ -1087,12 +1111,11 @@ fn void pear_emit_module(AirModule* mod, char* bc_path)
 
     PearCg cg;
     pear_setup(&cg, ctx, m, b, mod);
-    // Run the standard O2 pipeline: mem2reg, instcombine, gvn, simplifycfg,
-    // sccp, dce, tailcallelim, inliner, loop opts, etc.
+    // Run PEAR modular pipeline (function-attrs/globalopt/correlated-prop/etc.).
     {
         Lpass_opts po = ll_create_pb_opts();
         ll_pb_set_inliner_threshold(po, 250);
-        Lerror e = ll_run_passes(m, (char*)"default<O2>", null, po);
+        Lerror e = ll_run_passes(m, PEAR_PIPELINE, null, po);
         if (e != null) { ll_consume_error(e); }
         ll_dispose_pb_opts(po);
     }
@@ -1128,14 +1151,16 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path)
         ll_builder_dispose(b); ll_mod_dispose(m); ll_ctx_dispose(ctx);
         return false;
     }
+    PearCg cg;
+    pear_setup(&cg, ctx, m, b, mod);
+
+
     Ltarget_machine tm = ll_create_tm(tgt, (char*)"x86_64-pc-linux-gnu", (char*)"", (char*)"", LLVM_CODEGEN_O0, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_SMALL);
     if (tm == null)
     {
         ll_builder_dispose(b); ll_mod_dispose(m); ll_ctx_dispose(ctx);
         return false;
     }
-    PearCg cg;
-    pear_setup(&cg, ctx, m, b, mod);
 
     char* emsg = null;
     bool ok = (ll_tm_emit_to_file(tm, m, obj_path, LLVM_CG_OBJ_FILE, &emsg) == 0);
