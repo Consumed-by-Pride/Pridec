@@ -1,0 +1,54 @@
+-- Closures: free variables by binder identity, escape classification,
+-- captured mutable locals that outlive their frame, captures reassigned
+-- after creation, and calls of let-bound lambdas with the wrong arity.
+
+extern fn sink : i64 -> () ! [IO]
+extern fn keep : fn(i64) -> i64 -> () ! [IO]
+
+-- 1. non-escaping, called once: an inlining candidate; captures `n` (immutable)
+fn local_use : i64 -> i64
+  | n ->
+      let add = fn (x: i64) -> i64 { x + n }
+      add(1i64)
+
+-- 2. returned closure capturing a `let mut`: the mutable local outlives its frame
+fn counter : i64 -> fn(i64) -> i64
+  | start ->
+      let mut c : i64 = start
+      let bump = fn (d: i64) -> i64 { c = c + d; c }
+      bump
+
+-- 3. captured variable reassigned after the closure is created and before it runs
+fn stale : () -> i64
+  | () ->
+      let mut x : i64 = 1i64
+      let f = fn (y: i64) -> i64 { x + y }
+      x = 10i64
+      f(1i64)
+
+-- 4. passed to a call: escapes as an argument
+fn passed : () -> () ! [IO]
+  | () ->
+      let k : i64 = 3i64
+      keep(fn (v: i64) -> i64 { v * k })
+
+-- 5. wrong arity at a call of a let-bound lambda
+fn arity : () -> i64
+  | () ->
+      let g = fn (a: i64, b: i64) -> i64 { a + b }
+      g(1i64)
+
+-- 6. lambda capturing nothing, applied immediately
+fn immediate : () -> i64
+  | () -> (fn (z: i64) -> i64 { z * 2i64 })(21i64)
+
+-- 7. a name that shadows a captured one is not a capture
+fn shadowed : i64 -> i64
+  | n ->
+      let h = fn (n: i64) -> i64 { n + 1i64 }
+      h(n)
+
+fn main : () -> () ! [IO]
+  | () ->
+      sink(local_use(1i64) + counter(0i64)(1i64) + stale() + arity() + immediate() + shadowed(1i64))
+      passed()

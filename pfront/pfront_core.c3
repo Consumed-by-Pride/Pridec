@@ -66,6 +66,7 @@ const uint NF_TAIL        = 32768;  // tail-call annotated
  the difference, and it is exactly one bit of difference.
 */
 const uint NF_POSTTEST    = 65536;  // do { body } while cond
+const uint NF_NOESCAPE    = 131072; // lambda proven not to escape its creating function (theory_defun)
 
 // ── AST vocabulary ──────────────────────────────────────────────────────────
 // Grouped so range checks (is_decl / is_expr / is_pattern / is_type) are

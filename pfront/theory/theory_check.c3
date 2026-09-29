@@ -66,7 +66,6 @@ import theory_matching;
 import theory_hered;
 import theory_dataflow;
 import theory_ub;
-import theory_effects_full;
 import theory_cps;
 import theory_stratified;
 import theory_nbe;
@@ -534,7 +533,6 @@ struct TheoryPipeline
     theory_hered::HeredState*       hered;
     theory_dataflow::DfBundle*      dfb;
     theory_ub::UbAnalysis*          uba;
-    theory_effects_full::EffFull*   efffull;
     theory_cps::CpsXform*           cps;
     theory_stratified::StratChecker* strat;
     theory_nbe::NbeState*           nbe;
@@ -671,7 +669,6 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.hered = (theory_hered::HeredState*)malloc(theory_hered::HeredState::size);
     tp.dfb = (theory_dataflow::DfBundle*)malloc(theory_dataflow::DfBundle::size);
     tp.uba = (theory_ub::UbAnalysis*)malloc(theory_ub::UbAnalysis::size);
-    tp.efffull = (theory_effects_full::EffFull*)malloc(theory_effects_full::EffFull::size);
     tp.cps = (theory_cps::CpsXform*)malloc(theory_cps::CpsXform::size);
     tp.strat = (theory_stratified::StratChecker*)malloc(theory_stratified::StratChecker::size);
     tp.nbe = (theory_nbe::NbeState*)malloc(theory_nbe::NbeState::size);
@@ -693,7 +690,6 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.hered != null) tp.hered.init(a);
     if (tp.dfb != null) tp.dfb.init(a);
     if (tp.uba != null) { tp.uba.init(a); tp.uba.attach(d, it, file); }
-    if (tp.efffull != null) tp.efffull.init(a);
     if (tp.cps != null) tp.cps.init(a);
     if (tp.strat != null) tp.strat.init(a);
     if (tp.nbe != null) { tp.nbe.init(a); tp.nbe.run_demo(); }
@@ -704,7 +700,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.qual != null) tp.qual.init(a);
     if (tp.sess != null) tp.sess.init(a);
     if (tp.sct != null) { tp.sct.init(a); tp.sct.attach(d, it, file); }
-    if (tp.defun != null) tp.defun.init(a);
+    if (tp.defun != null) { tp.defun.init(a); tp.defun.attach(d, it, file); }
 
     tp.optimize = true;
     tp.opt_level = 2;
@@ -756,7 +752,6 @@ fn void TheoryPipeline.destroy(TheoryPipeline* tp)
     if (tp.hered != null) { tp.hered.destroy(); free((void*)tp.hered); }
     if (tp.dfb != null) { tp.dfb.destroy(); free((void*)tp.dfb); }
     if (tp.uba != null) { tp.uba.destroy(); free((void*)tp.uba); }
-    if (tp.efffull != null) { tp.efffull.destroy(); free((void*)tp.efffull); }
     if (tp.cps != null) { tp.cps.destroy(); free((void*)tp.cps); }
     if (tp.strat != null) { tp.strat.destroy(); free((void*)tp.strat); }
     if (tp.nbe != null) { tp.nbe.destroy(); free((void*)tp.nbe); }
@@ -833,8 +828,8 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.matcher != null) { tp.matcher.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.hered != null) { tp.hered.walk_ast(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.uba != null) { tp.uba.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
-    if (tp.efffull != null) { tp.efffull.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.strat != null) { tp.strat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.defun != null) { tp.defun.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.nbe != null) { tp.nbe.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.crdt != null) { tp.crdt.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.lin != null) { tp.lin.run(root); tp.passes_run = tp.passes_run + 1; }
@@ -842,7 +837,6 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.qual != null) { tp.qual.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.sess != null) { tp.sess.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.sct != null) { tp.sct.run(root); tp.passes_run = tp.passes_run + 1; }
-    if (tp.defun != null) { tp.defun.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.cps != null) { tp.cps.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.dfb != null) { tp.dfb.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     t0 = tp.tick("fcb+cmtt+irdl+eclass+eff", t0);
@@ -1152,7 +1146,6 @@ fn void TheoryPipeline.report(TheoryPipeline* tp)
     if (tp.hered != null) { tp.hered.report(); }
     if (tp.dfb != null) { tp.dfb.report(); }
     if (tp.uba != null) { tp.uba.report(); }
-    if (tp.efffull != null) { tp.efffull.report(); }
     if (tp.cps != null) { tp.cps.report(); }
     if (tp.strat != null) { tp.strat.report(); }
     if (tp.nbe != null) { tp.nbe.report(); }

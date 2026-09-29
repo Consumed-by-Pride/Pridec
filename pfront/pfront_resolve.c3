@@ -526,7 +526,13 @@ fn Sym* Resolver.declare(Resolver* r, uint name_id, pfront_core::SymKind k,
         {
             // Function clauses and overloads legitimately repeat a name; only
             // flag genuinely conflicting value bindings in the same scope.
-            if (k != pfront_core::SymKind.SYM_FN && prev.kind != pfront_core::SymKind.SYM_FN)
+            // A source definition of a name the compiler pre-declares
+            // (`type byte = u8` in the prelude over the builtin `byte`) is
+            // the intended override, not a shadowing accident. Before this
+            // every compile printed two W3010s from stdlib/prelude.pie.
+            bool over_builtin = prev.kind == pfront_core::SymKind.SYM_BUILTIN_TYPE
+                             || prev.kind == pfront_core::SymKind.SYM_BUILTIN_FN;
+            if (k != pfront_core::SymKind.SYM_FN && prev.kind != pfront_core::SymKind.SYM_FN && !over_builtin)
             {
                 char* nm = r.interner.text(name_id);
                 r.diags.warn(pfront_core::Phase.PH_RESOLVE, 3010,

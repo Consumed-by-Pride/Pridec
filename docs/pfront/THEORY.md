@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_defun.c3` | ~600 | Closure analysis: free vars by binder identity, escape classification (NF_NOESCAPE), mutable captures of escaping closures marked NF_ADDR_TAKEN for boxing; W4190/N4191/N4192/W4193/W4194 |
 | `theory_effcont.c3` | ~800 | Handler discipline: lexical prompt stack, W4180 undeclared perform, W4181 call leaks an effect, N4182 multi-shot, W4183 stray / W4184 escaping resume, N4185 dead arm, W4186 arm arity, N4187 tail-resumptive (sets NF_TAIL) |
 | `theory_linearity.c3` | ~900 | Ownership of `alloc`: flow-sensitive LIVE/FREED/MAYBE/ESCAPED per resource with aliases, defer, loops; W4160 double free, W4161 use-after-free, W4162 leak, W4166 overwritten while owned, N4163–N4165 path-dependent |
 | `theory_sct.c3` | ~900 | Size-change termination (Lee/Jones/Ben-Amram): structural descent through patterns, integer descent only under a guard bound, closure over mutual recursion; W4150 proved loop, N4152 not proved (why), N4151 proved (`--lint`) |
@@ -116,6 +117,31 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Closure analysis (`theory_defun`).** Compared free variables by *name*
+(an inner `n` shadowing an outer `n` counted as a capture) and reported
+"0 lambdas escape" for a lambda that was returned. Now free variables are
+computed by binder identity, and every lambda is classified by where its
+value goes — returned, passed to a call, stored into an aggregate or
+through a pointer, captured by another closure (resolved transitively), or
+only ever called directly; a `let f = fn …` inherits the fate of `f`'s
+uses. Two facts are written back to the AST for the rest of the pipeline:
+**`NF_NOESCAPE`** (new flag) on lambdas that never leave their function —
+the ones NbE's β may inline and the backend may lambda-lift — and
+**`NF_ADDR_TAKEN`** on a `let mut` captured by an *escaping* closure: the
+variable is shared mutable state that outlives its frame (closures read
+the variable, not a snapshot — that is the semantics NbE already
+implements), so it must be boxed, and the flag is exactly what liveness,
+dead-store elimination and alloca placement already honour for `&x`.
+Diagnostics: **W4190** an escaping closure writes to a captured `let mut`
+(note under `--lint` when it only reads it); **N4191** a captured variable
+is reassigned after the closure is created and before it is used ("the
+closure will see this new value"); **N4192** (`--lint`) non-escaping,
+called once — inline candidate; **W4193** a let-bound or immediately
+applied lambda called with the wrong number of arguments (both `fn (x: T)`
+and clause-style `fn | (x, y) ->` forms); **W4194** a let-bound lambda
+never used. The pass runs *before* NbE so it sees the source lambdas;
+NbE then removes the non-escaping ones. Corpus: clean.
 
 **Handler discipline (`theory_effcont`).** Counted "frames" and "fuses"
 on a continuation stack that nothing consulted. `theory_effects` already
@@ -353,6 +379,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `89_closures` + `closures` | inline candidate, boxed mutable capture (returned), stale capture, lambda arity, escape/capture census; immutable-capture-as-argument and shadowing quiet |
 | `88_handlers` + `handlers` | undeclared perform, call leak, tail-resumptive, multi-shot (sequential and loop), dead arm, stray and escaping resume, arm arity; declared/handled performs quiet |
 | `87_ownership` + `ownership` | double free, UAF, one-path leak, full leak, alias, escape (quiet), defer+free, loop-carried double free, overwrite-while-owned, parameter UAF |
 | `86_sct_termination` + `sct_termination`/`sct_quiet` | len/fib/ack/halve/ev-od proved; fact (unbounded) / swap (rotation) / shadow not proved; spin is a proved loop; proofs only under `--lint` |

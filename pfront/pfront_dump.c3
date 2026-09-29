@@ -175,6 +175,7 @@ fn void print_flags(Node* n)
     if ((f & pfront_core::NF_VARIADIC) != 0)   { printf(" ..."); }
     if ((f & pfront_core::NF_EXTERN) != 0)     { printf(" extern"); }
     if ((f & pfront_core::NF_TAIL) != 0)       { printf(" tail"); }
+    if ((f & pfront_core::NF_NOESCAPE) != 0)   { printf(" noescape"); }
     if ((f & pfront_core::NF_ERROR) != 0)      { printf(" ERR"); }
 }
 
