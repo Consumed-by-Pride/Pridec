@@ -1,0 +1,29 @@
+-- UB lattice (spec §14): `poison` is UB only when USED; the use is the
+-- diagnostic point and the origin is named.
+extern fn sink(x: i64) -> i64
+
+fn main : (i64, *i64) -> i64
+  | (n, p) ->
+      let bad = poison i64
+      -- (a) arithmetic on poison is poison, not yet UB
+      let q = bad + 1i64
+      -- (b) a branch on it IS UB (via q, origin line 7)
+      if q > 0i64 then sink(1i64) else sink(2i64)
+      -- (c) a call argument
+      sink(bad)
+      -- (d) a shift by the operand's width is poison; using it is UB
+      let s = 1i8 << 8i64
+      let mut m : i64 = 0i64
+      m = s as i64
+      if m == 0i64 then sink(3i64)
+      -- (e) re-tagging: after `m = n` m is defined again — no report
+      m = n
+      if m == 0i64 then sink(4i64)
+      -- (f) storing poison to memory is a use
+      p[0i64] = bad
+      -- (g) a lambda body is scanned too
+      let f = fn (x: i64) -> i64 { if bad > 0i64 then x else 0i64 }
+      -- (h) dead code after ub!
+      unsafe { ub! }
+      sink(5i64)
+      sink(6i64)

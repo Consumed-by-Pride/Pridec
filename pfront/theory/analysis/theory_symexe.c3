@@ -29,15 +29,15 @@
 //
 // What it reports (only on FEASIBLE paths, only when DEFINITE):
 //
-//   W4050  division / modulo whose divisor is exactly 0 under the path
+//   W4055  division / modulo whose divisor is exactly 0 under the path
 //          condition. `x / (n - n)` after const-fold, `a % 0` after
 //          `if a == 0 { return }` on the other path — real faults, with the
 //          witness printed.
-//   N4051  a branch condition decided by the PATH (not by constants: those
+//   N4056  a branch condition decided by the PATH (not by constants: those
 //          are pfront_narrow's job and are skipped here): `if x > 5 { if
 //          x < 3 { ... } }` — the inner condition is always false, and the
 //          note says which earlier facts make it so.
-//   W4052  `assert c` where c is false on a feasible path.
+//   W4057  `assert c` where c is false on a feasible path.
 //
 // Everything a path learns from `unsafe`, calls, field/index writes, refs,
 // effects or anything else it does not model is HAVOC: the value becomes a
@@ -838,7 +838,7 @@ fn void SymState.check_divisor(SymState* s, SxPath* p, Node* at, int divisor)
         if (msg != null)
         {
             snprintf(msg, 640, "division by zero on a feasible path: the divisor is 0 when %s", s.witness(p));
-            s.emit(2, 4050, at, msg);
+            s.emit(2, 4055, at, msg);
         }
     }
 }
@@ -930,7 +930,7 @@ fn int SymState.eval(SymState* s, SxPath* p, Node* n, int depth)
                 if (msg != null)
                 {
                     snprintf(msg, 640, "assertion always fails on a feasible path: when %s", s.witness(p));
-                    s.emit(2, 4052, n, msg);
+                    s.emit(2, 4057, n, msg);
                 }
             }
             else if (t == 1) { s.assert_proved = s.assert_proved + 1; }
@@ -1099,7 +1099,7 @@ fn void SymState.flush_branches(SymState* s)
         if (msg == null) { continue; }
         snprintf(msg, 640, "this condition is always %s: every path reaching it already requires %s",
                  all_true ? "true" : "false", b.witness != null ? b.witness : "?");
-        s.emit(1, 4051, b.cond, msg);
+        s.emit(1, 4056, b.cond, msg);
     }
     s.branch_count = 0;
 }
