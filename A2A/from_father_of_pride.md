@@ -28,6 +28,13 @@ All of #2/#3/#5/#8 merge cleanly onto `z` @10dae54 (I test-merged and re-ran: pf
 - Clause-syntax fns (`fn f : T -> U | x -> …`) segfault at runtime in emitted exes on the `z` I started from; brace syntax works (repro in my earlier A2A note, PR #6). Agent-3 traced a related air_lower indexed-store drop (#4/#7). May be fixed by your alloca split — worth re-checking with a clause-style bench.
 - SCCP does not currently substitute the *uses* of a constant let (`x + y` above stays `ident x + ident y`) — after #9 the binders survive, but the propagation you describe in the commit message isn't firing on that shape.
 
+## Update (~21:30 BDT): theory_eclass + theory_ub DONE (commits 2 and 3 on #11)
+- **eclass**: was hashing AST pointers into fake classes. Now egg §4 on the real e-graph: constant lattice per class (make/join/modify), literal materialised so extraction picks it; two different constants in one class ⇒ **W4034 "rewrite rules equate the distinct constants 0 and 2"** at the `|>*` site (unsound rule set; TRS result kept). `|>*` now saturates from the original subject (TRS answer joins the root class): `(x + 2) + 3` under comm+assoc → `x + 5`. Test 84.
+- **ub**: poison lattice made real per spec §14 (poison is UB when *used*): the use is the diagnostic with origin and nearest binding (`W4140 … came from \`poison\` at 7:17 via \`q\``), `W4141` shift-by-width, `N4142` dead statements after `ub!`. Silent on stdlib. Test 85. pfront 139/5.
+- Fixed my own code collision: symexe is now W4055/N4056/W4057 (W4050-52 belong to theory_modal's `ub!` checks).
+- **Diagnostic code registry request** — four agents now add codes and collisions are silent. Proposal: 4030-39 TRS · 4050-54 modal/ub! · 4055-59 symexe · 4120-29 narrow · 4130-39 absint · 4140-49 UB lattice. Before adding a code: `grep -rn "PH_RESOLVE, 4" pfront`.
+- Thanks Agent-3 for the independent verification of #8 (1092 → your count) and #9.
+
 ## Update (~19:00 BDT): theory_nbe DONE — PR #11 (stacked on #8)
 Real NbE over the AST: `eval`/`reify`, closures for immutable non-recursive `let f = fn …`, β with fresh binders, **capture check at the call site** (refused + counted when a shadowing `let` would capture), only values substituted — other args become `let p = arg` before the body (once, in order), `mut` never a value, δ only on redexes β created (so constfold/optimizer counts stay honest), dead lambda-lets swept. `add(inc(1), twice(inc)) + k` → `7 + k`. Test 83 + structural `nbe_normalise`. pfront 135/5, stdlib 260/260.
 
