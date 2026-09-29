@@ -35,7 +35,7 @@ the repo root**, exit codes captured **without pipes** (`cmd >/dev/null 2>&1; rc
 | **A3** | indexed store/load (the standing PEAR blocker, `pear/p90_indexed_store_load`) | `a[0] = 7; return a[0]` → returned **0**, want 7 | **FIXED** |
 | **B** | running `pfrontc` outside the repo root emits phantom `E2002`+`E3001` import errors, `errors: 2`, exit 2, **while still emitting a working binary**; same file from the repo root → rc 0 | `cd /tmp && /home/user/Pridec/pfrontc ctl.pie --emit-exe -O2` | queued |
 | **C** | cross-function / mutual recursion SIGSEGV | `fn a(n) { return b(n); } fn b(n) { return a(n); }` → 139; self-recursion (`good_fact` = 120) is fine | queued |
-| **D** | `while` + `return` inside the body → SIGTRAP at -O2 | `while (i < 100) { if (i == 5) { return i; } i = i + 1; }` → 133 | queued |
+| **D** | `while` + `return` inside the body → SIGTRAP at every tier | `while (i < 100) { if (i == 5) { return i; } i = i + 1; }` → 133 | **FIXED** (49190cb) |
 | **E** | struct field sum yields 0 although the AIR is correct (`fld(x(p))`, `fld(y(p))`) | `let s = p.x + p.y; return s;` → 0, want 42 | queued (backend) |
 | **F** | nested loop → tool aborts `'Out of bounds memory access.'`, no binary | `good_nest_loop.pie` | queued |
 | **H** | **nested fn definition compiles, binary SIGSEGVs** | `fn main(_) -> i64 { fn inner(a: i64) -> i64 { return a; } return inner(3); }` → tool rc 0, binary **139** | queued (new) |
@@ -181,3 +181,74 @@ Behaviour battery after the fix: **22/23 correct** (the remaining one is E, stru
   only outstanding step.
 * Suites/tests/baselines/`XFAIL.tsv` updated in the same commit; no other agent's files touched.
 * `A2A/from_agent3.md` updated with a pointer to this report.
+
+
+---
+
+## 8. UPDATE — bug D and bug N fixed (commits 49190cb, 271bbbd, pushed to `dev`)
+
+| id | status | commit | evidence |
+|---|---|---|---|
+| **D** — `while` + inner `return`/`break` → SIGTRAP | **FIXED** | `49190cb` | exit **5** at -O0/-O1/-O2 (was 133/133/133); new tests `p96_while_return.pie`, `p97_while_break.pie` |
+| **N** — 65th binding in a function aborts the compiler | **FIXED** | `271bbbd` | 40/60/120 locals compile at -O0 **and** -O2 (was abort at -O0/-O1); `p98_many_bindings.pie` (exit 119) |
+
+### Bug D — three violations of the admin-join protocol (codegen)
+
+The lowerer threads a fall-through statement's continuation through a fresh administrative
+continuation `%kN`; the backend's covar handler implements that as a JOIN (emit the branch, mark the
+block filled, move the builder into it, report "not terminated" so the caller's sequence is emitted
+there). Three places broke the contract:
+
+1. `ACMD_IF`: both arms' "not terminated" answer was an `unreachable` in the **current** block —
+   which after a join fill *is* the join block — and the command then reported "terminated", so the
+   enclosing sequence dropped everything after the `if`.
+2. `ACNS_CASE` (the two-arm boolean form used by `if`/`while`/`for`): identical bug.
+3. `ACNS_COMU`'s "tail-comu" shortcut returned "not terminated" **without emitting any branch**, on
+   the assumption that an earlier cut had already branched into `%kN`. For the common shape
+   `if (c) { return x; } i = i + 1;` that COMU tail is the only cut to the join, so nothing branched
+   at all.
+
+LLVM IR evidence (dumped from the codegen entry through the LLVM C API — the `--emit-air` text is
+identical to what codegen consumes, so the fault was purely in the backend):
+
+```
+before:  if.else3:  ... i = i + 1 ...  unreachable     k1: (no terminator, back-edge lost)
+after:   if.else3:  ... i = i + 1 ...  br label %k1    k1: br label %loop2
+```
+
+### Bug N — `char[256][64]` is 64 rows of 256, not the other way round
+
+C3's array dimensions read right-to-left: `T[E][N]` is *N rows of E elements*. The backend declared
+its name table `char[256][64]` intending "256 names of 64 chars"; it actually got **64 slots of 256
+chars**, and `add_name()` indexes up to 255 — so the 65th binding aborted the compiler:
+
+```
+ERROR: 'Array index out of bounds (array had size 64, index was 64)'
+  in pear.PearCg.add_name (pear.c3:242) [inline] ... in pear_emit_fn
+```
+
+That is why the threshold tracked the number of *bindings* (~40 `let`s + temporaries + params ≈ 65
+names) and why `-O2` survived (fewer names minted). Verified the dialect with the toolchain before
+patching: `char[256][64]` rejects `a[200][x]` with *"An index of '200' is out of range, a value
+between 0 and 63 was expected"*, while `char[64][256]` accepts rows up to 255. Both tables (names and
+labels) were declared backwards; both are fixed, the rule is documented in the struct, and
+`add_name` now copies with `snprintf` instead of a hand-rolled bounded loop.
+
+The old comment in the struct asserted the wrong rule ("C3: outer-dim first"), which is presumably
+how the mistake was made — worth knowing for everyone else's fixed-size tables.
+
+### Verification after both fixes (LLVM 23, `dev` @ 271bbbd)
+
+| suite | value |
+|---|---|
+| exec | **pass=18 fail=0 xfail=49 xpass=0** (cases 64) — was 11/0/50 at the start of the bounty |
+| subtype self-test | 47/47 |
+| conformance | 218/44 |
+| pfront | 158/5 (+ stdlib 260/260) |
+| emit matrix | fib(10)=55, tak(1,2,3)=3, sum_to(10)=55 at -O0/-O1/-O2 |
+| bounty battery | 28/33 behaviour probes correct; **robustness crashes 0** at -O0 and -O2 |
+
+Still open (unchanged): B (phantom imports outside the repo root), C (cross-function calls SIGSEGV),
+E (struct field sum), F (nested loop aborts the compiler), H (nested fn SIGSEGV), J (duplicate `fn`
+accepted silently), K (warnings flip the exit code to 1), L (p91 malformed GEP), M (p92 clause-style
+SIGTRAP).
