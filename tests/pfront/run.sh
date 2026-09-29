@@ -99,6 +99,7 @@ declare -A EXPECT=(
   [86_sct_termination]=0      # size-change termination: proved / not proved / proved loop
   [87_ownership]=0            # alloc/free ownership: double free, use-after-free, leaks, path-dependent notes
   [88_handlers]=0             # effect handlers: undeclared performs, resume discipline, dead arms, arity
+  [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
 )
 
 # ---------------------------------------------------------------------------
@@ -1665,15 +1666,37 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "handlers" "$eh_why"
 fi
 
+# Closures: escape classification decides inlining (N4192, NF_NOESCAPE) and
+# boxing (a written `let mut` captured by an escaping closure → W4190 and
+# NF_ADDR_TAKEN on the binder); stale capture; lambda call arity; shadowing
+# inner names are not captures.
+cl=$("$BIN" tests/pfront/89_closures.pie -I stdlib -I . --lint 2>&1)
+cl_ok=1; cl_why=""
+cneed() { echo "$cl" | grep -q "$1" || { cl_ok=0; cl_why="$cl_why missing[$2]"; }; }
+cdeny() { echo "$cl" | grep -q "$1" && { cl_ok=0; cl_why="$cl_why noise[$2]"; }; }
+cneed '89_closures.pie:11:17: note\[N4192\]: the lambda bound to `add` does not escape and is called exactly once' "inline candidate"
+cneed '89_closures.pie:18:18: warning\[W4190\]: this closure writes to the captured `let mut c` and is returned'   "boxed mutable capture"
+cneed '89_closures.pie:26:9: note\[N4191\]: `x` is reassigned here after the closure `f` (created at 25:15)'       "stale capture"
+cneed '89_closures.pie:39:8: warning\[W4193\]: `g` is a lambda of 2 parameters but is called here with 1 argument' "lambda arity"
+cneed 'closure-escape   : 2 escape (1 returned, 1 as argument, 0 stored, 0 via another closure), 5 do not (1 immediate, 4 inline candidates' "escape census"
+cneed 'closures         : 7 lambdas, 4 captures (2 mutable, 1 written; max 1 per closure), 1 binders marked address-taken' "capture census (shadowed `n` not captured)"
+cdeny '89_closures.pie:3[0-4]:[0-9]*: warning\[W419'                                                              "immutable capture passed to a call warned"
+cdeny '89_closures.pie:4[6-9]:[0-9]*: \(warning\|note\)\[[WN]419[013]'                                             "shadowing inner `n` treated as a capture"
+if [ $cl_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (escape/inline, boxed mutable capture, stale capture, lambda arity; shadowing quiet)\n' "closures"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "closures" "$cl_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x across stdlib)\n' "flow_noise_floor"
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x/W419x across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi
