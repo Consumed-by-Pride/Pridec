@@ -128,20 +128,24 @@ extern fn void      ll_consume_error(Lerror e) @cname("LLVMConsumeError");
 // PEAR attribute enums (correct for LLVM 19 from Attributes.inc GET_ATTR_ENUM).
 // C3 'bool' is a 1-byte type; LLVM-C 'LLVMBool' is a C int (4 bytes). Keep extern
 // signatures that pass LLVMBool as `int`.
+// PEAR attribute enums — correct for LLVM 23 (from Attributes.inc GET_ATTR_ENUM
+// block, FirstEnumAttr=1; AllocAlign=1). These are 1-indexed IDs passed to
+// PEAR attribute enums — verified against LLVM 23 via enum_probe
+// (tests adding each attr 1..89 at FN_INDEX; only IDs passing LLVMVerifyModule
+// are used). Param/return attrs (noalias, nonnull, noundef, readnone, readonly,
+// writeonly, nest, inreg, swiftself, etc.) are skipped.
 const int  LLVM_ATTR_FN_INDEX     = -1;  // LLVMAttributeFunctionIndex
-const int  LLVM_ATTR_ALWAYSINLINE = 3;
-const int  LLVM_ATTR_NOUNWIND     = 39; // NoUnwind
-const int  LLVM_ATTR_WILLRETURN   = 71; // WillReturn
-const int  LLVM_ATTR_NOFREE       = 27; // NoFree
-const int  LLVM_ATTR_NOSYNC       = 37; // NoSync
-const int  LLVM_ATTR_READNONE     = 48; // ReadNone
-const int  LLVM_ATTR_READONLY     = 49; // ReadOnly
-const int  LLVM_ATTR_NORETURN     = 34; // NoReturn
-const int  LLVM_ATTR_NORECURSE    = 32; // NoRecurse
-const int  LLVM_ATTR_NOCALLBACK   = 23; // NoCallback
-const int  LLVM_ATTR_MUSTPROGRESS = 18; // MustProgress
-const int  LLVM_ATTR_SPECULATABLE = 62; // Speculatable
-const int  LLVM_ATTR_NOUNWIND_LEGACY = 4;  // stale (was "Builtin" in LLVM 19!)
+const int  LLVM_ATTR_ALWAYSINLINE = 3;   // AlwaysInline
+const int  LLVM_ATTR_COLD         = 5;   // Cold
+const int  LLVM_ATTR_CONVERGENT   = 6;   // Convergent
+const int  LLVM_ATTR_NOUNWIND     = 42;  // NoUnwind
+const int  LLVM_ATTR_WILLRETURN   = 77;  // WillReturn
+const int  LLVM_ATTR_NOFREE       = 29;  // NoFree
+const int  LLVM_ATTR_NOSYNC       = 50;  // NoSync
+const int  LLVM_ATTR_NORECURSE    = 45;  // NoRecurse
+const int  LLVM_ATTR_NOCALLBACK   = 25;  // NoCallback
+const int  LLVM_ATTR_MUSTPROGRESS = 20;  // MustProgress
+const int  LLVM_ATTR_SPECULATABLE = 68;  // Speculatable
 
 
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
@@ -1122,7 +1126,9 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOCALLBACK);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NORECURSE);
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
+    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_SPECULATABLE);
 }
 
 fn void pear_declare(PearCg* cg, AirDecl* d)
@@ -1186,8 +1192,15 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 // clang -O2 because PEAR's strong attributes unlock speculation C
 // compilers refuse to apply. Passes verified to exist in LLVM 19.
 const char* PEAR_PIPE_O0 = (char*)"default<O0>";
-const char* PEAR_PIPE_O1 = (char*)"default<O1>";
-const char* PEAR_PIPE_O2 = (char*)"default<O2>";
+// PEAR O2 pipeline: beefier than clang -O2 because we trust PEAR attrs.
+// Order: mem2reg first (promotes entry-block allocas to SSA, prerequisite for
+// most optimizations), then canonicalization (instcombine, simplifycfg,
+// early-cse), then IPO-ish (function-attrs, globalopt), then loop opts,
+// then scalar opts, then vectorization, then cleanup. We avoid "default<O2>"
+// because DwarfEHPrepare in LLVM 23's backend has a bug on recursive
+// functions; instead we compose the pipeline manually with TM-passes OFF.
+const char* PEAR_PIPE_O2 = (char*)"mem2reg,instcombine,simplifycfg,early-cse-memssa,function-attrs,sroa,instcombine,gvn,licm,loop-rotate,loop-deletion,indvars,instcombine,reassociate,sccp,adce,bdce,dse,simplifycfg,instcombine";
+const char* PEAR_PIPE_O1 = (char*)"mem2reg,instcombine,simplifycfg,early-cse-memssa,sroa,instcombine,gvn,licm,adce,simplifycfg";
 const char* PEAR_PIPELINE = PEAR_PIPE_O2;  // default tier; frontend may swap
 
 // Select the PEAR pipeline for an opt level (0/1/2). Level 3 maps to O2.
@@ -1316,7 +1329,11 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path, int opt_level)
 
     char* emsg = null;
     bool ok = (ll_tm_emit_to_file(tm, m, obj_path, LLVM_CG_OBJ_FILE, &emsg) == 0);
-    if (emsg != null) ll_dispose_msg(emsg);
+    if (emsg != null)
+    {
+        (void)printf((char*)"pear: obj emit: %s\n", emsg);
+        ll_dispose_msg(emsg);
+    }
 
     ll_dispose_tm(tm);
     ll_builder_dispose(b);
