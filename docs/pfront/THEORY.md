@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_dataflow.c3` | 1,011 | Generic monotone bitvector engine instantiated on a real multi-function CFG: reaching definitions, available expressions, very-busy expressions, live variables; bounded circular worklist, correct may/must boundary identities, lattice law / monotonicity / fixed-point equation certificates |
 | `theory_hered.c3` | 1,407 | Hash-consed de Bruijn terms; binder-aware AST translation; hereditary β substitution (typed decreasing metric), δ arithmetic/boolean, π pair projections, literal-if, η-contraction, modal β; opaque imperative boundary; N4270 βη-equivalent units, N4271 η-wrappers, N4272 source β-redex, N4273 staging redex |
 | `theory_mu.c3` | ~830 | Iso-recursive μ-types built from the declarations (struct/enum/newtype → μ; `*T` → option); contractivity, least-fixpoint inhabitation W4250, coinductive shape equality between nominal recursive types N4251 |
 | `theory_session.c3` | ~1,230 | Session types over `stdlib/channel`: endpoints from `let (tx, rx) = oneshot()/bounded()/unbounded()` and `*…Sender/*…Receiver` parameters; a protocol per party from its control flow (seq → prefix, if/match → choice, loop → μ); duality decided coinductively — W4260 ends not dual (with the first disagreement), W4261 oneshot sent twice on a path, N4262 parameter protocol under `--lint` |
@@ -150,6 +151,27 @@ send). A oneshot sender used twice on one straight path is **W4261**; the
 inferred protocol of a channel parameter is **N4262** under `--lint`.
 Control‑flow choices are decisions each party takes on its own, so they
 keep their kind under duality; only protocol labels flip ⊕ ↔ &.
+
+**Generic dataflow (`theory_dataflow`).** The original bundle made up a
+four-block linear CFG for every function, set GEN/KILL bits 0, 1 and 2
+regardless of the source, *did not call its own solver*, and invoked the
+transfer algebra directly. Now it allocates one real `pfront_cfg::Cfg` for
+the module, appends each function clause as a disconnected component, and
+runs four actual analyses over its real edges: **reaching definitions**
+(forward may, binder-identity def-sites), **available expressions**
+(forward must, structurally equal pure binary/unary expressions),
+**very-busy expressions** (backward must), and **live variables** (backward
+may, use-before-def). Each has a separate fact universe; writes build
+GEN/KILL by binder identity, expression kills follow operand dependencies,
+and parameters are seeded at their clause-entry blocks. The solver uses
+`OUT = GEN ∪ (IN − KILL)` with OR for may / AND for must, initializes the
+must analyses at top and may analyses at bottom, handles each disconnected
+function entry/exit with its own boundary fact, and uses a bounded circular
+worklist rather than a monotonically growing queue. The reported certificate
+recomputes every block equation after convergence and checks monotonicity and
+that the worklist drained; the meet and transfer functions are also checked
+for lattice laws and monotonicity. Tests require zero violations for all
+four analyses on a branch diamond plus a loop back-edge.
 
 **Hereditary substitution (`theory_hered`).** This replaced two counter
 implementations: `theory_cmtt_meta.hered_walk` recursively searched the AST
@@ -586,6 +608,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `98_dataflow` + `dataflow` | actual 7-block/7-edge CFG (diamond + loop): reaching (14 defs, 8 pops), available (7 exprs, must), very-busy (backward must), live (8 vars, backward may); all four lattice/transfer checks pass, worklists drain, every fixed-point equation verifies |
 | `97_hered` + `hered` | `inc2` / `add2` η-wrappers, let-expanded/direct `inc(inc(x))` equality, closures with distinct binder names but same capture, source β `(fn x. x*2)(21) → 42`, modal β, literal if; no false equality for imperative loops and 0 fuel cuts |
 | `95_mu` + `mu` | IntList ≡ IntList2 (N4251) while BoolList / IntSeq are not; Stream W4250; Chain / Server quiet; memo hits > 0 |
 | `94_strata` + `strata` | E4240 ×3 (self + mutual alias cycles, plus fuzz `type T = T`), NF_RECURSIVE_TY on Tree/Link, N4241 variant recursion, N4242 negative occurrence, W4243 `Nest<Box<T>>`; Box / TreeRef / Link quiet |

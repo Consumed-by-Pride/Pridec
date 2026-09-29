@@ -102,6 +102,7 @@ declare -A EXPECT=(
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
   [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
+  [98_dataflow]=0             # real CFG dataflow: reaching defs, must-available and very-busy expressions over diamond + loop
   [97_hered]=0                # hereditary substitution: βη normal forms/equivalence, η wrappers, source β, staging modal beta, metrics/no cuts
   [96_session]=0              # session types over channels: starved receiver + extra send (W4260), oneshot double send (W4261), μ-loops dual, param protocol (N4262)
   [95_mu]=0                   # μ-types from declarations: IntList ≡ IntList2 (N4251), Stream uninhabited (W4250), Bool/Seq/Chain/Server quiet
@@ -651,7 +652,7 @@ fi
 # the loop header. Without it, liveness would converge in one iteration and
 # every loop-carried variable would be misclassified as local.
 backedge=$("$BIN" tests/pfront/46_liveness_loop.pie --dump-cfg 2>&1 | grep -cE "b3 +body +succ=\[b2\]")
-iters=$("$BIN" tests/pfront/46_liveness_loop.pie 2>&1 | grep -oE '[0-9]+ iters' | grep -oE '^[0-9]+')
+iters=$("$BIN" tests/pfront/46_liveness_loop.pie 2>&1 | grep "liveness         :" | grep -oE '[0-9]+ iters' | grep -oE '^[0-9]+')
 if [ "$backedge" -ge 1 ] && [ "${iters:-0}" -ge 2 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (back edge present, %s dataflow iters)\n' "cfg_backedge" "$iters"
 else
@@ -1887,6 +1888,28 @@ if [ $he_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (hereditary beta-delta-pi/modal, eta, beta-eta equality incl. closures, no fuel cuts)\n' "hered"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "hered" "$he_why"
+fi
+
+# Generic monotone dataflow is exercised on the actual CFG, not fabricated
+# 4-block chains: reaching definitions cross a diamond and loop back-edge;
+# available / very-busy expressions use AND meet and real GEN/KILL sets.
+df=$("$BIN" tests/pfront/98_dataflow.pie -I stdlib -I . --emit-ast 2>&1)
+df_ok=1; df_why=""
+dfneed() { echo "$df" | grep -q "$1" || { df_ok=0; df_why="$df_why missing[$2]"; }; }
+dfneed 'df-reaching     : 7 blks, 14 bits, 8 wl pops, 8 iters, gen=14 kill=30' "reaching defs fixed point"
+dfneed 'df-avail        : 7 blks, 7 bits, 8 wl pops, 8 iters, gen=8 kill=14' "available expressions"
+dfneed 'df-vbusy        : 7 blks, 7 bits, 9 wl pops, 9 iters, gen=8 kill=14' "very-busy expressions"
+dfneed 'df-live         : 7 blks, 8 bits, 11 wl pops, 11 iters, gen=9 kill=14' "backward live variables"
+dfneed 'df-bundle        : 2 functions, 7 real CFG blocks / 7 edges, 10 reaching-def writes, 14 defs, 8 vars, 7 pure exprs (complete)' "real CFG census"
+dfneed 'df-cert        : reaching, monotone violations=0, equation violations=0, worklist remaining=0' "reaching fixed-point certificate"
+dfneed 'df-cert        : avail, monotone violations=0, equation violations=0, worklist remaining=0' "available fixed-point certificate"
+dfneed 'df-cert        : vbusy, monotone violations=0, equation violations=0, worklist remaining=0' "very-busy fixed-point certificate"
+dfneed 'df-cert        : live, monotone violations=0, equation violations=0, worklist remaining=0' "liveness fixed-point certificate"
+dfneed 'df-lattice     : live, 0 law failures' "lattice laws"
+if [ $df_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (4 real bitvector analyses: reaching defs / available / very busy / live on diamond + loop CFG)\n' "dataflow"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "dataflow" "$df_why"
 fi
 
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
