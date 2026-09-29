@@ -1,0 +1,101 @@
+-- Ownership / linearity of `alloc`-ed resources: every allocation must be
+-- freed exactly once on every path, and never touched afterwards.
+
+extern fn sink : i64 -> () ! [IO]
+extern fn keep : ptr -> () ! [IO]
+
+-- 1. the good case: alloc, use, free
+fn ok : () -> () ! [IO, Alloc]
+  | () ->
+      let p : *u8 = alloc [u8; 8]
+      p[0] = 1u8
+      sink(p[0] as i64)
+      free p
+
+-- 2. double free, straight line
+fn twice : () -> () ! [Alloc]
+  | () ->
+      let p : *u8 = alloc [u8; 8]
+      free p
+      free p
+
+-- 3. use after free
+fn uaf : () -> i64 ! [Alloc]
+  | () ->
+      let p : *u8 = alloc [u8; 8]
+      free p
+      p[0] as i64
+
+-- 4. leak on one path only
+fn leaky : i64 -> () ! [IO, Alloc]
+  | n ->
+      let p : *u8 = alloc [u8; 8]
+      if n > 0
+        free p
+      sink(n)
+
+-- 5. leak: never freed at all
+fn leak_all : () -> () ! [Alloc]
+  | () ->
+      let p : *u8 = alloc [u8; 16]
+      p[0] = 2u8
+
+-- 6. alias: freeing through the alias frees the resource
+fn alias : () -> () ! [Alloc]
+  | () ->
+      let p : *u8 = alloc [u8; 8]
+      let q = p
+      free q
+      p[0] = 1u8
+
+-- 7. escape: passed to a call or returned is not a leak
+fn escapes : () -> *u8 ! [IO, Alloc]
+  | () ->
+      let a : *u8 = alloc [u8; 8]
+      keep(a as ptr)
+      let b : *u8 = alloc [u8; 8]
+      b
+
+-- 8. defer frees at scope exit; an explicit free on top is a double free
+fn deferred : () -> () ! [Alloc]
+  | () ->
+      let p : *u8 = alloc [u8; 8]
+      defer free p
+      p[0] = 3u8
+      free p
+
+-- 9. free in a loop body without leaving the loop
+fn loopfree : i64 -> () ! [Alloc]
+  | n ->
+      let p : *u8 = alloc [u8; 8]
+      let mut i : i64 = 0
+      while i < n
+        free p
+        i = i + 1
+
+-- 10. reassigning an owning binder while it still owns
+fn overwrite : () -> () ! [Alloc]
+  | () ->
+      let mut p : *u8 = alloc [u8; 8]
+      p = alloc [u8; 16]
+      free p
+
+-- 11. a parameter freed and then used is still a use-after-free
+fn param_uaf : *u8 -> i64 ! [Alloc]
+  | p ->
+      free p
+      p[0] as i64
+
+fn main : () -> () ! [IO, Alloc]
+  | () ->
+      ok()
+      twice()
+      sink(uaf())
+      leaky(1)
+      leak_all()
+      alias()
+      free escapes()
+      deferred()
+      loopfree(2)
+      overwrite()
+      sink(param_uaf(alloc [u8; 1]))

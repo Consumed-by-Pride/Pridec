@@ -699,7 +699,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.nbe != null) { tp.nbe.init(a); tp.nbe.run_demo(); }
     if (tp.crdt != null) tp.crdt.init(a);
     if (tp.ssa != null) { tp.ssa.init(a, null); tp.ssa.run(); }
-    if (tp.lin != null) tp.lin.init(a);
+    if (tp.lin != null) { tp.lin.init(a); tp.lin.attach(d, it, file); }
     if (tp.sym != null) { tp.sym.init(a); tp.sym.attach(d, it, file); }
     if (tp.qual != null) tp.qual.init(a);
     if (tp.sess != null) tp.sess.init(a);
