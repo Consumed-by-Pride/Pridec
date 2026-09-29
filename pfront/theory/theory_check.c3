@@ -703,7 +703,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.sym != null) { tp.sym.init(a); tp.sym.attach(d, it, file); }
     if (tp.qual != null) tp.qual.init(a);
     if (tp.sess != null) tp.sess.init(a);
-    if (tp.sct != null) tp.sct.init(a);
+    if (tp.sct != null) { tp.sct.init(a); tp.sct.attach(d, it, file); }
     if (tp.defun != null) tp.defun.init(a);
 
     tp.optimize = true;

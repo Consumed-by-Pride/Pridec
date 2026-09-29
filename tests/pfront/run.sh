@@ -96,6 +96,7 @@ declare -A EXPECT=(
   [83_nbe_normalise]=0        # NbE: β/δ/η on the λ-fragment; effects, capture, mut respected
   [84_eclass_analysis]=0      # e-class constant analysis folds through saturation; W4034 on unsound rules
   [85_ub_poison]=0            # UB lattice: poison is UB when USED; use point + origin reported
+  [86_sct_termination]=0      # size-change termination: proved / not proved / proved loop
 )
 
 # ---------------------------------------------------------------------------
@@ -1578,15 +1579,46 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "ub_poison" "$ub_why"
 fi
 
+# Size-change termination: structural descent and BOUNDED integer descent
+# prove termination; an unbounded `n - 1` does not (fact(-1) loops); every
+# argument unchanged with no guard is a proved loop; a shadowing local is
+# not the parameter.
+sct=$("$BIN" tests/pfront/86_sct_termination.pie -I stdlib -I . --lint 2>&1)
+sct_ok=1; sct_why=""
+sneed() { echo "$sct" | grep -q "$1" || { sct_ok=0; sct_why="$sct_why missing[$2]"; }; }
+sdeny() { echo "$sct" | grep -q "$1" && { sct_ok=0; sct_why="$sct_why noise[$2]"; }; }
+sneed '86_sct_termination.pie:11:1: note\[N4151\]: recursion of `len` terminates.*structural descent'   "structural"
+sneed '86_sct_termination.pie:16:1: note\[N4151\]: recursion of `fib` terminates'                       "bounded by early return"
+sneed '86_sct_termination.pie:25:18: note\[N4152\]: recursion of `fact` is not proved.*nothing bounds it below' "unbounded decrement"
+sneed '86_sct_termination.pie:29:14: warning\[W4150\]: this call to `spin` passes every parameter unchanged' "proved loop"
+sneed '86_sct_termination.pie:32:1: note\[N4151\]: recursion of `ack` terminates'                       "lexicographic via closure"
+sneed '86_sct_termination.pie:41:1: note\[N4151\]: recursion of `halve` terminates'                     "halving with n>0"
+sneed '86_sct_termination.pie:48:1: note\[N4151\]: recursion of `ev` terminates'                        "mutual recursion"
+sneed '86_sct_termination.pie:64:11: note\[N4152\]: recursion of `swap` is not proved.*rearranged'      "rotation is not descent"
+sneed '86_sct_termination.pie:72:13: note\[N4152\]: recursion of `shadow` is not proved'                "shadowing local is not the param"
+sneed 'sct-verdicts     : 6 terminating, 3 not proved, 1 proved loops, 0 unknown'                       "verdict counts"
+sdeny '86_sct_termination.pie:\(6[0-9]\|7[0-9]\):[0-9]*: warning\[W4150\]'                              "guarded/changed call called a loop"
+if [ $sct_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (structural + bounded descent proved; unbounded/rotating not; unchanged self-call = loop)\n' "sct_termination"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "sct_termination" "$sct_why"
+fi
+# the proofs are --lint advisories; the default build stays quiet about them
+if "$BIN" tests/pfront/86_sct_termination.pie -I stdlib -I . 2>&1 | grep -q 'N4151'; then
+  fail=$((fail+1)); printf '  FAIL  %-26s N4151 emitted without --lint\n' "sct_quiet"
+else
+  pass=$((pass+1)); printf '  PASS  %-26s (termination proofs only under --lint)\n' "sct_quiet"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141 across stdlib)\n' "flow_noise_floor"
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150 across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi

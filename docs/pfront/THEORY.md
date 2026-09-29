@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_sct.c3` | ~900 | Size-change termination (Lee/Jones/Ben-Amram): structural descent through patterns, integer descent only under a guard bound, closure over mutual recursion; W4150 proved loop, N4152 not proved (why), N4151 proved (`--lint`) |
 | `theory_ub.c3` | ~520 | UB lattice (Lee et al.): poison flows through bindings/arithmetic; the USE is the diagnostic (W4140 with origin + binding), poison shifts (W4141), dead code after `ub!` (N4142) |
 | `theory_nbe.c3` | ~900 | Normalisation by evaluation over the AST: closures/neutrals, β with fresh binders and capture check, effect-safe argument `let`s, δ on β-created redexes, η, dead-lambda sweep |
 | `theory_symexe.c3` | ~1000 | Bounded symbolic execution: per-function path sets, interval + disequality decision procedure, witnessed diagnostics |
@@ -113,6 +114,28 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Size-change termination (`theory_sct`).** Matched arguments to
+parameters *by position and name* and called `n - 1` a descent; it found 0
+call graphs on any input. Now, per Lee/Jones/Ben-Amram: a call-site graph
+relates each callee argument to the caller parameter it descends from, the
+graphs are composed to a closure over the whole call graph (mutual
+recursion included), and the function terminates iff every idempotent
+self-loop has a strict self-edge. What counts as "smaller" is the honest
+part: a binder bound *inside* a pattern that matched a parameter
+(`Cons(_, t)`, a match arm, `let (a, b) = p`) is a well-founded structural
+descent; an integer `n - k` is a descent **only under a lower bound** from
+an enclosing guard (`if n <= 0 return …`, `while n > 0`, a literal arm),
+`n / k` and `n >> k` need `n ≥ 1`, and an ascending `lo + 1` needs an upper
+bound (`lo < hi` with `hi` passed on unchanged). Identifiers count only if
+they *resolve* to the parameter's binder, and a binder that is assigned or
+`&mut`-borrowed anywhere is never trusted. Verdicts: **W4150** a self-call
+passing every parameter unchanged under no guard that could differ next
+time ("once reached, the recursion never terminates"); **N4152** "not
+proved terminating" with the reason — unbounded decrement (with the guard
+to add), arguments rearranged but none decreasing, or nothing decreasing;
+**N4151** the proof, under `--lint` only. `fact : | 0 -> 1 | n -> n *
+fact(n - 1)` is correctly *not* proved: `fact(-1)` never returns.
 
 **UB lattice (`theory_ub`).** Tagged every node DEF/POISON/UB and never
 reported anything — and since identifiers were never tracked, poison could
@@ -280,6 +303,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `86_sct_termination` + `sct_termination`/`sct_quiet` | len/fib/ack/halve/ev-od proved; fact (unbounded) / swap (rotation) / shadow not proved; spin is a proved loop; proofs only under `--lint` |
 | `85_ub_poison` + `ub_poison` | branch/call/store/lambda uses with origin + nearest binding; shift-by-width; re-tagged `mut` silent; arithmetic on poison silent; dead after `ub!` |
 | `flow_noise_floor` | 0 × W4055/W4057/N4056/W4120 across the stdlib |
 
