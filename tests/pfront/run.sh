@@ -136,10 +136,10 @@ declare -A ADVISORY=(
 )
 
 pass=0; fail=0
-for f in pfront_tests/*.pie; do
+for f in tests/pfront/*.pie; do
   name=$(basename "$f" .pie)
   want=${EXPECT[$name]:-0}
-  got=$("$BIN" "$f" -I pfront_tests -I stdlib -I . 2>&1 | grep -c "$f:.*error")
+  got=$("$BIN" "$f" -I tests/pfront -I stdlib -I . 2>&1 | grep -c "$f:.*error")
   if [ "$got" = "$want" ]; then
     pass=$((pass+1)); printf '  PASS  %-26s (%s errors)\n' "$name" "$got"
   else
@@ -149,7 +149,7 @@ done
 
 for name in "${!STRICT[@]}"; do
   want=${STRICT[$name]}
-  got=$("$BIN" "pfront_tests/$name.pie" --strict-types 2>&1 | grep -c "error\[")
+  got=$("$BIN" "tests/pfront/$name.pie" --strict-types 2>&1 | grep -c "error\[")
   if [ "$got" = "$want" ]; then
     pass=$((pass+1)); printf '  PASS  %-26s (strict: %s errors)\n' "$name" "$got"
   else
@@ -161,9 +161,9 @@ done
 for name in "${!ADVISORY[@]}"; do
   want=${ADVISORY[$name]}
   # half 1: zero errors even with every strict switch on
-  errs=$("$BIN" "pfront_tests/$name.pie" --strict-types --strict-vis 2>&1 | grep -c "error\[")
+  errs=$("$BIN" "tests/pfront/$name.pie" --strict-types --strict-vis 2>&1 | grep -c "error\[")
   # half 2: --lint surfaces at least `want` warnings
-  warns=$("$BIN" "pfront_tests/$name.pie" --lint 2>&1 | grep -c "warning\[")
+  warns=$("$BIN" "tests/pfront/$name.pie" --lint 2>&1 | grep -c "warning\[")
   if [ "$errs" = "0" ] && [ "$warns" -ge "$want" ]; then
     pass=$((pass+1)); printf '  PASS  %-26s (untyped: 0 err, %s advisory)\n' "$name" "$warns"
   else
@@ -175,7 +175,7 @@ done
 for name in "${!OPT_FIELD[@]}"; do
   field=${OPT_FIELD[$name]}
   want=${OPT_MIN[$name]}
-  line=$("$BIN" "pfront_tests/$name.pie" 2>&1 | grep "  $field ")
+  line=$("$BIN" "tests/pfront/$name.pie" 2>&1 | grep "  $field ")
   got=$(echo "$line" | grep -oE '[0-9]+' | head -1)
   got=${got:-0}
   if [ "$got" -ge "$want" ]; then
@@ -194,13 +194,13 @@ done
 # same tail). Assert the INDENT DEPTH instead -- in the clause block, the
 # trailing `ident 'a'` must sit at exactly the same depth as `let 'a'`, i.e.
 # be its SIBLING. With the bug present it is two levels deeper and UNRESOLVED.
-d_let=$("$BIN" pfront_tests/71_elseif_init.pie --dump-ast --plain --quiet 2>&1 \
+d_let=$("$BIN" tests/pfront/71_elseif_init.pie --dump-ast --plain --quiet 2>&1 \
         | sed -n "/fn 'chain3'/,/fn 'chain4'/p" | grep "let 'a'" \
         | sed 's/[^ ].*//' | head -1 | wc -c)
-d_use=$("$BIN" pfront_tests/71_elseif_init.pie --dump-ast --plain --quiet 2>&1 \
+d_use=$("$BIN" tests/pfront/71_elseif_init.pie --dump-ast --plain --quiet 2>&1 \
         | sed -n "/fn 'chain3'/,/fn 'chain4'/p" | grep "ident 'a'  ->" \
         | sed 's/[^ ].*//' | head -1 | wc -c)
-unres=$("$BIN" pfront_tests/71_elseif_init.pie --dump-ast --plain --quiet 2>&1 \
+unres=$("$BIN" tests/pfront/71_elseif_init.pie --dump-ast --plain --quiet 2>&1 \
         | sed -n "/fn 'chain3'/,/fn 'chain4'/p" | grep -c "UNRESOLVED")
 if [ "${d_let:-0}" -gt 1 ] && [ "$d_let" = "$d_use" ] && [ "$unres" = "0" ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (else-if init: use is a sibling, depth %s)\n' "elseif_init" "$d_let"
@@ -210,7 +210,7 @@ fi
 
 # Back-to-back initializers: `two_inits` must show TWO sibling `let`s at the
 # same depth, not one nested inside the other's initializer.
-tw=$("$BIN" pfront_tests/71_elseif_init.pie --dump-ast --plain --quiet 2>&1 \
+tw=$("$BIN" tests/pfront/71_elseif_init.pie --dump-ast --plain --quiet 2>&1 \
      | sed -n "/fn 'two_inits'/,/fn 'multi_stmt'/p")
 dd=$(echo "$tw" | grep "let 'd'" | sed 's/[^ ].*//' | head -1 | wc -c)
 de=$(echo "$tw" | grep "let 'e'" | sed 's/[^ ].*//' | head -1 | wc -c)
@@ -227,7 +227,7 @@ fi
 # was pulled INSIDE it, so assert depths rather than error counts. In `wy`
 # the trailing `a + b + s` and the `let s` must both be siblings of the
 # tuple `let`, and nothing in the function may be UNRESOLVED.
-wy=$("$BIN" pfront_tests/72_implicit_block_leak.pie --dump-ast --plain --quiet 2>&1 \
+wy=$("$BIN" tests/pfront/72_implicit_block_leak.pie --dump-ast --plain --quiet 2>&1 \
      | sed -n "/fn 'wy'/,/fn 'wy2'/p")
 d_tup=$(echo "$wy" | grep -n "pat-tuple" | head -1 | cut -d: -f1)
 dl_let=$(echo "$wy" | grep "let  (" | sed 's/[^ ].*//' | head -1 | wc -c)
@@ -241,7 +241,7 @@ fi
 
 # All three shapes in the file (continuation in branch 1, branch 2, and with
 # no tuple pattern) must resolve every name.
-leak_unres=$("$BIN" pfront_tests/72_implicit_block_leak.pie --dump-ast --plain --quiet 2>&1 | grep -c "UNRESOLVED")
+leak_unres=$("$BIN" tests/pfront/72_implicit_block_leak.pie --dump-ast --plain --quiet 2>&1 | grep -c "UNRESOLVED")
 if [ "$leak_unres" = "0" ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (implicit_block: 0 unresolved across 3 shapes)\n' "implicit_leak2"
 else
@@ -252,8 +252,8 @@ fi
 # tail-call annotation, a handler head, or a staging block -- AND the real
 # `tail f(x)` annotation must survive. Assert BOTH halves: zero unresolved
 # names anywhere in the file, and the `call tail` flag still on tail_call.
-then_unres=$("$BIN" pfront_tests/73_soft_then_kw.pie --dump-ast --plain --quiet 2>&1 | grep -c "UNRESOLVED")
-then_tail=$("$BIN" pfront_tests/73_soft_then_kw.pie --emit-ast --quiet 2>&1 \
+then_unres=$("$BIN" tests/pfront/73_soft_then_kw.pie --dump-ast --plain --quiet 2>&1 | grep -c "UNRESOLVED")
+then_tail=$("$BIN" tests/pfront/73_soft_then_kw.pie --emit-ast --quiet 2>&1 \
             | sed -n "/fn 'tail_call'/,/fn 'handle_then'/p" | grep -c "call tail")
 if [ "$then_unres" = "0" ] && [ "$then_tail" = "1" ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (soft `then`: 0 unresolved, tail annotation kept)\n' "soft_then"
@@ -266,7 +266,7 @@ fi
 # top-level function was silently parsed INSIDE the previous one -- with
 # zero diagnostics, which is why an error count cannot catch this. Count
 # top-level declarations instead.
-hi_fns=$("$BIN" pfront_tests/74_hanging_indent_stack.pie --dump-ast --plain --quiet 2>&1 | grep -cE "^  fn ")
+hi_fns=$("$BIN" tests/pfront/74_hanging_indent_stack.pie --dump-ast --plain --quiet 2>&1 | grep -cE "^  fn ")
 if [ "$hi_fns" = "6" ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (hanging indent: all 6 fns top-level)\n' "indent_stack"
 else
@@ -285,7 +285,7 @@ fi
 # 78_inline_then_chain_siblings: three fns must all appear at top level
 # (2-space indent in the AST dump). The layout_elseif_nest bug made the
 # third fn nest inside the first.
-it_fns=$("$BIN" pfront_tests/78_inline_then_chain_siblings.pie --dump-ast --plain --quiet 2>&1 | grep -cE "^  fn ")
+it_fns=$("$BIN" tests/pfront/78_inline_then_chain_siblings.pie --dump-ast --plain --quiet 2>&1 | grep -cE "^  fn ")
 if [ "$it_fns" = "3" ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (inline-then chains: all 3 fns top-level)\n' "inline_then_siblings"
 else
@@ -296,7 +296,7 @@ fi
 # module-alias path must keep working. This only reproduces when the graph
 # actually loads the colliding module, so resolve against -I stdlib and
 # assert on field accesses reaching their binder.
-sh=$("$BIN" pfront_tests/75_local_shadows_module.pie -I stdlib --dump-ast --plain --quiet 2>&1)
+sh=$("$BIN" tests/pfront/75_local_shadows_module.pie -I stdlib --dump-ast --plain --quiet 2>&1)
 sh_unres=$(echo "$sh" | grep -c "UNRESOLVED")
 sh_bound=$(echo "$sh" | grep -c "ident 'target'  -> pat-ident 'target'")
 if [ "$sh_unres" = "0" ] && [ "$sh_bound" -ge 2 ]; then
@@ -344,14 +344,14 @@ fi
 
 # ── ADVERSARIAL STRESS FILES ────────────────────────────────────────────
 #
-# pfront_tests/stress/ exercises spec features with little or no stdlib
+# tests/pfront/stress/ exercises spec features with little or no stdlib
 # coverage. They were written to BREAK the front end and did: s01 found 7
 # bugs and s02 found 9, none of which the 258-module stdlib sweep could
 # reach because the stdlib never uses those constructs.
 #
 # Both must stay at zero errors. Warnings are allowed (unused bindings in
 # a file whose point is syntax coverage).
-for sf in pfront_tests/stress/*.pie; do
+for sf in tests/pfront/stress/*.pie; do
   [ -e "$sf" ] || continue
   sname=$(basename "$sf" .pie)
   serr=$("$BIN" "$sf" -I stdlib -I . --plain --quiet 2>&1 | grep -oE 'errors=[0-9]+' | cut -d= -f2)
@@ -590,7 +590,7 @@ fi
 # The purity interlock: exactly ONE of two dead stores may be removed. The
 # other has a function call as its initializer and MUST survive. This is the
 # single most important correctness property of the DCE pass.
-purity=$("$BIN" pfront_tests/44_opt_purity.pie 2>&1 | grep "dead stores" | grep -oE '[0-9]+ dead stores' | grep -oE '^[0-9]+')
+purity=$("$BIN" tests/pfront/44_opt_purity.pie 2>&1 | grep "dead stores" | grep -oE '[0-9]+ dead stores' | grep -oE '^[0-9]+')
 purity=${purity:-0}
 if [ "$purity" = "1" ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (purity: 1 pure store removed, impure kept)\n' "44_opt_purity"
@@ -601,7 +601,7 @@ fi
 # --emit-ast / --emit-sexp must render the FINAL (optimized) tree, not the
 # parse tree. 43_opt_dce has 2 statements after `return`; if the emitter were
 # printing the pre-optimization tree they would still be there.
-sexp=$("$BIN" pfront_tests/43_opt_dce.pie --emit-sexp --quiet 2>&1 | grep '^(fn')
+sexp=$("$BIN" tests/pfront/43_opt_dce.pie --emit-sexp --quiet 2>&1 | grep '^(fn')
 if [ -n "$sexp" ] && ! echo "$sexp" | grep -q "after"; then
   pass=$((pass+1)); printf '  PASS  %-26s (emit-sexp: dead code absent)\n' "emit_ast"
 else
@@ -610,7 +610,7 @@ fi
 
 # Folded constants must be marked SYN so a reader can tell compiler output
 # from source text.
-syn=$("$BIN" pfront_tests/42_opt_algebraic.pie --emit-ast --quiet 2>&1 | grep -c "SYN")
+syn=$("$BIN" tests/pfront/42_opt_algebraic.pie --emit-ast --quiet 2>&1 | grep -c "SYN")
 if [ "$syn" -ge 2 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (emit-ast: %s synthetic marked)\n' "emit_syn" "$syn"
 else
@@ -619,9 +619,9 @@ fi
 
 # Semi-pruned: a loop must produce non-local variables (they cross the back
 # edge), straight-line code must produce none.
-nl_loop=$("$BIN" pfront_tests/46_liveness_loop.pie 2>&1 | grep "semi-pruned" | grep -oE '[0-9]+ non-local' | grep -oE '^[0-9]+')
-nl_str=$("$BIN" pfront_tests/47_liveness_local.pie 2>&1 | grep "semi-pruned" | grep -oE '[0-9]+ non-local' | grep -oE '^[0-9]+')
-loc_str=$("$BIN" pfront_tests/47_liveness_local.pie 2>&1 | grep "semi-pruned" | grep -oE '[0-9]+ block-local' | grep -oE '^[0-9]+')
+nl_loop=$("$BIN" tests/pfront/46_liveness_loop.pie 2>&1 | grep "semi-pruned" | grep -oE '[0-9]+ non-local' | grep -oE '^[0-9]+')
+nl_str=$("$BIN" tests/pfront/47_liveness_local.pie 2>&1 | grep "semi-pruned" | grep -oE '[0-9]+ non-local' | grep -oE '^[0-9]+')
+loc_str=$("$BIN" tests/pfront/47_liveness_local.pie 2>&1 | grep "semi-pruned" | grep -oE '[0-9]+ block-local' | grep -oE '^[0-9]+')
 if [ "${nl_loop:-0}" -ge 2 ] && [ "${nl_str:-9}" = "0" ] && [ "${loc_str:-0}" -ge 3 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (semi-pruned: loop=%s non-local, straight=%s/%s local)\n' "liveness" "$nl_loop" "$nl_str" "$loc_str"
 else
@@ -631,8 +631,8 @@ fi
 # The loop CFG must contain a real back edge: the body block's successor is
 # the loop header. Without it, liveness would converge in one iteration and
 # every loop-carried variable would be misclassified as local.
-backedge=$("$BIN" pfront_tests/46_liveness_loop.pie --dump-cfg 2>&1 | grep -cE "b3 +body +succ=\[b2\]")
-iters=$("$BIN" pfront_tests/46_liveness_loop.pie 2>&1 | grep -oE '[0-9]+ iters' | grep -oE '^[0-9]+')
+backedge=$("$BIN" tests/pfront/46_liveness_loop.pie --dump-cfg 2>&1 | grep -cE "b3 +body +succ=\[b2\]")
+iters=$("$BIN" tests/pfront/46_liveness_loop.pie 2>&1 | grep -oE '[0-9]+ iters' | grep -oE '^[0-9]+')
 if [ "$backedge" -ge 1 ] && [ "${iters:-0}" -ge 2 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (back edge present, %s dataflow iters)\n' "cfg_backedge" "$iters"
 else
@@ -644,11 +644,11 @@ fi
 #   fold `1>0` -> take the then-arm -> flatten it into the parent
 #   -> the spliced `return` makes the following statements unreachable.
 # Asserting only the final node count would pass even if one link broke.
-casc=$("$BIN" pfront_tests/48_opt_cascade.pie 2>&1)
+casc=$("$BIN" tests/pfront/48_opt_cascade.pie 2>&1)
 c_br=$(echo "$casc" | grep "branches" | grep -oE '[0-9]+' | head -1)
 c_fl=$(echo "$casc" | grep "cleanup" | grep -oE '[0-9]+' | head -1)
 c_un=$(echo "$casc" | grep "dead code" | grep -oE '[0-9]+' | head -1)
-c_sx=$("$BIN" pfront_tests/48_opt_cascade.pie --emit-sexp --quiet 2>&1 | grep '^(fn')
+c_sx=$("$BIN" tests/pfront/48_opt_cascade.pie --emit-sexp --quiet 2>&1 | grep '^(fn')
 if [ "${c_br:-0}" -ge 1 ] && [ "${c_fl:-0}" -ge 1 ] && [ "${c_un:-0}" -ge 2 ] \
    && ! echo "$c_sx" | grep -q "after"; then
   pass=$((pass+1)); printf '  PASS  %-26s (cascade: %s fold, %s flatten, %s unreachable)\n' "opt_cascade" "$c_br" "$c_fl" "$c_un"
@@ -659,7 +659,7 @@ fi
 # POLYMORPHISM: the pass must actually SOLVE, not just count. Assert every
 # call is fully inferred and no bogus conflicts are reported -- `pair<A,B>`
 # regressed to "1 conflict" when the parameter tuple was matched positionally.
-poly=$("$BIN" pfront_tests/62_polymorphism.pie --plain 2>&1)
+poly=$("$BIN" tests/pfront/62_polymorphism.pie --plain 2>&1)
 p_full=$(echo "$poly" | grep "inference " | grep -oE '[0-9]+ fully' | grep -oE '^[0-9]+' | head -1)
 p_conf=$(echo "$poly" | grep -c "problems ")
 p_sub=$(echo "$poly" | grep "substitution " | grep -oE '[0-9]+ nodes' | grep -oE '^[0-9]+' | head -1)
@@ -673,9 +673,9 @@ fi
 # and parsed `use` but never opened a second file, so 4/257 stdlib modules
 # compiled. Assert the loader actually pulls in dependencies AND that the
 # cross-module calls bind to real declarations.
-ms=$("$BIN" pfront_tests/63_modsys.pie -I pfront_tests -I stdlib -I . --quiet 2>&1)
+ms=$("$BIN" tests/pfront/63_modsys.pie -I tests/pfront -I stdlib -I . --quiet 2>&1)
 ms_mods=$(echo "$ms" | grep -oE 'modules=[0-9]+' | grep -oE '[0-9]+')
-ms_bound=$("$BIN" pfront_tests/63_modsys.pie -I pfront_tests -I stdlib -I . --dump-ast --quiet 2>&1 \
+ms_bound=$("$BIN" tests/pfront/63_modsys.pie -I tests/pfront -I stdlib -I . --dump-ast --quiet 2>&1 \
            | grep -cE "method '(add|triple)' +-> fn")
 if [ "${ms_mods:-0}" -ge 3 ] && [ "${ms_bound:-0}" -ge 2 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (%s modules loaded, %s cross-module calls bound)\n' "modsys" "$ms_mods" "$ms_bound"
@@ -685,13 +685,13 @@ fi
 
 # ── SYNTAX SUITE: written from the SPEC, not from the implementation ────
 #
-# pfront_tests/syntax/ exists because every earlier test was written
+# tests/pfront/syntax/ exists because every earlier test was written
 # against constructs the compiler already handled, so a construct the spec
 # lists and nothing exercises stayed broken indefinitely. These files are
 # generated from section 24's operator table and section 7's control-flow
 # list. On their first run they found eight defects, four of them silent
 # miscompiles rather than parse errors.
-for f in pfront_tests/syntax/x*.pie; do
+for f in tests/pfront/syntax/x*.pie; do
   [ -e "$f" ] || continue
   name=$(basename "$f" .pie)
   errs=$(./pfrontc -I stdlib "$f" 2>&1 | grep -cE "error\[")
@@ -896,7 +896,7 @@ if [ -x ./pearc ]; then
   # the bug only shows when enough stack traffic separates the render
   # from the print, so a small input prints plausible text and hides it.
   nonascii=0
-  for f in pfront_tests/syntax/x*.pie; do
+  for f in tests/pfront/syntax/x*.pie; do
     [ -e "$f" ] || continue
     if ./pfrontc -I stdlib "$f" 2>&1 | LC_ALL=C grep -qP '[\x80-\xff]'; then
       # Genuine UTF-8 in a source echo is fine; raw control bytes are not.
@@ -922,14 +922,14 @@ if [ -x ./pearc ]; then
   # else is a crash, and a compiler that segfaults on bad input cannot be
   # run over a corpus to find out what else is wrong.
   #
-  # The corpus in pfront_tests/fuzz/ is deliberately hostile: unterminated
+  # The corpus in tests/pfront/fuzz/ is deliberately hostile: unterminated
   # strings and block comments, unbalanced brackets in both directions, a
   # NUL byte mid-file, bare CR line endings, mixed tabs and spaces, a
   # 400-digit integer, 500 stacked unary minuses, non-ASCII identifiers,
   # an invalid UTF-8 sequence, a self-referential type and a
   # self-referential struct.
   fz_bad=0
-  for f in pfront_tests/fuzz/*.pie; do
+  for f in tests/pfront/fuzz/*.pie; do
     [ -e "$f" ] || continue
     ./pfrontc "$f" >/tmp/pf_fz.out 2>&1
     rc=$?
@@ -940,7 +940,7 @@ if [ -x ./pearc ]; then
       fz_bad=$((fz_bad+1)); printf '        %s -> corrupt output\n' "$(basename "$f")"
     fi
   done
-  fz_n=$(ls pfront_tests/fuzz/*.pie 2>/dev/null | wc -l)
+  fz_n=$(ls tests/pfront/fuzz/*.pie 2>/dev/null | wc -l)
   if [ "$fz_bad" = "0" ] && [ "$fz_n" -ge 20 ]; then
     printf '  PASS  %-26s %s\n' "fuzz_no_crash" "($fz_n malformed inputs, 0 crashes)"
     pass=$((pass+1))
@@ -1158,7 +1158,7 @@ if [ -x ./pearc ]; then
   # coverage.
   sh=0
   crashed=""
-  for f in pfront_tests/syntax/x*.pie; do
+  for f in tests/pfront/syntax/x*.pie; do
     [ -e "$f" ] || continue
     out=$(./pearc -I stdlib --stats "$f" 2>/dev/null)
     rc=$?
@@ -1179,10 +1179,10 @@ if [ -x ./pearc ]; then
   # cached a TypeId in the same integer that marks a numeric tuple index.
   # Assert the lookups happen, that a narrow field bounds the value, that
   # a wide one does not over-claim, and that a tuple index still works.
-  ft_out=$(./pfrontc pfront_tests/77_field_types.pie -I stdlib 2>&1)
+  ft_out=$(./pfrontc tests/pfront/77_field_types.pie -I stdlib 2>&1)
   ft_look=$(echo "$ft_out" | grep -oE 'field access     : [0-9]+' | grep -oE '[0-9]+$')
   ft_miss=$(echo "$ft_out" | grep -oE '[0-9]+ miss' | grep -oE '[0-9]+')
-  ft_air=$(./pearc pfront_tests/77_field_types.pie 2>/dev/null)
+  ft_air=$(./pearc tests/pfront/77_field_types.pie 2>/dev/null)
   ft_hit=$(echo "$ft_out" | grep -oE '\([0-9]+ hit' | grep -oE '[0-9]+')
   ft_ok=1
   [ "${ft_look:-0}" -ge 4 ] || ft_ok=0
@@ -1220,7 +1220,7 @@ if [ -x ./pearc ]; then
   # Kept in the tree rather than regenerated, because a corpus that
   # changes every run cannot regress. These found the irdl progress loop
   # and the operator-named-function bug; both fixtures are in
-  # pfront_tests/fuzz/ alongside.
+  # tests/pfront/fuzz/ alongside.
   #
   # Three properties, in increasing strength:
   #   1. neither binary exits on a signal or hangs;
@@ -1228,7 +1228,7 @@ if [ -x ./pearc ]; then
   #   3. AIR_UNKNOWN appears only where pfront already reported an error
   #      -- i.e. no lowering holes on input the front end accepted.
   gf_sig=0; gf_verr=0; gf_hole=0; gf_n=0
-  for f in pfront_tests/fuzz/grammar/*.pie; do
+  for f in tests/pfront/fuzz/grammar/*.pie; do
     [ -e "$f" ] || continue
     gf_n=$((gf_n+1))
     ( ulimit -v 3000000; timeout 25 ./pfrontc "$f" -I stdlib --plain --quiet >/dev/null 2>&1 )
@@ -1277,10 +1277,10 @@ if [ -x ./pearc ]; then
     done
     echo "$peak"
   }
-  nt_min=$(peak_of ./pfrontc pfront_tests/fuzz/f_trs_nonterminating_min.pie -I stdlib --plain --quiet)
-  nt_big=$(peak_of ./pfrontc pfront_tests/fuzz/f_trs_nonterminating.pie -I stdlib --plain --quiet)
-  nt_rej=$(./pfrontc pfront_tests/fuzz/f_trs_nonterminating_min.pie -I stdlib 2>&1 | grep -c 'rules REJECTED')
-  nt_fire=$(./pfrontc pfront_tests/fuzz/f_trs_nonterminating_min.pie -I stdlib 2>&1 | grep -oE 'rewriting        : [0-9]+' | grep -oE '[0-9]+$')
+  nt_min=$(peak_of ./pfrontc tests/pfront/fuzz/f_trs_nonterminating_min.pie -I stdlib --plain --quiet)
+  nt_big=$(peak_of ./pfrontc tests/pfront/fuzz/f_trs_nonterminating.pie -I stdlib --plain --quiet)
+  nt_rej=$(./pfrontc tests/pfront/fuzz/f_trs_nonterminating_min.pie -I stdlib 2>&1 | grep -c 'rules REJECTED')
+  nt_fire=$(./pfrontc tests/pfront/fuzz/f_trs_nonterminating_min.pie -I stdlib 2>&1 | grep -oE 'rewriting        : [0-9]+' | grep -oE '[0-9]+$')
   io_peak=$(peak_of ./pfrontc stdlib/io.pie -I stdlib --plain --quiet)
   if [ "${nt_min:-999999}" -lt 20000 ] && [ "${nt_big:-999999}" -lt 20000 ] \
      && [ "${nt_rej:-0}" = "1" ] && [ "${nt_fire:-1}" = "0" ] \
@@ -1305,7 +1305,7 @@ if [ -x ./pearc ]; then
   # than rc=124 depending on which limit it hits first, and either is a
   # failure.
   pg_bad=""
-  for f in pfront_tests/fuzz/f_irdl_minimal.pie pfront_tests/fuzz/f_irdl_progress.pie; do
+  for f in tests/pfront/fuzz/f_irdl_minimal.pie tests/pfront/fuzz/f_irdl_progress.pie; do
     [ -e "$f" ] || continue
     ( ulimit -v 2000000; timeout 15 ./pfrontc "$f" -I stdlib --plain --quiet >/dev/null 2>&1 )
     rc=$?
@@ -1358,12 +1358,12 @@ if [ -x ./pearc ]; then
   # block's predecessor count reads undefined values on the edges it
   # omits, which is why the phi width is checked against the predecessor
   # count rather than against a constant.
-  wc_air=$(./pearc -I stdlib pfront_tests/syntax/x13_wide_constructs.pie 2>/dev/null)
+  wc_air=$(./pearc -I stdlib tests/pfront/syntax/x13_wide_constructs.pie 2>/dev/null)
   wc_call=$(echo "$wc_air" | awk '/= call /{n=gsub(/%[0-9]+/,"&"); if(n>m)m=n} END{print m+0}')
   wc_struct=$(echo "$wc_air" | awk '/= struct /{n=gsub(/%[0-9]+/,"&"); if(n>m)m=n} END{print m+0}')
   wc_phi=$(echo "$wc_air" | awk '/= phi /{n=gsub(/%[0-9]+@/,"&"); if(n>m)m=n} END{print m+0}')
-  wc_unsup=$(./pearc -I stdlib --stats pfront_tests/syntax/x13_wide_constructs.pie 2>/dev/null | grep -oE 'unsupported      : [0-9]+' | grep -oE '[0-9]+$')
-  wc_err=$(./pearc -I stdlib --verify pfront_tests/syntax/x13_wide_constructs.pie 2>/dev/null | grep 'errors / warnings' | grep -oE '[0-9]+ / [0-9]+' | cut -d' ' -f1)
+  wc_unsup=$(./pearc -I stdlib --stats tests/pfront/syntax/x13_wide_constructs.pie 2>/dev/null | grep -oE 'unsupported      : [0-9]+' | grep -oE '[0-9]+$')
+  wc_err=$(./pearc -I stdlib --verify tests/pfront/syntax/x13_wide_constructs.pie 2>/dev/null | grep 'errors / warnings' | grep -oE '[0-9]+ / [0-9]+' | cut -d' ' -f1)
   if [ "${wc_call:-0}" -ge 21 ] && [ "${wc_struct:-0}" -ge 21 ] \
      && [ "${wc_phi:-0}" -ge 81 ] && [ "${wc_unsup:-1}" = "0" ] && [ "${wc_err:-1}" = "0" ]; then
     pass=$((pass+1)); printf '  PASS  %-26s %s\n' "wide_constructs" "(call=$wc_call struct=$wc_struct phi=$wc_phi, 0 dropped)"
@@ -1375,7 +1375,7 @@ if [ -x ./pearc ]; then
   # syntax suite. This is the property the 64-cap violated, and it is
   # cheap enough to check over every file rather than one fixture.
   pm_bad=0
-  for f in pfront_tests/syntax/x*.pie; do
+  for f in tests/pfront/syntax/x*.pie; do
     [ -e "$f" ] || continue
     ./pearc -I stdlib "$f" 2>/dev/null | awk '
       /^func /{fn=$2}
@@ -1399,7 +1399,7 @@ if [ -x ./pearc ]; then
   # The width a literal DECLARES must be the width it CARRIES, and the
   # value must fit it. Asserting the widths themselves, not just that the
   # file parses: the hex bug parsed perfectly and produced w=6.
-  ns=$(./pearc -I stdlib pfront_tests/76_numeric_suffix_hex.pie 2>/dev/null)
+  ns=$(./pearc -I stdlib tests/pfront/76_numeric_suffix_hex.pie 2>/dev/null)
   ns_ok=1
   echo "$ns" | grep -q 'ival=8317987319222330741 .*w=64' || ns_ok=0   # 0x..u64, f in mantissa
   echo "$ns" | grep -q 'ival=3735928559 .*w=64'          || ns_ok=0   # 0xdeadbeefu64
