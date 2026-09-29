@@ -1,0 +1,59 @@
+-- Normalisation by evaluation: β/δ/η over the lambda fragment, and the
+-- cases where it must NOT reduce (or must reduce carefully).
+
+extern fn read() -> i64
+extern fn emit(x: i64) -> i64
+
+-- (a) pure higher-order chain normalises to a literal: 17.
+fn pure_chain : () -> i64
+  | () ->
+      let inc = fn (x: i64) -> i64 { x + 1i64 }
+      let twice = fn (f: fn(i64) -> i64) -> i64 { f(f(3i64)) }
+      let add = fn (a: i64, b: i64) -> i64 { a + b }
+      let k = (fn (y: i64) -> i64 { y * 2i64 })(5i64)
+      add(inc(1i64), twice(inc)) + k
+
+-- (b) an effectful argument used twice must be evaluated ONCE: the β
+--     introduces `let x = read()` rather than duplicating the call.
+fn once : () -> i64
+  | () ->
+      let dbl = fn (x: i64) -> i64 { x + x }
+      dbl(read())
+
+-- (c) argument order: both calls stay, in order, each exactly once.
+fn ordered : () -> i64
+  | () ->
+      let sub = fn (a: i64, b: i64) -> i64 { a - b }
+      sub(emit(1i64), emit(2i64))
+
+-- (d) capture: the lambda's free `n` is the OUTER n; at the call site a
+--     different `n` is innermost. The β must be refused (or a rename made),
+--     never `n + 1` resolving to the inner n.
+fn capture : (i64) -> i64
+  | n ->
+      let addn = fn (x: i64) -> i64 { x + n }
+      let r =
+        let n = 100i64
+        addn(1i64) + n
+      r
+
+-- (e) a `mut` binding is never a value: `g` may change between uses.
+fn mutable : () -> i64
+  | () ->
+      let mut g = fn (x: i64) -> i64 { x + 1i64 }
+      let a = g(1i64)
+      g = fn (x: i64) -> i64 { x + 2i64 }
+      a + g(1i64)
+
+-- (f) η: fn (x) { emit(x) } is emit.
+fn eta : () -> i64
+  | () ->
+      let e = fn (x: i64) -> i64 { emit(x) }
+      e(7i64)
+
+-- (g) an escaping closure with a captured literal is materialised with
+--     the capture substituted: fn (x) { x + 5 }.
+fn escape : () -> fn(i64) -> i64
+  | () ->
+      let mk = fn (n: i64) -> fn(i64) -> i64 { fn (x: i64) -> i64 { x + n } }
+      mk(5i64)
