@@ -686,7 +686,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.defun = (theory_defun::DefunState*)malloc(theory_defun::DefunState::size);
     if (tp.reclat != null && tp.ts != null) tp.reclat.init(tp.ts, a);
     if (tp.matcher != null) { tp.matcher.init(a); tp.matcher.attach(d, it, file); }
-    if (tp.hered != null) tp.hered.init(a);
+    if (tp.hered != null) { tp.hered.init(a); tp.hered.attach(d, it, file); }
     if (tp.dfb != null) tp.dfb.init(a);
     if (tp.uba != null) { tp.uba.init(a); tp.uba.attach(d, it, file); }
     if (tp.cps != null) { tp.cps.init(a); tp.cps.attach(d, it, file); }
@@ -821,12 +821,12 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
         tp.mustate.scan_ast(root, 0);
         tp.passes_run = tp.passes_run + 1;
     }
-    if (tp.meta != null) { tp.meta.scan(root, 0); tp.meta.run_hered(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.issa != null) { tp.issa.walk_dialects(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.effc != null) { tp.effc.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.reclat != null) { tp.reclat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.matcher != null) { tp.matcher.emit = tp.emit_dtree; tp.matcher.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.hered != null) { tp.hered.walk_ast(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.meta != null) { tp.meta.scan(root, 0); tp.meta.absorb(tp.hered); tp.passes_run = tp.passes_run + 1; }
     if (tp.uba != null) { tp.uba.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.strat != null) { tp.strat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.defun != null) { tp.defun.run(root); tp.passes_run = tp.passes_run + 1; }

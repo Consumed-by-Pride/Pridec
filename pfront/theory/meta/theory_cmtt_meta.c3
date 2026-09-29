@@ -22,6 +22,7 @@ import pfront_core;
 import theory_term;
 import theory_cmtt;
 import theory_setops;
+import theory_hered;
 
 alias Tk    = pfront_lex::TokenType;
 alias Node  = pfront_core::PNode;
@@ -238,59 +239,19 @@ fn int MetaCtx.subst_compose(MetaCtx* mc, int sigma, int tau)
     return sigma;
 }
 
-// ── Hereditary substitution (β-normalisation engine) ───────────────────────
-struct Hered
+// ── Hereditary substitution ────────────────────────────────────────────────
+// The engine lives in theory_hered (hash-consed de Bruijn terms, typed
+// metric, δ/π/if/modal reductions). The contextual meta-variables it finds
+// — every `splice` under a `quote`, u::A[Ψ] with Ψ the binders introduced
+// inside the quote — are the meta-variables of this context.
+fn void MetaCtx.absorb(MetaCtx* mc, theory_hered::HeredState* h)
 {
-    usz steps;
-    int fuel;
-    bool stuck;
-}
-
-fn void hered_init(Hered* h)
-{
-    h.steps = 0;
-    h.fuel = HERED_MAX_FUEL;
-    h.stuck = false;
-}
-
-fn bool hered_walk(Hered* h, Node* body, Node* arg, int depth)
-{
-    if (h.fuel <= 0) { h.stuck = true; return false; }
-    if (body == null || depth > META_MAX_DEPTH) { return false; }
-    bool reduced = false;
-    h.fuel = h.fuel - 1;
-    if (body.kind == Nk.N_EXPR_LAMBDA && arg != null)
-    {
-        h.steps = h.steps + 1;
-        reduced = true;
-        for (usz i = 0; i < body.child_count; i++)
-        {
-            if (hered_walk(h, body.children[i], arg, depth + 1)) { reduced = true; }
-        }
-        return reduced;
-    }
-    if (body.kind == Nk.N_EXPR_CALL && body.child_count >= 2
-        && body.children[0] != null
-        && body.children[0].kind == Nk.N_EXPR_LAMBDA)
-    {
-        h.steps = h.steps + 1;
-        reduced = true;
-        if (hered_walk(h, body.children[0], body.children[1], depth + 1)) { reduced = true; }
-    }
-    for (usz i = 0; i < body.child_count; i++)
-    {
-        if (hered_walk(h, body.children[i], arg, depth + 1)) { reduced = true; }
-    }
-    return reduced;
-}
-
-fn void MetaCtx.run_hered(MetaCtx* mc, Node* root)
-{
-    if (root == null) { return; }
-    Hered h;
-    hered_init(&h);
-    (void)hered_walk(&h, root, null, 0);
-    mc.n_hered_steps = mc.n_hered_steps + h.steps;
+    if (h == null) { return; }
+    mc.n_hered_steps = mc.n_hered_steps + h.n_beta + h.n_modal;
+    mc.var_count = h.meta_count();
+    // The current engine discovers contextual metavariables and performs
+    // β/η normalisation, but does not solve meta-variables or run a CMTT
+    // contextual occurs-check. Keep those counters honest at zero. 
 }
 
 fn void MetaCtx.scan(MetaCtx* mc, Node* n, int depth)

@@ -51,3 +51,12 @@ theory_stratified (249, types/), theory_ssa (347), theory_dataflow (438), theory
 
 ### Next on my list
 theory_hered (484, "stub hered_walk"), theory_ssa (347), theory_dataflow (438), theory_records (443), theory_verify (461).
+
+
+## 2026-09-30 — hereditary substitution pass made real (PR #11 update)
+- Replaced `theory_cmtt_meta.hered_walk` (recursive AST counter; saw lambdas but did not bind/substitute) and `theory_hered.ht_from_ast` (all identifiers were fake De Bruijn 0) with a single hash-consed de Bruijn engine in `theory_hered.c3` (~1,407 LoC).
+- Translation uses resolver binder pointers; immutable lets → β-redexes; lambdas incl. curried tuple params; source calls, arithmetic, comparisons, if, pairs/projections, closures; imperative/mutating fragment becomes opaque and is never compared.
+- Hereditary β substitution under binders with a decreasing simple-type metric, δ arithmetic/boolean/comparison, π projection, literal-if, η-contraction, modal β/η. Fuel cuts are counted; 0 on all 674 corpus inputs.
+- N4270 equivalent pure functions/closures, N4271 η-wrapper, N4272 source β-redex and result, N4273 staging redex (`--lint`). Definitions compare after closing de Bruijn indices over captured binders, so closures with differently named parameters but the same captured binder compare correctly.
+- Contextual splice meta-variables now feed `cmtt-meta`; importantly we do NOT claim metas are solved: the solved and occurs-check counters remain zero.
+- Fixed a corpus crash (`token_type_name` can return null; guarded the normal-form printer). Corpus: 674 files, 0 crashes, 0 fuel cuts. pfront 164/5 (the same 5 pre-existing), stdlib 260/260. Test `97_hered.pie`.

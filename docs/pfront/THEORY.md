@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_hered.c3` | 1,407 | Hash-consed de Bruijn terms; binder-aware AST translation; hereditary β substitution (typed decreasing metric), δ arithmetic/boolean, π pair projections, literal-if, η-contraction, modal β; opaque imperative boundary; N4270 βη-equivalent units, N4271 η-wrappers, N4272 source β-redex, N4273 staging redex |
 | `theory_mu.c3` | ~830 | Iso-recursive μ-types built from the declarations (struct/enum/newtype → μ; `*T` → option); contractivity, least-fixpoint inhabitation W4250, coinductive shape equality between nominal recursive types N4251 |
 | `theory_session.c3` | ~1,230 | Session types over `stdlib/channel`: endpoints from `let (tx, rx) = oneshot()/bounded()/unbounded()` and `*…Sender/*…Receiver` parameters; a protocol per party from its control flow (seq → prefix, if/match → choice, loop → μ); duality decided coinductively — W4260 ends not dual (with the first disagreement), W4261 oneshot sent twice on a path, N4262 parameter protocol under `--lint` |
 | `theory_stratified.c3` | ~680 | Type-definition strata: dependency graph (value/guarded/alias edges, polarity), Tarjan SCCs + levels, NF_RECURSIVE_TY; alias cycles E4240, by-value recursion via variant N4241, non-positive N4242, non-regular generic recursion W4243 |
@@ -149,6 +150,31 @@ send). A oneshot sender used twice on one straight path is **W4261**; the
 inferred protocol of a channel parameter is **N4262** under `--lint`.
 Control‑flow choices are decisions each party takes on its own, so they
 keep their kind under duality; only protocol labels flip ⊕ ↔ &.
+
+**Hereditary substitution (`theory_hered`).** This replaced two counter
+implementations: `theory_cmtt_meta.hered_walk` recursively searched the AST
+and incremented a counter when it *saw* a lambda, without binding or
+substituting anything; `theory_hered.ht_from_ast` assigned every identifier
+De Bruijn index 0, then normalised those made-up terms. Now the source is
+translated with the resolver's binder pointers into a hash-consed term
+store: function and closure parameters become de Bruijn binders (including
+curried tuple patterns), immutable `let` is represented as `(λ. body) value`,
+mutable / written / imperative constructs are opaque leaves, and free names
+are keyed by their declaration identity. Hereditary substitution shifts
+under binders and reduces each application as it is built; its decreasing
+simple-type metric is recorded, and a fuel cut is visible (the regression
+requires 0). δ reduces literal arithmetic, comparisons and booleans; π
+reduces pair projections; `if true` selects its arm; η contracts `λx. f x`
+iff `x` is not free in `f`; modal β/η cancel `splice (quote e)` /
+`quote (splice q)`. After normalisation, hash-consed structural identity is
+a βη-equality decision for the supported pure fragment. Units with opaque
+leaves are never compared, so the loop tests remain deliberately outside the
+judgement. N4270 (`--lint`) reports equivalent functions / closures, N4271
+an η-wrapper, N4272 an immediate lambda application with its value, N4273
+staging redexes. The same engine now feeds `cmtt-meta`: each splice under a
+quote is recorded as a contextual meta-variable `u::A[Ψ]`, and the old
+`hered_walk` has been deleted. Not a source transform: this pass is a
+normalisation/equivalence oracle only.
 
 **μ-types (`theory_mu`).** The contractivity / De Bruijn shift‑subst /
 coinductive‑subtyping machinery was real but ran on a hard‑coded demo
@@ -560,6 +586,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `97_hered` + `hered` | `inc2` / `add2` η-wrappers, let-expanded/direct `inc(inc(x))` equality, closures with distinct binder names but same capture, source β `(fn x. x*2)(21) → 42`, modal β, literal if; no false equality for imperative loops and 0 fuel cuts |
 | `95_mu` + `mu` | IntList ≡ IntList2 (N4251) while BoolList / IntSeq are not; Stream W4250; Chain / Server quiet; memo hits > 0 |
 | `94_strata` + `strata` | E4240 ×3 (self + mutual alias cycles, plus fuzz `type T = T`), NF_RECURSIVE_TY on Tree/Link, N4241 variant recursion, N4242 negative occurrence, W4243 `Nest<Box<T>>`; Box / TreeRef / Link quiet |
 | `93_commute` + `commute` | sum+max loop flagged NF_REDUCTION + N4230, `last =` N4231, FNV mixed monoids, impure call / heap write / control-carried accumulator stay ordered, NF_INDEPENDENT on an independent `let` |

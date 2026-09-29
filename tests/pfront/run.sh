@@ -102,6 +102,7 @@ declare -A EXPECT=(
   [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
   [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
+  [97_hered]=0                # hereditary substitution: βη normal forms/equivalence, η wrappers, source β, staging modal beta, metrics/no cuts
   [96_session]=0              # session types over channels: starved receiver + extra send (W4260), oneshot double send (W4261), μ-loops dual, param protocol (N4262)
   [95_mu]=0                   # μ-types from declarations: IntList ≡ IntList2 (N4251), Stream uninhabited (W4250), Bool/Seq/Chain/Server quiet
   [94_strata]=3               # type strata: alias cycles are errors (Loop, Ping, Pong); variant/negative/non-regular recursion diagnosed
@@ -1861,6 +1862,31 @@ if [ $ss_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (channel ends dual by coinduction; starved/extra/double-send flagged; parameter protocols inferred)\n' "session"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "session" "$ss_why"
+fi
+
+# Hereditary substitution: the engine normalises the pure fragment to a
+# hash-consed βη normal form (binder-aware closures), proves equivalence of
+# direct/let-expanded functions, detects η wrappers and source β redexes,
+# and performs modal β. Imperative units stay opaque; no fuel cuts.
+he=$("$BIN" tests/pfront/97_hered.pie -I stdlib -I . --lint 2>&1)
+he_ok=1; he_why=""
+hneed() { echo "$he" | grep -q "$1" || { he_ok=0; he_why="$he_why missing[$2]"; }; }
+hdeny() { echo "$he" | grep -q "$1" && { he_ok=0; he_why="$he_why noise[$2]"; }; }
+hneed '97_hered.pie:9:1: note\[N4271\]: `inc2` is an η-expansion of `inc`'                                  "one-arg eta wrapper"
+hneed '97_hered.pie:16:1: note\[N4271\]: `add2` is an η-expansion of `add`'                                 "tuple eta wrapper"
+hneed '97_hered.pie:25:1: note\[N4270\]: compose_inc is βη-equivalent to twice_inc'                           "let beta equivalence"
+hneed '97_hered.pie:39:15: note\[N4270\]: closure at 39:15 in `closure_pair` is βη-equivalent to closure at 38:15' "binder-aware closure equivalence"
+hneed '97_hered.pie:33:44: note\[N4272\]: β-redex in the source: this immediately-applied closure reduces to 42' "source beta + delta"
+hneed '97_hered.pie:52:15: note\[N4273\]: staging redex: `quote (splice q)` is `q`'                        "modal beta"
+hneed 'hered-subst      : 48 subst, 7 shift, 10 β (1 source redexes, 6 lets), 3 δ, 0 π, 1 if, 2 η, 1 modal; metric ≤ 1, 0 fuel cuts' "real substitutions, reductions, no fuel cuts"
+hneed 'hered-judge      : 2 βη-equivalent pairs (N4270), 2 η-wrappers (N4271), 1 source redexes shown (N4272), 2 staging redexes (N4273)' "judgement census"
+hneed 'cmtt-meta        : 1 meta-vars (0 solved), 0 substitutions' "contextual splice discovery without claiming solves"
+hdeny '97_hered.pie:.*(loop_a|loop_b).*N4270'                                                         "opaque imperative false equality"
+hneed '0 fuel cuts' "normalisation completed without a fuel cut"
+if [ $he_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (hereditary beta-delta-pi/modal, eta, beta-eta equality incl. closures, no fuel cuts)\n' "hered"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "hered" "$he_why"
 fi
 
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
