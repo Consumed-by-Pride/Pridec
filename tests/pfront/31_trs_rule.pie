@@ -2,4 +2,4 @@ rewrite simp
   | 0i64 -> 1i64
 
 fn f : () -> i64
-  | () -> 0i64
+  | () -> 0i64 |> simp

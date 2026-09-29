@@ -551,7 +551,7 @@ fn Sym* Resolver.declare(Resolver* r, uint name_id, pfront_core::SymKind k,
 // scope so `i64`, `bool`, `printf` etc. resolve without a prelude file.
 fn void Resolver.install_builtins(Resolver* r)
 {
-    char*[25] tynames = {
+    char*[27] tynames = {
         "i8", "i16", "i32", "i64", "i128",
         "u8", "u16", "u32", "u64", "u128",
         "f32", "f64", "bool", "char", "str",
@@ -562,9 +562,14 @@ fn void Resolver.install_builtins(Resolver* r)
         // spec §13.1's canonical example is `T ∩ ¬null`, and without this
         // the resolver rejected it as an unknown type name even once the
         // parser accepted it.
-        "null"
+        "null",
+        // Compile-time values of the MSP stage, spec §16: a `rewrite` block
+        // has type Rewrite, a `rule` declaration type Rule. Neither exists
+        // at runtime, but `let r : Rewrite = rewrite ...` -- the spec's
+        // own example -- must not fail with "unknown type name".
+        "Rewrite", "Rule"
     };
-    for (usz i = 0; i < 25; i++)
+    for (usz i = 0; i < 27; i++)
     {
         uint id = r.interner.intern(tynames[i], cstr_len(tynames[i]));
         r.declare(id, pfront_core::SymKind.SYM_BUILTIN_TYPE, pfront_core::NS_TYPE, null, true);

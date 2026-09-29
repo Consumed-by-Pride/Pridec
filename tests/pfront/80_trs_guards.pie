@@ -1,0 +1,14 @@
+-- Spec §16 verbatim: guards, builtins in the rhs, `++`, `|>` and `|> r*`.
+fn demo : (i64, i64) -> i64
+  | (n, m) ->
+      let arith : Rewrite = rewrite
+        | x + 0 ↦ x
+        | x * 1 ↦ x
+        | x * 2 ↦ x << 1
+      let strength : Rewrite = rewrite
+        | x * n, is_power_of_2(n) ↦ x << log2(n)
+      let full : Rewrite = arith ++ strength
+      let a = ((n + 0) * 8) |> full      -- n << 3
+      let b = (m * 1 + 0) |> arith*      -- m
+      let c = (m * 3) |> full            -- unchanged: 3 is not a power of 2
+      a + b + c

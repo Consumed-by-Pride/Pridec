@@ -516,9 +516,15 @@ fn bool EGraph.saturate(EGraph* g, theory_trs::RuleSet* rules, int max_iters)
             g.search(rule.lhs, ms);
             for (usz m = 0; m < ms.count; m++)
             {
+                // A guarded rule only asserts its equality where the guard
+                // is decided true. The e-graph used to ignore guards
+                // entirely, which merged `x * n` with `x << log2(n)` for
+                // every n -- an unsound equality the extractor then chose.
+                if (!theory_trs::guard_holds(rule, &ms.items[m].subst)) { continue; }
                 // Instantiate the right-hand side under this match, insert it,
                 // and assert it equal to the matched class.
                 Node* rhs = ms.items[m].subst.instantiate(g.arena, rule.rhs, 0);
+                rhs = theory_trs::fold_builtins(g.arena, rhs, 0);
                 if (rhs == null) { continue; }
                 int rc = g.add_term(rhs, 0);
                 if (rc < 0) { continue; }
@@ -728,6 +734,19 @@ fn Node* Saturator.optimise(Saturator* s, Node* term)
 
     Node* out = s.eg.extract(root, 0);
     return out == null ? term : out;
+}
+
+// Saturate ONE term under ONE rule set (a `|>*` site), on a fresh e-graph
+// so classes from an earlier site cannot leak equalities into this one.
+fn Node* Saturator.optimise_with(Saturator* s, Node* term, theory_trs::RuleSet* rules)
+{
+    if (!s.enabled || term == null || rules == null || rules.count == 0) { return term; }
+    theory_trs::RuleSet* saved = s.rules;
+    s.eg.init(s.arena, s.diags, s.file);
+    s.rules = rules;
+    Node* out = s.optimise(term);
+    s.rules = saved;
+    return out;
 }
 
 fn void Saturator.report(Saturator* s)

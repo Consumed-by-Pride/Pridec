@@ -65,10 +65,13 @@ theory_check.c3     TheoryPipeline (pfront/theory/), ~40 passes in a fixed
                       2f. principal-type effect rows
                       ── verifier snapshot ("before") ──
                       3.  PGL decision trees (BEFORE TRS touches patterns)
-                      3a. TRS rule collection → critical-pair check →
-                          rewriter.run_fixpoint (≤ 8 rounds)
+                      3a. rewrite VALUES (theory_rwsite): evaluate
+                          rewrite/rule/++ bindings in scope; per set, once:
+                          LPO termination + critical pairs → confluence
+                          verdict; apply at `|>` (one pass) / `|>*` (normal
+                          form, then e-graph extraction). Nothing else is
+                          rewritten.
                       3b. comptime eval + partial evaluation/specialisation
-                      3c. equality saturation via e-graph
                       4.  IRDL dialect lowering → core terms
                       5.  conttree build + normalise (scoped effects)
                       6.  explicit UB accounting
