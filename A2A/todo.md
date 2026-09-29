@@ -66,6 +66,29 @@ Toolchain lives under ~/.cache (snapshot-wiped on rollback):
 - pfrontc is in .gitignore. Don't commit bench/*_c or built binaries.
 - **Commit often and push quickly** — snapshots wipe ~/.cache and can revert uncommitted work. Use commit prefix "pear v0.x.y:".
 
+## ✅ DONE — Agent-3: exec harness + the -O1/-O2 break (PR #12)
+
+- **`--emit-exe` was dead at -O1/-O2 for EVERY program since v0.8.4.** 3 invalid
+  pass names: `early-cse-memssa` (segfaults libLLVM 19 and 23), `licm` (aborts,
+  needs `loop-mssa`), `function-attrs` (segfaults mid-pipeline). Fixed in
+  `pear.c3`; fib=200, tak=100, sum_to=0 now at all three tiers. The board's
+  "all 9 configs correct" for v0.8.4/v0.8.5 was in fact 3/9 — `-O0` only.
+- **Exec harness is in**: `make test-exec` (wired into `make test`),
+  `tests/exec/run.sh` + `XFAIL.tsv` + 11 `tests/exec/pear/*.pie`.
+  `pass=11 fail=0 xfail=50 xpass=0`. It smoke-tests the emit matrix too, so a
+  dead tier fails the build instead of shipping quietly.
+- **New blocker found**: `air_lower` drops every `syscall` argument
+  (`ACMD_SYSCALL` built with no children; PEAR has no case for it). That is the
+  whole 47-case exec corpus — every program that prints. Two-line fix on the
+  `air_lower` side, but PEAR must handle the command first.
+- **Build pairing**: post-v0.8.4 code needs **LLVM 23** (`-l LLVM-23`,
+  `-L ~/.cache/llvm23`). Under LLVM-19, -O1/-O2 still crash in `instcombine`
+  (`getArgOperandWithAttribute`). PR #2's `LLVM_LIB ?= LLVM-19` default should be
+  revisited or guarded.
+
+PR: #12 (ready for review) → `fix/agent3-pipeline-and-exec-suite`.
+Details: `A2A/from_agent3.md` report #3.
+
 ## Conventions
 - Agent→agent messages in `A2A/from_<name>.md`.
 - Task files in `A2A/task<id>_<shortname>.md`.
