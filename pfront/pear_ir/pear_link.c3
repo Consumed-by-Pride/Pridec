@@ -27,7 +27,7 @@ fn bool write_bytes(char* path, char* data, usz len)
     return w == len;
 }
 
-fn bool pear_link_exe(AirModule* mod, char* src_path)
+fn bool pear_link_exe(AirModule* mod, char* src_path, int opt_level)
 {
     if (mod == null || src_path == null) return false;
 
@@ -62,7 +62,7 @@ fn bool pear_link_exe(AirModule* mod, char* src_path)
         exe_path[k] = 0;
     }
 
-    if (!pear_emit_obj(mod, &obj_path[0]))
+    if (!pear_emit_obj(mod, &obj_path[0], opt_level))
     {
         return false;
     }

@@ -424,11 +424,11 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
         }
         if (emit_bc)
         {
-            air::emit_bc(entry.ast, it, path);
+            air::emit_bc(entry.ast, it, path, opt_level);
         }
         if (emit_exe)
         {
-            air::emit_exe(entry.ast, it, path);
+            air::emit_exe(entry.ast, it, path, opt_level);
         }
 
         pfront_ext::Stats st;

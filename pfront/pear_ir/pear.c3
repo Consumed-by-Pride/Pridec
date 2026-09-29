@@ -1108,6 +1108,14 @@ const char* PEAR_PIPE_O1 = (char*)"default<O1>";
 const char* PEAR_PIPE_O2 = (char*)"default<O2>,instcombine,simplifycfg,bdce,adce,dce,gvn,jump-threading,simplifycfg,instcombine,dce,globaldce,dce";
 const char* PEAR_PIPELINE = PEAR_PIPE_O2;  // default tier; frontend may swap
 
+// Select the PEAR pipeline for an opt level (0/1/2). Level 3 maps to O2.
+fn char* pear_pipe_for(int lvl)
+{
+    if (lvl <= 0) return PEAR_PIPE_O0;
+    if (lvl == 1) return PEAR_PIPE_O1;
+    return PEAR_PIPE_O2;
+}
+
 fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* mod)
 {
     cg.ctx = ctx; cg.mod = m; cg.b = b; cg.tmp = 0; cg.blk = 0;
@@ -1139,7 +1147,7 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
     }
 }
 
-fn void pear_emit_module(AirModule* mod, char* bc_path)
+fn void pear_emit_module(AirModule* mod, char* bc_path, int opt_level)
 {
     if (mod == null || bc_path == null) return;
     Lcontext ctx = ll_ctx_create();
@@ -1155,7 +1163,7 @@ fn void pear_emit_module(AirModule* mod, char* bc_path)
     {
         Lpass_opts po = ll_create_pb_opts();
         ll_pb_set_inliner_threshold(po, 250);
-        Lerror e = ll_run_passes(m, PEAR_PIPELINE, null, po);
+        Lerror e = ll_run_passes(m, pear_pipe_for(opt_level), null, po);
         if (e != null)
         {
             char* msg = ll_get_err_msg(e);
@@ -1173,7 +1181,7 @@ fn void pear_emit_module(AirModule* mod, char* bc_path)
 
 // Emit a native ELF .o via LLVMTargetMachineEmitToFile (in-process, no shell).
 // Returns true on success.
-fn bool pear_emit_obj(AirModule* mod, char* obj_path)
+fn bool pear_emit_obj(AirModule* mod, char* obj_path, int opt_level)
 {
     if (mod == null || obj_path == null) return false;
     ll_init_x86_ti();
@@ -1207,7 +1215,7 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path)
     {
         Lpass_opts po = ll_create_pb_opts();
         ll_pb_set_inliner_threshold(po, 250);
-        Lerror pe = ll_run_passes(m, PEAR_PIPELINE, null, po);
+        Lerror pe = ll_run_passes(m, pear_pipe_for(opt_level), null, po);
         if (pe != null)
         {
             char* msg = ll_get_err_msg(pe);

@@ -117,7 +117,7 @@ fn char* derive_bc_path(char* src, char* buf, usz cap)
     return buf;
 }
 
-fn void emit_bc(PNode* root, pfront_core::Interner* it, char* path)
+fn void emit_bc(PNode* root, pfront_core::Interner* it, char* path, int opt_level)
 {
     char[AIR_PATH_MAX] buf;
     char* out_path = null;
@@ -138,13 +138,13 @@ fn void emit_bc(PNode* root, pfront_core::Interner* it, char* path)
     lr.init(&mod, &sc, it);
     lr.module_body(root);
 
-    pear::pear_emit_module(&mod, out_path);
+    pear::pear_emit_module(&mod, out_path, opt_level);
 
     sc.destroy();
     arena.destroy();
 }
 
-fn void emit_exe(PNode* root, pfront_core::Interner* it, char* path)
+fn void emit_exe(PNode* root, pfront_core::Interner* it, char* path, int opt_level)
 {
     AirArena arena;
     if (!arena.init()) return;
@@ -157,7 +157,7 @@ fn void emit_exe(PNode* root, pfront_core::Interner* it, char* path)
     lr.init(&mod, &sc, it);
     lr.module_body(root);
 
-    (void)pear::pear_link_exe(&mod, path);
+    (void)pear::pear_link_exe(&mod, path, opt_level);
 
     sc.destroy();
     arena.destroy();
