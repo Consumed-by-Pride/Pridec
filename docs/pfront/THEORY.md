@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_effcont.c3` | ~800 | Handler discipline: lexical prompt stack, W4180 undeclared perform, W4181 call leaks an effect, N4182 multi-shot, W4183 stray / W4184 escaping resume, N4185 dead arm, W4186 arm arity, N4187 tail-resumptive (sets NF_TAIL) |
 | `theory_linearity.c3` | ~900 | Ownership of `alloc`: flow-sensitive LIVE/FREED/MAYBE/ESCAPED per resource with aliases, defer, loops; W4160 double free, W4161 use-after-free, W4162 leak, W4166 overwritten while owned, N4163–N4165 path-dependent |
 | `theory_sct.c3` | ~900 | Size-change termination (Lee/Jones/Ben-Amram): structural descent through patterns, integer descent only under a guard bound, closure over mutual recursion; W4150 proved loop, N4152 not proved (why), N4151 proved (`--lint`) |
 | `theory_ub.c3` | ~520 | UB lattice (Lee et al.): poison flows through bindings/arithmetic; the USE is the diagnostic (W4140 with origin + binding), poison shifts (W4141), dead code after `ub!` (N4142) |
@@ -115,6 +116,33 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Handler discipline (`theory_effcont`).** Counted "frames" and "fuses"
+on a continuation stack that nothing consulted. `theory_effects` already
+checks each handler's coverage (W4070–72); what was missing is the
+perform and resume sites. The pass now walks each function with a lexical
+model of the delimited-continuation stack: the computation of a `handle`
+runs under a prompt naming the ops its arms catch; an arm's own body runs
+*outside* that prompt (deep-handler semantics — only the continuation is
+re-handled); a lambda body is a fresh frame. A `perform` not caught by an
+enclosing prompt must be in the function's *written* row — **W4180**
+"`Ask.ask` is performed here but … the row of `forgets` (`! [IO]`) does
+not list `Ask`" — and a call carries its callee's row (**W4181**).
+Unannotated functions are not nagged (rows are inferred elsewhere).
+Inside arms `resume(v)` (or an explicit continuation binder `| E.op x k ->
+k v`) is counted along every path: exactly once and in tail position on
+every path is **tail-resumptive** (Leijen) — `NF_TAIL` is set on the arm
+so the backend can run it as a plain function without capturing a
+continuation (N4187 under `--lint`); ≥ 2 on a path or inside a loop is
+**multi-shot** (N4182); no resume at all is an abort arm; `resume` outside
+any arm is **W4183**, and inside a closure or the binder used as a value
+is **W4184** (the continuation escapes). An arm for an effect the handled
+computation provably cannot perform is dead (**N4185**), and an arm binding
+the wrong number of payload values is **W4186**. This round also fixed the
+parser: `op ask : …` produced a phantom operation named `op` in every
+effect, which made every handler "incomplete" (W4072) and every second
+effect a shadowing binding (W3010). The stdlib and corpus are clean; 27
+tail-resumptive arms are proved across the corpus.
 
 **Ownership / linearity (`theory_linearity`).** Counted identifier uses
 by name and guessed "moves" from function-name prefixes (`take_`, `free_`),
@@ -325,6 +353,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `88_handlers` + `handlers` | undeclared perform, call leak, tail-resumptive, multi-shot (sequential and loop), dead arm, stray and escaping resume, arm arity; declared/handled performs quiet |
 | `87_ownership` + `ownership` | double free, UAF, one-path leak, full leak, alias, escape (quiet), defer+free, loop-carried double free, overwrite-while-owned, parameter UAF |
 | `86_sct_termination` + `sct_termination`/`sct_quiet` | len/fib/ack/halve/ev-od proved; fact (unbounded) / swap (rotation) / shadow not proved; spin is a proved loop; proofs only under `--lint` |
 | `85_ub_poison` + `ub_poison` | branch/call/store/lambda uses with origin + nearest binding; shift-by-width; re-tagged `mut` silent; arithmetic on poison silent; dead after `ub!` |

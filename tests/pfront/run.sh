@@ -98,6 +98,7 @@ declare -A EXPECT=(
   [85_ub_poison]=0            # UB lattice: poison is UB when USED; use point + origin reported
   [86_sct_termination]=0      # size-change termination: proved / not proved / proved loop
   [87_ownership]=0            # alloc/free ownership: double free, use-after-free, leaks, path-dependent notes
+  [88_handlers]=0             # effect handlers: undeclared performs, resume discipline, dead arms, arity
 )
 
 # ---------------------------------------------------------------------------
@@ -1637,15 +1638,42 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "ownership" "$own_why"
 fi
 
+# Effect handlers: a perform not caught by an enclosing handle must be in
+# the written row; calls carry their callee's row; resume is counted per
+# path (tail-resumptive → NF_TAIL, multi-shot, stray, escaping); dead arms
+# and arm arity. Unannotated functions are not nagged.
+eh=$("$BIN" tests/pfront/88_handlers.pie -I stdlib -I . --lint 2>&1)
+eh_ok=1; eh_why=""
+hneed() { echo "$eh" | grep -q "$1" || { eh_ok=0; eh_why="$eh_why missing[$2]"; }; }
+hdeny() { echo "$eh" | grep -q "$1" && { eh_ok=0; eh_why="$eh_why noise[$2]"; }; }
+hneed '88_handlers.pie:23:7: warning\[W4180\]: `Ask.ask` is performed here.*row of `forgets` (`! \[IO\]`) does not list `Ask`' "undeclared perform"
+hneed '88_handlers.pie:27:15: warning\[W4181\]: calling `asks` performs `Ask`'                              "call leaks effect"
+hneed '88_handlers.pie:33:9: note\[N4187\]: arm for `ask` is tail-resumptive'                               "tail-resumptive"
+hneed '88_handlers.pie:41:13: note\[N4182\]: the continuation of `ask` is resumed more than once'           "multi-shot sequential"
+hneed '88_handlers.pie:42:9: note\[N4185\]: the handled computation can never perform `Tell.tell`'          "dead arm"
+hneed '88_handlers.pie:46:11: note\[N4183\]: `resume` outside a handler arm'                               "stray resume (note: no handle in the fn)"
+hneed '88_handlers.pie:53:[0-9]*: warning\[W4184\]: `resume` inside a closure'                             "escaping resume"
+hneed '88_handlers.pie:70:9: warning\[W4186\]: this arm binds 2 values but `Tell.tell` carries 1'          "arm arity"
+hneed '88_handlers.pie:80:27: note\[N4182\]: the continuation of `ask` is resumed inside a loop'            "multi-shot loop"
+hdeny '88_handlers.pie:1[6-8]:[0-9]*: warning\[W418'                                                        "declared row reported"
+hdeny '88_handlers.pie:3[0-3]:[0-9]*: warning\[W418'                                                        "lexically handled perform reported"
+hdeny '88_handlers.pie:5[89]:[0-9]*: \(warning\|note\)\[[WN]418[27]'                                        "mixed abort/resume arm given a verdict"
+hdeny 'W4072'                                                                                               "phantom `op` operation (parser)"
+if [ $eh_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (undeclared/leaked effects; tail/multi-shot/stray/escaping resume; dead arm; arity)\n' "handlers"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "handlers" "$eh_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x across stdlib)\n' "flow_noise_floor"
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi

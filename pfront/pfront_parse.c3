@@ -4974,6 +4974,19 @@ fn Node* Parser.parse_effect_decl(Parser* p, bool is_pub)
             if (p.check(Tk.TOKEN_NEWLINE)) { p.advance(); continue; }
             break;
         }
+        // `op ask : () -> i64`: the `op` keyword is not the operation's name.
+        // It used to become a phantom operation called `op` in every effect,
+        // which made every handler "incomplete" (W4072) and every second
+        // effect a shadowing binding (W3010).
+        if (on.len == 2 && on.start[0] == 'o' && on.start[1] == 'p')
+        {
+            Tok nx = p.peek(1);
+            if (tok_is_member_name(nx.type) && !(nx.len == 2 && nx.start[0] == 'o' && nx.start[1] == 'p'))
+            {
+                p.advance();
+                on = p.cur();
+            }
+        }
         p.advance();
         Node* op = p.mk_at(Nk.N_DECL_EFFECT_OP, on);
         op.name_id = p.interner.intern(on.start, on.len);
