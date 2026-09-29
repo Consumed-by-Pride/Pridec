@@ -179,6 +179,8 @@ fn void print_flags(Node* n)
     if ((f & pfront_core::NF_DENSE_SWITCH) != 0) { printf(" dense"); }
     if ((f & pfront_core::NF_PURE_FN) != 0)    { printf(" pure"); }
     if ((f & pfront_core::NF_READONLY_PARAM) != 0) { printf(" readonly"); }
+    if ((f & pfront_core::NF_INDEPENDENT) != 0) { printf(" indep"); }
+    if ((f & pfront_core::NF_REDUCTION) != 0) { printf(" reduction"); }
     if ((f & pfront_core::NF_ERROR) != 0)      { printf(" ERR"); }
 }
 

@@ -46,6 +46,7 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_crdt.c3` | ~900 | Commutativity (CALM/CRDT): per-statement read/write location sets, block dependence DAG + critical path, NF_INDEPENDENT; loop accumulators classified counter/product/join/max-min/register/mixed, commutative reductions flagged NF_REDUCTION; N4230/N4231 |
 | `theory_quals.c3` | ~750 | Whole-program qualifier fixpoint: purity classes with reasons, parameter write/escape via callees, NF_PURE_FN / NF_READONLY_PARAM; W4220 discarded pure result, W4221 never-written mutable param, N4222/N4223 |
 | `theory_matching.c3` | ~1000 | Maranget decision DAGs for every `match` and clause set: f/b/a heuristics, enum signatures, or-rows, guards, hash-consed sharing, tree-vs-first-match verification, NF_DENSE_SWITCH; `--emit-dtree`; N4210 |
 | `theory_cps.c3` | ~1300 | Danvy–Filinski one-pass CPS into a continuation IR; tail verdicts (NF_TAIL), join/loop continuations, η/β contraction, contification; `--emit-cps`; W4200/N4201/N4203 |
@@ -120,6 +121,35 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Commutativity analysis (`theory_crdt`).** Was a token counter: every
+`+` was a "counter CRDT", every assignment "LWW", every call whose name
+began with `add`/`ins`/`pus` an "op-set", joined into one meaningless
+"final class" per file. Now it asks the CALM question properly — *what is
+order-insensitive?* — at two granularities. **Statements**: each gets a
+set of locations it reads and writes (`VAR(b)`, `HEAP(b)` = memory
+reachable through binder `b`, `WORLD`); calls consult `NF_PURE_FN` from
+`theory_quals` (a pure call only reads its arguments, anything else
+touches `WORLD`), `return`/`break`/`continue`/`perform`/`handle` are
+barriers. Within a block the RAW/WAR/WAW relation gives a dependence DAG,
+its longest chain the critical path; a statement that does not conflict
+with its predecessor is flagged **`NF_INDEPENDENT`** (it may be swapped or
+hoisted without re-deriving alias facts). **Loops**: every local written
+in the body is classified by *how* — `x = x ± e`/`x += e` counter,
+`x = x * e` product, `x |= e`/`x &= e` join, `if e > x then x = e` max/min
+register, plain `x = e` last-writer-wins register — and by whether its
+intermediate value is observed elsewhere (the condition included: an
+accumulator steering the trip count is a dependence through control).
+Updates of one variable must all lie in the *same* monoid: `h ^= b; h *= P`
+(FNV) is *mixed*, not a fold. A loop whose written locals are all
+commutative accumulators (plus induction variables stepping by a
+constant) and whose body has no heap/world write or barrier is a
+**commutative reduction**: flagged **`NF_REDUCTION`** for the backend and
+reported under `--lint` as **N4230** with the accumulator list (26 real
+ones in the stdlib: `stats.pie` sums/min/max, `blas.pie` dot products,
+`subtle.pie` constant-time compare, …). **N4231** names the single plain
+assignment that pins an otherwise commutative loop (`last = a[i]`). Order
+of passes: after `theory_quals`.
 
 **Qualifier inference (`theory_quals`).** Carried a "qualifier word"
 through a walk and cleared PURE on any assignment or call; every call was
@@ -458,6 +488,7 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `93_commute` + `commute` | sum+max loop flagged NF_REDUCTION + N4230, `last =` N4231, FNV mixed monoids, impure call / heap write / control-carried accumulator stay ordered, NF_INDEPENDENT on an independent `let` |
 | `92_quals` + `quals` | interprocedural purity (bump → bump_twice), recursive fn pure, NF_PURE_FN / NF_READONLY_PARAM in the dump, W4220 ×2, N4223, externs/alloc/effects never pure |
 | `91_matching` + `dtree` | complete enum switch (no default), two-column DAG sharing (16→13), dense jump table + N4210, or-expanded rows, guard fallthrough leaf, nested occurrence `x.0.0`, 0 tree/first-match disagreements |
 | `90_cps` + `cps` | self tail → loop, W4200 misuse, contified join (`letj`), while as `letk`, inline continuation for a non-tail call, escaping lambda stays `letf`, contraction census |
