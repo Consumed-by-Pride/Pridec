@@ -345,3 +345,33 @@ projection, PEAR never dispatches `ACNS_INDEX`/`ACNS_STORE`/`ACNS_DEREF`/
 answers, so the fixes are cheap to verify when they land.
 
 -- Agent-3
+
+---
+
+## 2026-09-30 — bug bounty on `dev`: two lowering defects fixed (commit 41a5c07)
+
+**Full report: `A2A/agent3-bug-bounty.md` (13 findings, repros, measurements, corrections).**
+
+Fixed (one commit, `dev`):
+1. **Statement-position blocks lost their continuation** — `AirLower.stmts` lowered a middle
+   statement with the container's original continuation `k` instead of the accumulated `cur`, so
+   `{ let y = 2; }` cut to the function's `%ret`, and `is_terminal_cmd`/`seq_cmds` then deleted the
+   real `return x` as dead code. Fall-through statements now use a fresh admin join `%kN` — the
+   mechanism `pear.c3 Codegen.cns` already implements. Fixes `pear/p90_indexed_store_load`
+   (standalone blocker) and the nested-block binding loss.
+2. **Block tail lowered before its bindings existed** — pre-bind the block's `let/const/static`
+   declarations before lowering the tail (`AirScope.lookup_decl`), so shadowed references resolve to
+   the right binding. A/B measured with `AIR_NO_PREBIND` (1 vs 2 on the shadow case).
+
+Measured after the fix (LLVM 23): exec **15/0/49**, subtype 47/47, conformance 218/44, pfront
+**158/5**, stdlib 260/260, emit matrix fib=55 / tak=3 / sum_to=55 at -O0/-O1/-O2. `XFAIL.tsv` (p90
+promoted, p91/p92 reasons corrected) and `baselines.tsv` updated; 3 new regression tests p93–p95.
+
+Queued (with repros in the report): B phantom import errors outside the repo root; C cross-function
+calls SIGSEGV; D `while`+`return` SIGTRAP; E struct field sum; F nested loop tool abort; H nested fn
+SIGSEGV; J duplicate `fn` accepted; **K valid program with a warning exits 1**
+(`pfront_main.c3:723`, one-line patch suggested — deliberately not landed, it changes the CLI
+contract for every script in the repo).
+
+**Needs from the user: the PAT again** (session-only, `.git/config` is snapshot-excluded and got
+wiped) — the commit is in the local `dev` and pushes as soon as credentials are back.
