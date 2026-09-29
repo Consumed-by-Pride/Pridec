@@ -614,6 +614,11 @@ fn Node* sccp_mk_bool(Arena* a, bool v, Span sp)
 fn Node* Sccp.replace_const(Sccp* s, Node* n)
 {
     if (n == null) return null;
+    // Only EXPRESSIONS are values. The lattice also carries entries for
+    // binder patterns (from `set(n.children[0], v)` on a let) so that uses
+    // can look them up; substituting the binder itself turns `let y = 3`
+    // into `let 3 = 3` and leaves every `y` pointing at a detached node.
+    if (!pfront_core::is_expr(n.kind)) return n;
     // Don't replace already-trivial literals.
     if (n.kind == Nk.N_EXPR_INT || n.kind == Nk.N_EXPR_BOOL
      || n.kind == Nk.N_EXPR_FLOAT || n.kind == Nk.N_EXPR_CHAR
@@ -678,8 +683,15 @@ fn Node* Sccp.apply(Sccp* s, Node* n)
     }
 
     // Default: recurse into children, then try to replace THIS node.
+    // An assignment's target (child 0) is a PLACE (lvalue), not a value:
+    // never substitute constants into it — that would turn `x = 5` into
+    // `3 = 5` if x were inferred constant.
+    bool lhs_is_place = n.kind == Nk.N_STMT_ASSIGN
+                     || n.kind == Nk.N_STMT_COMPOUND_ASSIGN
+                     || n.kind == Nk.N_EXPR_ASSIGN;
     for (usz i = 0; i < n.child_count; i++)
     {
+        if (lhs_is_place && i == 0) continue;
         n.set_child(i, s.apply(n.children[i]));
     }
     return s.replace_const(n);
