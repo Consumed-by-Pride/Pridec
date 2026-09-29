@@ -1,0 +1,55 @@
+-- Qualifier inference: purity by whole-program fixpoint, parameter writes
+-- through callees, read-only parameters, discarded pure results.
+-- EXPECT: 0 errors
+
+struct Counter
+  n : i64
+
+extern fn emit(x: i64) -> i64
+
+-- 1. pure, recursive: stays pure (may not terminate)
+fn tri : i64 -> i64
+  | 0i64 -> 0i64
+  | n -> n + tri(n - 1i64)
+
+-- 2. pure, no recursion, no loop: memoisable
+fn square : i64 -> i64
+  | x -> x * x
+
+-- 3. writes through its pointer parameter: impure, parameter 0 written
+fn bump : *Counter -> ()
+  | c -> c.n = c.n + 1i64
+
+-- 4. only reads through the pointer: read-only parameter (N4223 --lint)
+fn peek : *Counter -> i64
+  | c -> c.n
+
+-- 5. impure only because it calls `bump` (interprocedural), and the
+--    counter it passes along is therefore written too
+fn bump_twice : *Counter -> ()
+  | c ->
+      bump(c)
+      bump(c)
+
+-- 6. calls an extern: unknown callee → impure
+fn shout : i64 -> i64
+  | x -> emit(x)
+
+-- 7. allocating: not referentially transparent, but no external effect
+fn fresh : () -> *u8 ! [Alloc]
+  | () -> alloc [u8; 16]
+
+-- 8. the results of `square` and `tri` are discarded: the calls do nothing (W4220)
+fn wasted : i64 -> i64
+  | x ->
+      square(x)
+      tri(x)
+      x + 1i64
+
+fn main : () -> () ! [Alloc]
+  | () ->
+      let mut c : Counter = Counter { n: 0i64 }
+      bump_twice(&c)
+      let _a : i64 = peek(&c) + shout(square(2i64)) + wasted(3i64)
+      let _p : *u8 = fresh()
+      ()

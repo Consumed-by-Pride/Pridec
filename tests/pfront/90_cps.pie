@@ -1,0 +1,47 @@
+-- CPS translation: tail-call verdicts, `tail` misuse, join points,
+-- loops as continuations, contification of local functions.
+-- EXPECT: 0 errors
+
+-- 1. self-recursion in tail position without annotation: a loop (N4201 --lint)
+fn count_down : (i64, i64) -> i64
+  | (0i64, acc) -> acc
+  | (n, acc) -> count_down(n - 1i64, acc + n)
+
+-- 2. `tail` on a call whose value feeds `+`: not a tail call (W4200)
+fn bad_tail : i64 -> i64
+  | n -> if n == 0i64 then 0i64 else 1i64 + tail bad_tail(n - 1i64)
+
+-- 3. a local function only ever called with the same continuation: a join point (N4203 --lint)
+fn classify : i64 -> i64
+  | n ->
+      let done = fn (r: i64) -> i64 { r * 10i64 }
+      if n < 0i64 then done(0i64)
+      else if n == 0i64 then done(1i64)
+      else done(2i64)
+
+-- 4. while loop with an early return: a letk loop; `return` jumps to k_ret
+fn find_first_even(limit: i64) -> i64 {
+  let mut i : i64 = 1i64;
+  while i < limit {
+    if i % 2i64 == 0i64 { return i; }
+    i = i + 1i64;
+  }
+  return 0i64 - 1i64;
+}
+
+-- 5. short-circuit `and`: branches, not a primitive
+fn both : (i64, i64) -> bool
+  | (a, b) -> a > 0i64 and b > 0i64
+
+-- 6. a local function used as a value escapes: must stay a closure
+fn keep_closure : i64 -> fn(i64) -> i64
+  | k ->
+      let add = fn (x: i64) -> i64 { x + k }
+      add
+
+fn main : () -> ()
+  | () ->
+      let _a : i64 = count_down(3i64, 0i64) + bad_tail(2i64) + classify(1i64) + find_first_even(9i64)
+      let _b : bool = both(1i64, 2i64)
+      let _c : i64 = keep_closure(1i64)(2i64)
+      ()

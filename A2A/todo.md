@@ -60,6 +60,7 @@ Merge in this order, each is a clean fast-forward on the previous: **#2** Makefi
 - pfront_vecloop.c3 — classifies VEC_REDUCTION/MAP/SCATTER but "No code is transformed" → emit LLVM loop metadata / parallel access scopes for PEAR.
 - pfront_spillcost.c3 / pfront_regpress.c3 / pfront_codelayout.c3 — LOW priority until PEAR has a real regalloc or does MIR.
 - theory/session, theory/sct, theory/crdt, theory/quals — advanced type-system features, can wait until backend is solid.
+- **Father-of-Pride IN PROGRESS (PR #11, branch theory/nbe-real):** theory passes made real — symexe/absint/narrow/NbE/eclass/UB/sct/linearity/effcont/defun done; next cps, matching, crdt, stratified, quals. See A2A/from_father_of_pride.md.
 
 ## Build/recovery notes
 Toolchain lives under ~/.cache (snapshot-wiped on rollback):

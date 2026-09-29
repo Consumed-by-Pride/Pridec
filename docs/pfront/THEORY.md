@@ -46,6 +46,11 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_crdt.c3` | ~900 | Commutativity (CALM/CRDT): per-statement read/write location sets, block dependence DAG + critical path, NF_INDEPENDENT; loop accumulators classified counter/product/join/max-min/register/mixed, commutative reductions flagged NF_REDUCTION; N4230/N4231 |
+| `theory_quals.c3` | ~750 | Whole-program qualifier fixpoint: purity classes with reasons, parameter write/escape via callees, NF_PURE_FN / NF_READONLY_PARAM; W4220 discarded pure result, W4221 never-written mutable param, N4222/N4223 |
+| `theory_matching.c3` | ~1000 | Maranget decision DAGs for every `match` and clause set: f/b/a heuristics, enum signatures, or-rows, guards, hash-consed sharing, tree-vs-first-match verification, NF_DENSE_SWITCH; `--emit-dtree`; N4210 |
+| `theory_cps.c3` | ~1300 | Danvy–Filinski one-pass CPS into a continuation IR; tail verdicts (NF_TAIL), join/loop continuations, η/β contraction, contification; `--emit-cps`; W4200/N4201/N4203 |
+| `theory_defun.c3` | ~600 | Closure analysis: free vars by binder identity, escape classification (NF_NOESCAPE), mutable captures of escaping closures marked NF_ADDR_TAKEN for boxing; W4190/N4191/N4192/W4193/W4194 |
 | `theory_effcont.c3` | ~800 | Handler discipline: lexical prompt stack, W4180 undeclared perform, W4181 call leaks an effect, N4182 multi-shot, W4183 stray / W4184 escaping resume, N4185 dead arm, W4186 arm arity, N4187 tail-resumptive (sets NF_TAIL) |
 | `theory_linearity.c3` | ~900 | Ownership of `alloc`: flow-sensitive LIVE/FREED/MAYBE/ESCAPED per resource with aliases, defer, loops; W4160 double free, W4161 use-after-free, W4162 leak, W4166 overwritten while owned, N4163–N4165 path-dependent |
 | `theory_sct.c3` | ~900 | Size-change termination (Lee/Jones/Ben-Amram): structural descent through patterns, integer descent only under a guard bound, closure over mutual recursion; W4150 proved loop, N4152 not proved (why), N4151 proved (`--lint`) |
@@ -116,6 +121,136 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Commutativity analysis (`theory_crdt`).** Was a token counter: every
+`+` was a "counter CRDT", every assignment "LWW", every call whose name
+began with `add`/`ins`/`pus` an "op-set", joined into one meaningless
+"final class" per file. Now it asks the CALM question properly — *what is
+order-insensitive?* — at two granularities. **Statements**: each gets a
+set of locations it reads and writes (`VAR(b)`, `HEAP(b)` = memory
+reachable through binder `b`, `WORLD`); calls consult `NF_PURE_FN` from
+`theory_quals` (a pure call only reads its arguments, anything else
+touches `WORLD`), `return`/`break`/`continue`/`perform`/`handle` are
+barriers. Within a block the RAW/WAR/WAW relation gives a dependence DAG,
+its longest chain the critical path; a statement that does not conflict
+with its predecessor is flagged **`NF_INDEPENDENT`** (it may be swapped or
+hoisted without re-deriving alias facts). **Loops**: every local written
+in the body is classified by *how* — `x = x ± e`/`x += e` counter,
+`x = x * e` product, `x |= e`/`x &= e` join, `if e > x then x = e` max/min
+register, plain `x = e` last-writer-wins register — and by whether its
+intermediate value is observed elsewhere (the condition included: an
+accumulator steering the trip count is a dependence through control).
+Updates of one variable must all lie in the *same* monoid: `h ^= b; h *= P`
+(FNV) is *mixed*, not a fold. A loop whose written locals are all
+commutative accumulators (plus induction variables stepping by a
+constant) and whose body has no heap/world write or barrier is a
+**commutative reduction**: flagged **`NF_REDUCTION`** for the backend and
+reported under `--lint` as **N4230** with the accumulator list (26 real
+ones in the stdlib: `stats.pie` sums/min/max, `blas.pie` dot products,
+`subtle.pie` constant-time compare, …). **N4231** names the single plain
+assignment that pins an otherwise commutative loop (`last = a[i]`). Order
+of passes: after `theory_quals`.
+
+**Qualifier inference (`theory_quals`).** Carried a "qualifier word"
+through a walk and cleared PURE on any assignment or call; every call was
+opaque, parameters were never examined, nothing was reported. Now a
+whole-program **greatest-fixpoint** over the call graph derives, per
+function, the *reasons* it is not pure — writes outside its frame, reads
+of a `static`, writes through a parameter (per parameter), effects/system
+operations, allocation, unknown (extern/indirect) callee, impure callee,
+loops, recursion — each remembered with the node that first caused it.
+Callee facts flow to callers (a function that only calls `bump` inherits
+`bump`'s write to the pointer it passes along); recursion does not break
+purity (optimistic start, facts only grow). Parameters are tracked as
+*written* (directly, through field/index/deref, `&mut`, or via a callee
+that writes that position) and *escaping* (returned, stored, captured,
+passed to an unknown callee). Classes: PURE (referentially transparent),
+READONLY (reads statics), ALLOC, IMPURE, each ± may-diverge. Writeback:
+**`NF_PURE_FN`** on PURE/READONLY functions and **`NF_READONLY_PARAM`** on
+every binder of a parameter position that is neither written nor
+retained — exactly LLVM's `readnone`/`readonly` and `noalias readonly`.
+Diagnostics: **W4220** a statement-position call to a pure function (the
+result is discarded, so the call does nothing — it found a real no-op in
+`stdlib/effect_async/uring_handler.pie` and three in the test corpus),
+**W4221** a `mut`/`&mut` parameter never written, **N4222**/**N4223**
+(`--lint`) pure function / read-only pointer parameter. Bodiless
+`#extern` declarations are foreign, never pure. Also fixed: the pipeline
+allocated `QualAnalysis` (and SymState/SessionCheck/SctState) with
+hard-coded byte counts; they now use the types' sizes.
+
+**Match compilation (`theory_matching`).** Built a one-column matrix per
+`match`, picked the first non-wildcard column, turned or-patterns into
+wildcards, ignored guards, ranges, enum signatures and function clauses,
+and called a tree "exhaustive" whenever its root was not a Fail node. Now
+it is the match compiler: every `match` and every multi-clause function is
+compiled to a Maranget decision DAG over *occurrences* (`x`, `x.0`,
+`x.1.2`) with the f→b→a column heuristic, or-patterns expanded into rows,
+guards as leaves with a fallthrough tree, and constructor signatures
+(bool; enum variants looked up from the declarations, so a switch over
+every variant has no default; tuple/struct as a single UNPACK step).
+Nodes are hash-consed per site, so identical subtrees are emitted once
+(the classic blow-up of decision trees becomes sharing). Each DAG is then
+**verified**: a sample value per row (wildcards filled with a constructor
+of the right type when the matrix reveals one) plus a "none of the above"
+value are run through the DAG and through a naive first-match interpreter
+over the original rows; disagreements are reported as compiler bugs. This
+check caught two real defects during development (a 256-case cap that
+silently dropped cases, and ill-typed samples). Writeback:
+**`NF_DENSE_SWITCH`** (new flag) on a site whose root test is an int/enum
+switch with ≥ 4 cases spanning ≤ 2× their count — emit a jump table;
+**N4210** under `--lint`. `--emit-dtree` prints every DAG. Exhaustiveness
+and unreachable arms stay with `theory_pglcert` (W4090/W4091).
+
+**CPS translation (`theory_cps`).** Counted call sites and called the count
+"administrative redexes avoided"; nothing was translated. Now every
+function is translated by the Danvy–Filinski one-pass call-by-value CPS
+into a small continuation IR (Kennedy's normal form: applications carry a
+continuation variable or an inline `λx.`, `letk` for continuations, `letf`
+for local functions, `if`/`case`). Branches in tail position go straight to
+the current continuation; in value position they get a `letk` join point —
+the one-pass discipline means no administrative redex is ever built. Loops
+are continuations (`letk loop(_) = … loop(()) …`), `break`/`continue`/
+`return` are jumps, `and`/`or` are branches, `perform`/`resume` are
+applications of the operation with the current continuation. On the built
+term: **tail-call verdicts** (a call is a tail call iff its CPS form passes
+`k_ret`; each such `N_EXPR_CALL` gets `NF_TAIL` — the parser's bit for an
+explicit `tail` — so the backend may release the frame), **W4200** an
+explicit `tail` on a call whose value flows into an enclosing expression or
+sits under a `handle` prompt (the flag is also cleared so the backend is
+not lied to), **N4201** (`--lint`) unannotated self tail call, **η/β
+contraction** of joins (single-use join inlined, `letk j(x) = k(x)`
+eliminated, dead joins dropped — counted as term mutations), and
+**contification**: a `letf` never used as a value and always called with
+the same continuation variable becomes a jump target (`letj`, **N4203**
+under `--lint`). Per function the largest continuation (values live across
+a call) is measured. `--emit-cps` prints every term after contraction; the
+pass runs before NbE so it sees source lambdas. Corpus: 0 W4200, no
+crashes over stdlib/tests/conformance/examples.
+
+**Closure analysis (`theory_defun`).** Compared free variables by *name*
+(an inner `n` shadowing an outer `n` counted as a capture) and reported
+"0 lambdas escape" for a lambda that was returned. Now free variables are
+computed by binder identity, and every lambda is classified by where its
+value goes — returned, passed to a call, stored into an aggregate or
+through a pointer, captured by another closure (resolved transitively), or
+only ever called directly; a `let f = fn …` inherits the fate of `f`'s
+uses. Two facts are written back to the AST for the rest of the pipeline:
+**`NF_NOESCAPE`** (new flag) on lambdas that never leave their function —
+the ones NbE's β may inline and the backend may lambda-lift — and
+**`NF_ADDR_TAKEN`** on a `let mut` captured by an *escaping* closure: the
+variable is shared mutable state that outlives its frame (closures read
+the variable, not a snapshot — that is the semantics NbE already
+implements), so it must be boxed, and the flag is exactly what liveness,
+dead-store elimination and alloca placement already honour for `&x`.
+Diagnostics: **W4190** an escaping closure writes to a captured `let mut`
+(note under `--lint` when it only reads it); **N4191** a captured variable
+is reassigned after the closure is created and before it is used ("the
+closure will see this new value"); **N4192** (`--lint`) non-escaping,
+called once — inline candidate; **W4193** a let-bound or immediately
+applied lambda called with the wrong number of arguments (both `fn (x: T)`
+and clause-style `fn | (x, y) ->` forms); **W4194** a let-bound lambda
+never used. The pass runs *before* NbE so it sees the source lambdas;
+NbE then removes the non-escaping ones. Corpus: clean.
 
 **Handler discipline (`theory_effcont`).** Counted "frames" and "fuses"
 on a continuation stack that nothing consulted. `theory_effects` already
@@ -353,6 +488,11 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `93_commute` + `commute` | sum+max loop flagged NF_REDUCTION + N4230, `last =` N4231, FNV mixed monoids, impure call / heap write / control-carried accumulator stay ordered, NF_INDEPENDENT on an independent `let` |
+| `92_quals` + `quals` | interprocedural purity (bump → bump_twice), recursive fn pure, NF_PURE_FN / NF_READONLY_PARAM in the dump, W4220 ×2, N4223, externs/alloc/effects never pure |
+| `91_matching` + `dtree` | complete enum switch (no default), two-column DAG sharing (16→13), dense jump table + N4210, or-expanded rows, guard fallthrough leaf, nested occurrence `x.0.0`, 0 tree/first-match disagreements |
+| `90_cps` + `cps` | self tail → loop, W4200 misuse, contified join (`letj`), while as `letk`, inline continuation for a non-tail call, escaping lambda stays `letf`, contraction census |
+| `89_closures` + `closures` | inline candidate, boxed mutable capture (returned), stale capture, lambda arity, escape/capture census; immutable-capture-as-argument and shadowing quiet |
 | `88_handlers` + `handlers` | undeclared perform, call leak, tail-resumptive, multi-shot (sequential and loop), dead arm, stray and escaping resume, arm arity; declared/handled performs quiet |
 | `87_ownership` + `ownership` | double free, UAF, one-path leak, full leak, alias, escape (quiet), defer+free, loop-carried double free, overwrite-while-owned, parameter UAF |
 | `86_sct_termination` + `sct_termination`/`sct_quiet` | len/fib/ack/halve/ev-od proved; fact (unbounded) / swap (rotation) / shadow not proved; spin is a proved loop; proofs only under `--lint` |

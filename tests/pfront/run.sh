@@ -99,6 +99,11 @@ declare -A EXPECT=(
   [86_sct_termination]=0      # size-change termination: proved / not proved / proved loop
   [87_ownership]=0            # alloc/free ownership: double free, use-after-free, leaks, path-dependent notes
   [88_handlers]=0             # effect handlers: undeclared performs, resume discipline, dead arms, arity
+  [89_closures]=0             # closures: free vars by binder, escape, mutable capture boxing, stale capture, arity
+  [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
+  [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
+  [93_commute]=0              # commutativity: reductions (counter/maxmin), LWW pins order, FNV mixed monoids, impure call, heap write, NF_INDEPENDENT
+  [92_quals]=0                # qualifiers: purity fixpoint, param writes via callees, read-only params, discarded pure results
 )
 
 # ---------------------------------------------------------------------------
@@ -1665,15 +1670,136 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "handlers" "$eh_why"
 fi
 
+# Closures: escape classification decides inlining (N4192, NF_NOESCAPE) and
+# boxing (a written `let mut` captured by an escaping closure → W4190 and
+# NF_ADDR_TAKEN on the binder); stale capture; lambda call arity; shadowing
+# inner names are not captures.
+cl=$("$BIN" tests/pfront/89_closures.pie -I stdlib -I . --lint 2>&1)
+cl_ok=1; cl_why=""
+cneed() { echo "$cl" | grep -q "$1" || { cl_ok=0; cl_why="$cl_why missing[$2]"; }; }
+cdeny() { echo "$cl" | grep -q "$1" && { cl_ok=0; cl_why="$cl_why noise[$2]"; }; }
+cneed '89_closures.pie:11:17: note\[N4192\]: the lambda bound to `add` does not escape and is called exactly once' "inline candidate"
+cneed '89_closures.pie:18:18: warning\[W4190\]: this closure writes to the captured `let mut c` and is returned'   "boxed mutable capture"
+cneed '89_closures.pie:26:9: note\[N4191\]: `x` is reassigned here after the closure `f` (created at 25:15)'       "stale capture"
+cneed '89_closures.pie:39:8: warning\[W4193\]: `g` is a lambda of 2 parameters but is called here with 1 argument' "lambda arity"
+cneed 'closure-escape   : 2 escape (1 returned, 1 as argument, 0 stored, 0 via another closure), 5 do not (1 immediate, 4 inline candidates' "escape census"
+cneed 'closures         : 7 lambdas, 4 captures (2 mutable, 1 written; max 1 per closure), 1 binders marked address-taken' "capture census (shadowed `n` not captured)"
+cdeny '89_closures.pie:3[0-4]:[0-9]*: warning\[W419'                                                              "immutable capture passed to a call warned"
+cdeny '89_closures.pie:4[6-9]:[0-9]*: \(warning\|note\)\[[WN]419[013]'                                             "shadowing inner `n` treated as a capture"
+if [ $cl_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (escape/inline, boxed mutable capture, stale capture, lambda arity; shadowing quiet)\n' "closures"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "closures" "$cl_why"
+fi
+
+# CPS: the translation must produce the right shapes (loop continuations,
+# contified local fn, inline continuation for a non-tail call) and the right
+# verdicts (W4200 on a misplaced `tail`, N4201 on an unannotated self tail
+# call, N4203 on a contified local fn); an escaping lambda stays a letf.
+cp=$("$BIN" tests/pfront/90_cps.pie -I stdlib -I . --lint --emit-cps 2>&1)
+cp_ok=1; cp_why=""
+pneed() { echo "$cp" | grep -q "$1" || { cp_ok=0; cp_why="$cp_why missing[$2]"; }; }
+pdeny() { echo "$cp" | grep -q "$1" && { cp_ok=0; cp_why="$cp_why noise[$2]"; }; }
+pneed '90_cps.pie:12:58: warning\[W4200\]: `tail` here is not a tail call: its result flows into the enclosing expression' "tail misuse"
+pneed '90_cps.pie:8:27: note\[N4201\]: this self-call to `count_down` is in tail position'                           "self tail call"
+pneed '90_cps.pie:17:18: note\[N4203\]: `done` is called 3 times, always with the same continuation'                 "contified"
+pneed 'count_down(t[0-9]*, t[0-9]*; k_ret)   ; self tail call → loop'                                                 "self tail call in the term"
+pneed 'letj done_[0-9]*(r_[0-9]*; k[0-9]*) =   ; contified'                                                            "letj in the term"
+pneed 'letf add_[0-9]*(x_[0-9]*; k[0-9]*) =$'                                                                         "escaping lambda stays letf"
+pneed 'bad_tail(t[0-9]*; λt[0-9]*\.)'                                                                                 "inline continuation for non-tail call"
+pneed 'let t[0-9]* = < i_[0-9]* limit_[0-9]*'                                                                          "while as loop continuation (param resolved)"
+pneed 'cps-contract     : 0 η, 2 β (join inlined), 0 dead joins, 1 contified'                                          "contraction census"
+if [ "$(echo "$cp" | grep -c 'warning\[W4200\]')" != "1" ]; then cp_ok=0; cp_why="$cp_why W4200-count"; fi
+if [ $cp_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (self tail → loop, W4200 misuse, contified join, while as letk, non-tail inline continuation)\n' "cps"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "cps" "$cp_why"
+fi
+
+# Decision trees: shapes and the self-check. A complete enum switch has no
+# default; the two-column function shares subtrees; the dense integer
+# dispatch is flagged for a jump table; or-patterns expand rows; a guard is a
+# leaf with a fallthrough; every sample the tree is run on agrees with naive
+# first-match.
+dt=$("$BIN" tests/pfront/91_matching.pie -I stdlib -I . --lint --emit-dtree 2>&1)
+dt_ok=1; dt_why=""
+dneed() { echo "$dt" | grep -q "$1" || { dt_ok=0; dt_why="$dt_why missing[$2]"; }; }
+ddeny() { echo "$dt" | grep -q "$1" && { dt_ok=0; dt_why="$dt_why noise[$2]"; }; }
+dneed '=== dtree: fn area @12:1 ===   \[3 rows, tree 4 → dag 4 nodes, worst 1 tests, 3/3 samples agree, complete\]' "complete enum switch"
+dneed '=== dtree: fn classify @18:1 ===   \[6 rows, tree 16 → dag 13 nodes, worst 3 tests, 6/6 samples agree, complete\]' "two-column DAG sharing"
+dneed '=== dtree: fn digit_name @27:1 ===   \[6 rows, tree 7 → dag 7 nodes, worst 1 tests, 7/7 samples agree, dense\]' "dense switch"
+dneed '=== dtree: fn small @36:1 ===   \[4 rows (or-expanded)'                                                     "or-pattern rows"
+dneed 'arm 0 if guard'                                                                                              "guard leaf"
+dneed '91_matching.pie:27:1: note\[N4210\]: these clauses dispatch on 5 values in one dense switch'               "N4210"
+dneed 'switch x.0.0'                                                                                                "nested payload occurrence"
+ddeny 'matching-BUG'                                                                                                "tree disagrees with first-match"
+if echo "$dt" | grep -q 'matching-verify  : [0-9]* samples run through the trees, [0-9]* agree with first-match, 0 disagree'; then :; else dt_ok=0; dt_why="$dt_why verify"; fi
+if [ $dt_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (complete enum switch, shared DAG, dense jump table, or-rows, guard fallthrough, 0 disagreements)\n' "dtree"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "dtree" "$dt_why"
+fi
+
+# Qualifiers: purity must be interprocedural (bump_twice impure only through
+# bump; wasted stays pure), recursion must not break purity, pointer
+# parameters that are only read are flagged, discarded pure results warn,
+# and extern/bodiless declarations are never called pure.
+ql=$("$BIN" tests/pfront/92_quals.pie -I stdlib -I . --lint --emit-ast 2>&1)
+ql_ok=1; ql_why=""
+qneed() { echo "$ql" | grep -q "$1" || { ql_ok=0; ql_why="$ql_why missing[$2]"; }; }
+qdeny() { echo "$ql" | grep -q "$1" && { ql_ok=0; ql_why="$ql_why noise[$2]"; }; }
+qneed '92_quals.pie:45:13: warning\[W4220\]: the result of `square` is discarded, and `square` has no side effects'   "discarded pure result"
+qneed '92_quals.pie:46:10: warning\[W4220\]: the result of `tri` is discarded.*except possibly not terminating'      "discarded recursive pure result"
+qneed '92_quals.pie:25:5: note\[N4223\]: pointer parameter `c` is only read and never retained'                    "read-only pointer param"
+qneed '92_quals.pie:11:1: note\[N4222\]: `tri` is pure: its result depends only on its arguments (but it may not terminate)' "recursive fn pure"
+qneed "^  fn 'square' pure"                                                                                          "NF_PURE_FN on square"
+qneed "^  fn 'peek' pure"                                                                                            "NF_PURE_FN on peek"
+qneed "pat-ident 'c' readonly"                                                                                       "NF_READONLY_PARAM"
+qdeny "^  fn 'bump' pure"                                                                                            "bump (writes through param) marked pure"
+qdeny "^  fn 'bump_twice' pure"                                                                                      "bump_twice (calls bump) marked pure"
+qdeny "^  fn 'shout' pure"                                                                                           "shout (calls extern) marked pure"
+qdeny "^  fn 'fresh' pure"                                                                                           "fresh (allocates) marked pure"
+qdeny 'note\[N4222\]: `emit` is pure'                                                                                "extern marked pure"
+qneed 'quals            : 10 fns in 2 rounds: 4 pure, 0 read-only, 1 allocating, 4 impure (3 may diverge)'          "census"
+if [ $ql_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (interprocedural purity, recursion stays pure, read-only params flagged, W4220 discarded results, externs impure)\n' "quals"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "quals" "$ql_why"
+fi
+
+# Commutativity: a sum+max loop is a reduction (flag + N4230), an LWW
+# assignment among commuting updates is named (N4231), xor-then-multiply
+# is NOT a monoid (mixed), an impure call or a heap write keeps the order,
+# and independent adjacent lets are flagged.
+cm=$("$BIN" tests/pfront/93_commute.pie -I stdlib -I . --lint --emit-ast 2>&1)
+cm_ok=1; cm_why=""
+cneed() { echo "$cm" | grep -q "$1" || { cm_ok=0; cm_why="$cm_why missing[$2]"; }; }
+cdeny() { echo "$cm" | grep -q "$1" && { cm_ok=0; cm_why="$cm_why noise[$2]"; }; }
+cneed '93_commute.pie:15:7: note\[N4230\]: loop is a commutative reduction: `s` is a counter (+/-), `m` is a max/min register, `i` steps by a constant (induction)' "sum+max reduction"
+cneed '93_commute.pie:29:14: note\[N4231\]: `last` is overwritten here (last writer wins) while every other update in this loop commutes' "LWW pins order"
+cneed "^        while reduction.*@15:7"                                                                    "NF_REDUCTION on the loop"
+cneed "^        let 'b' indep"                                                                            "NF_INDEPENDENT on independent let"
+cneed 'crdt-loops       : 6 loops: 1 commutative reductions, 1 counting, 4 ordered; accumulators .* 1 maxmin, 1 register, 1 mixed'  "census (fnv mixed, shouted ordered, count_up ordered)"
+cdeny '93_commute.pie:4[0-9]:.*N4230'                                                                     "fnv called a reduction"
+cdeny '93_commute.pie:5[0-9]:.*N4230'                                                                     "impure-call loop called a reduction"
+cdeny '93_commute.pie:3[0-9]:.*N4230'                                                                     "prefix-sum (heap write) called a reduction"
+c_n4230=$(echo "$cm" | grep -c 'N4230')
+[ "$c_n4230" = "1" ] || { cm_ok=0; cm_why="$cm_why n4230=$c_n4230(want 1)"; }
+if [ $cm_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (reduction flagged, LWW named, FNV mixed, impure/heap loops ordered, independent lets flagged)\n' "commute"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "commute" "$cm_why"
+fi
+
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.
 # (Before this work narrow emitted ~750 false "contradicts" warnings there.)
 noise=0
 for f in $(find stdlib -name '*.pie' 2>/dev/null); do
-  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186)\]")
+  c=$("$BIN" "$f" -I stdlib -I . 2>&1 | grep -cE "^$f:.*\[(W4055|W4057|N4056|W4120|W4140|W4141|W4150|W4160|W4161|W4162|W4166|W4180|W4181|W4183|W4184|W4186|W4190|W4193|W4194|W4200|W4220|W4221)\]")
   noise=$((noise+c))
 done
 if [ "$noise" -eq 0 ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x across stdlib)\n' "flow_noise_floor"
+  pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x/W419x/W4200/W422x across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi

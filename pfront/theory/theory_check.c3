@@ -66,7 +66,6 @@ import theory_matching;
 import theory_hered;
 import theory_dataflow;
 import theory_ub;
-import theory_effects_full;
 import theory_cps;
 import theory_stratified;
 import theory_nbe;
@@ -534,7 +533,6 @@ struct TheoryPipeline
     theory_hered::HeredState*       hered;
     theory_dataflow::DfBundle*      dfb;
     theory_ub::UbAnalysis*          uba;
-    theory_effects_full::EffFull*   efffull;
     theory_cps::CpsXform*           cps;
     theory_stratified::StratChecker* strat;
     theory_nbe::NbeState*           nbe;
@@ -559,6 +557,8 @@ struct TheoryPipeline
     int  opt_level;
     bool timing;              // --time-passes: per-pass wall clock
     bool dump_cfg;            // --dump-cfg: print the last function's CFG
+    bool emit_cps;            // --emit-cps: print every function's CPS term
+    bool emit_dtree;          // --emit-dtree: print every match decision DAG
     long[40] pass_ms;
     char*[40] pass_name;
     usz  timed;
@@ -671,45 +671,42 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.hered = (theory_hered::HeredState*)malloc(theory_hered::HeredState::size);
     tp.dfb = (theory_dataflow::DfBundle*)malloc(theory_dataflow::DfBundle::size);
     tp.uba = (theory_ub::UbAnalysis*)malloc(theory_ub::UbAnalysis::size);
-    tp.efffull = (theory_effects_full::EffFull*)malloc(theory_effects_full::EffFull::size);
     tp.cps = (theory_cps::CpsXform*)malloc(theory_cps::CpsXform::size);
     tp.strat = (theory_stratified::StratChecker*)malloc(theory_stratified::StratChecker::size);
     tp.nbe = (theory_nbe::NbeState*)malloc(theory_nbe::NbeState::size);
     tp.crdt = (theory_crdt::CrdtAnalysis*)malloc(theory_crdt::CrdtAnalysis::size);
     tp.ssa = (theory_ssa::SsaBuilder*)malloc(theory_ssa::SsaBuilder::size);
     tp.lin = (theory_linearity::LinAnalysis*)malloc(theory_linearity::LinAnalysis::size);
-    const usz SYMSTATE_SZ = 16384;
-    const usz QUAL_SZ = 256;
-    const usz SESS_SZ = 4096;
-    const usz SCT_SZ = 4096;
-    const usz DEFUN_SZ = 4096;
-    tp.sym = (theory_symexe::SymState*)malloc(SYMSTATE_SZ);
-    tp.qual = (theory_quals::QualAnalysis*)malloc(QUAL_SZ);
-    tp.sess = (theory_session::SessionCheck*)malloc(SESS_SZ);
-    tp.sct = (theory_sct::SctState*)malloc(SCT_SZ);
-    tp.defun = (theory_defun::DefunState*)malloc(DEFUN_SZ);
+    // sizes come from the types: a hard-coded byte count silently truncates
+    // the struct the moment a pass grows (QualAnalysis was 256 bytes here).
+    tp.sym = (theory_symexe::SymState*)malloc(theory_symexe::SymState::size);
+    tp.qual = (theory_quals::QualAnalysis*)malloc(theory_quals::QualAnalysis::size);
+    tp.sess = (theory_session::SessionCheck*)malloc(theory_session::SessionCheck::size);
+    tp.sct = (theory_sct::SctState*)malloc(theory_sct::SctState::size);
+    tp.defun = (theory_defun::DefunState*)malloc(theory_defun::DefunState::size);
     if (tp.reclat != null && tp.ts != null) tp.reclat.init(tp.ts, a);
-    if (tp.matcher != null) tp.matcher.init(a);
+    if (tp.matcher != null) { tp.matcher.init(a); tp.matcher.attach(d, it, file); }
     if (tp.hered != null) tp.hered.init(a);
     if (tp.dfb != null) tp.dfb.init(a);
     if (tp.uba != null) { tp.uba.init(a); tp.uba.attach(d, it, file); }
-    if (tp.efffull != null) tp.efffull.init(a);
-    if (tp.cps != null) tp.cps.init(a);
+    if (tp.cps != null) { tp.cps.init(a); tp.cps.attach(d, it, file); }
     if (tp.strat != null) tp.strat.init(a);
     if (tp.nbe != null) { tp.nbe.init(a); tp.nbe.run_demo(); }
-    if (tp.crdt != null) tp.crdt.init(a);
+    if (tp.crdt != null) { tp.crdt.init(a); tp.crdt.attach(d, it, file); }
     if (tp.ssa != null) { tp.ssa.init(a, null); tp.ssa.run(); }
     if (tp.lin != null) { tp.lin.init(a); tp.lin.attach(d, it, file); }
     if (tp.sym != null) { tp.sym.init(a); tp.sym.attach(d, it, file); }
-    if (tp.qual != null) tp.qual.init(a);
+    if (tp.qual != null) { tp.qual.init(a); tp.qual.attach(d, it, file); }
     if (tp.sess != null) tp.sess.init(a);
     if (tp.sct != null) { tp.sct.init(a); tp.sct.attach(d, it, file); }
-    if (tp.defun != null) tp.defun.init(a);
+    if (tp.defun != null) { tp.defun.init(a); tp.defun.attach(d, it, file); }
 
     tp.optimize = true;
     tp.opt_level = 2;
     tp.timing = false;
     tp.dump_cfg = false;
+    tp.emit_cps = false;
+    tp.emit_dtree = false;
     tp.timed = 0;
     tp.gradual.init(d, it, file);
     return true;
@@ -756,7 +753,6 @@ fn void TheoryPipeline.destroy(TheoryPipeline* tp)
     if (tp.hered != null) { tp.hered.destroy(); free((void*)tp.hered); }
     if (tp.dfb != null) { tp.dfb.destroy(); free((void*)tp.dfb); }
     if (tp.uba != null) { tp.uba.destroy(); free((void*)tp.uba); }
-    if (tp.efffull != null) { tp.efffull.destroy(); free((void*)tp.efffull); }
     if (tp.cps != null) { tp.cps.destroy(); free((void*)tp.cps); }
     if (tp.strat != null) { tp.strat.destroy(); free((void*)tp.strat); }
     if (tp.nbe != null) { tp.nbe.destroy(); free((void*)tp.nbe); }
@@ -830,20 +826,19 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.issa != null) { tp.issa.walk_dialects(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.effc != null) { tp.effc.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.reclat != null) { tp.reclat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
-    if (tp.matcher != null) { tp.matcher.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.matcher != null) { tp.matcher.emit = tp.emit_dtree; tp.matcher.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.hered != null) { tp.hered.walk_ast(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.uba != null) { tp.uba.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
-    if (tp.efffull != null) { tp.efffull.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.strat != null) { tp.strat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.defun != null) { tp.defun.run(root); tp.passes_run = tp.passes_run + 1; }
+    if (tp.cps != null) { tp.cps.emit = tp.emit_cps; tp.cps.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.nbe != null) { tp.nbe.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
-    if (tp.crdt != null) { tp.crdt.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.lin != null) { tp.lin.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.sym != null) { tp.sym.run_on(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.qual != null) { tp.qual.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.crdt != null) { tp.crdt.walk(root, 0); tp.passes_run = tp.passes_run + 1; }   // after quals: uses NF_PURE_FN
     if (tp.sess != null) { tp.sess.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.sct != null) { tp.sct.run(root); tp.passes_run = tp.passes_run + 1; }
-    if (tp.defun != null) { tp.defun.run(root); tp.passes_run = tp.passes_run + 1; }
-    if (tp.cps != null) { tp.cps.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.dfb != null) { tp.dfb.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     t0 = tp.tick("fcb+cmtt+irdl+eclass+eff", t0);
 
@@ -1152,7 +1147,6 @@ fn void TheoryPipeline.report(TheoryPipeline* tp)
     if (tp.hered != null) { tp.hered.report(); }
     if (tp.dfb != null) { tp.dfb.report(); }
     if (tp.uba != null) { tp.uba.report(); }
-    if (tp.efffull != null) { tp.efffull.report(); }
     if (tp.cps != null) { tp.cps.report(); }
     if (tp.strat != null) { tp.strat.report(); }
     if (tp.nbe != null) { tp.nbe.report(); }

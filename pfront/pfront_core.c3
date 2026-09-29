@@ -66,6 +66,12 @@ const uint NF_TAIL        = 32768;  // tail-call annotated
  the difference, and it is exactly one bit of difference.
 */
 const uint NF_POSTTEST    = 65536;  // do { body } while cond
+const uint NF_NOESCAPE    = 131072; // lambda proven not to escape its creating function (theory_defun)
+const uint NF_DENSE_SWITCH = 262144; // match/clauses whose root test is a dense int/enum switch: emit a jump table (theory_matching)
+const uint NF_PURE_FN     = 524288;  // fn proven side-effect free: readnone/readonly (theory_quals)
+const uint NF_INDEPENDENT = 2097152; // statement commutes with its predecessor (theory_crdt)
+const uint NF_REDUCTION   = 4194304; // loop is a commutative reduction (theory_crdt)
+const uint NF_READONLY_PARAM = 1048576; // parameter never written through nor retained (theory_quals)
 
 // ── AST vocabulary ──────────────────────────────────────────────────────────
 // Grouped so range checks (is_decl / is_expr / is_pattern / is_type) are
