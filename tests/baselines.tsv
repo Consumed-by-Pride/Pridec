@@ -1,0 +1,9 @@
+# Expected results per suite — the integration script compares against these and
+# reports a REGRESSION only when a suite gets worse. Known failures are recorded,
+# not hidden: if the number improves, the script says so and asks for an update.
+#
+#   suite<TAB>pass<TAB>fail<TAB>note
+subtype	47	0	semantic-subtyping spec cases
+exec	11	0	exec cases that must pass (xfail excluded)
+conformance	218	44	44 known non-conformance cases
+pfront	156	5	5 known: 63_modsys megaload cfg_backedge opt_cascade modsys
