@@ -1084,6 +1084,36 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 cv = ll_build_icmp(cg.b, LLVM_ICMP_NE, v, z, cg.mktmp());
             }
             else { cv = ll_const_int(cg.i1ty, 0, 0); }
+            // Single-arm irrefutable match (e.g. clause-style `| () -> 42`
+            // or `match x { _ -> body }`): run the body directly without a
+            // condbr. Limit to wildcards and 0-field tuples/records; bool
+            // arms must go through condbr even when n_arms==1.
+            AirCmd* single_cmd = null;
+            uint n_arms = 0;
+            bool has_bool_arm = false;
+            bool has_irrefutable = false;
+            for (uint i = 0; i < (uint)k.branch_count; i++)
+            {
+                AirBranch* br = k.branches[i];
+                if (br == null) continue;
+                AirPat* pat = br.pat;
+                if (pat == null) continue;
+                n_arms++;
+                if (pat.tag == APAT_BOOL) { has_bool_arm = true; }
+                if (pat.tag == APAT_WILD || pat.tag == APAT_TUPLE)
+                {
+                    // APAT_TUPLE with 0 children is the unit pattern `()`.
+                    if (pat.tag == APAT_WILD || pat.sub_count == 0)
+                    {
+                        has_irrefutable = true;
+                        single_cmd = br.body;
+                    }
+                }
+            }
+            if (!has_bool_arm && n_arms == 1 && has_irrefutable && single_cmd != null)
+            {
+                return cg.cmd(single_cmd);
+            }
             // Find true/false arms.
             AirCmd* true_cmd = null;
             AirCmd* false_cmd = null;
@@ -1276,6 +1306,23 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
         }
         case ACMD_MU:
             return cg.cmd(c.body);
+        case ACMD_MATCH:
+        {
+            // match scrutee { pats... } — evaluate scrutee, dispatch via CASE.
+            Lvalue sv = cg.prd_i64(c.prd);
+            AirCns kase;
+            kase.id = 0; kase.tag = ACNS_CASE; kase.name = null; kase.idx = 0;
+            kase.prd = null; kase.tail = null; kase.cont_k = null; kase.body = null;
+            kase.bind = null; kase.ty = null; kase.label_name = null;
+            kase.label_body = null; kase.label_arg_count = 0; kase.branch_count = 0;
+            kase.cobranch_count = 0; kase.subst_count = 0;
+            for (usz zi = 0; zi < 16; zi++) { kase.subst_vars[zi] = null; kase.subst_prds[zi] = null; }
+            for (usz zi = 0; zi < 64; zi++) { kase.branches[zi] = null; kase.cobranches[zi] = null; }
+            for (usz zi = 0; zi < 16; zi++) { kase.label_args[zi] = null; }
+            kase.branch_count = c.branch_count;
+            for (usz i = 0; i < c.branch_count && i < 64; i++) { kase.branches[i] = c.branches[i]; }
+            return cg.cns(sv, &kase);
+        }
         case ACMD_IF:
         {
             Lvalue cv = cg.prd_i1(c.prd);

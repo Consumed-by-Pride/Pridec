@@ -1,6 +1,6 @@
 -- EXIT: 42
--- BLOCKER (XFAIL): clause-style body. AIR wraps the single irrefutable clause
--- in a match on the parameter and drops the '-> i64' return type; the binary
--- traps (SIGTRAP 133). Every stdlib/example/conformance file is clause-style.
+-- PEAR v0.8.9: clause-style single-arm body (`fn f : () -> i64 | () -> 42`).
+-- ACMD_MATCH dispatches to ACNS_CASE; single-irrefutable-arm matches
+-- (wildcard / unit-pattern `()`) run the body directly without a condbr.
 fn main : () -> i64
   | () -> 42
