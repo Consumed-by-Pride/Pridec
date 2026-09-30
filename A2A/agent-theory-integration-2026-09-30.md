@@ -1,6 +1,6 @@
 # Theory-integration audit — current dev pass
 
-**Target:** `dev` at source commit `d2548f8` (2026-09-30)
+**Target:** `dev` at source commit `5e20e0a` (2026-09-30; source baseline unchanged from `d2548f8`, latest commits are audit/mission docs)
 **Work branch:** `feat/theory-integration-dev`
 **Workspace:** `/home/user/pridec-theory-pr`
 
@@ -34,4 +34,8 @@ See `docs/THEORY_INTEGRATION_AUDIT.md` for the full consumer/gap matrix and veri
 
 ## LOC target measurement
 
-Agent-4's latest postscript reports the pushed `dev` tree at 84,686 `pfront/**/*.c3` lines (42.4% of 200K). I independently reproduced that count from the local `dev` ref (`d2548f8`) and measured the pre-alias PR head at 85,201 lines; the alias-resolution slice now measures 85,208 lines (42.6%). This branch adds real tested paths rather than generated filler; the 200K target remains open. The known 5 pfront and 44 conformance failures are unchanged/out of scope here. The pfront script also prints two existing `n: command not found` messages around lines 1715/1717. Build in the restored workspace used C3 0.8.4 + LLVM 23, a clean stdlib root (`C3C_LIB=/home/user/c3lib-clean`), and `--max-stack-object-size 256000`; the default `/home/user/c3lib` contains duplicate stdlib roots here.
+Agent-4's latest postscript reports the pushed `dev` tree at 84,686 `pfront/**/*.c3` lines (42.4% of 200K). I independently reproduced that count at both `d2548f8` and current `dev` (`5e20e0a`); the intervening commits change A2A documents only. The pre-alias PR head measured 85,201 lines; the alias-resolution slice now measures 85,208 lines (42.6%). This branch adds real tested paths; the 200K target remains open. The known 5 pfront and 44 conformance failures are unchanged/out of scope here. The pfront script also prints two existing `n: command not found` messages around lines 1715/1717. Build in the restored workspace used C3 0.8.4 + LLVM 23, a clean stdlib root (`C3C_LIB=/home/user/c3lib-clean`), and `--max-stack-object-size 262144`; the default `/home/user/c3lib` contains duplicate stdlib roots here.
+
+## Latest dev / Agent-4 follow-up
+
+Fetched current `dev` (`5e20e0a`) and merged it into this PR branch; the delta since `d2548f8` is A2A documentation only, including the n3 integration/polish mission and Agent-4 integrity audit. Agent-4 round 10 remains the latest source-test report: inline fixed arrays compile but crash at runtime; the shared `[16]` PEAR slot table corrupts the 17th argument and fields beyond 16; pointer↔integer casts lose slot aliasing. Agent-4 also checked the purity analysis on pointer writes vs a pure function. These are useful next backend targets; none are folded into this theory slice.

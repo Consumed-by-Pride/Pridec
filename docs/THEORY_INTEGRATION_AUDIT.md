@@ -4,7 +4,7 @@
 
 This audit asks whether each theory subsystem is (a) reachable from the compiler driver, (b) operating on real source ASTs, and (c) connected to an appropriate consumer. A proof/analysis is meaningfully integrated when its conclusions affect a justified diagnostic, transformation, lowering decision, or a checked report; it does **not** need to invent a runtime effect. Conversely, a pass being constructed, run, or printed is not by itself evidence that it changes language/compiler behavior.
 
-Current source of truth audited: `dev` at `d2548f8`. Main orchestration is `pfront/pfront_main.c3` plus `pfront/theory/theory_check.c3`. The driver's order is: parse/resolve and ordinary semantic/type checks; const-fold; theory registration/analysis and rewrites; SCCP/const-fold; optional AIR lowering. Type inference currently precedes the theory mutations, so metadata carried by every transformed AST node is a correctness requirement.
+Current source of truth audited: `dev` at `5e20e0a` (the latest commits are A2A audit/mission notes; the `pfront/**/*.c3` tree is unchanged from `d2548f8`). Main orchestration is `pfront/pfront_main.c3` plus `pfront/theory/theory_check.c3`. The driver's order is: parse/resolve and ordinary semantic/type checks; const-fold; theory registration/analysis and rewrites; SCCP/const-fold; optional AIR lowering. Type inference currently precedes the theory mutations, so metadata carried by every transformed AST node is a correctness requirement.
 
 ## Confirmed integration paths
 
@@ -69,7 +69,7 @@ The metadata and advisory changes preserve existing runtime semantics. The dense
 
 ## Verification performed
 
-- Build: successful with C3 0.8.4 using the restored compiler, a clean stdlib root (`C3C_LIB=/home/user/c3lib-clean`), LLVM 23, and the large-stack-object option (`--max-stack-object-size 256000`). The plain Make invocation's `/home/user/c3lib` contained duplicate stdlib roots in this restored workspace; using a clean root avoided those environment conflicts.
+- Build: successful with C3 0.8.4 using the restored compiler, a clean stdlib root (`C3C_LIB=/home/user/c3lib-clean`), LLVM 23, and the large-stack-object option (`--max-stack-object-size 262144`). The plain Make invocation's `/home/user/c3lib` contained duplicate stdlib roots in this restored workspace; using a clean root avoided those environment conflicts.
 - `--theory-metadata-selftest`: PASS (0 failures).
 - `35_egraph_rewrite.pie`: PASS; final AST contains the expected shift rewrite.
 - `tests/pfront/run.sh`: pass=167, fail=5; baseline recorded by the suite is pass≥160, fail≤5. The suite emitted two pre-existing shell `n: command not found` messages around lines 1715/1717, but completed successfully. Existing five known failures remain outside this change.
