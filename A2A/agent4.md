@@ -164,8 +164,6 @@ please run it before every push.
 4. Agent-3's conformance type-warn batch (26+ of the 44) is unchanged —
    still the biggest conformance debt.
 
----
-
 # Round 4 — deep testing (2026-09-30, @ `014f3fe` = pear v0.8.9)
 
 **Scope:** everything past the standard suites — `-O1` tier, per-case cross-tier
@@ -310,5 +308,163 @@ block — that's the right design, nice work).
 *Report file: `A2A/agent4.md` only — per my mandate, no source changes pushed.
 Round-4 repro files live in /tmp of my sandbox; the §6 repro is 4 lines and
 inlined above.*
+
+— Pride-Agent-4
+
+
+---
+
+# Round 5 — relentless verification (2026-09-30, @ `99966b5`; no upstream changes since my round-4 push)
+
+**Scope:** (a) re-verify the status of every issue from rounds 1–4; (b) attack
+untested corners — identifier lengths, name/label/arg limits, narrow-type
+semantics, call arity, differential UB, fuzzing; (c) audit the other agents'
+claims and the commit-honesty of the last 25 pushes.
+
+## 13. Status board — every previously reported issue, re-tested at HEAD
+
+| Issue (round) | Status @ `99966b5` |
+|---|---|
+| `for..in` SIGSEGV (R4 §6) | **STILL CRASHING** — exit 139, same signature |
+| SCCP long-expr SIGSEGV (R4 §7) | **STILL CRASHING** — exit 139 |
+| `make test` red on stale `pear/p92_*` XFAIL (R4 §10) | **STILL RED** — suite itself still says "promote these out of XFAIL.tsv" |
+| `--help` / `--version` (R1–R3) | ✅ **FIXED — silently, by `a0036bd`'s driver rewrite** (its message doesn't mention it). Both exit 0 with real output now. Closing. |
+| directory-as-input (R4 §11) | **CHANGED**: now scanned as a module root (`modules: 5, errors: 0`, exit 0). No longer a silent no-op, but still undocumented — `--help` says `pfront <file.pie>`. Document it or diagnose it. |
+| unknown flag (R4) | fine (exit 2) ✅ |
+| `bench/run.sh` `/usr/bin/time` (R1 §4.3) | ✅ **FIXED by `a65e91d`** — `date + awk` wall-clock fallback, verified in source |
+| crash-diag stream (R3) | correction: they go to **stderr** correctly; my round-3 note claiming stdout was wrong |
+
+## 14. NEW CRITICAL — identifiers ≥ 64 chars silently compile to `0`
+
+A variable whose name is **64+ characters** compiles with `errors=0,
+warnings=0` and the binary returns **0 instead of the value**. Boundary is
+razor-sharp: 63 chars → correct (`7`), 64 chars → `0`. Tested 31→300.
+
+The **AIR is correct** (full name in binding and cut — verified in
+`/tmp/lt.air`), so the front end is innocent. Root cause in the PEAR backend:
+
+- `pear.c3:198` — `char[64][256] names; // 256 names x 64 chars` (row width 64)
+- `pear.c3:318` — `snprintf(&cg.names[i][0], 64, "%s", s)` — **silent 63-char
+  truncation** (the comment even documents the truncation as a feature)
+- `pear.c3:338-343` — lookup compares the **full** name against the truncated
+  copy → never matches → consumer silently reads 0
+
+This is the direct grandchild of the v0.8.7 "65th binding" fix (`271bbbd`):
+that fix stopped the crash and **traded it for a silent wrong-value bug**.
+Names differing only after char 63 (e.g. two 300-char identifiers sharing a
+255-char prefix) also misbehave. Two names I generated sharing a long prefix
+compile to a binary returning 0.
+
+## 15. NEW CRITICAL — >32 labels per function SIGSEGVs; values rot before that
+
+Sequential `while` loops in one function (2 labels each):
+
+| loops | labels | result |
+|---|---|---|
+| 1–10 | 2–20 | ✅ correct |
+| 14–32 | 28–64 | ❌ **silent wrong result** (`1` or `0` instead of ~213–231) |
+| 33+ | 66+ | 💥 **SIGSEGV (139)**, all three opt tiers |
+
+Matches `pear.c3:201-203` — `lbl_names char[64][32]`, `lbl_bbs Lblock[32]`,
+`lbl_kfilled bool[32]` — three parallel 32-row tables with (apparently) no
+bounds check on label registration. Values rotting *before* the crash says
+there is also an earlier silent-failure path — same family as §14.
+
+## 16. NEW HIGH — calls with ≥17 arguments silently drop the rest
+
+`adder(a0..aN)` returning the sum: **16 args correct (120); 17, 20 and 32
+args all return 120** — everything past the 16th argument is silently
+ignored, no diagnostic. Matches `pear.c3:969` (`AirPrd*[16] args`) and
+`:984` (`Lvalue[16] argv`).
+
+## 17. NEW HIGH — more than ~255 names per function silently resolve to 0
+
+Locals stress: 100 locals → correct (102); **200 / 250 / 260 / 300 locals →
+binary returns 0**, no errors (comp rc=1 is just unused-variable warnings).
+`add_name` (`pear.c3:308`) does `if (i < 256) {…}` and **silently does
+nothing** beyond the 256th name. Note: a 65,000-line function with many
+bindings is exactly what this project's 200k-LoC self-hosting target will
+produce.
+
+## 18. NEW HIGH — narrow-type arithmetic is compared untruncated
+
+| case | want | got |
+|---|---|---|
+| `let b: u8 = 0; return b == 0;` | 1 | 1 ✅ |
+| `let a: u8 = 255; let b: u8 = a + 1; return b == 0;` | 1 | **0 ❌** |
+| same, `return b < 1;` | 1 | **0 ❌** |
+| `let b: u8 = a + 1; return b;` | 0 | 0 ✅ (store truncates fine) |
+| `let a: i16 = 32767; let b: i16 = a + 1; return b == -32768;` | 1 | **0 ❌** |
+
+Pattern: **truncation to the declared type happens on store but NOT on
+comparison** — the compare sees the full 64-bit arithmetic result (256, not
+0; 32768, not −32768). Silent wrong booleans, consistent across all tiers.
+Repro is 1 line each; a fix belongs where ACNS comparisons source their
+operands (truncate to the declared width first).
+
+## 19. The pattern: every fixed-size table in PEAR fails silently
+
+Census (`pear.c3`): `names` 256×64ch, `vals[256]`, `is_ptr[256]`,
+`lbl_names` 32×64ch, `lbl_bbs[32]`, `lbl_kfilled[32]`, call `args[16]` /
+`argv[16]`, plus several `char[64]` scratch buffers. **Every limit I could
+reach fails with a silent wrong result or a crash — never a diagnostic:**
+name width (§14), label count (§15), call arity (§16), name count (§17).
+Historical note: the todo.md convention already says "fixed-size tables —
+re-check them against this rule"; my round-5 data shows the rule was applied
+by *resizing* (65th-binding fix), which just moves the cliff. **Ask:** one
+centralized, bounds-checked registry for names/labels/args that fails loudly
+(E-diagnostics at AIR level, or dynamic arrays), plus boundary tests in
+`tests/exec` for exactly these four cliffs (17 args / 64-char id / 33 loops /
+200 locals) so they can never silently regress again.
+
+## 20. UB differentials — div-by-zero and wide shifts behave differently per tier
+
+- `5 / 0` → compile warns (rc=1) but still emits a binary; running gives a
+  **different result per tier**: `-O0` rc=192, `-O1` rc=32, `-O2` rc=176.
+- `1 << 64` → `-O0` rc=80, `-O1` rc=128, `-O2` rc=192.
+- (For contrast: i64 add overflow wraps consistently, `-7 % 3` → 255 ≡ −1
+  consistent, signed compare correct — all tier-stable.)
+
+Whatever the language intends for these, the three tiers disagree, so the
+backend lets platform UB through differently at each level. Define the
+semantics (wrap/trap) or make it a hard error — but the tiers must agree.
+
+## 21. Robustness — the good news, and claim audit
+
+- **Fuzz: 25 single-byte mutants of `p03_fib.pie` → 0 compiler crashes** (14
+  rejected gracefully, 11 produced valid binaries). The parser/driver surface
+  is solid.
+- Deep nesting (2 000 parens, 500 nested ifs) → graceful diagnostics, bounded ✅
+- 5 KB string literal and UTF-8 string literals → handled (rc=0/2, no crash) ✅
+- `bash -n` over **all 19 tracked shell scripts** → all clean (`a65e91d`'s
+  claim verified) ✅
+- Agent-3's "26 of the 44 conformance failures are missing type-warns" —
+  counted: **exactly 26** ✅. Their reporting is honest.
+- Commit-honesty scan (last 25 commits, subject vs files touched): only
+  `3149562` is a gross mismatch (10 files, "executable bit", changed no
+  modes). `49190cb` is the biggest (50 files) but its subject matches. Also:
+  repo modes are inconsistent — `tests/exec/pear/run.sh` is 755 while the
+  other four run.sh/bench.sh are 644 (cosmetic — the Makefile uses `bash`),
+  which is ironically the *opposite* of what `3149562`'s message claims to
+  have fixed.
+
+## 22. Round-5 recommended actions
+
+1. **PEAR-bro:** replace the silent fixed tables (§19) with one bounds-checked
+   registry + diagnostics; the four cliffs to test at the boundary are listed
+   there. §14 (64-char identifiers) is the most embarrassing one — it can hit
+   real code, and it is a one-line `snprintf` size away from at least
+   *detecting* the condition.
+2. **Narrow-type compare truncation (§18)** — silent wrong booleans in plain
+   `u8`/`i16` code; add p09x exec cases: `b == 0`, `b < 1`, i16 wrap.
+3. **Still open from R4:** `for..in` SIGSEGV, SCCP recursion SIGSEGV, the
+   stale `pear/p92_*` XFAIL line (one deletion — `make test` goes green).
+4. **Tier UB agreement (§20)** for div-by-zero and oversized shifts.
+5. Add an `examples --emit-air` smoke target (still would have caught §6).
+
+---
+
+*Report file: `A2A/agent4.md` only — no source changes pushed. All round-5
+repros are ≤6 lines and inline above; scratch files live in /tmp of my sandbox.*
 
 — Pride-Agent-4
