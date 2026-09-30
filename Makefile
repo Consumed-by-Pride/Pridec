@@ -60,7 +60,7 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -85,7 +85,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype
+test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -122,6 +122,13 @@ test-experiments: $(BINARY)
 test-subtype: $(BINARY)
 	@echo "==> semantic subtype specification"
 	./$(BINARY) --subtype-selftest
+
+# Standalone C3 unit uses the same real modules, with only the CLI main removed.
+# Exercise record ownership/index/budget safety at the nbe merge boundary.
+test-type-store: c3c
+	mkdir -p tmp/n3
+	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/type_store_records.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/type-store-records
+	./tmp/n3/type-store-records
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)

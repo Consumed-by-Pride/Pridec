@@ -1872,6 +1872,49 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi
 
+# Set-algebra types are first-class in inference, not merely analyzed by the
+# later theory checker: values flow into unions/complements, branches join to
+# unions, and disjoint/empty assignments are counted as rejected.
+set_sem=$("$BIN" tests/pfront/102_semantic_types.pie -I stdlib -I . 2>&1)
+set_lint=$("$BIN" tests/pfront/102_semantic_types.pie -I stdlib -I . --strict-types --lint 2>&1)
+set_ok=1; set_why=""
+echo "$set_sem" | grep -q 'type mismatches  : 3 ' || { set_ok=0; set_why="$set_why mismatch boundary"; }
+echo "$set_sem" | grep -q 'set algebra .*15 assignability checks (12 accepted, 3 rejected), 1 inferred union joins' || { set_ok=0; set_why="$set_why lattice inference"; }
+echo "$set_lint" | grep -q 'set algebra .*15 assignability checks (12 accepted, 3 rejected), 1 inferred union joins' || { set_ok=0; set_why="$set_why strict lattice inference"; }
+set_type_notes=$(echo "$set_lint" | grep -c '\[W3100\]')
+set_empty_notes=$(echo "$set_lint" | grep -c '\[W3291\]')
+[ "$set_type_notes" = 3 ] || { set_ok=0; set_why="$set_why subtype advice"; }
+[ "$set_empty_notes" = 1 ] || { set_ok=0; set_why="$set_why empty-type note"; }
+echo "$set_sem" | grep -q 'errors    : 0' || { set_ok=0; set_why="$set_why frontend errors"; }
+if [ $set_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (union/complement/top/bottom assignments, call checking, branch joins, advice)\n' "semantic_type_values"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "semantic_type_values" "$set_why"
+fi
+
+# Record row semantics: exercise typed width/depth rows, incompatible field
+# intersections, Boolean row formulas, and dynamic storage beyond 64 labels.
+rec_sem=$("$BIN" tests/pfront/100_records_semantics.pie -I stdlib -I . 2>&1)
+rec_wide=$("$BIN" tests/pfront/101_records_wide.pie -I stdlib -I . 2>&1)
+rec_ok=1; rec_why=""
+echo "$rec_sem" | grep -Eq 'records +: [0-9]+ rows from 5 structs, 13 typed fields' || { rec_ok=0; rec_why="$rec_why typed rows"; }
+echo "$rec_sem" | grep -q 'record-relations .*cert errors=0, skipped=0' || { rec_ok=0; rec_why="$rec_why relation certificates"; }
+echo "$rec_sem" | grep -q 'record-formulas .*overflow=0, validation errors=0' || { rec_ok=0; rec_why="$rec_why formula budgets"; }
+echo "$rec_sem" | grep -Eq 'record-semantic +: [3-9][0-9][0-9] Boolean checks, soundness errors=0' || { rec_ok=0; rec_why="$rec_why semantic law matrix"; }
+echo "$rec_sem" | grep -q 'dnf laws .*38 checks, 0 failures' || { rec_ok=0; rec_why="$rec_why DNF normalization laws"; }
+echo "$rec_sem" | grep -q 'subtype laws .*12 query checks' || { rec_ok=0; rec_why="$rec_why semantic subtype query laws"; }
+echo "$rec_wide" | grep -Eq 'record-semantic +: [3-9][0-9][0-9] Boolean checks, soundness errors=0' || { rec_ok=0; rec_why="$rec_why wide semantic law matrix"; }
+echo "$rec_wide" | grep -q 'dnf laws .*38 checks, 0 failures' || { rec_ok=0; rec_why="$rec_why wide DNF normalization laws"; }
+echo "$rec_wide" | grep -q 'subtype laws .*12 query checks' || { rec_ok=0; rec_why="$rec_why wide semantic subtype query laws"; }
+echo "$rec_wide" | grep -Eq '141 typed fields' || { rec_ok=0; rec_why="$rec_why wide field count"; }
+echo "$rec_wide" | grep -q 'record-relations .*cert errors=0, skipped=0' || { rec_ok=0; rec_why="$rec_why wide row certificate"; }
+echo "$rec_wide" | grep -q 'record-formulas .*overflow=0, validation errors=0' || { rec_ok=0; rec_why="$rec_why wide formula budgets"; }
+if [ $rec_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (typed width/depth rows, empty intersections, formula laws, 70+ field storage)\n' "record_semantics"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "record_semantics" "$rec_why"
+fi
+
 echo "---"
 echo "pfront regression: pass=$pass fail=$fail"
 

@@ -16,10 +16,13 @@
 //
 // Bidirectionality matters here because Pride has integer literals of many
 // widths, and a purely bottom-up HM would either reject or over-default them.
+// In algebraic contexts, checking uses set inclusion rather than unification;
+// joins of `if`, `match`, and array element types preserve alternatives as
+// canonical union TypeIds.
 //
-// Errors are reported once at the point of mismatch and then poisoned with
+// Mismatches are reported once at their source point and then poisoned with
 // TY_ERROR, which unifies with anything — so one bad expression yields one
-// diagnostic, not a cascade through every enclosing node.
+// advisory, not a cascade through every enclosing node.
 // ============================================================================
 
 module pfront_infer;
@@ -33,6 +36,7 @@ alias Node  = pfront_core::PNode;
 alias Nk    = pfront_core::NodeKind;
 alias Types = pfront_types::TypeTable;
 alias TyKind = pfront_types::TyKind;
+alias TyNode = pfront_types::TyNode;
 
 extern fn int printf(char* fmt, ...);
 
@@ -55,6 +59,10 @@ struct Inferencer
     usz   arity_errors;
     usz   defaulted;
     usz   suppressed;       // errors withheld because a subterm already failed
+    usz   algebra_checks;
+    usz   algebra_accepts;
+    usz   algebra_rejects;
+    usz   algebra_joins;
     bool  strict;           // report mismatches (off while bootstrapping)
 }
 
@@ -74,6 +82,10 @@ fn void Inferencer.init(Inferencer* inf, Types* tt, pfront_core::DiagBag* d,
     inf.arity_errors = 0;
     inf.defaulted = 0;
     inf.suppressed = 0;
+    inf.algebra_checks = 0;
+    inf.algebra_accepts = 0;
+    inf.algebra_rejects = 0;
+    inf.algebra_joins = 0;
     inf.strict = false;
 }
 
@@ -132,6 +144,113 @@ fn void Inferencer.unify_at(Inferencer* inf, Node* at, int a, int b)
     }
 }
 
+// Check a value against an expected type. Ordinary types retain the existing
+// unification policy; set types use inclusion (actual ⊆ expected) and never
+// rewrite one lattice operand into another.
+fn void Inferencer.check_type(Inferencer* inf, Node* at, int expected, int actual)
+{
+    int er = inf.tt.find(expected);
+    int ar = inf.tt.find(actual);
+    if (inf.tt.nodes[ar].kind == TyKind.TY_ERROR) { return; }
+    bool algebraic = inf.tt.has_set_type(er, 0) || inf.tt.has_set_type(ar, 0);
+    if (!algebraic)
+    {
+        inf.unify_at(at, er, ar);
+        return;
+    }
+    inf.algebra_checks++;
+
+    // A still-polymorphic value can adopt an expected lattice type. Numeric
+    // literals are special: choose a concrete numeric member where possible,
+    // otherwise default to i64 and test that concrete value against the set.
+    if (inf.tt.nodes[ar].kind != TyKind.TY_VAR)
+    {
+        inf.specialize_set_members(ar, er, 0);
+        ar = inf.tt.find(ar);
+    }
+    if (inf.tt.nodes[ar].kind == TyKind.TY_VAR)
+    {
+        TyNode* variable = &inf.tt.nodes[ar];
+        if (inf.tt.is_empty(er, 0) && variable.is_numeric == false)
+        {
+            inf.algebra_rejects++;
+            inf.report_mismatch(at, er, ar);
+            return;
+        }
+        if (variable.is_numeric)
+        {
+            int candidate = inf.tt.numeric_member(er, 0);
+            if (candidate == pfront_types::NO_TYPE) { candidate = inf.tt.t_i64; }
+            inf.unify_at(at, ar, candidate);
+            ar = inf.tt.find(ar);
+        }
+        else
+        {
+            inf.unify_at(at, ar, er);
+            inf.algebra_accepts++;
+            return;
+        }
+    }
+
+    if (inf.tt.subtype(ar, er, 0))
+    {
+        inf.algebra_accepts++;
+    }
+    else
+    {
+        inf.algebra_rejects++;
+        inf.report_mismatch(at, er, ar);
+    }
+}
+
+fn int Inferencer.join_types(Inferencer* inf, int left, int right)
+{
+    bool left_in_right = inf.tt.subtype(left, right, 0);
+    bool right_in_left = inf.tt.subtype(right, left, 0);
+    if (!left_in_right && !right_in_left) { inf.algebra_joins++; }
+    return inf.tt.join(left, right);
+}
+
+// Context can resolve numeric variables nested in an inferred union, such as
+// the `{integer} ∪ bool` produced by joining `if` branches. Refine only where
+// the expected set offers a concrete numeric member; final inclusion remains
+// the authority on whether the whole value fits.
+fn void Inferencer.specialize_set_members(Inferencer* inf, int actual,
+                                          int expected, int depth)
+{
+    if (depth > 64) { return; }
+    int ar = inf.tt.find(actual);
+    int er = inf.tt.find(expected);
+    TyNode* an = &inf.tt.nodes[ar];
+    TyNode* en = &inf.tt.nodes[er];
+    if (an.kind == TyKind.TY_VAR)
+    {
+        if (an.is_numeric)
+        {
+            int candidate = inf.tt.numeric_member(er, 0);
+            if (candidate == pfront_types::NO_TYPE) { candidate = inf.tt.t_i64; }
+            inf.unify_at(null, ar, candidate);
+        }
+        return;
+    }
+    if (an.kind == TyKind.TY_UNION || an.kind == TyKind.TY_INTERSECT)
+    {
+        for (usz i = 0; i < an.arg_count; i++)
+        {
+            inf.specialize_set_members(an.args[i], er, depth + 1);
+        }
+        return;
+    }
+    if (an.kind == TyKind.TY_TUPLE && en.kind == TyKind.TY_TUPLE
+        && an.arg_count == en.arg_count)
+    {
+        for (usz i = 0; i < an.arg_count; i++)
+        {
+            inf.specialize_set_members(an.args[i], en.args[i], depth + 1);
+        }
+    }
+}
+
 // ── Declaration types ───────────────────────────────────────────────────────
 // The type of a declaration, computed once and cached in `type_slot`.
 fn int Inferencer.type_of_decl(Inferencer* inf, Node* d)
@@ -145,21 +264,35 @@ fn int Inferencer.type_of_decl(Inferencer* inf, Node* d)
         case N_DECL_FN:
         case N_DECL_EXTERN_FN:
         {
-            if (d.type_ann != null) { result = inf.mapper.map(d.type_ann, 0); }
+            // Function-type syntax carries a complete arrow; ordinary
+            // parameter-list syntax stores each annotation on its pattern and
+            // the result annotation directly on the declaration.
+            if (d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN)
+            {
+                result = inf.mapper.map(d.type_ann, 0);
+            }
             else
             {
-                // Parameter-list form: build the arrow from N_DECL_PARAMs.
                 int[pfront_types::MAX_TYPE_ARGS] ps;
                 usz np = 0;
                 for (usz i = 0; i < d.child_count && np < pfront_types::MAX_TYPE_ARGS - 1; i++)
                 {
                     Node* c = d.children[i];
                     if (c == null || c.kind != Nk.N_DECL_PARAM) { continue; }
-                    ps[np] = c.type_ann != null ? inf.mapper.map(c.type_ann, 0)
+                    Node* pat = c.child(0);
+                    Node* param_type = c.type_ann;
+                    if (param_type == null && pat != null) { param_type = pat.type_ann; }
+                    ps[np] = param_type != null ? inf.mapper.map(param_type, 0)
                                                 : inf.tt.fresh_var(false);
                     np = np + 1;
                 }
-                result = inf.tt.mk_fn(&ps[0], np, inf.tt.fresh_var(false));
+                if (np > 0 || d.type_ann == null)
+                {
+                    int ret = d.type_ann != null ? inf.mapper.map(d.type_ann, 0)
+                                                 : inf.tt.fresh_var(false);
+                    result = inf.tt.mk_fn(&ps[0], np, ret);
+                }
+                else { result = inf.mapper.map(d.type_ann, 0); }
             }
         }
         case N_DECL_STRUCT:
@@ -323,7 +456,7 @@ fn int Inferencer.infer_inner(Inferencer* inf, Node* e)
             for (usz i = 1; i < e.child_count; i++)
             {
                 int t = inf.infer(e.children[i]);
-                inf.unify_at(e.children[i], elem, t);
+                elem = inf.join_types(elem, t);
             }
             return inf.tt.mk_array(elem, (ulong)e.child_count);
         }
@@ -367,7 +500,7 @@ fn int Inferencer.infer_inner(Inferencer* inf, Node* e)
             if (e.child_count >= 3)
             {
                 int el = inf.infer(e.child(2));
-                inf.unify_at(e, th, el);
+                th = inf.join_types(th, el);
             }
             else
             {
@@ -400,7 +533,7 @@ fn int Inferencer.infer_inner(Inferencer* inf, Node* e)
                 }
                 if (armty == pfront_types::NO_TYPE) { continue; }
                 if (result == pfront_types::NO_TYPE) { result = armty; }
-                else { inf.unify_at(arm, result, armty); }
+                else { result = inf.join_types(result, armty); }
             }
             return result == pfront_types::NO_TYPE ? inf.tt.t_unit : result;
         }
@@ -546,7 +679,11 @@ fn int Inferencer.infer_binary(Inferencer* inf, Node* e)
         case TOKEN_LEQ_UNI:
         case TOKEN_GEQ_UNI:
         {
-            inf.unify_at(e, l, r);
+            if (inf.tt.has_set_type(l, 0) || inf.tt.has_set_type(r, 0))
+            {
+                if (!inf.tt.overlaps(l, r, 0)) { inf.report_mismatch(e, l, r); }
+            }
+            else { inf.unify_at(e, l, r); }
             return inf.tt.t_bool;
         }
         // Logical: both sides bool.
@@ -610,7 +747,7 @@ fn int Inferencer.infer_call(Inferencer* inf, Node* e)
                 {
                     for (usz i = 0; i < na; i++)
                     {
-                        inf.unify_at(e.children[i + 1], tup.args[i], args[i]);
+                        inf.check_type(e.children[i + 1], tup.args[i], args[i]);
                     }
                     return ret;
                 }
@@ -625,7 +762,7 @@ fn int Inferencer.infer_call(Inferencer* inf, Node* e)
         }
         for (usz i = 0; i < na; i++)
         {
-            inf.unify_at(e.children[i + 1], cn.args[i], args[i]);
+            inf.check_type(e.children[i + 1], cn.args[i], args[i]);
         }
         return ret;
     }
@@ -700,7 +837,10 @@ fn int Inferencer.infer_stmt(Inferencer* inf, Node* s)
         case N_DECL_CONST:
         case N_DECL_STATIC:
         {
-            int declared = s.type_ann != null ? inf.mapper.map(s.type_ann, 0)
+            Node* pat = s.child(0);
+            Node* annotation = s.type_ann;
+            if (annotation == null && pat != null) { annotation = pat.type_ann; }
+            int declared = annotation != null ? inf.mapper.map(annotation, 0)
                                               : pfront_types::NO_TYPE;
             int init = pfront_types::NO_TYPE;
             for (usz i = 0; i < s.child_count; i++)
@@ -715,7 +855,6 @@ fn int Inferencer.infer_stmt(Inferencer* inf, Node* s)
             int final_ty = declared != pfront_types::NO_TYPE ? declared
                          : (init != pfront_types::NO_TYPE ? init : inf.tt.fresh_var(false));
             // Bind the pattern so later references see the type.
-            Node* pat = s.child(0);
             if (pat != null && pat.kind == Nk.N_PAT_IDENT) { inf.cache_type(pat, final_ty); }
             inf.cache_type(s, final_ty);
             return inf.tt.t_unit;
@@ -785,6 +924,16 @@ fn int Inferencer.check(Inferencer* inf, Node* e, int expected)
             inf.exprs_typed = inf.exprs_typed + 1;
             return expected;
         }
+        if (inf.tt.has_set_type(er, 0))
+        {
+            int numeric = inf.tt.numeric_member(er, 0);
+            if (numeric != pfront_types::NO_TYPE)
+            {
+                int found = inf.check(e, numeric);
+                inf.check_type(e, expected, found);
+                return expected;
+            }
+        }
     }
     if (e.kind == Nk.N_EXPR_ARRAY)
     {
@@ -808,7 +957,7 @@ fn int Inferencer.check(Inferencer* inf, Node* e, int expected)
     }
 
     int actual = inf.infer(e);
-    inf.unify_at(e, expected, actual);
+    inf.check_type(e, expected, actual);
     return expected;
 }
 
@@ -858,9 +1007,11 @@ fn void Inferencer.check_fn(Inferencer* inf, Node* f)
         else if (c.kind == Nk.N_DECL_PARAM)
         {
             Node* pat = c.child(0);
-            if (pat != null && c.type_ann != null)
+            Node* param_type = c.type_ann;
+            if (param_type == null && pat != null) { param_type = pat.type_ann; }
+            if (pat != null && param_type != null)
             {
-                inf.cache_type(pat, inf.mapper.map(c.type_ann, 0));
+                inf.cache_type(pat, inf.mapper.map(param_type, 0));
             }
         }
     }
@@ -905,7 +1056,7 @@ fn void Inferencer.bind_pattern_type(Inferencer* inf, Node* pat, int ty)
             if (pat.type_ann != null)
             {
                 int declared = inf.mapper.map(pat.type_ann, 0);
-                inf.unify_at(pat, declared, ty);
+                inf.check_type(pat, declared, ty);
                 inf.cache_type(pat, declared);
                 return;
             }
@@ -972,4 +1123,10 @@ fn void Inferencer.report(Inferencer* inf)
     printf("  numeric defaults : %d vars -> i64\n", (int)inf.defaulted);
     printf("  types mapped     : %d (%d unknown names)\n",
            (int)inf.mapper.mapped, (int)inf.mapper.unknown_names);
+    if (inf.algebra_checks > 0 || inf.algebra_joins > 0)
+    {
+        printf("  set algebra      : %d assignability checks (%d accepted, %d rejected), %d inferred union joins\n",
+               (int)inf.algebra_checks, (int)inf.algebra_accepts,
+               (int)inf.algebra_rejects, (int)inf.algebra_joins);
+    }
 }

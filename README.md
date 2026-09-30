@@ -169,6 +169,9 @@ air_lower  →  AirModule (λ̄μμ̃ IR in slab arena)
 * PEAR native backend: exercised by `tests/exec/pear/` and `tests/exec/`;
   scalar fixtures pass, while broader language/runtime coverage remains
   incomplete. Known-broken execution cases are tracked in `tests/exec/XFAIL.tsv`.
+* Examples: 21/37 are front-end error-free; the 16 preserved broken showcases
+  are labeled in `examples/README.md` and `examples/STATUS.tsv`. AIR artifacts
+  are diagnostic output, not proof of successful compilation or native behavior.
 * Theory analyses and optimizations have differing consumer coverage; do not
   infer runtime support from an advisory counter or a historical checklist.
 

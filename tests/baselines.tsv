@@ -6,4 +6,4 @@
 subtype	47	0	semantic-subtyping spec cases
 exec	39	0	exec cases that must pass (xfail excluded)
 conformance	150	112	current pfront; see conformance/KNOWN_FAILURES.tsv and docs/dev/CONFORMANCE_GATE_REPAIR.md
-pfront	167	5	5 known: 63_modsys megaload cfg_backedge opt_cascade modsys
+pfront	172	5	5 known: 63_modsys megaload cfg_backedge opt_cascade modsys

@@ -28,6 +28,11 @@
 //
 //   * INTEGER LITERAL DEFAULTING. `0` is polymorphic until context fixes it;
 //     unresolved numeric variables default to i64 at the end, like Rust/OCaml.
+//
+//   * SET TYPES ARE FIRST-CLASS TypeIds. Union/intersection/negation survive
+//     mapping instead of degrading to their first source operand. Bounded
+//     subtype, overlap, emptiness, and join operations feed bidirectional
+//     inference; unresolved cases remain conservative.
 // ============================================================================
 
 module pfront_types;
@@ -67,8 +72,10 @@ enum TyKind : int
     TY_NAMED,        // struct / enum / newtype, identified by its decl
     TY_VAR,          // unification variable
     TY_NEVER,        // uninhabited: the type of `unreachable`
+    TY_TOP,          // all values: the type-level identity for intersection
     TY_UNION,
-    TY_INTERSECT
+    TY_INTERSECT,
+    TY_NEGATION
 }
 
 // A type node. `args` indexes back into the table, so the whole universe is a
@@ -108,6 +115,7 @@ struct TypeTable
     int t_char;
     int t_string;
     int t_never;
+    int t_top;
     int t_i8; int t_i16; int t_i32; int t_i64;
     int t_u8; int t_u16; int t_u32; int t_u64;
     int t_f32; int t_f64;
@@ -147,6 +155,7 @@ fn void TypeTable.init(TypeTable* t)
     t.t_char   = t.mk_simple(TyKind.TY_CHAR);
     t.t_string = t.mk_simple(TyKind.TY_STRING);
     t.t_never  = t.mk_simple(TyKind.TY_NEVER);
+    t.t_top    = t.mk_simple(TyKind.TY_TOP);
     t.t_i8  = t.mk_int(8, true);   t.t_u8  = t.mk_int(8, false);
     t.t_i16 = t.mk_int(16, true);  t.t_u16 = t.mk_int(16, false);
     t.t_i32 = t.mk_int(32, true);  t.t_u32 = t.mk_int(32, false);
@@ -258,6 +267,107 @@ fn int TypeTable.mk_fn(TypeTable* t, int* params, usz n, int ret)
 fn int TypeTable.mk_named(TypeTable* t, Node* decl, uint name_id)
 {
     return t.intern(TyKind.TY_NAMED, 0, false, false, 0, decl, name_id, null, 0);
+}
+
+// Flatten nested instances of the same set operator before interning. The
+// caller supplies fixed-capacity storage; MAX_TYPE_ARGS + 1 is the overflow
+// sentinel, so a too-wide source expression becomes TY_ERROR rather than a
+// silently truncated approximation.
+fn usz TypeTable.flatten_set(TypeTable* t, TyKind op, int id, int* out,
+                             usz count, int depth)
+{
+    if (depth > 64 || count > MAX_TYPE_ARGS) { return MAX_TYPE_ARGS + 1; }
+    int root = t.find(id);
+    TyNode* n = &t.nodes[root];
+    if (n.kind == op)
+    {
+        for (usz i = 0; i < n.arg_count; i++)
+        {
+            count = t.flatten_set(op, n.args[i], out, count, depth + 1);
+            if (count > MAX_TYPE_ARGS) { return count; }
+        }
+        return count;
+    }
+    if (count >= MAX_TYPE_ARGS) { return MAX_TYPE_ARGS + 1; }
+    out[count] = root;
+    return count + 1;
+}
+
+fn int TypeTable.mk_set(TypeTable* t, TyKind op, int* members, usz count)
+{
+    if (op != TyKind.TY_UNION && op != TyKind.TY_INTERSECT) { return t.t_error; }
+    int[MAX_TYPE_ARGS] flat;
+    usz n = 0;
+    for (usz i = 0; i < count; i++)
+    {
+        n = t.flatten_set(op, members[i], &flat[0], n, 0);
+        if (n > MAX_TYPE_ARGS) { return t.t_error; }
+    }
+
+    int[MAX_TYPE_ARGS] normalized;
+    usz used = 0;
+    for (usz i = 0; i < n; i++)
+    {
+        int id = t.find(flat[i]);
+        if (t.nodes[id].kind == TyKind.TY_ERROR) { return t.t_error; }
+        if (op == TyKind.TY_UNION)
+        {
+            if (id == t.t_never) { continue; }
+            if (id == t.t_top) { return t.t_top; }
+        }
+        else
+        {
+            if (id == t.t_never) { return t.t_never; }
+            if (id == t.t_top) { continue; }
+        }
+        bool duplicate = false;
+        for (usz j = 0; j < used; j++)
+        {
+            if (normalized[j] == id) { duplicate = true; break; }
+        }
+        if (!duplicate) { normalized[used++] = id; }
+    }
+
+    // Canonical order makes commutative unions/intersections hash-cons to the
+    // same TypeId, independent of source operand order.
+    for (usz i = 1; i < used; i++)
+    {
+        int key = normalized[i];
+        usz j = i;
+        while (j > 0 && normalized[j - 1] > key)
+        {
+            normalized[j] = normalized[j - 1];
+            j--;
+        }
+        normalized[j] = key;
+    }
+    if (used == 0) { return op == TyKind.TY_UNION ? t.t_never : t.t_top; }
+    if (used == 1) { return normalized[0]; }
+    return t.intern(op, 0, false, false, 0, null, 0, &normalized[0], used);
+}
+
+fn int TypeTable.mk_union(TypeTable* t, int* members, usz count)
+{
+    return t.mk_set(TyKind.TY_UNION, members, count);
+}
+
+fn int TypeTable.mk_intersect(TypeTable* t, int* members, usz count)
+{
+    return t.mk_set(TyKind.TY_INTERSECT, members, count);
+}
+
+fn int TypeTable.mk_negation(TypeTable* t, int inner)
+{
+    int root = t.find(inner);
+    if (root == t.t_top) { return t.t_never; }
+    if (root == t.t_never) { return t.t_top; }
+    if (t.nodes[root].kind == TyKind.TY_NEGATION && t.nodes[root].arg_count == 1)
+    {
+        return t.nodes[root].args[0];
+    }
+    int[1] arg;
+    arg[0] = root;
+    return t.intern(TyKind.TY_NEGATION, 0, false, false, 0, null, 0, &arg[0], 1);
 }
 
 // Type variables are NOT hash-consed: each must be distinct.
@@ -392,6 +502,16 @@ fn UnifyResult TypeTable.unify(TypeTable* t, int a, int b, int depth)
         return UnifyResult.UNIFY_OK;
     }
 
+    // Lattice values are related by subtyping, not by destructive unification
+    // of their branches. Callers that know an expected type use `subtype`.
+    if (na.kind == TyKind.TY_UNION || na.kind == TyKind.TY_INTERSECT
+        || na.kind == TyKind.TY_NEGATION || na.kind == TyKind.TY_TOP
+        || nb.kind == TyKind.TY_UNION || nb.kind == TyKind.TY_INTERSECT
+        || nb.kind == TyKind.TY_NEGATION || nb.kind == TyKind.TY_TOP)
+    {
+        return UnifyResult.UNIFY_MISMATCH;
+    }
+
     if (na.kind != nb.kind) { return UnifyResult.UNIFY_MISMATCH; }
 
     switch (na.kind)
@@ -418,6 +538,268 @@ fn UnifyResult TypeTable.unify(TypeTable* t, int a, int b, int depth)
         if (r != UnifyResult.UNIFY_OK) { return r; }
     }
     return UnifyResult.UNIFY_OK;
+}
+
+// Set-algebra presence is recursive: a tuple of unions still needs semantic
+// compatibility rather than first-component unification.
+fn bool TypeTable.has_set_type(TypeTable* t, int id, int depth)
+{
+    if (depth > 64) { return true; }
+    int root = t.find(id);
+    TyNode* n = &t.nodes[root];
+    if (n.kind == TyKind.TY_UNION || n.kind == TyKind.TY_INTERSECT
+        || n.kind == TyKind.TY_NEGATION || n.kind == TyKind.TY_TOP
+        || n.kind == TyKind.TY_NEVER) return true;
+    for (usz i = 0; i < n.arg_count; i++)
+    {
+        if (t.has_set_type(n.args[i], depth + 1)) return true;
+    }
+    return false;
+}
+
+// Find a numeric branch for an unsuffixed literal under a set-valued expected
+// type. The full relation is checked afterward, so a candidate from an
+// impossible intersection cannot silently validate it.
+fn int TypeTable.numeric_member(TypeTable* t, int id, int depth)
+{
+    if (depth > 64) { return NO_TYPE; }
+    int root = t.find(id);
+    TyNode* n = &t.nodes[root];
+    if (n.kind == TyKind.TY_INT || n.kind == TyKind.TY_FLOAT) return root;
+    if (n.kind != TyKind.TY_UNION && n.kind != TyKind.TY_INTERSECT) return NO_TYPE;
+    for (usz i = 0; i < n.arg_count; i++)
+    {
+        int candidate = t.numeric_member(n.args[i], depth + 1);
+        if (candidate != NO_TYPE) return candidate;
+    }
+    return NO_TYPE;
+}
+
+// A deliberately bounded disjointness proof. Unknown/variable/function cases
+// stay overlapping; only constructor and nominal contradictions are used to
+// reject set membership or prove an intersection empty.
+fn bool TypeTable.disjoint(TypeTable* t, int a, int b, int depth)
+{
+    if (depth > 64) { return false; }
+    int ra = t.find(a); int rb = t.find(b);
+    TyNode* na = &t.nodes[ra]; TyNode* nb = &t.nodes[rb];
+    if (na.kind == TyKind.TY_NEVER || nb.kind == TyKind.TY_NEVER) { return true; }
+    if (ra == rb) { return false; }
+    if (na.kind == TyKind.TY_ERROR || nb.kind == TyKind.TY_ERROR
+        || na.kind == TyKind.TY_VAR || nb.kind == TyKind.TY_VAR
+        || na.kind == TyKind.TY_TOP || nb.kind == TyKind.TY_TOP
+        || na.kind == TyKind.TY_NEGATION || nb.kind == TyKind.TY_NEGATION) return false;
+
+    if (na.kind == TyKind.TY_UNION)
+    {
+        for (usz i = 0; i < na.arg_count; i++)
+        {
+            if (!t.disjoint(na.args[i], rb, depth + 1)) return false;
+        }
+        return true;
+    }
+    if (nb.kind == TyKind.TY_UNION)
+    {
+        for (usz i = 0; i < nb.arg_count; i++)
+        {
+            if (!t.disjoint(ra, nb.args[i], depth + 1)) return false;
+        }
+        return true;
+    }
+    if (na.kind == TyKind.TY_INTERSECT)
+    {
+        for (usz i = 0; i < na.arg_count; i++)
+        {
+            if (t.disjoint(na.args[i], rb, depth + 1)) return true;
+        }
+    }
+    if (nb.kind == TyKind.TY_INTERSECT)
+    {
+        for (usz i = 0; i < nb.arg_count; i++)
+        {
+            if (t.disjoint(ra, nb.args[i], depth + 1)) return true;
+        }
+    }
+    if (na.kind != nb.kind) { return true; }
+    switch (na.kind)
+    {
+        case TyKind.TY_NAMED:
+            return na.decl != nb.decl;
+        case TyKind.TY_TUPLE:
+        {
+            if (na.arg_count != nb.arg_count) { return true; }
+            for (usz i = 0; i < na.arg_count; i++)
+            {
+                if (t.disjoint(na.args[i], nb.args[i], depth + 1)) return true;
+            }
+            return false;
+        }
+        case TyKind.TY_ARRAY:
+        {
+            if (na.length != nb.length) { return true; }
+            if (na.arg_count == 1 && nb.arg_count == 1)
+            {
+                return t.disjoint(na.args[0], nb.args[0], depth + 1);
+            }
+            return false;
+        }
+        default:
+            return false;
+    }
+}
+
+fn bool TypeTable.subtype(TypeTable* t, int a, int b, int depth)
+{
+    if (depth > 64) { return false; }
+    int ra = t.find(a); int rb = t.find(b);
+    if (ra == rb) { return true; }
+    TyNode* na = &t.nodes[ra]; TyNode* nb = &t.nodes[rb];
+    if (na.kind == TyKind.TY_ERROR || nb.kind == TyKind.TY_ERROR) { return true; }
+    if (na.kind == TyKind.TY_NEVER) { return true; }
+    if (nb.kind == TyKind.TY_TOP) { return true; }
+    if (nb.kind == TyKind.TY_NEVER) { return false; }
+    if (na.kind == TyKind.TY_TOP || na.kind == TyKind.TY_VAR || nb.kind == TyKind.TY_VAR)
+    {
+        return false;
+    }
+    if (na.kind == TyKind.TY_INTERSECT && t.is_empty(ra, depth + 1)) return true;
+
+    if (nb.kind == TyKind.TY_UNION)
+    {
+        for (usz i = 0; i < nb.arg_count; i++)
+        {
+            if (t.subtype(ra, nb.args[i], depth + 1)) return true;
+        }
+        return false;
+    }
+    if (na.kind == TyKind.TY_UNION)
+    {
+        for (usz i = 0; i < na.arg_count; i++)
+        {
+            if (!t.subtype(na.args[i], rb, depth + 1)) return false;
+        }
+        return true;
+    }
+    if (nb.kind == TyKind.TY_INTERSECT)
+    {
+        for (usz i = 0; i < nb.arg_count; i++)
+        {
+            if (!t.subtype(ra, nb.args[i], depth + 1)) return false;
+        }
+        return true;
+    }
+    if (na.kind == TyKind.TY_INTERSECT)
+    {
+        for (usz i = 0; i < na.arg_count; i++)
+        {
+            if (t.subtype(na.args[i], rb, depth + 1)) return true;
+        }
+        return false;
+    }
+    if (nb.kind == TyKind.TY_NEGATION)
+    {
+        if (nb.arg_count != 1) { return false; }
+        return t.disjoint(ra, nb.args[0], depth + 1);
+    }
+    if (na.kind != nb.kind) { return false; }
+
+    switch (na.kind)
+    {
+        case TyKind.TY_NAMED:
+            return na.decl == nb.decl;
+        case TyKind.TY_INT:
+            return na.bits == nb.bits && na.is_signed == nb.is_signed;
+        case TyKind.TY_FLOAT:
+            return na.bits == nb.bits;
+        case TyKind.TY_TUPLE:
+        {
+            if (na.arg_count != nb.arg_count) { return false; }
+            for (usz i = 0; i < na.arg_count; i++)
+            {
+                if (!t.subtype(na.args[i], nb.args[i], depth + 1)) return false;
+            }
+            return true;
+        }
+        case TyKind.TY_SLICE:
+            return na.arg_count == 1 && nb.arg_count == 1
+                && t.subtype(na.args[0], nb.args[0], depth + 1);
+        case TyKind.TY_ARRAY:
+            return na.length == nb.length && na.arg_count == 1 && nb.arg_count == 1
+                && t.subtype(na.args[0], nb.args[0], depth + 1)
+                && t.subtype(nb.args[0], na.args[0], depth + 1);
+        case TyKind.TY_PTR:
+        case TyKind.TY_REF:
+            return na.is_mut == nb.is_mut && na.arg_count == 1 && nb.arg_count == 1
+                && t.subtype(na.args[0], nb.args[0], depth + 1)
+                && t.subtype(nb.args[0], na.args[0], depth + 1);
+        case TyKind.TY_FN:
+        {
+            if (na.arg_count != nb.arg_count || na.arg_count == 0) return false;
+            usz ret = na.arg_count - 1;
+            for (usz i = 0; i < ret; i++)
+            {
+                if (!t.subtype(nb.args[i], na.args[i], depth + 1)) return false;
+            }
+            return t.subtype(na.args[ret], nb.args[ret], depth + 1);
+        }
+        default:
+            return false;
+    }
+}
+
+fn bool TypeTable.overlaps(TypeTable* t, int a, int b, int depth)
+{
+    return !t.disjoint(a, b, depth);
+}
+
+fn bool TypeTable.is_empty(TypeTable* t, int id, int depth)
+{
+    if (depth > 64) { return false; }
+    int root = t.find(id);
+    TyNode* n = &t.nodes[root];
+    if (n.kind == TyKind.TY_NEVER) { return true; }
+    if (n.kind == TyKind.TY_UNION)
+    {
+        for (usz i = 0; i < n.arg_count; i++)
+        {
+            if (!t.is_empty(n.args[i], depth + 1)) return false;
+        }
+        return true;
+    }
+    if (n.kind == TyKind.TY_INTERSECT)
+    {
+        for (usz i = 0; i < n.arg_count; i++)
+        {
+            if (t.is_empty(n.args[i], depth + 1)) return true;
+            for (usz j = i + 1; j < n.arg_count; j++)
+            {
+                if (t.disjoint(n.args[i], n.args[j], depth + 1)) return true;
+            }
+        }
+        return false;
+    }
+    if (n.kind == TyKind.TY_TUPLE)
+    {
+        for (usz i = 0; i < n.arg_count; i++)
+        {
+            if (t.is_empty(n.args[i], depth + 1)) return true;
+        }
+        return false;
+    }
+    if (n.kind == TyKind.TY_ARRAY && n.length > 0 && n.arg_count == 1)
+    {
+        return t.is_empty(n.args[0], depth + 1);
+    }
+    return false;
+}
+
+fn int TypeTable.join(TypeTable* t, int a, int b)
+{
+    if (t.subtype(a, b, 0)) return t.find(b);
+    if (t.subtype(b, a, 0)) return t.find(a);
+    int[2] members;
+    members[0] = a; members[1] = b;
+    return t.mk_union(&members[0], 2);
 }
 
 fn bool TypeTable.is_numeric_type(TypeTable* t, int id)
@@ -458,6 +840,26 @@ fn void TypeTable.write(TypeTable* t, int id, char* buf, usz cap, usz* pos, int 
         case TY_CHAR:   append(buf, cap, pos, "char");
         case TY_STRING: append(buf, cap, pos, "str");
         case TY_NEVER:  append(buf, cap, pos, "never");
+        case TY_TOP:    append(buf, cap, pos, "any");
+        case TY_NEGATION:
+        {
+            append(buf, cap, pos, "¬");
+            if (n.arg_count == 1) { t.write(n.args[0], buf, cap, pos, depth + 1); }
+        }
+        case TY_UNION:
+        case TY_INTERSECT:
+        {
+            append(buf, cap, pos, "(");
+            for (usz i = 0; i < n.arg_count; i++)
+            {
+                if (i > 0)
+                {
+                    append(buf, cap, pos, n.kind == TyKind.TY_UNION ? " ∪ " : " ∩ ");
+                }
+                t.write(n.args[i], buf, cap, pos, depth + 1);
+            }
+            append(buf, cap, pos, ")");
+        }
         case TY_INT:
         {
             append(buf, cap, pos, n.is_signed ? "i" : "u");
@@ -618,6 +1020,7 @@ fn int TypeMapper.primitive_of(TypeMapper* m, uint name_id)
     }
     if (n == 4 && s[0] == 'u' && s[1] == 'n' && s[2] == 'i' && s[3] == 't') { return m.tt.t_unit; }
     if (n == 4 && s[0] == 'v' && s[1] == 'o' && s[2] == 'i' && s[3] == 'd') { return m.tt.t_unit; }
+    if (n == 3 && s[0] == 'a' && s[1] == 'n' && s[2] == 'y') { return m.tt.t_top; }
     if (n == 5 && s[0] == 'n' && s[1] == 'e' && s[2] == 'v') { return m.tt.t_never; }
     if (n == 4 && s[0] == 'b' && s[1] == 'y' && s[2] == 't' && s[3] == 'e') { return m.tt.t_u8; }
     return NO_TYPE;
@@ -724,11 +1127,18 @@ fn int TypeMapper.map(TypeMapper* m, Node* ty, int depth)
         case N_TY_UNION:
         case N_TY_INTERSECT:
         {
-            // Approximate with the first component: a full lattice needs
-            // subtyping, which this pass deliberately does not attempt.
-            if (ty.child_count > 0) { return m.map(ty.children[0], depth + 1); }
-            return m.tt.fresh_var(false);
+            if (ty.child_count > MAX_TYPE_ARGS) { return m.tt.t_error; }
+            int[MAX_TYPE_ARGS] members;
+            for (usz i = 0; i < ty.child_count; i++)
+            {
+                members[i] = m.map(ty.children[i], depth + 1);
+            }
+            if (ty.kind == Nk.N_TY_UNION) return m.tt.mk_union(&members[0], ty.child_count);
+            return m.tt.mk_intersect(&members[0], ty.child_count);
         }
+        case N_TY_NEGATION:
+            if (ty.child_count != 1) { return m.tt.t_error; }
+            return m.tt.mk_negation(m.map(ty.children[0], depth + 1));
         case N_TY_PATH:
         {
             if (ty.resolved != null)

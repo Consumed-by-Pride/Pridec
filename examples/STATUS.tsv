@@ -1,0 +1,38 @@
+file	errors	warnings	exit_code	status
+01_comptime_generic_specialization.pie	0	1	1	front-end error-free; native behavior unverified
+02_algebraic_effects_state_logger.pie	7	13	2	known compile errors; diagnostic AIR only
+03_hose_prompt_dynamic_wind.pie	6	6	2	known compile errors; diagnostic AIR only
+04_stdlib_collections_crypto.pie	3	26	2	known compile errors; diagnostic AIR only
+05_modal_stage_checker.pie	0	1	1	front-end error-free; native behavior unverified
+algebraic_async_io.pie	0	0	0	front-end error-free; native behavior unverified
+allocator.pie	0	2	1	front-end error-free; native behavior unverified
+checks_demo.pie	0	0	0	front-end error-free; native behavior unverified
+echo_server.pie	6	1	2	known compile errors; diagnostic AIR only
+effect_demo.pie	4	3	2	known compile errors; diagnostic AIR only
+fib.pie	0	0	0	front-end error-free; native behavior unverified
+format_demo.pie	1	1	2	known compile errors; diagnostic AIR only
+generics_demo.pie	0	0	0	front-end error-free; native behavior unverified
+hose_async_showcase.pie	0	2	1	front-end error-free; native behavior unverified
+hybrid_scoped_effects_showcase.pie	0	21	1	front-end error-free; native behavior unverified
+integration.pie	7	1	2	known compile errors; diagnostic AIR only
+irdl_showcase.pie	7	0	2	known compile errors; diagnostic AIR only
+json.pie	1	0	2	known compile errors; diagnostic AIR only
+member_demo.pie	0	0	0	front-end error-free; native behavior unverified
+micro_c.pie	0	0	0	front-end error-free; native behavior unverified
+mlcee_contextual_effects_showcase.pie	0	3	1	front-end error-free; native behavior unverified
+operator_demo.pie	0	1	1	front-end error-free; native behavior unverified
+operators.pie	1	1	2	known compile errors; diagnostic AIR only
+pgen_demo.pie	8	15	2	known compile errors; diagnostic AIR only
+resolve_demo.pie	0	1	1	front-end error-free; native behavior unverified
+rewrite_demo.pie	0	0	0	front-end error-free; native behavior unverified
+rfc_number.pie	0	0	0	front-end error-free; native behavior unverified
+showcase.pie	12	27	2	known compile errors; diagnostic AIR only
+sigils.pie	0	5	1	front-end error-free; native behavior unverified
+spec_coverage.pie	18	32	2	known compile errors; diagnostic AIR only
+ssi_demo.pie	0	0	0	front-end error-free; native behavior unverified
+stress.pie	15	6	2	known compile errors; diagnostic AIR only
+tensor_demo.pie	8	6	2	known compile errors; diagnostic AIR only
+time_calendar_showcase.pie	0	0	0	front-end error-free; native behavior unverified
+typecheck_demo.pie	0	0	0	front-end error-free; native behavior unverified
+union_intersection_showcase.pie	1	0	2	known compile errors; diagnostic AIR only
+vec_math_showcase.pie	0	2	1	front-end error-free; native behavior unverified

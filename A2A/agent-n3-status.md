@@ -1,5 +1,10 @@
 # Agent-n3 — integration & polish, 2026-09-30
 
+**Latest checkpoint:** all three original queue branches are integrated into
+`n3/merge-nbe-real`; full gate and tier matrices are verified below. No dev
+landing yet: independent review and the observed remote dev rewind need
+coordination. The newer PEAR-bro branch is a separate, not-yet-verified queue item.
+
 ## Review request (not permission to skip independent verification)
 
 @agent4 please verify merge `n3/merge-regression-gate` of `fix/agent4-regression-gate` (`933318c`), including the conformance instrument/baseline correction in its n3 prerequisite commits.
@@ -95,3 +100,60 @@ reports real check totals, and runs the semantic subtype specification.
 pre-verification addendum. That is useful evidence for the old queue snapshot,
 but is not independent signoff on n3's conformance repair, CLI changes, or the
 two newer parameter-capture commits. Final dev landing remains gated on review.
+
+## Third merge candidate — NBE / combined original queue
+
+@agent4 please verify merge `n3/merge-nbe-real` of `theory/nbe-real` at **7beff71**, stacked on the first two verified candidates and the n3 polish commits.
+
+Resolution keeps the NBE side's complete owned/sorted/deduplicated record
+constructor, and adds explicit post-allocation ID bounds/type validation with
+field-entry cleanup/rollback. Harness-label conflicts retain literal quoting;
+all new NBE semantic/record checks remain present.
+
+**Real regression caught and fixed:** NBE's new input guard rejected `tail=-1`,
+the existing closed-record API sentinel. The protected semantic subtype spec
+failed 2 existing cases (45/47), because both closed records became bottom and
+false containment proofs resulted. The constructor now allows -1, still
+rejects less-than--1/out-of-range tails, and a dedicated regression tests it.
+The 47-case spec is restored to **47/47**, not weakened or rebaselined.
+
+A standalone C3 unit linked against the real compiler modules tests ownership,
+sorting, duplicate-field intersections, invalid/null/oversized inputs, node
+and field-entry exhaustion, late allocation cleanup, and closed-tail API
+compatibility: **10/10**. It is part of make test.
+
+Final build + full gate: exit 0; pfront **172/5**, stdlib **260/260**,
+conformance **150/112**, PEAR **31/0**, exec **39/0** (48 XFAIL, 0 XPASS),
+harness regressions **27/27**, experiments **14/14**, semantic subtype **47/47**,
+record-constructor checks **10/10**. The pfront floor is tightened to 172/5.
+Both native suites again have identical per-case outcomes at O0/O1/O2/O3:
+31 PEAR cases + 87 exec checks per tier. Nine selected malformed/CLI probes
+return their expected non-crashing exit codes.
+
+**Examples measured honestly:** 37/37 emit nonempty AIR, but only **21/37**
+compile without errors. Rebuilt original dev source 5e20e0a in an isolated
+worktree: the same 21 are error-free and no example's error count regresses.
+The 16 erroneous examples are labeled individually in `examples/STATUS.tsv`
+and `examples/README.md`; a default harness test now protects the error floors.
+This is not a claim that all examples run or produce correct native results.
+
+## Remote coordination blocker — do not silently restore dev history
+
+During the final fetch, origin/dev was **force-rewound from 7ce61ec to a65f86b**.
+That drops the mission/pre-verification and other A2A audit docs (10 commits
+between a65f86b and original base 5e20e0a; compiler source there is unchanged).
+Agent-n3 did not push, force-push, or reset dev. The tested candidate preserves
+its original history; landing it would also restore the dropped documents, so
+the owner's intended base must be confirmed before doing that.
+
+A new `pear-bro/v0.9.1-multiarg-clause` branch appeared at **8330f31**. It adds
+expression-bodied tuple-clause parameter lowering and nullary const auto-call,
+with known block/multi-clause limitations. It is **not** in the original
+three-branch candidate and has not been verified by n3; queue it explicitly
+rather than imply that the live remote has no remaining work.
+
+Independent review requested especially for conformance recalibration, the
+newer parameter-capture integration, record bounds/closed-tail compatibility,
+and the documented dev-history/base choice. No baseline was lowered to hide a
+merge regression; the invalid legacy conformance instrument is separately
+explained and its replacement failures remain visible by case.
