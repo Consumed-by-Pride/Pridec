@@ -1,5 +1,12 @@
 # Theory-integration audit — current dev pass
 
+> **N3 integration correction (2026-10-01):** the original memory/captures
+> helpers below created custom string attrs, which LLVM does not interpret as
+> the semantic contracts. N3 switches to named enum/integer attrs, with two
+> direct LLVM-API checks (0/2 before, 2/2 after) in the default gate. Historical
+> stdout-counter verification below did not establish this. See
+> `A2A/agent-n3-status.md`; the intended no-write/no-retain scope is unchanged.
+
 **Target:** `dev` at source commit `5e20e0a` (2026-09-30; source baseline unchanged from `d2548f8`, latest commits are audit/mission docs)
 **Work branch:** `feat/theory-integration-dev`
 **Workspace:** `/home/user/pridec-theory-pr`

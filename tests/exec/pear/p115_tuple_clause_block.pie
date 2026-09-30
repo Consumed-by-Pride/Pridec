@@ -1,0 +1,7 @@
+-- EXIT: 42
+-- BLOCKER (XFAIL): PEAR v0.9.1's tuple-clause fast path is expr-only; block binding/match still fails.
+fn add_block : (i64, i64) -> i64
+  | (a, b) ->
+      let sum = a + b
+      sum
+fn main(_) -> i64 { return add_block(17, 25); }

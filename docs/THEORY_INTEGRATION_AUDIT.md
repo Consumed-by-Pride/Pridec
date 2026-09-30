@@ -83,3 +83,16 @@ The metadata and advisory changes preserve existing runtime semantics. The dense
 ## Acceptance and follow-up
 
 This branch now has three additional producer-to-consumer edges beyond metadata preservation: the subtype engine drives opt-in alias/binding emptiness advice; dense scalar match classification selects real LLVM switch dispatch; and qualifier facts become LLVM `memory(read)` function and `captures(none)` parameter attributes under their respective proof conditions. It also fixes a false exhaustiveness witness for wildcard-covered infinite domains. It does **not** claim that every analysis is now a lowering input. Next slices should be independently semantics-reviewed and tested: (1) extend match-lowering handoff only after differential coverage for guards, payloads, binders, and fallthrough; (2) define checked-index semantics before consuming `NF_BOUNDS_PROVEN`; (3) identify additional clone/rebuild helpers that can drop metadata; and (4) extend `captures(none)` only for clause-pattern/slice parameters after AIR type mapping is reliable; do not infer `readonly`/`noalias` from the current fact. The broad goal remains open until every subsystem has an intended consumer and regression tests for that edge.
+
+
+## Agent-n3 integration correction — semantic attributes (2026-10-01)
+
+The original helpers attached custom LLVM string attributes named memory and
+captures. Quoted `"memory"="read"` / `"captures"="none"` are not semantic LLVM
+contracts, even when a stdout counter increments. N3 uses named attribute-kind
+lookup plus LLVMCreateEnumAttribute with LLVM-23 parser-verified payloads:
+memory(read)=1365, captures(none)=0. The direct C3 unit tests the actual helpers
+on a body-less declaration, where optimization cannot infer either attribute.
+It failed 0/2 before the correction and passes 2/2 after; make test runs it.
+No readonly/noalias/termination strengthening is made. The four driver-flag
+runtime matrices remain identical after activating these real contracts.

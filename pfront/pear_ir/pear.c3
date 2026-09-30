@@ -126,6 +126,7 @@ alias Lerror = void*;
 
 extern fn Ltype      ll_global_val_type(Lvalue g) @cname("LLVMGlobalGetValueType");
 extern fn Ltype      ll_type_of(Lvalue v) @cname("LLVMTypeOf");
+extern fn uint      ll_enum_attr_kind(char* name, usz len) @cname("LLVMGetEnumAttributeKindForName");
 extern fn Lvalue    ll_create_enum_attr(Lcontext c, uint id, ulong v) @cname("LLVMCreateEnumAttribute");
 extern fn Lvalue    ll_create_string_attr(Lcontext c, char* k, uint kl, char* v, uint vl) @cname("LLVMCreateStringAttribute");
 extern fn void      ll_add_attr_at_idx(Lvalue f, int idx, Lvalue a) @cname("LLVMAddAttributeAtIndex");
@@ -608,7 +609,10 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             if (p.name[0] != '%')
             {
                 Lvalue f = ll_get_named_fn(cg.mod, p.name);
-                if (f != null) return f;
+                if (f != null)
+                {
+                    return f;
+                }
                 // Legacy __pear_alloca intrinsic (v0.8 bootstrap) — redirect
                 // to real malloc so older .air or stale references still work.
                 if (p.name[0] == '_' && p.name[1] == '_'
@@ -1823,8 +1827,12 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 fn void pear_tag_memory_read(PearCg* cg, Lvalue fnv)
 {
     if (cg == null || fnv == null) { return; }
-    Lvalue a = ll_create_string_attr(cg.ctx,
-        (char*)"memory", 6u, (char*)"read", 4u);
+    uint kind = ll_enum_attr_kind((char*)"memory", 6);
+    if (kind == 0) { return; }
+    // LLVM 23 semantic MemoryEffects::readOnly(), verified against its IR
+    // parser: all six locations carry Ref (0x555). A string named memory is
+    // merely custom metadata and does not establish LLVM memory(read).
+    Lvalue a = ll_create_enum_attr(cg.ctx, kind, 1365);
     if (a != null)
     {
         ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, a);
@@ -1842,8 +1850,11 @@ fn void pear_tag_captures_none_params(PearCg* cg, Lvalue fnv, AirDecl* d)
     {
         AirBinder* p = d.params[i];
         if (p == null || !p.no_capture) { continue; }
-        Lvalue a = ll_create_string_attr(cg.ctx,
-            (char*)"captures", 8u, (char*)"none", 4u);
+        uint kind = ll_enum_attr_kind((char*)"captures", 8);
+        if (kind == 0) { continue; }
+        // CaptureInfo::none() is the zero payload of LLVM 23's semantic
+        // captures attribute, not a custom string key/value.
+        Lvalue a = ll_create_enum_attr(cg.ctx, kind, 0);
         if (a == null) { continue; }
         // LLVM attribute positions are 1-based for the first parameter.
         ll_add_attr_at_idx(fnv, (int)(i + 1), a);

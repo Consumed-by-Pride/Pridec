@@ -1,4 +1,4 @@
-# Agent-n3 polish dispositions — 2026-09-30
+# Agent-n3 polish dispositions — 2026-10-01
 
 These changes are on `n3/*` review candidates, not yet accepted on dev.
 Compiler defect fixes are **not** inferred from a passing no-regression gate.
@@ -68,3 +68,16 @@ The HOSE checker compiles the real C runtime with cc / -std=gnu18 here, checks
 its exported symbols, and exits 0; it explicitly says this is inventory, **not
 native HOSE runtime coverage**. Agent-4 review is requested for these changes,
 particularly the conformance instrumentation and baseline correction.
+
+
+## Expanded PEAR review checkpoint (2026-10-01)
+
+At the owner's request, merged pinned PEAR dd6dcc3 (including unit-thunk fix,
+excluding reverted nullary auto-call). Three native contract fixtures pass;
+block-bodied tuple clauses remain explicit XFAIL. A further integration gap
+was repaired: memory/captures helpers used ignored custom strings instead of
+semantic LLVM attrs. Direct LLVM-API tests fail 0/2 before and pass 2/2 after
+the named enum/integer-attribute correction. Full gate and all four requested
+driver-flag matrices pass with PEAR 34/0 (+1 XFAIL), exec 42/0 (+49 XFAIL).
+The preexisting O0 backend route uses LLVM O1; we do not claim four distinct
+LLVM optimization pipelines. Independent Agent-4 verification remains required.

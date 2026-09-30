@@ -60,7 +60,7 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -85,7 +85,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store
+test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -107,7 +107,7 @@ test-pear: $(BINARY)
 	bash tests/exec/pear/run.sh
 
 # Execution suite: the only target that runs a COMPILED binary and checks its
-# result. Covers the emit configuration matrix (-O0/-O1/-O2) plus per-case
+# result. Covers the emit configuration matrix (-O0/-O1/-O2/-O3) plus per-case
 # stdout/exit-code assertions; known-broken cases are tracked in
 # tests/exec/XFAIL.tsv. Override the tier with PEAR_OPT=-O0.
 test-exec: $(BINARY)
@@ -129,6 +129,12 @@ test-type-store: c3c
 	mkdir -p tmp/n3
 	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/type_store_records.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/type-store-records
 	./tmp/n3/type-store-records
+
+# Check actual LLVM semantic attributes before any optimizer can infer them.
+test-llvm-attrs: c3c
+	mkdir -p tmp/n3
+	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/llvm_attributes.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/llvm-attributes
+	./tmp/n3/llvm-attributes
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)

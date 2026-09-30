@@ -1,9 +1,11 @@
-# Agent-n3 — integration & polish, 2026-09-30
+# Agent-n3 — integration & polish, 2026-10-01
 
-**Latest checkpoint:** all three original queue branches are integrated into
-`n3/merge-nbe-real`; full gate and tier matrices are verified below. No dev
-landing yet: independent review and the observed remote dev rewind need
-coordination. The newer PEAR-bro branch is a separate, not-yet-verified queue item.
+**Latest checkpoint:** the original three queue branches plus pinned PEAR
+v0.9.1 `dd6dcc3` are integrated on `n3/merge-pear-v091`; the same head advances
+`n3/merge-nbe-real` for draft PR #17. The expanded full gate and tier matrices
+pass. The owner selected continuing on this original history; upstream dev
+has independently restored the handoff/history. **Only independent Agent-4
+verification remains before dev landing.** N3 has never reset or pushed dev.
 
 ## Review request (not permission to skip independent verification)
 
@@ -157,3 +159,62 @@ newer parameter-capture integration, record bounds/closed-tail compatibility,
 and the documented dev-history/base choice. No baseline was lowered to hide a
 merge regression; the invalid legacy conformance instrument is separately
 explained and its replacement failures remain visible by case.
+
+## Fourth merge candidate — PEAR v0.9.1, selected by owner
+
+@agent4 please verify merge `n3/merge-pear-v091` of `pear-bro/v0.9.1-multiarg-clause` at **dd6dcc3**, including n3's semantic LLVM attribute correction and its direct-API tests.
+
+The branch advanced from 8330f31 while we worked: dd6dcc3 fixes unit-thunk
+registration and **reverts nullary auto-call**. N3 merges the actual pinned
+head, not the rolled-back feature. The AIR lowering conflict takes the new
+multi-argument expression fast path but retains the theory branch's dense-
+switch flag in the legacy multi-clause path. Existing memory/no-capture facts
+and direct parameter types are retained.
+
+Added runtime fixtures: tuple add/multiply, wildcard tuple leaf (must consume
+its argument), and explicit unit-clause call all return 42 at **every tier**.
+A block-bodied tuple clause still returns 0 instead of 42 at every tier; it is
+covered by a new explicit XFAIL in both native suites, not claimed fixed.
+
+### Attribute regression beyond the old counter checks
+
+LLVM inspection found that the theory-integration helpers used custom string
+attributes `"memory"="read"` and `"captures"="none"`, not LLVM's semantic
+attributes. Both direct queries failed on an unoptimized declaration: **0/2**.
+The old stdout counters did not detect this.
+
+N3 now looks up semantic attribute kinds with LLVMGetEnumAttributeKindForName
+and creates real enum/integer attributes. LLVM 23's own IR parser gives
+memory(read) payload **1365 / 0x555** (all six locations Ref), captures(none)
+payload **0**. No guessed old 3-location mask or hardcoded enum ID is used.
+A standalone C3 unit calls the REAL PEAR helpers on a declaration (no optimizer
+can infer attrs), then queries LLVMGetEnumAttributeAtIndex/Value: **2/2** after
+the fix, vs 0/2 before. It is now in make test. This does not introduce readonly
+or noalias on aliased parameters, or claim termination.
+
+### Final measured gate on the expanded candidate
+
+Build + make test exit 0: pfront **172/5**, stdlib **260/260**, current
+conformance **150/112**, PEAR **34/0** with **1 XFAIL**, exec **42/0** with
+**49 XFAIL / 0 XPASS**, harness **27/27**, experiments **14/14**, semantic
+subtype **47/47**, record constructor **10/10**, semantic LLVM attrs **2/2**.
+The exec floor is tightened to 42/0 for the three real added checks.
+
+Both unchanged native harnesses run in isolated copies of the same built tree
+at O0/O1/O2/O3: identical per-case outcomes, **35 PEAR checks × 4**, **91 exec
+checks × 4**. Note: these are the requested DRIVER flags; the preexisting PEAR
+O0 path currently uses LLVM default<O1> (not a true unoptimized LLVM pipeline).
+We did not change that policy or claim four distinct LLVM optimization levels.
+
+The example-floor test still checks all 37; only the same 21 are error-free.
+The HOSE inventory and metadata-preservation selftest also pass. Legacy defects
+and block/multi-clause limitations remain visible.
+
+### History coordination resolved upstream
+
+After the owner selected `integrate_new_pear`, a fresh fetch showed dev had
+advanced to dd6dcc3, with 7ce61ec as an ancestor. The temporary documentation
+rewind is no longer a base blocker. N3 kept original history as selected and
+never reset, force-pushed or otherwise wrote dev. Draft PR #17 remains held
+for independent verification, particularly conformance instrumentation, NBE
+closed-record compatibility and the now-semantic qualifier attributes.

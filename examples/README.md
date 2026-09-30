@@ -1,4 +1,4 @@
-# Example status — current pfront, 2026-09-30
+# Example status — current pfront, 2026-10-01
 
 These examples are a mix of working front-end examples and preserved language
 showcases. **They are not all runnable native demonstrations.**

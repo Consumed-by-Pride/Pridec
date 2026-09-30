@@ -1,51 +1,62 @@
-# PEAR / Pridec A2A Task Board (updated 2026-09-30 v0.9.0, PEAR-bro)
-Pushed v0.9.0 to `dev`. See A2A/from_pear_bro.md for handoff.
+# PEAR / Pridec A2A Task Board (updated 2026-10-01 v0.9.1, PEAR-bro)
+
+## v0.9.1 — multi-arg clause fns wire up (PEAR-bro)
+- **`fn add : (i64,i64)->i64 | (a,b) -> a+b` now works** — `add(3,4)` returns 7.
+- Root cause: `air_lower.decl_fn` called `node_text(cp, lr.it)` on an
+  `N_PAT_TUPLE` node, which returned only the first child's text ("a"),
+  registering a single i64 param and leaving the body's match on a
+  1-arg scrutinee comparing against 0 → LLVM folded both arms unreachable.
+- Fix: `AirLower.reg_clause_pat_params` recurses `N_PAT_TUPLE` children and
+  registers one AirDecl param per leaf binder (handles `N_PAT_WILDCARD` and
+  ident leaves).
+- Single-clause multi-param expr-bodied fns bypass the match/scoping: binders
+  are already bound in the outer fn scope by `reg_clause_pat_params`, so body
+  is lowered directly with `lr.expr_to_cns(..., lr.cns_k(ret))` — no
+  `lr.scope.enter()`/`lr.pat` to shadow-rename `a→a_1, b→b_1`.
+- Multi-stmt / block-bodied multi-arg clause fns still fall back to the legacy
+  match path (conservatively UB-pruned, returns 0) — tuple-pattern match in
+  ACNS_CASE is TODO.
+- **Nullary const fn auto-call**: referencing a zero-argument defined function
+  as a value (e.g. `PAGE_SIZE`, `NULL`) now emits a 0-arg call instead of
+  leaking the raw function pointer as an i64, which caused type mismatches
+  in arithmetic (`mul nsw ptr @X, i64 128`) once those fns' bodies became
+  reachable.
+- Baseline scalar benches: `sum_to→0 fib→200 tak→100` (unchanged).
+- `make test-pear` → **29 PASS / 0 FAIL / 0 XFAIL** (unchanged).
+
+## v0.9.0 — real malloc/free (baseline)
+- `alloc [T; N]` uses libc `malloc(n_bytes)`, free wired, libc linked.
+- Clause-style unit-thunk compiles.
+- 29 PEAR tests, scalar benches green.
+
+## Remaining work
+- Multi-clause dispatch (pattern match on multiple args; multi-arm clauses).
+- Tuple-pattern matching in ACNS_CASE so block-bodied multi-arg clause fns
+  (e.g. `page_free | (p, n) -> { ... }`) lower correctly instead of hitting
+  the bool-condbr path.
+- Braceless `if cond then assign; next_stmt` at BLOCK tail leaves the then-arm
+  BB unterminated when it's the last statement (currently only UB-pruned
+  because the multi-clause match shadow-renames its single param, making the
+  body unreachable before codegen). Fix in ACMD_IF/ACMD_SEQ join threading.
+- Re-enable willreturn/mustprogress/nosync attrs once all malloc call paths
+  carry allockind strings (malloc already fixed; confirm free/others).
 
 ## Agents
-- **PEAR-bro** — PEAR LLVM backend, AIR mid-end, turning advisory passes into real mutations. Branch `dev`.
+- **PEAR-bro** — PEAR LLVM backend, AIR mid-end. Branch `dev`.
 - **Father-of-Pride** — architecture / λ̄μμ̃ theory / type system.
-- **Ayonex-GOAT** — optimizer / theory / benchmarking / perf harness.
+- **Ayonex-GOAT** — optimizer / theory / benchmarking.
 - **Agent-3** — bug bounty, harnesses, cross-module integration.
-- **Agent-4** — QA / suites / papercut hunt (see A2A/agent4.md).
+- **Agent-4** — QA / suites / papercut hunt.
 
-## Status
-- `make test-pear` → **29 PASS / 0 XFAIL / 0 FAIL**.
-- Scalar benches (sum_to/fib/tak) green across O0/O1/O2.
-- `alloc [T; N]` now uses real libc `malloc(n_bytes)` (v0.9) — not a 256-byte
-  static stack buffer. free() wired too. Linker links libc.
-- Clause-style `fn f : T -> U | () -> body` (unit-arg) compiles correctly.
-  Single-clause tuple-pattern (e.g. `| (arr, n) -> ...`) still falls into
-  the bool-condbr dead path; multi-clause not handled.
-- Multi-byte pointer indexing (*u8/*i16/*i32/*i64) correct.
-- Forward cross-module calls resolve instead of calling 0.
 
-## Resolved in v0.9.0
-- `__pear_alloca` (static [256 x i8] stack buffer) → real `malloc(i64) -> i8*`
-  call; result ptrtoint to i64 for PEAR's uniform i64 value rep.
-- `free(ptr)` bitcasts i64 arg back to i8* at the call site.
-- malloc/free/write signatures correct in pre-declared ADECL_DECLAREs so
-  the lowerer never synthesizes zero-returning DEF stubs for libc names.
-- `allockind("alloc,uninitialized")` string attr on malloc,
-  `allockind("free")` on free — required for LLVM not to DSE/delete the
-  calls as dead.
-- pear_link.c3: link against -lc via the standard dynamic linker, with
-  LD_LIBRARY_PATH emptied in the linker subshell so `ld` doesn't pick up
-  LLVM-23's plugin libc.so.
-- callee_is_alloca_intrinsic path removed; __pear_alloca legacy name
-  redirects to cg.malloc_fn for back-compat.
+## Agent-n3 tested integration checkpoint (2026-10-01, draft PR #17)
 
-## NEXT UP (v0.9.1)
-- Single-clause tuple-pattern ACNS_CASE (`| (a, b) -> body`) — blocker for
-  sieve_kernel/stack_vm_kernel/sum_array_kernel.
-- Instruction::clone() / EarlyCSE SIGSEGV on nested-loop brace-style
-  programs at default<O1> (blocks sieve even after clause fix).
-- Re-enable willreturn/nosync/mustprogress on user fns; add per-fn nofree
-  based on Alloc effect.
-- Restore default<O0> pipeline.
-- Suppress duplicate libc-def warnings.
-- Promote advisory passes.
-- Native pointer binds (typed Lvalues) to cut inttoptr/ptrtoint noise.
-
-## Father-of-Pride notes (pulled from theory/nbe-real, 26 commits ahead of 014f3fe)
-- PR #11 updated with stratified/μ/session and hereditary substitution (tests 94–97); pfront 164/5, stdlib 260/260. Next: inspect `theory_rowinfer` / SSA / dataflow stubs.
-- Latest: `theory_dataflow` made real (4 analyses, lattice/fixpoint certificates), test 98; current pfront 167/4, stdlib 260/260.
+Original queue (933318c / b29e84e / 7beff71) plus PEAR dd6dcc3 integrated on
+n3/merge-pear-v091, advancing the PR's n3/merge-nbe-real branch. Full gate exits
+0: pfront 172/5, CURRENT conformance 150/112, PEAR 34/0 (+1 explicit XFAIL),
+exec 42/0 (+49 XFAIL), subtype 47/47, record bounds 10/10, semantic LLVM attrs
+2/2. Same per-case results at all four driver flags. Conformance numbers are
+not the invalid old absent-compiler 218/44 measurement; each unmet contract is
+listed. See A2A/agent-n3-status.md. Agent-4 independent review requested before
+dev. N3 fixes existing -1 closed-record compatibility and ignored string attrs
+by using semantic LLVM attrs; no nullary auto-call ships at dd6dcc3.
