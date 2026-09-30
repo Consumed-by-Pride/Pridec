@@ -3297,6 +3297,44 @@ fn AirDecl* AirLower.decl(AirLower* lr, Node* n)
     }
 }
 
+// reg_clause_pat_params — recurse into a clause pattern (tuple/wild/ident)
+// and register one AirDecl param per leaf binder. Fixes clause-style
+// `fn add : (i64,i64)->i64 | (a,b) -> a+b` which previously called
+// node_text on N_PAT_TUPLE and registered only the first child's text,
+// leaving 2-arg fns with arity=1.
+fn void AirLower.reg_clause_pat_params(AirLower* lr, AirDecl* dd, Node* pat)
+{
+    if (pat == null) return;
+    switch (pat.kind)
+    {
+        case Nk.N_PAT_TUPLE:
+        {
+            for (usz k2 = 0; k2 < pat.child_count; k2++)
+            {
+                lr.reg_clause_pat_params(dd, pat.children[k2]);
+            }
+            return;
+        }
+        case Nk.N_PAT_WILDCARD:
+        {
+            char* wn = (char*)"_";
+            char* wan = lr.scope.bind_var(wn, pat);
+            AirBinder* wpb = air_ir::air_mk_binder(lr.arena, wan, lr.mod.t_infer, AMULT_UNR);
+            dd.add_param(wpb);
+            return;
+        }
+        default:
+        {
+            char* pnm = node_text(pat, lr.it);
+            if (pnm == null) pnm = (char*)"_";
+            char* an = lr.scope.bind_var(pnm, pat);
+            AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, lr.mod.t_infer, AMULT_UNR);
+            dd.add_param(pb);
+            return;
+        }
+    }
+}
+
 fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
 {
     // A hoisted nested function is emitted under the AIR name chosen for it.
@@ -3381,28 +3419,44 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
             // registered from the first clause so call-sites have arity info.
             if (d.param_count == 0)
             {
+                bool is_thunk_wild = (c.child_count == 1) && (c.children[0] != null)
+                    && (c.children[0].kind == Nk.N_PAT_WILDCARD);
+                // Does this clause have a tuple pattern (multi-arg)?
+                bool has_tuple_pat = false;
+                for (usz j = 0; j < c.child_count; j++)
+                {
+                    Node* cp = c.children[j];
+                    if (cp != null && cp.kind == Nk.N_PAT_TUPLE) { has_tuple_pat = true; break; }
+                }
                 for (usz j = 0; j < c.child_count; j++)
                 {
                     Node* cp = c.children[j];
                     if (cp == null) continue;
                     if (!pfront_core::is_pattern(cp.kind)) continue;
-                    char* pnm; AirTyp* pty = lr.mod.t_infer;
-                    bool is_thunk_wild = (cp.kind == Nk.N_PAT_WILDCARD)
-                        && (c.child_count == 1);
                     if (is_thunk_wild) continue;
-                    if (cp.kind == Nk.N_PAT_WILDCARD) { pnm = (char*)"_"; }
+                    if (has_tuple_pat)
+                    {
+                        // Multi-arg (tuple) pattern: use reg_clause_pat_params to
+                        // recurse into tuple children so (a,b) registers TWO
+                        // params instead of one (the old node_text returned only
+                        // the first child's text).
+                        lr.reg_clause_pat_params(d, cp);
+                    }
                     else
                     {
-                        pnm = node_text(cp, lr.it);
-                        if (pnm == null) pnm = (char*)"_";
+                        // Single-arg / wildcard: fall back to legacy registration
+                        // to avoid perturbing code paths already known to work.
+                        char* pnm; AirTyp* pty = lr.mod.t_infer;
+                        if (cp.kind == Nk.N_PAT_WILDCARD) { pnm = (char*)"_"; }
+                        else
+                        {
+                            pnm = node_text(cp, lr.it);
+                            if (pnm == null) pnm = (char*)"_";
+                        }
+                        char* an = lr.scope.bind_var(pnm, cp);
+                        AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
+                        d.add_param(pb);
                     }
-                    // Don't use cp.type_ann/cp.type_slot for clause patterns:
-                    // the parser frequently attaches the FULL return-type clause
-                    // text (e.g. "-> i64 | n -> ...") to pattern type annotations
-                    // which would leak source.  We leave pty as t_infer.
-                    char* an = lr.scope.bind_var(pnm, cp);
-                    AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
-                    d.add_param(pb);
                 }
             }
         }
@@ -3456,68 +3510,114 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
         }
         if (ccnt > 0)
         {
-            AirBranch*[64] bs; usz bc = 0;
-            AirPrd* scr;
-            if (d.param_count >= 1)
+            if (ccnt == 1 && d.param_count > 1)
             {
-                char* arg0 = d.params[0].name;
-                scr = air_ir::air_mk_var(lr.arena, arg0);
-            }
-            else
-            {
-                scr = lr.mod.p_unit;
-            }
-            for (usz i = 0; i < n.child_count; i++)
-            {
-                Node* cl = n.children[i];
-                if (cl == null || cl.kind != Nk.N_CLAUSE) continue;
-                AirPat*[16] ps; usz pc = 0;
-                Node* body_n = null;
-                for (usz j = 0; j < cl.child_count; j++)
+                // Single-clause MULTI-ARG fn (e.g. `(a,b) -> a+b`): params
+                // are already registered in outer scope by reg_clause_pat_params.
+                //
+                // For simple expression-bodied fns (no BLOCK/stmt list), emit
+                // body directly without building a match (which would call
+                // lr.pat → lr.scope.enter() → shadow-rename a→a_1, leaving
+                // the body reading unbound 0). This covers the common
+                // "tuple-lambda arithmetic" shape (adders, mul64_hi, etc.).
+                //
+                // Multi-arg clause fns with a block/stmt body fall through to
+                // the legacy match path — their tuple-pattern matching is
+                // TODO.
+                for (usz i = 0; i < n.child_count; i++)
                 {
-                    Node* cp = cl.children[j];
-                    if (cp == null) continue;
-                    if (pfront_core::is_pattern(cp.kind))
+                    Node* cl = n.children[i];
+                    if (cl == null || cl.kind != Nk.N_CLAUSE) continue;
+                    Node* body_n = null;
+                    bool all_expr = true;
+                    usz bcnt = 0;
+                    for (usz j = 0; j < cl.child_count; j++)
                     {
-                        AirPat* pp = lr.pat(cp);
-                        if (pp != null && pc < 16) { ps[pc] = pp; pc++; }
-                    }
-                    else if (pfront_core::is_expr(cp.kind) || cp.kind == Nk.N_BLOCK
-                             || cp.kind == Nk.N_STMT_EXPR)
-                    {
+                        Node* cp = cl.children[j];
+                        if (cp == null) continue;
+                        if (pfront_core::is_pattern(cp.kind)) continue;
+                        bcnt++;
                         body_n = cp;
+                        if (!pfront_core::is_expr(cp.kind)) { all_expr = false; }
                     }
+                    if (bcnt == 1 && all_expr && body_n != null
+                        && pfront_core::is_expr(body_n.kind))
+                    {
+                        body = lr.expr_to_cns(body_n, lr.cns_k(ret));
+                    }
+                    // else: fall through to legacy multi-clause match path
+                    // (which will produce a 1-arg scrutinee match on param0
+                    // and UB-prune the body since params>1 — conservatively
+                    // safe but returns 0 for complex multi-arg clause fns
+                    // until proper tuple-match is implemented).
+                    break;
                 }
-                AirPat* pat;
-                if (pc == 0) { pat = lr.mod.pat_wild; }
-                else if (pc == 1) { pat = ps[0]; }
-                else { pat = air_ir::air_mk_pat_tuple(lr.arena, &ps[0], pc); }
-                lr.scope.enter();
-                AirCmd* bcmd = lr.nop();
-                if (body_n != null)
+            }
+            if (body == null)
+            {
+                AirBranch*[64] bs; usz bc = 0;
+                AirPrd* scr;
+                if (d.param_count >= 1)
                 {
-                    if (pfront_core::is_expr(body_n.kind))
-                    {
-                        bcmd = lr.expr_to_cns(body_n, lr.cns_k(ret));
-                    }
-                    else
-                    {
-                        bcmd = lr.cmd(body_n, ret);
-                    }
+                    char* arg0 = d.params[0].name;
+                    scr = air_ir::air_mk_var(lr.arena, arg0);
                 }
-                lr.scope.leave();
-                AirBranch* br = air_ir::air_mk_branch(lr.arena, pat, bcmd);
-                if (bc < 64) { bs[bc] = br; bc++; }
-            }
-            if (bc == 0) { body = lr.cut(lr.mod.p_unit, lr.cns_k(ret)); }
-            else if (bc == 1 && bs[0].pat == lr.mod.pat_wild && scr == lr.mod.p_unit)
-            {
-                // Single `| _ -> expr` with no params: just evaluate expr, no match.
-                body = bs[0].body;
-            }
-            else
-            {
-                body = air_ir::air_mk_match(lr.arena, scr, &bs[0], bc);
+                else
+                {
+                    scr = lr.mod.p_unit;
+                }
+                for (usz i = 0; i < n.child_count; i++)
+                {
+                    Node* cl = n.children[i];
+                    if (cl == null || cl.kind != Nk.N_CLAUSE) continue;
+                    AirPat*[16] ps; usz pc = 0;
+                    Node* body_n = null;
+                    for (usz j = 0; j < cl.child_count; j++)
+                    {
+                        Node* cp = cl.children[j];
+                        if (cp == null) continue;
+                        if (pfront_core::is_pattern(cp.kind))
+                        {
+                            AirPat* pp = lr.pat(cp);
+                            if (pp != null && pc < 16) { ps[pc] = pp; pc++; }
+                        }
+                        else if (pfront_core::is_expr(cp.kind) || cp.kind == Nk.N_BLOCK
+                                 || cp.kind == Nk.N_STMT_EXPR)
+                        {
+                            body_n = cp;
+                        }
+                    }
+                    AirPat* pat;
+                    if (pc == 0) { pat = lr.mod.pat_wild; }
+                    else if (pc == 1) { pat = ps[0]; }
+                    else { pat = air_ir::air_mk_pat_tuple(lr.arena, &ps[0], pc); }
+                    lr.scope.enter();
+                    AirCmd* bcmd = lr.nop();
+                    if (body_n != null)
+                    {
+                        if (pfront_core::is_expr(body_n.kind))
+                        {
+                            bcmd = lr.expr_to_cns(body_n, lr.cns_k(ret));
+                        }
+                        else
+                        {
+                            bcmd = lr.cmd(body_n, ret);
+                        }
+                    }
+                    lr.scope.leave();
+                    AirBranch* br = air_ir::air_mk_branch(lr.arena, pat, bcmd);
+                    if (bc < 64) { bs[bc] = br; bc++; }
+                }
+                if (bc == 0) { body = lr.cut(lr.mod.p_unit, lr.cns_k(ret)); }
+                else if (bc == 1 && bs[0].pat == lr.mod.pat_wild && scr == lr.mod.p_unit)
+                {
+                    // Single `| _ -> expr` with no params: just evaluate expr, no match.
+                    body = bs[0].body;
+                }
+                else
+                {
+                    body = air_ir::air_mk_match(lr.arena, scr, &bs[0], bc);
+                }
             }
         }
         else

@@ -94,6 +94,8 @@ extern fn Lvalue ll_build_condbr(Lbuilder b, Lvalue c, Lblock t, Lblock e) @cnam
 extern fn Lvalue ll_build_unreachable(Lbuilder b) @cname("LLVMBuildUnreachable");
 
 extern fn Lvalue ll_get_named_fn(Lmodule m, char* n) @cname("LLVMGetNamedFunction");
+extern fn Ltype   ll_global_get_type(Lvalue v) @cname("LLVMGlobalGetValueType");
+extern fn uint    ll_count_params(Ltype ft) @cname("LLVMCountParamTypes");
 extern fn int ll_write_bc(Lmodule m, char* p) @cname("LLVMWriteBitcodeToFile");
 // ── LLVM-C: Target machine (for native .o emission) ──────────────────
 alias Ltarget = void*;
@@ -604,7 +606,35 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             if (p.name[0] != '%')
             {
                 Lvalue f = ll_get_named_fn(cg.mod, p.name);
-                if (f != null) return f;
+                if (f != null)
+                {
+                    // If this is a zero-parameter defined function (e.g.
+                    // `const PAGE_SIZE : i64 = 4096;` lowered to a nullary
+                    // fn), referencing it as a value means "call with 0
+                    // args" — Pride consts are thunks that return their
+                    // value, not raw function pointers. Without this, prd
+                    // would return the fn's address as an i64 ptr and
+                    // arithmetic/call arg types would mismatch.
+                    // Detect nullary by checking whether the fn type takes
+                    // params: count params on the function's LLVM type.
+                    Ltype fty = ll_global_get_type(f);
+                    uint fpc = ll_count_params(fty);
+                    if (fpc == 0)
+                    {
+                        Ltype rty = cg.i64ty;
+                        // malloc/free/write are never nullary-called
+                        // implicitly — they are special-cased in ACNS_CALL
+                        // and we must NOT inline a 0-arg call here.
+                        bool is_special = (f == cg.malloc_fn) || (f == cg.free_fn)
+                                       || (f == cg.write_fn);
+                        if (!is_special)
+                        {
+                            Lvalue r = ll_build_call2(cg.b, fty, f, null, 0, cg.mktmp());
+                            return r;
+                        }
+                    }
+                    return f;
+                }
                 // Legacy __pear_alloca intrinsic (v0.8 bootstrap) — redirect
                 // to real malloc so older .air or stale references still work.
                 if (p.name[0] == '_' && p.name[1] == '_'
