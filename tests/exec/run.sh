@@ -22,7 +22,7 @@
 # XPASS and makes the suite fail, so the entry gets promoted instead of rotting.
 #
 # Usage:  bash tests/exec/run.sh [-v]
-# Env:    PEAR_OPT=-O0|-O1|-O2   optimization tier for the case runs (default -O0)
+# Env:    PEAR_OPT=-O0|-O1|-O2|-O3 optimization tier for the case runs (default -O2)
 #         TIMEOUT=5              seconds per program
 # ============================================================================
 set -u
@@ -91,7 +91,8 @@ record() { # $1=status $2=id $3=detail
 echo "=== emit configuration matrix (canary: fib-sum loop, expect exit 33) ==="
 canary=/tmp/pear_canary_$$.pie
 printf 'fn fib(n: i64) -> i64 { if (n < 2) { return n; } return fib(n-1) + fib(n-2); }\nfn main(_) -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while (i < 8) { s = s + fib(i); i = i + 1; } return s; }\n' > "$canary"
-for O in -O0 -O1 -O2; do
+config_tiers=(-O0 -O1 -O2 -O3)
+for O in "${config_tiers[@]}"; do
     id="cfg/$O"
     rm -f "${canary%.pie}"
     out=$("$BIN" "$canary" --emit-exe "$O" --quiet 2>&1)
@@ -244,7 +245,7 @@ done
 rm -f /tmp/pear_out_$$
 
 echo "---"
-echo "exec suite: pass=$pass fail=$fail xfail=$xfail xpass=$xpass  (cases=$((count + 4)) [$count files + 4 driver checks], tier=$PEAR_OPT)"
+echo "exec suite: pass=$pass fail=$fail xfail=$xfail xpass=$xpass  (cases=$((count + 4 + ${#config_tiers[@]})) [$count files + 4 driver checks + ${#config_tiers[@]} tier checks], tier=$PEAR_OPT)"
 if [ ${#fail_list[@]} -gt 0 ]; then
     echo "unexpected failures:"; for c in "${fail_list[@]}"; do echo "  - $c"; done
 fi

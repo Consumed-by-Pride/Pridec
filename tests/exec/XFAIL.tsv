@@ -10,5 +10,10 @@
 #
 # See A2A/from_agent3.md for the full diagnosis behind each reason.
 #
+04_dynamic_alloc	Runtime hangs at O0/O1/O2/O3 (>2 s) in this allocation/printing fixture; the allocation/index-loop kernel alone returns 42. Full root cause not yet isolated (Agent-4 §36).
+11_step_ranges	Runtime hangs at O0/O1/O2/O3 (>2 s) in this scalar-loop/printing fixture; the scalar sum kernel alone returns 2450 mod 256. Full root cause not yet isolated (Agent-4 §36).
+23_array_rebind_loop	Runtime hangs at all tiers; its i += 1 does not advance beyond 1. Independently reduced to n3_compound_loop (Agent-4 §§36,49); array/I/O defects may remain after that is fixed.
+39_mutable_globals	Compiler crashes (rc 139), emitting no binary, at O0/O1/O2/O3 in this mutable-global/printing fixture. Root cause not yet minimized (Agent-4 §36).
+n3_compound_loop	Compound assignment += overwrites with RHS instead of adding, so the otherwise bounded loop never terminates. Reproduced at O0/O1/O2/O3 (Agent-4 §49).
 [0-9]*	Legacy corpus (clause-style + syscall I/O). Blocked by: clause-style bodies trap at runtime and drop the return type; syscall(arg...) lowers to a bare 'syscall;' with no arguments (air_lower never fills c.prd/prds). See A2A/from_agent3.md.
 test_*	Legacy corpus (clause-style + syscall I/O). Blocked by: clause-style bodies trap at runtime and drop the return type; syscall(arg...) lowers to a bare 'syscall;' with no arguments (air_lower never fills c.prd/prds). See A2A/from_agent3.md.

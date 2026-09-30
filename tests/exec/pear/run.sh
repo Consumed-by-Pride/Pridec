@@ -43,7 +43,7 @@ for src in "$TDIR"/p*.pie; do
     is_xfail=0
     if grep -q 'BLOCKER (XFAIL)' "$src"; then is_xfail=1; fi
     bin="${src%.pie}"
-    errlog="/tmp/pear_${name}.err"
+    errlog="/tmp/pear_${name}_$$.err"
     "$PF" "$src" --emit-exe "$PEAR_OPT" --quiet >"$errlog" 2>&1
     compile_rc=$?
     # pfrontc returns 0 on clean compile, 1 if warnings only, 2+ on errors.

@@ -1,0 +1,8 @@
+-- EXIT: 42
+-- Known defect (Agent-4 §49): += assigns its RHS instead of adding; hangs at all tiers.
+fn main : () -> i64
+  | () ->
+      let mut i : i64 = 0
+      while i < 3
+        i += 1
+      42
