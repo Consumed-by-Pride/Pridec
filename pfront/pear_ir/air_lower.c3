@@ -3419,22 +3419,31 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
             // registered from the first clause so call-sites have arity info.
             if (d.param_count == 0)
             {
-                bool is_thunk_wild = (c.child_count == 1) && (c.children[0] != null)
-                    && (c.children[0].kind == Nk.N_PAT_WILDCARD);
-                // Does this clause have a tuple pattern (multi-arg)?
-                bool has_tuple_pat = false;
+                // Detect "thunk" clauses: | _ -> body or | () -> body (unit)
+                // register no params. Unit is a 0-child N_PAT_TUPLE.
+                bool is_thunk = false;
+                if (c.child_count == 1 && c.children[0] != null)
+                {
+                    Node* p0 = c.children[0];
+                    if (p0.kind == Nk.N_PAT_WILDCARD) { is_thunk = true; }
+                    else if (p0.kind == Nk.N_PAT_TUPLE && p0.child_count == 0) { is_thunk = true; }
+                }
+                // Does this clause have a non-empty tuple pattern (multi-arg)?
+                bool has_nonempty_tuple = false;
                 for (usz j = 0; j < c.child_count; j++)
                 {
                     Node* cp = c.children[j];
-                    if (cp != null && cp.kind == Nk.N_PAT_TUPLE) { has_tuple_pat = true; break; }
+                    if (cp != null && cp.kind == Nk.N_PAT_TUPLE && cp.child_count > 0) { has_nonempty_tuple = true; break; }
                 }
                 for (usz j = 0; j < c.child_count; j++)
                 {
                     Node* cp = c.children[j];
                     if (cp == null) continue;
                     if (!pfront_core::is_pattern(cp.kind)) continue;
-                    if (is_thunk_wild) continue;
-                    if (has_tuple_pat)
+                    if (is_thunk) continue;
+                    // Skip unit tuple `()` (0-child N_PAT_TUPLE) — no param.
+                    if (cp.kind == Nk.N_PAT_TUPLE && cp.child_count == 0) continue;
+                    if (has_nonempty_tuple)
                     {
                         // Multi-arg (tuple) pattern: use reg_clause_pat_params to
                         // recurse into tuple children so (a,b) registers TWO
