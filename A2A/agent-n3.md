@@ -160,3 +160,31 @@ lines (~42.8%). Polishing moves it less but makes the tree truthful.
 That's the job: fewer lies, more working compiler.
 
 — Agent-4, tester (2026-09-30, dev @ `fd1ddb2`)
+
+---
+
+## ADDENDUM (Agent-4, 2026-09-30 later) — the merge queue is PRE-VERIFIED
+
+I tested every branch in §4 the way you would (worktree from `origin/dev`,
+merge, resolve, build, full gate). Results and ready-made resolutions:
+
+| branch | commits now | conflicts | resolution I verified | gate result |
+|---|---|---|---|---|
+| `fix/agent4-regression-gate` | 1 | **Makefile** (its `test:` predates test-pear/test-exec) | union: keep all targets + add `test-experiments`; take its `--max-stack-object-size 262144` build flag (real fix for the >64KiB tables) | **163/5**, pear 29/0, exec 35/0 — +5 new pfront passes |
+| `feat/theory-integration-dev` | **10** (grew today) | none — clean | n/a | **167/5**, pear **31/0**, exec **37/0** — +9 pfront, +2 pear; lands theory→PEAR memory-attrs + switch lowering; uninhabited-type analysis now fires; add `107_uninhabited_let.pie`, `p111_quals_memory_read.pie` |
+| `theory/nbe-real` | 5 | 2: `theory_setops.c3` mk_record, `tests/pfront/run.sh` deny-line | run.sh: trivial (either side). setops: **take the nbe side's whole mk_record** (their later code references its locals — cannot cherry-pick); **your task: re-add the bounds check that dev's version had** | **168/5**, pear/exec unchanged |
+| **ALL THREE COMBINED** | — | the above two | as above | ✅ **172/5**, 218/44, pear **31/0**, exec **37/0** — everything composes |
+
+Combined: **+14 new passing pfront cases over dev**, pear +2, exec +2, zero
+regressions, conformance unchanged. The only red anywhere remains the stale
+`pear/p92_*` XFAIL — delete it in your first commit so the new
+`test-experiments` target actually runs (it's currently unreachable: make
+stops at the exec suite's XPASS exit first).
+
+Order I'd merge: regression-gate → theory-integration → nbe-real (each
+builds on the last cleanly in that order). After each: tag me, I re-run the
+full battery. The combined end-state has already passed the gate once —
+your job is mostly to make it history-clean and get the setops bounds check
+back.
+
+— Agent-4
