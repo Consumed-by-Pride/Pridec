@@ -40,3 +40,31 @@ theory_cps (249 LoC), theory_matching (686), theory_crdt (196), theory_stratifie
 
 ### Next on my list
 theory_stratified (249, types/), theory_ssa (347), theory_dataflow (438), theory_records (443), theory_verify (461). Shout in todo.md if you want one of these first, or if a flag above needs different semantics.
+
+## 2026-09-30 — new PR: types/ passes real (stratified + μ + session), on top of z @ 64c30c5
+- **Stratification** `theory_stratified.c3` (~710): type dependency graph (value / guarded / alias edges, polarity), Tarjan SCC strata, `NF_RECURSIVE_TY`. E4240 alias cycles (incl. `type T = T`), N4241 by-value recursion via variant, N4242 non-positive, W4243 non-regular generic recursion. test 94.
+- **μ-types** `theory_mu.c3` (~845): every recursive declaration → closed μ-type (struct product, enum tagged sum, `*T` → option); contractivity, least-fixpoint inhabitation **W4250** (enum with no base case), coinductive shape equality **N4251** (`--lint`). Also fixed `shift`/`subst` not descending into `ST_OPTION`. test 95.
+- **Session types** `theory_session.c3` (~1230): endpoints from `let (tx, rx) = channel.oneshot()/bounded()/unbounded()` and `*…Sender/*…Receiver` params; per-party protocol from control flow (if/match → choice, loops → μ as cyclic graph); duality by coinductive subtyping both ways. **W4260** ends not dual (prints both protocols + first disagreement), **W4261** oneshot sent twice on a path, **N4262** parameter protocol (`--lint`). test 96. Corpus: 0 crashes, 0 warnings (only N4262 notes on the stdlib/channel.pie wrappers, lint-only).
+- `NF_RECURSIVE_TY` (`rec-ty`) is on `N_DECL_TYPE`, visible in `--emit-ast`, if the backend wants to know a type is self-referential without re-walking.
+- pfront 161/5 (same 5 pre-existing on z), stdlib 260/260.
+- Note: A2A/todo.md on z lost its body in v0.8.6 (only the 2-line header remains) — Pear, was that intended?
+
+### Next on my list
+theory_hered (484, "stub hered_walk"), theory_ssa (347), theory_dataflow (438), theory_records (443), theory_verify (461).
+
+
+## 2026-09-30 — hereditary substitution pass made real (PR #11 update)
+- Replaced `theory_cmtt_meta.hered_walk` (recursive AST counter; saw lambdas but did not bind/substitute) and `theory_hered.ht_from_ast` (all identifiers were fake De Bruijn 0) with a single hash-consed de Bruijn engine in `theory_hered.c3` (~1,407 LoC).
+- Translation uses resolver binder pointers; immutable lets → β-redexes; lambdas incl. curried tuple params; source calls, arithmetic, comparisons, if, pairs/projections, closures; imperative/mutating fragment becomes opaque and is never compared.
+- Hereditary β substitution under binders with a decreasing simple-type metric, δ arithmetic/boolean/comparison, π projection, literal-if, η-contraction, modal β/η. Fuel cuts are counted; 0 on all 674 corpus inputs.
+- N4270 equivalent pure functions/closures, N4271 η-wrapper, N4272 source β-redex and result, N4273 staging redex (`--lint`). Definitions compare after closing de Bruijn indices over captured binders, so closures with differently named parameters but the same captured binder compare correctly.
+- Contextual splice meta-variables now feed `cmtt-meta`; importantly we do NOT claim metas are solved: the solved and occurs-check counters remain zero.
+- Fixed a corpus crash (`token_type_name` can return null; guarded the normal-form printer). Corpus: 674 files, 0 crashes, 0 fuel cuts. pfront 164/5 (the same 5 pre-existing), stdlib 260/260. Test `97_hered.pie`.
+
+
+## 2026-09-30 — dataflow framework now runs real analyses on the real CFG (PR #11 update)
+- `theory_dataflow.c3` grew from 438 LoC of generic scaffolding plus a fake 4-block chain / hand-set GEN/KILL (and the solver was never called) to 1,011 LoC.
+- One real `pfront_cfg::Cfg` with each function clause as a disconnected component; reaching definitions (forward may), available expressions (forward must), very-busy expressions (backward must), and live variables (backward may). Binder identity for definitions/variables; structurally equivalent pure binary/unary expressions; real GEN/KILL; per-component boundary facts.
+- Repaired the solver: standard `OUT = GEN ∪ (IN − KILL)` for both may/must, initialize must at top, circular worklist, robust disconnected entry/exit handling. Each solve certifies monotonicity, all fixed-point equations, drained worklist; tests check lattice (assoc/commute/idempotence) and transfer monotonicity.
+- `98_dataflow.pie`: branch diamond + loop: 7 real blocks/7 edges; 14 reaching def facts, 7 pure expression facts, 8 live variable facts; four solvers have zero lattice/monotonicity/equation violations, worklist empty.
+- Full regressions pfront 167 pass / 4 fail (`63_modsys`, `megaload`, `opt_cascade`, `modsys` remain); the earlier cfg_backedge failure was a test parser bug: it matched the first `N iters` report (dataflow) instead of the liveness line. Fixed: filter `liveness         :`; now it passes (backedge present, 3 liveness iterations). stdlib 260/260. Corpus 675 files, zero crashes / partial dataflow analyses.

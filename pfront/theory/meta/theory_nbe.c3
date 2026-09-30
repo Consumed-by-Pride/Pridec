@@ -143,9 +143,6 @@ fn void NbeState.destroy(NbeState* s)
     if (s.map != null) { free((void*)s.map); s.map = null; }
 }
 
-// Kept for pipeline compatibility: the old entry point.
-fn void NbeState.run_demo(NbeState* s) { (void)s; }
-
 // ── Values ──────────────────────────────────────────────────────────────────
 fn NVal* NbeState.mk(NbeState* s, VKind k, Node* n, NEnv* env)
 {

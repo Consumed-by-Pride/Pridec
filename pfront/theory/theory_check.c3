@@ -661,7 +661,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.eca = (theory_eclass::EClassAnalyses*)malloc(theory_eclass::EClassAnalyses::size);
     tp.effc = (theory_effcont::EffCont*)malloc(theory_effcont::EffCont::size);
     if (tp.ts != null) tp.ts.init();
-    if (tp.ts != null && tp.mustate != null) tp.mustate.init(a, tp.ts);
+    if (tp.ts != null && tp.mustate != null) { tp.mustate.init(a, tp.ts); tp.mustate.attach(d, it, file); }
     if (tp.meta != null) tp.meta.init(a);
     if (tp.issa != null) tp.issa.init(a);
     if (tp.eca != null) tp.eca.attach(tp.saturator);
@@ -686,18 +686,18 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.defun = (theory_defun::DefunState*)malloc(theory_defun::DefunState::size);
     if (tp.reclat != null && tp.ts != null) tp.reclat.init(tp.ts, a);
     if (tp.matcher != null) { tp.matcher.init(a); tp.matcher.attach(d, it, file); }
-    if (tp.hered != null) tp.hered.init(a);
+    if (tp.hered != null) { tp.hered.init(a); tp.hered.attach(d, it, file); }
     if (tp.dfb != null) tp.dfb.init(a);
     if (tp.uba != null) { tp.uba.init(a); tp.uba.attach(d, it, file); }
     if (tp.cps != null) { tp.cps.init(a); tp.cps.attach(d, it, file); }
     if (tp.strat != null) { tp.strat.init(a); tp.strat.attach(d, it, file); }
-    if (tp.nbe != null) { tp.nbe.init(a); tp.nbe.run_demo(); }
+    if (tp.nbe != null) { tp.nbe.init(a); }
     if (tp.crdt != null) { tp.crdt.init(a); tp.crdt.attach(d, it, file); }
-    if (tp.ssa != null) { tp.ssa.init(a, null); tp.ssa.run(); }
+    if (tp.ssa != null) tp.ssa.init(a, null);
     if (tp.lin != null) { tp.lin.init(a); tp.lin.attach(d, it, file); }
     if (tp.sym != null) { tp.sym.init(a); tp.sym.attach(d, it, file); }
     if (tp.qual != null) { tp.qual.init(a); tp.qual.attach(d, it, file); }
-    if (tp.sess != null) tp.sess.init(a);
+    if (tp.sess != null) { tp.sess.init(a); tp.sess.attach(d, it, file); }
     if (tp.sct != null) { tp.sct.init(a); tp.sct.attach(d, it, file); }
     if (tp.defun != null) { tp.defun.init(a); tp.defun.attach(d, it, file); }
 
@@ -813,21 +813,20 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     t0 = tp.tick("stages", t0);
     tp.passes_run = tp.passes_run + 1;
 
-    // 2a. FCB μ-type machinery: TypeStore + μ-contractivity + coinductive
-    //     subtyping demo. Lives here so the set-theoretic universe is ready
-    //     before the later subtype/IRDL passes need it.
+    // 2a. FCB μ-type machinery: translate recursive declarations, check
+    //     contractivity/inhabitation and coinductive shape subtyping. Lives
+    //     here so the set-theoretic universe is ready for later passes.
     if (tp.mustate != null)
     {
         tp.mustate.scan_ast(root, 0);
-        tp.mustate.run_demo();
         tp.passes_run = tp.passes_run + 1;
     }
-    if (tp.meta != null) { tp.meta.scan(root, 0); tp.meta.run_hered(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.issa != null) { tp.issa.walk_dialects(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.effc != null) { tp.effc.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.reclat != null) { tp.reclat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.matcher != null) { tp.matcher.emit = tp.emit_dtree; tp.matcher.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.hered != null) { tp.hered.walk_ast(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.meta != null) { tp.meta.scan(root, 0); tp.meta.absorb(tp.hered); tp.passes_run = tp.passes_run + 1; }
     if (tp.uba != null) { tp.uba.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.strat != null) { tp.strat.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.defun != null) { tp.defun.run(root); tp.passes_run = tp.passes_run + 1; }
@@ -840,6 +839,7 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.sess != null) { tp.sess.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.sct != null) { tp.sct.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.dfb != null) { tp.dfb.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.ssa != null) { tp.ssa.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     t0 = tp.tick("fcb+cmtt+irdl+eclass+eff", t0);
 
     // 2b. The CMTT typing judgment, which subsumes the operational check with

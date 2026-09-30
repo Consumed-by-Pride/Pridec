@@ -1,0 +1,26 @@
+-- Generic monotone dataflow on the actual CFG: reaching definitions
+-- through a diamond and a loop; available / very-busy pure expressions.
+-- EXPECT: 0 errors
+
+fn choose : (bool, i64, i64) -> i64
+  | (cond, left, right) ->
+      let mut x : i64 = 0i64
+      let mut y : i64 = 0i64
+      if cond then {
+        x = left + 1i64
+        y = x * 2i64
+      } else {
+        x = right + 1i64
+        y = x * 2i64
+      }
+      y + x
+
+fn accumulate : i64 -> i64
+  | n ->
+      let mut i : i64 = 0i64
+      let mut sum : i64 = 0i64
+      while i < n do {
+        sum = sum + i
+        i = i + 1i64
+      }
+      sum

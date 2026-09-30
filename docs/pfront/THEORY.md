@@ -46,6 +46,11 @@ item is withdrawn.
 | `theory_live.c3` | 1,029 | **CFG + liveness + semi-pruned classification.** The `SP` of SP-ERM-e-SSI |
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
+| `theory_dataflow.c3` | 1,011 | Generic monotone bitvector engine instantiated on a real multi-function CFG: reaching definitions, available expressions, very-busy expressions, live variables; bounded circular worklist, correct may/must boundary identities, lattice law / monotonicity / fixed-point equation certificates |
+| `theory_ssa.c3` | 1,000+ | Real clause CFG dominator forest + sparse DF, binder/site definition universe, IDF phi placement, dominator-tree versions/use mapping and ordered predecessor operands; reciprocal edge, liveness-equation, small-graph dominator/DF, IDF, version, and operand certificates; bounded CFG overflow reported as partial |
+| `theory_hered.c3` | 1,407 | Hash-consed de Bruijn terms; binder-aware AST translation; hereditary β substitution (typed decreasing metric), δ arithmetic/boolean, π pair projections, literal-if, η-contraction, modal β; opaque imperative boundary; N4270 βη-equivalent units, N4271 η-wrappers, N4272 source β-redex, N4273 staging redex |
+| `theory_mu.c3` | ~830 | Iso-recursive μ-types built from the declarations (struct/enum/newtype → μ; `*T` → option); contractivity, least-fixpoint inhabitation W4250, coinductive shape equality between nominal recursive types N4251 |
+| `theory_session.c3` | ~1,230 | Session types over `stdlib/channel`: endpoints from `let (tx, rx) = oneshot()/bounded()/unbounded()` and `*…Sender/*…Receiver` parameters; a protocol per party from its control flow (seq → prefix, if/match → choice, loop → μ); duality decided coinductively — W4260 ends not dual (with the first disagreement), W4261 oneshot sent twice on a path, N4262 parameter protocol under `--lint` |
 | `theory_stratified.c3` | ~680 | Type-definition strata: dependency graph (value/guarded/alias edges, polarity), Tarjan SCCs + levels, NF_RECURSIVE_TY; alias cycles E4240, by-value recursion via variant N4241, non-positive N4242, non-regular generic recursion W4243 |
 | `theory_crdt.c3` | ~900 | Commutativity (CALM/CRDT): per-statement read/write location sets, block dependence DAG + critical path, NF_INDEPENDENT; loop accumulators classified counter/product/join/max-min/register/mixed, commutative reductions flagged NF_REDUCTION; N4230/N4231 |
 | `theory_quals.c3` | ~750 | Whole-program qualifier fixpoint: purity classes with reasons, parameter write/escape via callees, NF_PURE_FN / NF_READONLY_PARAM; W4220 discarded pure result, W4221 never-written mutable param, N4222/N4223 |
@@ -122,6 +127,99 @@ if the shift rule fires last**. An e-graph keeps both forms, so extraction finds
 `a` regardless of order. Congruence closure is maintained incrementally with a
 dirty worklist; extraction is a fixpoint over a pluggable cost model where a
 shift costs 2 and a multiply costs 5.
+
+**Session types (`theory_session`).** The Honda / Gay–Hole store (`!T.S`,
+`?T.S`, `⊕{l:S}`, `&{l:S}`, `μX.S`), duality and coinductive subtyping
+existed but only ever ran on a literal protocol and the "walk" counted
+identifiers named `send`. Now the pass reads Pride's real channel API:
+every `let (tx, rx) = channel.oneshot()/bounded(n)/unbounded()` (also the
+`*_channel_new()` forms) makes a **pair of endpoints**, and every
+parameter typed `*OneshotSender` / `*BoundedReceiver` / … makes a single
+one. Each endpoint's **protocol is built from the control flow of the
+party that owns it** (the function body, or a lambda): a sequence of
+`send_*`/`recv_*`/`*_close` calls on it is a chain of prefixes, an `if`
+or `match` is a choice with labels `then`/`else`/`arm_i`, a `while`/`for`
+is `μX.+{again: body·X, done: rest}` built as a cyclic graph, and a
+`return` ends the session. Endpoints that escape (passed to a
+non‑channel call, stored, returned, rebound) or are used by more than one
+party are counted but never judged. Two ends of a pair are checked with
+`dual(tx) ≤ rx ∧ rx ≤ dual(tx)` — the coinductive algorithm with the
+visited‑pair memo, so two symmetric loops are dual in a handful of steps
+— and a failure is reported once, at the first operation the two sides
+disagree on, with both protocols printed (**W4260**: `tx` follows
+`!msg.end` but `rx` follows `?msg.?msg.end` — this receive has no matching
+send). A oneshot sender used twice on one straight path is **W4261**; the
+inferred protocol of a channel parameter is **N4262** under `--lint`.
+Control‑flow choices are decisions each party takes on its own, so they
+keep their kind under duality; only protocol labels flip ⊕ ↔ &.
+
+**Generic dataflow (`theory_dataflow`).** The original bundle made up a
+four-block linear CFG for every function, set GEN/KILL bits 0, 1 and 2
+regardless of the source, *did not call its own solver*, and invoked the
+transfer algebra directly. Now it allocates one real `pfront_cfg::Cfg` for
+the module, appends each function clause as a disconnected component, and
+runs four actual analyses over its real edges: **reaching definitions**
+(forward may, binder-identity def-sites), **available expressions**
+(forward must, structurally equal pure binary/unary expressions),
+**very-busy expressions** (backward must), and **live variables** (backward
+may, use-before-def). Each has a separate fact universe; writes build
+GEN/KILL by binder identity, expression kills follow operand dependencies,
+and parameters are seeded at their clause-entry blocks. The solver uses
+`OUT = GEN ∪ (IN − KILL)` with OR for may / AND for must, initializes the
+must analyses at top and may analyses at bottom, handles each disconnected
+function entry/exit with its own boundary fact, and uses a bounded circular
+worklist rather than a monotonically growing queue. The reported certificate
+recomputes every block equation after convergence and checks monotonicity and
+that the worklist drained; the meet and transfer functions are also checked
+for lattice laws and monotonicity. Tests require zero violations for all
+four analyses on a branch diamond plus a loop back-edge.
+
+**Hereditary substitution (`theory_hered`).** This replaced two counter
+implementations: `theory_cmtt_meta.hered_walk` recursively searched the AST
+and incremented a counter when it *saw* a lambda, without binding or
+substituting anything; `theory_hered.ht_from_ast` assigned every identifier
+De Bruijn index 0, then normalised those made-up terms. Now the source is
+translated with the resolver's binder pointers into a hash-consed term
+store: function and closure parameters become de Bruijn binders (including
+curried tuple patterns), immutable `let` is represented as `(λ. body) value`,
+mutable / written / imperative constructs are opaque leaves, and free names
+are keyed by their declaration identity. Hereditary substitution shifts
+under binders and reduces each application as it is built; its decreasing
+simple-type metric is recorded, and a fuel cut is visible (the regression
+requires 0). δ reduces literal arithmetic, comparisons and booleans; π
+reduces pair projections; `if true` selects its arm; η contracts `λx. f x`
+iff `x` is not free in `f`; modal β/η cancel `splice (quote e)` /
+`quote (splice q)`. After normalisation, hash-consed structural identity is
+a βη-equality decision for the supported pure fragment. Units with opaque
+leaves are never compared, so the loop tests remain deliberately outside the
+judgement. N4270 (`--lint`) reports equivalent functions / closures, N4271
+an η-wrapper, N4272 an immediate lambda application with its value, N4273
+staging redexes. The same engine now feeds `cmtt-meta`: each splice under a
+quote is recorded as a contextual meta-variable `u::A[Ψ]`, and the old
+`hered_walk` has been deleted. Not a source transform: this pass is a
+normalisation/equivalence oracle only.
+
+**μ-types (`theory_mu`).** The contractivity / De Bruijn shift‑subst /
+coinductive‑subtyping machinery was real but ran on a hard‑coded demo
+(`μX. unit ∨ int×X` and `μα.α`), and two of its parts were broken: `shift`
+and `subst` never descended into `ST_OPTION`, so any recursion under a
+pointer was never unfolded, and the structural comparison delegated
+nominal atoms to the set‑theoretic layer, which compares them by node id
+(so `Nil` ≠ `Nil`). Now every recursive declaration in the module is
+translated to a closed μ‑type — struct → product, enum → sum of
+constructor‑tagged tuples, newtype → body, `*T`/`&T` → `T?` (nullable: the
+base case), aliases transparent, the binder on the stack → De Bruijn
+variable — and three things are decided: contractivity; **inhabitation**
+in the least‑fixpoint reading (μX.B has a finite value iff B[X:=∅] is
+non‑empty, arrows erased since a closure can always be written) — an enum
+whose every constructor embeds itself by value is **W4250**, the struct
+case being already E3020; and **structural equality/subtyping** between
+distinct recursive nominal types by the Brandt–Henglein algorithm
+(assumption kept while the unfolding is examined, unions summand‑wise,
+constructors componentwise, arrows contravariant) — two enums with the
+same constructors, payload shapes and recursion are one type with two
+names, **N4251** (`--lint`). Memo hits are now non‑zero on real input,
+i.e. coinduction actually engages.
 
 **Type strata (`theory_stratified`).** Was a Kernel‑F<: sketch that
 compared every function type against itself (`predicative=N`); Pride's
@@ -493,7 +591,7 @@ a false positive miscompiles.
 ```
 $ bash pfront_tests/run.sh
 pfront regression: pass=100 fail=0
-stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
+stdlib self-clean: 260 / 260   (baseline before rewrite: 4)
 ```
 
 | Test | Asserts |
@@ -511,6 +609,10 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
+| `98_dataflow` + `dataflow` | actual 8-block/8-edge CFG (diamond + loop, explicit loop preheader): reaching (14 defs), available (7 exprs, must), very-busy (backward must), live (8 vars, backward may); all four lattice/transfer checks pass |
+| `99_ssa_cfg` + `ssa_cfg` | actual 8-block/2-clause CFG; 9 source definitions map to 6 binders; branch and loop-carried variables each get an IDF phi with two concrete predecessor versions; 8 uses, 0 unresolved values, 0 certificate errors |
+| `97_hered` + `hered` | `inc2` / `add2` η-wrappers, let-expanded/direct `inc(inc(x))` equality, closures with distinct binder names but same capture, source β `(fn x. x*2)(21) → 42`, modal β, literal if; no false equality for imperative loops and 0 fuel cuts |
+| `95_mu` + `mu` | IntList ≡ IntList2 (N4251) while BoolList / IntSeq are not; Stream W4250; Chain / Server quiet; memo hits > 0 |
 | `94_strata` + `strata` | E4240 ×3 (self + mutual alias cycles, plus fuzz `type T = T`), NF_RECURSIVE_TY on Tree/Link, N4241 variant recursion, N4242 negative occurrence, W4243 `Nest<Box<T>>`; Box / TreeRef / Link quiet |
 | `93_commute` + `commute` | sum+max loop flagged NF_REDUCTION + N4230, `last =` N4231, FNV mixed monoids, impure call / heap write / control-carried accumulator stay ordered, NF_INDEPENDENT on an independent `let` |
 | `92_quals` + `quals` | interprocedural purity (bump → bump_twice), recursive fn pure, NF_PURE_FN / NF_READONLY_PARAM in the dump, W4220 ×2, N4223, externs/alloc/effects never pure |

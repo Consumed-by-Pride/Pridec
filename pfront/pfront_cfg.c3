@@ -489,9 +489,13 @@ fn void Cfg.walk_if(Cfg* c, Node* n)
 fn void Cfg.walk_while(Cfg* c, Node* n)
 {
     if (n.child_count < 2) { c.emit(n); return; }
-    int cond_b = c.cur;
-    // emit any setup that was already in cond block; the cond expr itself
-    // is evaluated in cond_b. Terminate with a TERM_IF to body/exit.
+    // A while condition must not share a block with the pre-loop definition.
+    // Splitting an explicit preheader from the header preserves the entry path
+    // separately from the latch path and exposes loop-carried SSA phi nodes.
+    int preheader = c.cur;
+    int cond_b = c.new_block();
+    if (preheader >= 0 && cond_b >= 0) { c.edge(preheader, cond_b); c.terminate(TermKind.TERM_FALL); }
+    c.set_cur(cond_b);
     Node* cond = n.children[0];
     Node* body = n.children[1];
     c.emit(cond);

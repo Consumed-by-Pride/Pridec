@@ -1,0 +1,69 @@
+-- Hereditary substitution: canonical forms, βη-equivalence, η wrappers,
+-- source β-redexes, tuples, closures, and staging β.
+-- EXPECT: 0 errors
+
+fn inc : i64 -> i64
+  | n -> n + 1i64
+
+-- η-wrapper: exactly `inc`
+fn inc2 : i64 -> i64
+  | n -> inc(n)
+
+fn add : (i64, i64) -> i64
+  | (a, b) -> a + b
+
+-- multi-argument η-wrapper
+fn add2 : (i64, i64) -> i64
+  | (x, y) -> add(x, y)
+
+-- let beta-reduction and direct beta-reduction give the same canonical form
+fn twice_inc : i64 -> i64
+  | n ->
+      let m = inc(n)
+      inc(m)
+
+fn compose_inc : i64 -> i64
+  | k -> inc(inc(k))
+
+fn not_equivalent : i64 -> i64
+  | n -> add(add(n, 1i64), 2i64)
+
+-- source beta redex and delta reduction
+fn redex : () -> i64
+  | () -> (fn (x: i64) -> i64 { x * 2i64 })(21i64)
+
+-- closures capture the same free binder; their parameter names differ
+fn closure_pair : (i64) -> i64
+  | z ->
+      let f = fn (a: i64) -> i64 { a + z }
+      let g = fn (b: i64) -> i64 { b + z }
+      let h = fn (c: i64) -> i64 { c - z }
+      f(1i64) + g(2i64) + h(3i64)
+
+-- `if` selection and pair projection are hereditary reductions
+fn select_and_project : i64 -> i64
+  | n ->
+      let p = (n + 1i64, n + 2i64)
+      if true then p.0 else p.1
+
+-- quote/splice cancellation (modal beta)
+fn staged : () -> i64
+  | () ->
+      let q = quote (splice (quote (1i64 + 2i64)))
+      3i64
+
+-- imperative bodies are opaque; distinct source loops are not called equal
+fn loop_a : i64 -> i64
+  | n ->
+      let mut i : i64 = 0i64
+      while i < n do { i = i + 1i64 }
+      i
+
+fn loop_b : i64 -> i64
+  | n ->
+      let mut i : i64 = 0i64
+      while i < n do { i = i + 1i64 }
+      i
+
+fn main : () -> i64
+  | () -> inc2(1i64) + add2(1i64, 2i64) + twice_inc(1i64) + compose_inc(1i64) + not_equivalent(1i64) + redex() + closure_pair(1i64) + select_and_project(1i64) + staged() + loop_a(1i64) + loop_b(1i64)

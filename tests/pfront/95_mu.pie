@@ -1,0 +1,39 @@
+-- Iso-recursive μ-types built from the declarations: coinductive shape
+-- equality between nominal recursive types, and inhabitation in the
+-- least-fixpoint reading.
+-- EXPECT: 0 errors
+
+-- two lists that differ only by name: one μ-type (N4251 under --lint)
+enum IntList
+  | Nil
+  | Cons(i64, *IntList)
+
+enum IntList2
+  | Nil
+  | Cons(i64, *IntList2)
+
+-- same constructors, different payload: not identical
+enum BoolList
+  | Nil
+  | Cons(bool, *BoolList)
+
+-- same shape, different constructor names: not identical
+enum IntSeq
+  | End
+  | More(i64, *IntSeq)
+
+-- every constructor embeds another Stream by value: no finite value (W4250)
+enum Stream
+  | Next(i64, Stream)
+
+-- a pointer gives the base case (null): inhabited, no warning
+struct Chain
+  v : i64
+  next : *Chain
+
+-- a function-typed field never makes a type empty
+struct Server
+  handle : fn(Server, i64) -> Server
+
+fn main : () -> ()
+  | () -> ()
