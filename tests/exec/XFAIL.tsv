@@ -11,6 +11,5 @@
 # See A2A/from_agent3.md for the full diagnosis behind each reason.
 #
 [0-9]*	Legacy corpus (clause-style + syscall I/O). Blocked by: clause-style bodies trap at runtime and drop the return type; syscall(arg...) lowers to a bare 'syscall;' with no arguments (air_lower never fills c.prd/prds). See A2A/from_agent3.md.
-pear/p91_*	Indexed array write with a DYNAMIC index (the shape every bench/*_kernel.pie uses): the emitted IR contains a malformed GEP, so LLVM aborts inside EarlyCSE/simplifyGEPInst (DataLayout::getTypeAllocSize) with "Out of bounds memory access." and no binary is produced.
 pear/p92_*	Clause-style body: builds now, but the single irrefutable clause is still wrapped in a match on the parameter and the '-> i64' return type is dropped, so the binary traps (SIGTRAP 133) instead of returning 42. Every stdlib/example/conformance file is clause-style.
 test_*	Legacy corpus (clause-style + syscall I/O). Blocked by: clause-style bodies trap at runtime and drop the return type; syscall(arg...) lowers to a bare 'syscall;' with no arguments (air_lower never fills c.prd/prds). See A2A/from_agent3.md.
