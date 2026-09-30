@@ -687,28 +687,67 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
     return rr;
 }
 
+// print_usage — the flag list, in one place. It used to be a blob inside the
+// "no arguments" branch, which meant `--help` printed "error: no input file",
+// and the list had drifted out of date (--emit-exe, --emit-air, -O0..-O3,
+// --subtype-selftest and friends were missing).
+fn void print_usage()
+{
+    printf("pfront — Pride front end (parse + resolve + module load + PEAR backend)\n");
+    printf("usage: pfront <file.pie> [-I dir] [options]\n");
+    printf("  -I <dir>          add a module search root (repeatable; defaults are . and stdlib)\n");
+    printf("  -O0 | -O1 | -O2 | -O3   optimisation level for emitted code (default -O2)\n");
+    printf("  --no-opt          disable the optimiser (same as -O0 for the middle end)\n");
+    printf("  --emit-exe        emit a native executable next to the source\n");
+    printf("  --emit-bc         emit LLVM bitcode next to the source\n");
+    printf("  --emit-air        print the AIR of every function\n");
+    printf("  --emit-ast        print the annotated AST with pass flags (pure, readonly, reduction, indep, ...)\n");
+    printf("  --emit-sexp       print the AST as s-expressions\n");
+    printf("  --emit-cps        print every function's CPS term after eta/beta contraction\n");
+    printf("  --emit-dtree      print the decision DAG compiled for every match / clause set\n");
+    printf("  --dump-ast        print the resolved AST\n");
+    printf("  --dump-mods       print the module graph\n");
+    printf("  --dump-cfg        print the control-flow graph of every function\n");
+    printf("  --context <n>     lines of context around each diagnostic (max 8)\n");
+    printf("  --plain           one-line diagnostics (no snippets)\n");
+    printf("  --strict-types    report type mismatches as errors\n");
+    printf("  --dead-code       warn about functions no entry point reaches\n");
+    printf("  --strict-vis      enforce pub/private across module boundaries\n");
+    printf("  --no-theory       skip the MSP/TRS/IRDL/effects theory layer\n");
+    printf("  --no-verify       skip AST verification\n");
+    printf("  --lint            surface advisory notes (purity, reductions, read-only params, ...)\n");
+    printf("  --time-passes     report wall time per pass\n");
+    printf("  --subtype-selftest  run the semantic-subtyping spec and exit with the failure count\n");
+    printf("  --quiet           summary only\n");
+    printf("  --help            this message\n");
+    printf("  --version         print the version and exit\n");
+}
+
+fn void print_version()
+{
+    printf("pfront (Pridec) — PEAR: Pride's Engine for Abstractive Representations\n");
+    printf("front end + AIR mid-end + native backend; LLVM toolchain 23\n");
+}
+
 fn int main(String[] args)
 {
     if (args.len < 2)
     {
-        printf("pfront — Pride front end (parse + resolve + module load)\n");
-            printf("usage: pfront <file.pie> [-I dir] [options]\n");
-        printf("  -I <dir>       add a module search root (repeatable)\n");
-        printf("  --dump-ast     print the resolved AST\n");
-        printf("  --dump-mods    print the module graph\n");
-        printf("  --context <n>  lines of context around each diagnostic\n");
-        printf("  --plain        one-line diagnostics (no snippets)\n");
-        printf("  --strict-types report type mismatches as errors\n");
-        printf("  --dead-code    warn about functions no entry point reaches\n");
-        printf("  --strict-vis   enforce pub/private across module boundaries\n");
-        printf("  --no-theory    skip the MSP/TRS/IRDL/effects theory layer\n");
-        printf("  --lint         surface advisory notes (purity, reductions, read-only params, ...)\n");
-        printf("  --emit-ast     print the annotated AST with pass flags (pure, readonly, reduction, indep, ...)\n");
-        printf("  --emit-sexp    print the AST as s-expressions\n");
-        printf("  --emit-cps     print every function's CPS term after eta/beta contraction\n");
-        printf("  --emit-dtree   print the decision DAG compiled for every match / clause set\n");
-        printf("  --quiet        summary only\n");
+        print_usage();
         return 2;
+    }
+    // `--help` used to fall through to "error: no input file": the flag loop
+    // ignores unknown arguments starting with '-', so asking for help looked
+    // like forgetting an input file. Asking for help is not an error.
+    if (streq((char*)args[1].ptr, "--help") || streq((char*)args[1].ptr, "-h"))
+    {
+        print_usage();
+        return 0;
+    }
+    if (streq((char*)args[1].ptr, "--version") || streq((char*)args[1].ptr, "-V"))
+    {
+        print_version();
+        return 0;
     }
 
     char*[16] roots;

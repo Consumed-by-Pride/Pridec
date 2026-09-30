@@ -1842,4 +1842,28 @@ for f in $(find stdlib -name '*.pie' 2>/dev/null); do
   [ "$own" = "0" ] && sc=$((sc+1))
 done
 echo "stdlib self-clean: $sc / $tot   (baseline before rewrite: 4)"
+
+# Known failures are recorded in tests/baselines.tsv, so this suite exits
+# non-zero only on a REGRESSION (a suite that gets worse) — not on the failures
+# the project already knows about. That is what makes `make test` usable as a
+# pre-push gate: it used to exit 1 forever because of the 5 known cases, so a
+# real regression looked exactly like the status quo.
+base="tests/baselines.tsv"
+[ -f "$base" ] || base="$(dirname "$0")/../baselines.tsv"
+if [ -f "$base" ]; then
+    exp_pass=$(awk -F'\t' '$1=="pfront"{print $2}' "$base")
+    exp_fail=$(awk -F'\t' '$1=="pfront"{print $3}' "$base")
+    if [ -n "${exp_pass:-}" ] && [ -n "${exp_fail:-}" ]; then
+        if [ "$fail" -gt "$exp_fail" ] || [ "$pass" -lt "$exp_pass" ]; then
+            echo "REGRESSION: pfront pass=$pass fail=$fail, baseline pass=$exp_pass fail=$exp_fail"
+            exit 1
+        fi
+        if [ "$fail" -lt "$exp_fail" ] || [ "$pass" -gt "$exp_pass" ]; then
+            echo "IMPROVED: pfront pass=$pass fail=$fail vs baseline pass=$exp_pass fail=$exp_fail"
+            echo "  update tests/baselines.tsv (suite: pfront) to lock the improvement in"
+        fi
+        echo "pfront: at or above baseline (pass>=$exp_pass, fail<=$exp_fail) — OK"
+        exit 0
+    fi
+fi
 [ "$fail" -eq 0 ] || exit 1

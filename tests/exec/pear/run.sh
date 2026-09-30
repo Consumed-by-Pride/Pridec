@@ -56,7 +56,8 @@ for src in "$TDIR"/p*.pie; do
         continue
     fi
     "$bin" >/dev/null 2>&1; got=$?
-    rm -f "$bin" "$errlog"    if [ "$got" = "$expect" ]; then
+    rm -f "$bin" "$errlog"
+    if [ "$got" = "$expect" ]; then
         if [ $is_xfail -eq 1 ]; then
             echo "UNXPASS $name (expect=$expect got=$got, was XFAIL — promote!)"
             xpass=$((xpass+1))

@@ -72,3 +72,22 @@ for f in cases/*.pie; do
 done
 echo "----"
 echo "conformance pass=$pass fail=$fail"
+
+# Same contract as the other suites: exit non-zero only on a regression against
+# tests/baselines.tsv. 44 cases are known non-conformant (mostly "missing
+# type-warn" advisories), so an unconditional exit 1 here would mask real
+# regressions behind an expected failure count.
+base="tests/baselines.tsv"
+[ -f "$base" ] || base="$(dirname "$0")/../tests/baselines.tsv"
+if [ -f "$base" ]; then
+    exp_pass=$(awk -F'\t' '$1=="conformance"{print $2}' "$base")
+    exp_fail=$(awk -F'\t' '$1=="conformance"{print $3}' "$base")
+    if [ -n "${exp_pass:-}" ] && [ -n "${exp_fail:-}" ]; then
+        if [ "$fail" -gt "$exp_fail" ] || [ "$pass" -lt "$exp_pass" ]; then
+            echo "REGRESSION: conformance pass=$pass fail=$fail, baseline pass=$exp_pass fail=$exp_fail"
+            exit 1
+        fi
+        echo "conformance: at or above baseline (pass>=$exp_pass, fail<=$exp_fail) — OK"
+        exit 0
+    fi
+fi

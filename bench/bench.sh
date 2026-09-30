@@ -5,7 +5,11 @@ cd "$(dirname "$0")/.."
 PRIDEC="./pfrontc"
 GCC="gcc"
 RUNS=5
-export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+# pfrontc links against libLLVM-23, which lives in ~/.cache/llvm23 in the agent
+# toolchain layout (see scripts/agent3-env.sh). Hardcoding only the system
+# directory made every pfrontc invocation die with "error while loading shared
+# libraries: libLLVM.so.23.1" and the following mv fail.
+export LD_LIBRARY_PATH="$HOME/.cache/llvm23:${LD_LIBRARY_PATH:-/usr/lib/x86_64-linux-gnu}"
 export TIMEFORMAT='%3R'
 
 min_time() {
