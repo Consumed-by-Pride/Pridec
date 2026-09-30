@@ -4,6 +4,6 @@
 #
 #   suite<TAB>pass<TAB>fail<TAB>note
 subtype	47	0	semantic-subtyping spec cases
-exec	33	0	exec cases that must pass (xfail excluded)
+exec	35	0	exec cases that must pass (xfail excluded)
 conformance	218	44	44 known non-conformance cases
 pfront	158	5	5 known: 63_modsys megaload cfg_backedge opt_cascade modsys

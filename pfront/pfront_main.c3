@@ -575,7 +575,26 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
             if (emit_ok)
             {
                 if (emit_bc) { air::emit_bc(entry.ast, it, path, opt_level); }
-                if (emit_exe) { air::emit_exe(entry.ast, it, path, opt_level); }
+                if (emit_exe)
+                {
+                    // Whole-program emission: a call into another module has to
+                    // find that module's definition, so every loaded module's
+                    // AST goes into one AirModule (load order; the first
+                    // definition of a name wins). Emitting only the entry file
+                    // made cross-module calls resolve to nothing, which used to
+                    // turn into a call to address 0 and a segfault.
+                    pfront_core::PNode*[256] prog_roots;
+                    usz rn = 0;
+                    usz mc = ld.module_total();
+                    for (usz i = 0; i < mc && rn < 256; i++)
+                    {
+                        pfront_core::PNode* a = ld.module_ast_at(i);
+                        if (a != null) { prog_roots[rn] = a; rn = rn + 1; }
+                    }
+                    if (rn > 1) { air::emit_exe_program(&prog_roots[0], rn, it, path, opt_level); }
+                    else if (rn == 1) { air::emit_exe(prog_roots[0], it, path, opt_level); }
+                    else { air::emit_exe(entry.ast, it, path, opt_level); }
+                }
             }
             else
             {

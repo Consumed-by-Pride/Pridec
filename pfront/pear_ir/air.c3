@@ -144,6 +144,42 @@ fn void emit_bc(PNode* root, pfront_core::Interner* it, char* path, int opt_leve
     arena.destroy();
 }
 
+// emit_exe_program — emit an executable for a whole PROGRAM: every loaded
+// module's definitions are lowered into ONE AirModule before linking.
+//
+// A call to a function in another module used to compile and link and then
+// segfault: the callee was resolved by name against the module being emitted,
+// found nothing, and the call site fell back to address 0. Lowering all modules
+// together is what makes cross-module calls resolve — and since the symbol table
+// is keyed by bare name, later duplicate definitions are skipped (see
+// pear_dup_def) rather than silently shadowing.
+//
+// `roots` are the module ASTs in load order; the entry module is one of them.
+fn void emit_exe_program(PNode** roots, usz root_count, pfront_core::Interner* it,
+                         char* path, int opt_level)
+{
+    if (roots == null || root_count == 0) { return; }
+    AirArena arena;
+    if (!arena.init()) return;
+    AirModule mod;
+    char* mod_nm = module_name_of(roots[0]);
+    if (!mod.init(&arena, mod_nm, path)) { arena.destroy(); return; }
+    AirScope sc;
+    sc.init(&arena);
+    AirLower lr;
+    lr.init(&mod, &sc, it);
+    for (usz i = 0; i < root_count; i++)
+    {
+        if (roots[i] == null) continue;
+        lr.module_body(roots[i]);
+    }
+
+    (void)pear::pear_link_exe(&mod, path, opt_level);
+
+    sc.destroy();
+    arena.destroy();
+}
+
 fn void emit_exe(PNode* root, pfront_core::Interner* it, char* path, int opt_level)
 {
     AirArena arena;

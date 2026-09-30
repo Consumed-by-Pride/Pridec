@@ -159,7 +159,41 @@ else
         record FAIL "driver/no-artifact-on-error" "rc=$rc want 2, no executable"
     fi
 fi
+# (c) a call into ANOTHER module must reach that module's definition. The
+#     emitter used to lower only the entry file, so the callee resolved to
+#     nothing and the call site fell back to address 0: the program compiled,
+#     linked, and segfaulted on the first cross-module call.
+printf 'pub fn twice(x: i64) -> i64 { return x + x; }\n' > "$dc_dir/u.pie"
+printf 'use u;\nfn main(_) -> i64 { return twice(21); }\n' > "$dc_dir/x.pie"
+rm -f "$dc_dir/x"
+out=$(cd "$dc_dir" && "$abs_bin" x.pie --emit-exe "$PEAR_OPT" --quiet 2>&1); rc=$?
+if [ ! -x "$dc_dir/x" ]; then
+    record FAIL "driver/cross-module-call" "no binary (rc=$rc) — callee in another module not emitted?"
+else
+    timeout "$TIMEOUT" "$dc_dir/x" >/dev/null 2>&1; rrc=$?
+    if [ "$rrc" = 42 ]; then
+        record PASS "driver/cross-module-call" "call into another module reaches it (42)"
+    else
+        record FAIL "driver/cross-module-call" "rc=$rc run=$rrc want run=42"
+    fi
+fi
+
+# (d) an undefined callee must fail loudly (no binary), never compile into a
+#     program that jumps to address 0.
+printf 'fn main(_) -> i64 { return nosuchfn(1); }\n' > "$dc_dir/undef.pie"
+rm -f "$dc_dir/undef"
+out=$(cd "$dc_dir" && "$abs_bin" undef.pie --emit-exe "$PEAR_OPT" --quiet 2>&1); rc=$?
+if [ -x "$dc_dir/undef" ]; then
+    record FAIL "driver/undefined-callee" "binary emitted for an undefined callee (rc=$rc)"
+else
+    if [ "$rc" != 0 ]; then
+        record PASS "driver/undefined-callee" "rc=$rc and no binary"
+    else
+        record FAIL "driver/undefined-callee" "rc=0 but no binary — exit status must be non-zero"
+    fi
+fi
 rm -rf "$dc_dir"
+
 
 # ── 2. case runs ────────────────────────────────────────────────────────────
 echo "=== execution cases (pipeline tier: $PEAR_OPT) ==="
@@ -210,7 +244,7 @@ done
 rm -f /tmp/pear_out_$$
 
 echo "---"
-echo "exec suite: pass=$pass fail=$fail xfail=$xfail xpass=$xpass  (cases=$((count + 2)) [$count files + 2 driver checks], tier=$PEAR_OPT)"
+echo "exec suite: pass=$pass fail=$fail xfail=$xfail xpass=$xpass  (cases=$((count + 4)) [$count files + 4 driver checks], tier=$PEAR_OPT)"
 if [ ${#fail_list[@]} -gt 0 ]; then
     echo "unexpected failures:"; for c in "${fail_list[@]}"; do echo "  - $c"; done
 fi

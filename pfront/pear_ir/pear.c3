@@ -175,7 +175,15 @@ struct PearCg {
     Ltype    voidty;
     Ltype    i8ptrty;     // i8* — result of malloc
     Lvalue   malloc_fn;   // cached malloc(i64) -> i8* decl
-    bool     callee_is_alloca_intrinsic; // set by prd_i64 for __pear_alloca
+    bool     callee_is_alloca_intrinsic;
+    // Set when a bare-name callee lookup failed (see prd_i64 -> N_EXPR_IDENT).
+    // The call site uses it to declare a real external reference instead of
+    // calling address 0 — see ACNS_CALL.
+    char*    unresolved_callee;
+    // The AIR module being emitted — whole-program emission concatenates the
+    // loaded modules into one AirModule, and the symbol table is keyed by bare
+    // name, so pear_emit_fn needs the declaration list to spot duplicates.
+    AirModule* air;
     bool     terminated;
     // Memory-backed locals (mem2reg friendly): for each name in vals[], mark
     // whether it is an alloca pointer (needs load on read, store on write).
@@ -589,6 +597,11 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             {
                 Lvalue f = ll_get_named_fn(cg.mod, p.name);
                 if (f != null) return f;
+                // Not defined in this module. Remember the name so the call
+                // site can emit an external reference to it (a missing symbol
+                // must fail at LINK time with a name in the message, not as a
+                // call to address 0 that segfaults at run time).
+                cg.unresolved_callee = p.name;
                 // Detect __pear_alloca intrinsic by name prefix.
                 if (p.name[0] == '_' && p.name[1] == '_'
                     && p.name[2] == 'p' && p.name[3] == 'e'
@@ -1002,7 +1015,28 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 for (uint i = 0; i < ac; i++) { atys[i] = cg.i64ty; }
                 fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, 0);
             }
-            if (callee == null && !is_alloca_intrinsic) { callee = ll_const_int(cg.i64ty, 0, 0); }
+            if (callee == null && !is_alloca_intrinsic)
+            {
+                if (cg.unresolved_callee != null && fn_ty != null && !ret_is_ptr)
+                {
+                    // The callee was not defined anywhere in this program (see
+                    // prd_i64). Emit a real external reference: if the symbol
+                    // exists at link time the call is correct, and if it does
+                    // not the linker says so by name. Calling address 0 instead
+                    // compiled and linked cleanly and then segfaulted, which is
+                    // how a cross-module call looked before whole-program
+                    // emission went in.
+                    Lvalue ext = ll_add_fn(cg.mod, cg.unresolved_callee, fn_ty);
+                    if (ext != null)
+                    {
+                        (void)printf((char*)"pear: '%s' is not defined in this program — linked as an external reference\n",
+                                     cg.unresolved_callee);
+                        callee = ext;
+                    }
+                }
+                if (callee == null) { callee = ll_const_int(cg.i64ty, 0, 0); }
+            }
+            cg.unresolved_callee = null;
             char* nm = cg.mktmp();
             Lvalue r;
             if (is_alloca_intrinsic)
@@ -1468,13 +1502,60 @@ fn Lvalue pear_fn_get_or_create(PearCg* cg, AirDecl* d)
     return ll_add_fn(cg.mod, nm, fty);
 }
 
+// pear_dup_def — does an EARLIER definition in this program already own `nm`?
+//
+// Whole-program emission concatenates every loaded module into one AirModule,
+// and the symbol table is keyed by the bare name (there is no module mangling
+// yet). The first definition therefore wins; emitting a second one would add a
+// duplicate symbol that LLVM renames (name.1), leaving a dead body behind and
+// making it look like the later module's function was used when it was not.
+fn bool pear_dup_def(PearCg* cg, AirDecl* d)
+{
+    if (cg.air == null || d == null || d.name == null) return false;
+    for (usz i = 0; i < cg.air.decl_count; i++)
+    {
+        AirDecl* e = cg.air.decls[i];
+        if (e == null || e == d) continue;
+        if (e.name == null) continue;
+        if (e.tag != ADECL_DEF) continue;
+        usz j = 0; bool eq = true;
+        while (e.name[j] != 0 && d.name[j] != 0)
+        {
+            if (e.name[j] != d.name[j]) { eq = false; break; }
+            j++;
+        }
+        if (eq && e.name[j] == 0 && d.name[j] == 0) { return true; }
+    }
+    return false;
+}
+
 fn void pear_emit_fn(PearCg* cg, AirDecl* d)
 {
     if (d == null) return;
+    // First definition wins across modules (see pear_dup_def).
+    {
+        bool seen = false;
+        if (cg.air == null) { return; }
+        for (usz i = 0; i < cg.air.decl_count; i++)
+        {
+            AirDecl* e = cg.air.decls[i];
+            if (e == null || e == d) { if (e == d) { break; } continue; }
+            if (e.tag != ADECL_DEF || e.name == null || d.name == null) continue;
+            usz j = 0; bool eq = true;
+            while (e.name[j] != 0 && d.name[j] != 0) { if (e.name[j] != d.name[j]) { eq = false; break; } j++; }
+            if (eq && e.name[j] == 0 && d.name[j] == 0) { seen = true; break; }
+        }
+        if (seen)
+        {
+            (void)printf((char*)"pear: duplicate definition of '%s' — keeping the first\n", d.name);
+            return;
+        }
+    }
     char* nm = d.name; if (nm == null) nm = (char*)"_anon";
     cg.tmp = 0; cg.blk = 0; cg.name_n = 0; cg.lbl_n = 0;
     for (uint i = 0; i < 32; i++) cg.lbl_kfilled[i] = false;
     cg.cur_k_bb = null;
+    cg.unresolved_callee = null;
     Ltype[16] ptys;
     char*[16] pnms;
     uint pc = 0;
@@ -1634,6 +1715,7 @@ fn char* pear_pipe_for(int lvl)
 
 fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* mod)
 {
+    cg.air = mod;
     cg.ctx = ctx; cg.mod = m; cg.b = b; cg.tmp = 0; cg.blk = 0;
     cg.name_n = 0; cg.lbl_n = 0; cg.terminated = false;
     cg.callee_is_alloca_intrinsic = false;

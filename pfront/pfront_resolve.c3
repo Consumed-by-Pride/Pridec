@@ -344,6 +344,28 @@ fn void Loader.walk_imports(Loader* l, Mod* m, Node* n, int depth)
 }
 
 // Load a root file directly by path (the file named on the command line).
+// ── Module table accessors ──────────────────────────────────────────────────
+// The driver emits an executable for the whole PROGRAM (every loaded module),
+// not just the entry file, so it needs to walk the module table without
+// depending on the loader's internals.
+fn usz Loader.module_total(Loader* l)
+{
+    if (l == null) return 0;
+    return l.module_count;
+}
+
+fn PNode* Loader.module_ast_at(Loader* l, usz i)
+{
+    if (l == null || i >= l.module_count) return null;
+    return l.modules[i].ast;
+}
+
+fn char* Loader.module_path_at(Loader* l, usz i)
+{
+    if (l == null || i >= l.module_count) return null;
+    return l.modules[i].path;
+}
+
 fn Mod* Loader.load_entry(Loader* l, char* path)
 {
     usz src_len = 0;

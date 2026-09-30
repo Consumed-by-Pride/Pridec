@@ -3609,6 +3609,10 @@ fn void AirLower.walk_decls(AirLower* lr, Node* n)
 // lr.mod. Call this once per AirModule you want populated.
 fn void AirLower.module_body(AirLower* lr, Node* root)
 {
+    // Whole-program emission calls this once per loaded module; the hoist list
+    // belongs to the module being lowered NOW, so it must start empty each time
+    // (otherwise module N's nested functions are emitted again for module N+1).
+    lr.hoist_count = 0;
     lr.scope.enter();
     // Bind %ret as the top-level return covariable (for top-level exprs
     // and any accidental free `return` at module scope).
