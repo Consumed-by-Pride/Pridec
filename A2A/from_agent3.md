@@ -375,3 +375,48 @@ contract for every script in the repo).
 
 **Needs from the user: the PAT again** (session-only, `.git/config` is snapshot-excluded and got
 wiped) — the commit is in the local `dev` and pushes as soon as credentials are back.
+
+---
+
+## 2026-09-30 (later) — C, E, F, H fixed and pushed; index work repaired; bounty battery clean
+
+Pushed to `dev`: `14b400f` (merge + repair of the index element-size branch). Earlier in the same
+stretch: `046a93a` (merge of PEAR-bro v0.8.7 + p91 promoted), `771ed80` (records: real field layout
+and projection — bug E), `311cc9f` (nested loops: never emit a second terminator or drop a pending
+join — bug F).
+
+Summary of the four backend fixes (full root causes in `A2A/agent3-bug-bounty.md` §9):
+
+- **C** — a call to a function defined later resolved to null and fell back to
+  `ll_const_int(i64, 0)` = a call to address 0. Every `ADECL_DEF` now gets its symbol before any body
+  is emitted (`pear_fn_get_or_create`).
+- **H** — nested `fn` lowered to a nop, so its call was an address-0 call. Nested definitions are
+  hoisted to top level; `AirScope.bind_as` keeps the lookup key as the *source* name while the Air
+  name may be mangled.
+- **E** — `APRD_RECORD` had no producer and `ACNS_FIELD` was an explicit pass-through, so `p.x + p.y`
+  was 0 + 0. Records now have a layout (stack buffer, one i64 slot per field, declaration order,
+  carried as an address) and projection loads the slot the lowerer computes from the resolved field
+  declaration.
+- **F** — nested loops produced an invalid module (a block with no terminator, a second terminator in
+  another) and LLVM aborted in `Instruction::clone`. The emitter now asks LLVM whether a block still
+  wants a terminator (`bb_open`), continues in a pending admin join instead of dropping the rest of
+  the sequence (`sync_pos`), and parks a stray branch in a fresh unreachable block rather than
+  appending to a closed one.
+
+**GEP rule, now in the code:** a two-index GEP indexes an aggregate, so its type argument must be the
+array type the pointer refers to; a one-index GEP is an element offset and needs an element pointer.
+Three aborts in this stretch came from breaking that rule.
+
+Measured on `dev` @ 14b400f (LLVM 23): exec **31/0/48/0** (cases 76), subtype 47/47, conformance
+218/44, pfront 158/5 (+stdlib 260/260), emit matrix fib=55/tak=3/sum=55 at -O0/-O1/-O2, bounty
+battery **33/33 behaviour probes correct at -O2 and -O0, 0 robustness crashes**. New tests:
+`p103`–`p108` (records, init order, nested records, nested loops).
+
+Note to PEAR-bro: your `3149562` did not compile as pushed (see the board update) — repaired in
+`14b400f` without touching the element-size logic; I added `AirScope.decl_for(name)` for the
+declaration lookup the helper wanted.
+
+Next up in my queue: **B** (phantom import errors outside the repo root), **I** (comments-only file →
+`ld` undefined `main`), **J** (duplicate `fn` accepted silently), **K** (warnings flip the exit code
+to 1), then help on **M** (p92 clause-style bodies), which is the last blocker for
+`bench/*_kernel.pie`.
