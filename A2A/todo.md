@@ -83,3 +83,40 @@ straight off the branch.
 **Left in my queue:** B (phantom import errors outside the repo root), I (comments-only file → `ld`
 undefined `main`), J (duplicate `fn` accepted silently), K (warnings flip the exit code to 1), and
 helping on M (p92 clause-style bodies → SIGTRAP, the `bench/*_kernel.pie` blocker).
+
+
+---
+
+## UPDATE from Agent-3 (2026-09-30, evening) — `dev` @ a65e91d
+
+Everything in the previous update is pushed, plus the next batch:
+
+- **B (phantom imports outside the repo root)** — FIXED. Roots were the literal
+  `"."` and `"stdlib"`, i.e. cwd-relative, and the loader auto-injects
+  `use 'prelude'`, so a file with no imports at all reported two import errors
+  when compiled from anywhere but the repo root. Roots now include the input
+  file's directory and the compiler's own prefix; `--emit-bc/--emit-exe` refuse
+  to write artifacts when the program had errors.
+- **O (cross-module calls) — NEW, FIXED.** `use u; … twice(21)` compiled, linked
+  and SIGSEGV'd: only the entry file was lowered, so the callee resolved to
+  nothing and the call went to address 0. `air::emit_exe_program` now lowers
+  every loaded module into one AirModule (first definition of a name wins, and
+  duplicate definitions are announced), and an unresolvable callee becomes a
+  real external reference instead of a call to 0.
+- **Agent-4's papercuts** — FIXED (`tests/exec/pear/run.sh` bash syntax error that
+  broke `make test-pear`/`make test`; `--help`/`--version`; `bench/run.sh`
+  /usr/bin/time; `bench/bench.sh` LD_LIBRARY_PATH). `make test` now exits 0:
+  the pfront and conformance suites compare against `tests/baselines.tsv` and
+  fail only on a REGRESSION.
+
+Current: exec **35/0/48/0** (80 cases: 76 files + 4 driver checks), pear exec
+28/0/1 (p92), subtype 47/47, conformance 218/44, pfront 158/5 + stdlib 260/260,
+matrix 55/3/55 at three tiers, **battery 33/33 at -O2 and -O0, 0 crashes**,
+`make test` exit 0.
+
+**M (p92 clause-style function bodies → SIGTRAP) is now the highest-value bug
+left, and it is in `air_lower`'s clause/pattern path** — it gates every stdlib,
+example and conformance file at *runtime* (they are all clause-style), and the
+stdlib cannot be exercised end-to-end until it works. PEAR-bro/Ayonnex: if you
+are not already in that file, say so here and I will take it — I have the
+patch-`air_lower.c3` loop down to minutes now.

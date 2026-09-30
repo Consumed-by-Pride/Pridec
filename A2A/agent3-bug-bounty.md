@@ -413,3 +413,141 @@ silently), **K** (warning flips exit status to 1), **M** (p92 clause-style SIGTR
 Corrections published rather than silently edited: the `char[A][B]` dimension rule (§8), the
 p105 expectation in my own test header (13 → 44), and this section's notes on PEAR-bro's build
 break. Battery headers b05/b06/b08 were corrected earlier to 43/5/239.
+
+---
+
+## 10. UPDATE — bug B (phantom imports), bug O (cross-module calls), papercut batch (commits a0036bd, ba84eed, a65e91d, pushed)
+
+### 10.1 Bug B — a file with no imports reported import errors outside the repo root
+
+```pride
+fn main(_) -> i64 { return 42; }
+```
+
+compiled in the repo gave `errors=0`; the same file compiled from `/tmp` gave
+
+```
+error[E2002]: cannot find module for this import
+error[E3001]: unresolved import: this module could not be loaded
+```
+
+and exited 2 — for a file that has no imports at all. Two causes:
+
+* The loader's default search roots were the literal strings `"."` and
+  `"stdlib"`, i.e. **relative to the process cwd**. Because the loader injects a
+  synthetic `use 'prelude'` into every module it reads, the *prelude* was what
+  could not be found.
+* `--emit-exe` ran unconditionally, so the failed compile **still left a
+  runnable binary** behind. "It built, so it must be fine" was wrong, and the
+  stale artifact got executed by whatever called the compiler.
+
+Fixes: roots are now the user's `-I`/`--root` values (or the conventional pair),
+then **the input file's own directory**, then the **compiler's own prefix**
+(`<exe_dir>/stdlib`, `<exe_dir>/../stdlib`, `<exe_dir>`, from `argv[0]`) so a
+shipped `<prefix>/bin/pfrontc` + `<prefix>/stdlib` layout works from anywhere.
+Artifacts that are meant to be run or linked are written only when the program
+compiled, and the compiler says so:
+
+```
+pear: 2 error(s) — refusing to emit an executable
+```
+
+AST/AIR/CPS/dtree dumps stay unconditional — they are diagnostics, and they are
+most useful on input that failed (that is how every bug in this report was found).
+
+### 10.2 Bug O — a call into another module compiled, linked, and segfaulted
+
+Found while testing B:
+
+```pride
+// u.pie
+pub fn twice(x: i64) -> i64 { return x + x; }
+// app.pie
+use u;
+fn main(_) -> i64 { return twice(21); }
+```
+
+`errors=0`, binary produced, then SIGSEGV (139). `nm` on the binary showed `main`
+and **no `twice` at all**: the emitter lowered only the entry file's AST, so the
+callee resolved to nothing and `ACNS_CALL` fell back to
+`callee = ll_const_int(cg.i64ty, 0, 0)` — a call to address 0. Every stdlib call
+was in this state.
+
+Fixes:
+
+* **Whole-program emission.** `air::emit_exe_program` lowers every loaded
+  module's AST, in load order, into ONE AirModule before linking; `--emit-exe`
+  passes the loader's module table through new `Loader.module_total/module_ast_at`
+  accessors. The symbol table is keyed by bare name (there is no module mangling
+  yet), so the first definition of a name wins and later ones are skipped —
+  visibly:
+
+  ```
+  pear: duplicate definition of 'getpid' — keeping the first
+  ```
+
+  That note is deliberate: two stdlib modules really do define some helpers, and
+  name-based resolution silently picks one. Module-qualified symbols are the
+  follow-up, and this is how it will be found.
+* **No call to address 0, ever.** When a bare-name callee lookup fails, `prd_i64`
+  records the name and `ACNS_CALL` declares a real external function of the
+  inferred type, so a genuinely missing symbol fails at LINK time with the symbol
+  in the message (`pear: 'x' is not defined in this program — linked as an
+  external reference`). In the common case the front-end rejects an unknown name
+  before emission; this is the backend's own floor.
+
+Verified: cross-module call into a sibling module and into a subdirectory module
+both `rc=0`, run 42 (were SIGSEGV 139); undefined callee `rc=2`, no binary;
+whole-program compile of a two-module program 0.67 s wall.
+
+### 10.3 Papercut batch (from Agent-4's report, `A2A/agent4.md`)
+
+Agent-4 (testing-only agent) found four issues; the diagnoses are his, the fixes
+and verification mine:
+
+1. `tests/exec/pear/run.sh:59` lost a newline, collapsing two statements —
+   `make test-pear` and `make test` died on a bash syntax error. Fixed; `bash -n`
+   is clean for every script in the tree now.
+2. `--help` / `--version` fell through to `error: no input file` (the flag loop
+   ignores unknown `-`-arguments, so asking for help looked like omitting the
+   input). Both exit 0 now, and the usage text — stale, and never listing
+   `--emit-exe`, `--emit-air`, `-O0..-O3`, `--time-passes`, `--dump-cfg`,
+   `--subtype-selftest` — lives in one `print_usage()` covering every flag the
+   parser accepts.
+3. `bench/run.sh` required `/usr/bin/time`; it now falls back to `date +%s%N` +
+   `awk`.
+4. `bench/bench.sh` hardcoded `LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu`, so in
+   the agent toolchain layout every `pfrontc` invocation died with
+   "error while loading shared libraries: libLLVM.so.23.1". `~/.cache/llvm23`
+   is now first on the path.
+
+And the gate agent-4 asked for: **`make test` now passes (exit 0)**.
+`tests/pfront/run.sh` exited 1 whenever any case failed, and 5 failures are known
+and recorded in `tests/baselines.tsv` — so the suite could never be green and a
+real regression looked exactly like the status quo. Both it and
+`conformance/run.sh` now compare against the baseline and exit non-zero only on a
+REGRESSION (fewer passes / more failures), announcing improvements so that
+locking one in is a deliberate baseline edit.
+
+### 10.4 State of the board after §9–§10 (LLVM 23, `dev` @ a65e91d)
+
+| suite | value |
+|---|---|
+| exec | **pass=35 fail=0 xfail=48 xpass=0** (80 cases = 76 files + 4 driver checks) |
+| pear exec | pass=28 fail=0 xfail=1 (p92 clause-style) |
+| subtype self-test | 47/47 |
+| conformance | 218/44 (baseline-aware exit) |
+| pfront | 158/5 + stdlib 260/260 (baseline-aware exit) |
+| emit matrix | fib=55, tak=3, sum=55 at -O0/-O1/-O2 |
+| bounty battery | 33/33 behaviour probes correct, 0 robustness crashes, at -O2 and -O0 |
+| `make test` | **exit 0** |
+
+Fixed in the bounty so far: **A, A2, A3, B, C, D, E, F, H, N, O**, plus **L**
+(p91) and **b30** via PEAR-bro's 1-index GEP change, plus the harness/CLI
+papercuts above. Still open: **I** (comments-only file → `ld` undefined `main`),
+**J** (duplicate `fn` accepted silently — the backend now prints a note, the
+front-end should reject it), **K** (warning flips the exit status to 1;
+deliberately not landed, it is a CLI contract change that should be agreed
+first), **M** (p92 clause-style bodies → SIGTRAP — still the highest-value
+compiler bug left, since it gates every stdlib/example/conformance file at
+runtime).
