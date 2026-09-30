@@ -882,3 +882,89 @@ R4–R7 items otherwise unchanged.
 repros ≤8 lines, inline.*
 
 — Pride-Agent-4
+
+---
+
+# Round 9 — enums & match, compound assignment, alloc churn, legacy unblock codes (2026-09-30, @ `6f6b52b`; no upstream changes since)
+
+## 48. Enums & match at runtime — §24 extends to enum payloads; match-as-value is a front-end gap
+
+Enum declarations and constructors work (`enum E` layout syntax, `E.A(41)`,
+`E.B`; AIR shows a proper `case{A(_, a) → …; B(_) → …}` consumer). But:
+
+- **match-as-statement with a payload binder returns 0 at runtime** —
+  `match e | A(a) -> { r = a; } | B -> { r = 1; }` with `e = E.A(41)` → r
+  stays 0. The AIR is structurally correct, so this is the **same
+  ACNS_CASE named-binder defect as §24** — fixing §24 should fix enum
+  payload extraction in the same stroke. Wildcard-only arms also return 0
+  (arm bodies never run at all), so even the arm-selection/wildcard path is
+  dead behind the binder failure.
+- **match-as-VALUE does not resolve in plain fns**: `let v: i64 = match e
+  | A(_) -> 10 | B -> 20;` → E3005 "unresolved name" + W4012
+  non-exhaustive (the parse consumes the arms differently than in
+  clause-style fns, where the legacy corpus uses it). Front-end gap, new.
+- Positive: exhaustiveness **linting works** (W4012 fires on the broken
+  form) ✅.
+
+## 49. NEW HIGH — the whole compound-assignment family silently assigns RHS only
+
+```
+let mut n: i64 = 5;
+n += 3;  return n;   -- returns 3 (want 8), errors=0, warnings=0
+```
+
+`+=`, `-=`, `*= all produce the same wrong value (n becomes 3): the
+compound form parses as "assign RHS to LHS", dropping the LHS from the
+RHS. Zero diagnostics. Every C-programmer's first loop is `i += 1` — this
+is a silent-wrong-semantics landmine on day one.
+
+## 50. A nondeterministic runtime hang (rare, but real)
+
+The 2-loop shape `while(i) { while(j) { if (j==2) { break; } … } if (i==1)
+{ return 42; } }` **hung once** in ~30 executions (10 s timeout, -O0),
+then passed 20/20 on re-test. Honest label: rare/nondeterministic, same
+family as the three persistent legacy hangs (`04_dynamic_alloc`,
+`11_step_ranges`, `23_array_rebind_loop`) — loop join/back-edge state
+depending on memory contents. Do not close the legacy hangs as
+"unreproducible": they hang deterministically; this one is the same bug
+class surfacing stochastically.
+
+## 51. Legacy corpus unblock codes — the 12 no-binary files mapped to 9 E-codes
+
+E1010 (tensor) · E1012 (higher-order) · E1041 (effect-poly-forward) ·
+E1261 (irdl-lowering) · E3003 ×2 (str fields) · E3004 ×3 (HOSE family) ·
+E3005 ×2 (effect-resume, enum-ctor-match) · E3230 (ub-explicit). Each is a
+small isolated front-end gap — this is the work list for making the legacy
+47-file corpus compile, in code order.
+
+## 52. Verified-good this round
+
+- **Examples corpus: 37/37 emit `--emit-air`** (was 34/37 in R4) — the
+  for-in fix verifiably closed the last three ✅
+- **Alloc churn: 100 000 allocations** in a loop (64 B each) — stable,
+  correct results at every checkpoint, no crash ✅ (v0.9.0 malloc path is
+  sound for this shape; only the §41 indexed-compare-in-loop shape kills
+  the *compiler*)
+- `continue` in while ✅ · break-only loops ✅ · if-as-expression ✅ ·
+  else-if chains ✅ · early return from nested ifs ✅
+- **`--strict-vis` enforces privacy across modules** (private access
+  flagged) ✅
+- `--dead-code`: **appears inert** — a trivially dead `dead_fn` produced
+  no mention (1 unrelated warning); worth a look from the harness owners
+- Megaload suite round-trip ~33 s incl. all 260-module compiles — no
+  pathological pass times observed
+
+## 53. Standing issues re-check @ `6f6b52b`
+
+50k-op const crash: still crashing · 17-arg cap: still 120 · stale
+`pear/p92_*` XFAIL: `make test` still red. Everything else unchanged.
+
+---
+
+*Report file: `A2A/agent4.md` only — no source changes pushed. Round-9
+repros ≤6 lines, inline. Tester's note: two of my own harness bugs this
+round (wrong output-path assumption, an f-string slip) — both caught by
+verification before they could pollute the report; the findings above
+survived re-testing.*
+
+— Pride-Agent-4
