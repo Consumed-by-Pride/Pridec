@@ -1885,7 +1885,8 @@ fn AirCmd* AirLower.index_acc(AirLower* lr, Node* n, AirCns* k)
         iv_p = air_ir::air_mk_var(lr.arena, iv_name);
         iv_comp = true;
     }
-    AirCns* ik = air_ir::air_mk_index(lr.arena, iv_p, k);
+    long esz = lr.index_elem_size(n);
+    AirCns* ik = air_ir::air_mk_index(lr.arena, iv_p, esz, k);
     AirCmd* out;
     if (is_value_node(n.children[0]))
     {
@@ -1905,6 +1906,97 @@ fn AirCmd* AirLower.index_acc(AirLower* lr, Node* n, AirCns* k)
         air_ir::air_mk_comu_cns(lr.arena, ov_name, out)); }
     lr.scope.leave();
     return out;
+}
+
+// elem_size_from_name — element byte size for a primitive type name
+// (u8/i8/bool→1, u16/i16→2, u32/i32/f32→4, u64/i64/f64/usize/isize/pointer→8).
+fn long elem_size_from_name(char* nm)
+{
+    if (nm == null) return 8;
+    if ((nm[0] == 'u' || nm[0] == 'i') && nm[1] != 0)
+    {
+        char b0 = nm[1];
+        if (b0 == '8') return 1;
+        if (b0 == '1' && nm[2] == '6') return 2;
+        if (b0 == '3' && nm[2] == '2') return 4;
+        if (b0 == '6' && nm[2] == '4') return 8;
+        if (b0 == 's' && nm[2] == 'z') return 8; // isz/usize
+    }
+    else if (nm[0] == 'f')
+    {
+        if (nm[1] == '3' && nm[2] == '2') return 4;
+        if (nm[1] == '6' && nm[2] == '4') return 8;
+    }
+    else if (nm[0] == 'b' && nm[1] == 'o' && nm[2] == 'o' && nm[3] == 'l') return 1;
+    return 8; // pointers and unknown types default to 8 bytes.
+}
+
+// index_elem_size — byte size of the pointee of an N_EXPR_INDEX (reads the
+// base's type annotation; pointer-dereferences of *T give esz=sizeof(T);
+// array [T;N] gives esz=sizeof(T)).
+fn long AirLower.index_elem_size(AirLower* lr, Node* n)
+{
+    // n is N_EXPR_INDEX (a[i]). Base is n.children[0]. Look at its type_ann
+    // for *T; if the annotation is missing or is a variable ref, try the
+    // base's own type_ann or fall back to 8.
+    if (n == null || n.child_count < 1) return 8;
+    Node* base = n.children[0];
+    if (base != null && base.type_ann != null)
+    {
+        Node* bt = base.type_ann;
+        // *T → look at children[0] which should be T.
+        if (bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF
+            || bt.kind == Nk.N_TY_REF_MUT)
+        {
+            if (bt.child_count > 0 && bt.children[0] != null
+                && bt.children[0].kind == Nk.N_TY_PATH)
+            {
+                return elem_size_from_name(node_text(bt.children[0], lr.it));
+            }
+            return 8;
+        }
+        if (bt.kind == Nk.N_TY_ARRAY && bt.child_count >= 1
+            && bt.children[0] != null && bt.children[0].kind == Nk.N_TY_PATH)
+        {
+            return elem_size_from_name(node_text(bt.children[0], lr.it));
+        }
+    }
+    // No annotation on the expr; see if it's a var whose declared type is
+    // a pointer/array (lookup in scope). Fallback 8.
+    if (base != null && base.kind == Nk.N_EXPR_PATH)
+    {
+        Node* bnd = lr.scope.lookup(base);
+        if (bnd != null && bnd.type_ann != null)
+        {
+            Node* bt = bnd.type_ann;
+            if ((bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF
+                 || bt.kind == Nk.N_TY_REF_MUT)
+                && bt.child_count > 0 && bt.children[0] != null
+                && bt.children[0].kind == Nk.N_TY_PATH)
+            {
+                return elem_size_from_name(node_text(bt.children[0], lr.it));
+            }
+        }
+    }
+    return 1; // byte pointer by default for bare a[i] on *u8 without annotations.
+}
+
+// index_elem_size_for_deref — pointee size for a DEREF (*p) expression base.
+fn long AirLower.index_elem_size_for_deref(AirLower* lr, Node* base)
+{
+    // *p on an i64* stores 8 bytes; on *u8 stores 1.
+    if (base != null && base.type_ann != null)
+    {
+        Node* bt = base.type_ann;
+        if ((bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF
+             || bt.kind == Nk.N_TY_REF_MUT)
+            && bt.child_count > 0 && bt.children[0] != null
+            && bt.children[0].kind == Nk.N_TY_PATH)
+        {
+            return elem_size_from_name(node_text(bt.children[0], lr.it));
+        }
+    }
+    return 8; // default deref is i64-sized.
 }
 
 // alloc_bytes — compute byte count for `alloc [T; N]` from n.type_ann.
@@ -2834,13 +2926,17 @@ fn AirCmd* AirLower.assign_mem(AirLower* lr, Node* n, AirCns* k)
     AirCns* store_c = air_ir::air_new_AirCns(lr.arena);
     lr.total_cns++;
     store_c.tag = ACNS_STORE; store_c.prd = vp; store_c.tail = after;
+    long store_esz = 1;
+    if (has_index) { store_esz = lr.index_elem_size(lhs); }
+    else if (lhs.child_count > 0) { store_esz = lr.index_elem_size_for_deref(lhs.children[0]); }
+    store_c.idx = store_esz;
 
     AirCmd* out;
     if (has_index)
     {
         // a[i] = v: <a | INDEX(i, store_c)>
         //         where INDEX on STORE-tail does gep+pass-addr (no load).
-        AirCns* idx_c = air_ir::air_mk_index(lr.arena, ip, store_c);
+        AirCns* idx_c = air_ir::air_mk_index(lr.arena, ip, store_esz, store_c);
         // Emit a as base: if it's a value node, use prd directly; else μ̃bind.
         if (is_value_node(base_node) && is_value_node(idx_node))
         {
@@ -2848,14 +2944,14 @@ fn AirCmd* AirLower.assign_mem(AirLower* lr, Node* n, AirCns* k)
             idx_prd = lr.prd(idx_node);
             // Wait — ip/bp are fresh var names but base/index are values so
             // no comu needed; rebuild idx_c with the real prds.
-            AirCns* idx_c2 = air_ir::air_mk_index(lr.arena, idx_prd, store_c);
+            AirCns* idx_c2 = air_ir::air_mk_index(lr.arena, idx_prd, store_esz, store_c);
             out = lr.cut(base_prd, idx_c2);
         }
         else
         {
             // Use the bound var names (bp/ip) in the INDEX chain; wrap with
             // μ̃ binders for non-value subexpressions, right-to-left.
-            AirCns* idx_c2 = air_ir::air_mk_index(lr.arena, ip, store_c);
+            AirCns* idx_c2 = air_ir::air_mk_index(lr.arena, ip, store_esz, store_c);
             out = lr.cut(bp, idx_c2);
             // Bind index (right-to-left means index wraps outside base).
             if (idx_node != null && !is_value_node(idx_node))

@@ -1,67 +1,72 @@
-# PEAR-bro handoff — v0.8.7 (2026-09-29, pushed to `dev`)
+# PEAR-bro handoff — v0.8.8 (2026-09-30, pushed to `dev`)
 
 ## Summary
-The indexed store/load critical blocker is fixed. Agent-3 (dev @ 41a5c07)
-landed the air_lower stmts() fallthrough fix (fresh-k admin continuation for
-statement-position blocks/ifs/whiles, plus p93/p94/p95 scope-binding tests).
-That fixed the original `a[0]=7; return a[0]` miscompile at the AIR level but
-two bugs in PEAR (pear.c3) still crashed p91 (the loop write test):
+On top of v0.8.7 (fixed the stmts() fallthrough + EarlyCSE crash), this round
+fixes the multi-byte INDEX scaling bug. AirCns.idx now carries the pointee
+byte size (1/2/4/8). air_lower computes it from type annotations (`*u8→1`,
+`*i32→4`, `*i64→8`, etc.) via `index_elem_size()` / `index_elem_size_for_deref()`
+and passes it into `air_mk_index(i, esz, k)` and into ACNS_STORE via
+`store_c.idx = esz`. pear.c3 ACNS_INDEX/ACNS_STORE select the correct
+element LLVM type, bitcast the int-encoded pointer to that type, GEP with
+scaled index, and trunc/zext/sext the value appropriately.
 
-  1. ACNS_INDEX emitted a double-zero GEP `gep i8, base_p, 0, idx` (2 indices)
-     on an `i8*` whose pointee came from inttoptr(i64). LLVM 23 EarlyCSE's
-     `simplifyGEPInst -> DataLayout::getTypeAllocSize(null)` SIGSEGV'd on it.
-     Clang emits a single index for `p[i]` on `i8*`; changed to
-     `ll_build_gep2(i8ty, base_p, &idx_v, 1, ...)` (single idx).
-  2. `__pear_alloca` was hardcoded to alloca one i64 (8 bytes). Loop writes to
-     a[i] for i=1..7 smashed adjacent stack slots. Changed to a static
-     `[256 x i8]` entry-BB array alloca (bootstrap; avoids dynamic
-     `array_alloca` which also tickled the EarlyCSE crash).
+## What's green at -O2 (pfrontc --emit-exe) — 18 PASS / 1 XFAIL
+- bench/sum_to=0, fib=200, tak=100 across O0/O1/O2
+- p01-p08 scalars (return 42/42/55/186/42/100/21/7)
+- p90 `a[0]=7; return a[0]` (u8 byte store/load) → 7
+- p91 loop writes `a[i]=i` for i<8 on `*i64`, returns a[3] → 3 (now CORRECT,
+  not LE luck)
+- p93-p95 Agent-3's block-scope/shadow/block-then-tail tests
+- p96-p98 Agent-3's while-return/while-break/many-bindings tests
+- **p99 i64 indexing**: `let a:*i64 = alloc [i64;8]; a[3]=77; return a[3]` → 77
+- **p99b i32 indexing**: `*i32` write 0x12345678, returns (a[2]&255) → 120
+- p92 clause-style bodies still SIGTRAP 133 (XFAIL; CPS/match lowering bug)
 
-## What's green at -O2 (pfrontc --emit-exe)
-- bench/sum_to.pie  exit 0   (mod 256)
-- bench/fib.pie     exit 200 (fib(30) mod 256)
-- bench/tak.pie     exit 100 (tak(18,10,4)*20 mod 256)
-- tests/exec/pear/p01-p08 all PASS (return 42, 42, 55, 186, 42, 100, 21, 7)
-- p90_indexed_store_load PASS  (a[0]=7; return a[0] → 7)
-- p93_block_scope_bindings PASS
-- p94_shadow_scope PASS
-- p95_block_then_tail PASS
-- p91_indexed_loop_write returns 3 "by luck" (see below; kept XFAIL)
-- p92_clause_style still SIGTRAP 133 (unrelated match/CPS bug; XFAIL)
+## Files changed this round
+- pfront/pear_ir/air_ir.c3: air_mk_index(i, esz, k) — passes elem size in `idx` field.
+- pfront/pear_ir/air_lower.c3:
+  - Added elem_size_from_name() (u8/i8/bool→1, i16→2, i32/f32→4, i64/f64/usize/ptr→8).
+  - Added index_elem_size() / index_elem_size_for_deref() that inspect type
+    annotations on the base/deref expr (handles `*T` / `[T;N]`).
+  - index_acc() reads the size from the base and passes into air_mk_index.
+  - assign_mem() computes store_esz for the LHS, sets store_c.idx, and uses
+    esz when constructing the wrapping INDEX consumer (for indexed stores).
+- pfront/pear_ir/pear.c3:
+  - ACNS_INDEX selects el_ty (i8/i16/i32/i64) from k.idx, bitcasts the
+    inttoptr to <el>*, single-index GEP, then loads with el_ty and
+    sext/zexts to i64 as needed.
+  - ACNS_STORE similarly bitcasts addr to <el>*, truncates val to el_ty, stores.
+  - Removed the volatile markers (they were bootstrap debug noise; volatile
+    was preventing DSE/GVN from cleaning up redundant slot traffic).
+- tests/exec/pear/p99_i64_index.pie, p99b_i32_index.pie (new).
+- tests/exec/pear/p91_indexed_loop_write.pie: removed LE-luck note.
+- tests/exec/pear/run.sh: cleanup handles non-executable stale binaries.
 
-## New infra
-- tests/exec/pear/run.sh — proper runner, tolerates pfrontc exit-code 1
-  (warnings-only), cleans stale binaries, reports PASS/FAIL/XFAIL/UNXPASS.
-- Makefile `test-pear` target, wired into `make test`.
-- .gitignore allows run.sh alongside the *.pie files.
-
-## Remaining known issues (v0.8.8)
-1. **Multi-byte INDEX scaling bug (CONFIRMED)**. ACNS_INDEX always does
-   i8-GEP + i8 load + zext. For `*i64`/`*i32`, `a[3]` computes byte offset 3
-   instead of element offset 24/12. p91 passes because the loop stores
-   ascending integers and the low byte at byte-offset 3 equals 3 (LE luck).
-   Direct repro: `let a : *i64 = alloc [i64;8]; a[3]=77; return a[3];` returns
-   1, not 77. Fix: air_lower must pass elem_size in INDEX (either add
-   ACNS_INDEX_I64/_I32 tags or carry elem size through an AirCns field), and
-   PEAR selects the matching gep source element type (i64ty/i32ty) and load
-   type.
-2. **__pear_alloca 256-byte cap** — static array. Replace with malloc() call
-   (cg.malloc_fn is already declared). Requires re-enabling nofree per
-   function (only on functions without Alloc effect) so DSE doesn't kill the
-   malloc stores.
-3. **O0 tier still aliases default<O1>** (FastISel + gep/inttoptr crashed).
-   With the simplified single-index GEP, retest; if clean restore default<O0>.
-4. **p92 clause-style bodies** still SIGTRAP 133 (CPS/match lowering).
-5. ~40 advisory passes (theory_nbe "counting & demo only", pfront_vecloop "No
-   code is transformed", pfront_licm/pfront_inline with real analysis but no
-   mutations) need to be promoted to real rewrites.
+## Remaining known issues (v0.8.9)
+1. **__pear_alloca 256-byte cap** — static `[256 x i8]` array alloca. Replace
+   with a real malloc() call (cg.malloc_fn is declared in pear_setup).
+   Requires re-enabling per-function attribute tagging (nofree only for
+   functions without the Alloc effect) so DSE doesn't kill malloc stores.
+2. **O0 tier still aliases default<O1>** (FastISel + gep/inttoptr crashed
+   before). Now that GEP types match the pointee, retest default<O0>; if
+   clean, restore it.
+3. **p92 clause-style bodies** SIGTRAP 133 (CPS/match lowering for the
+   `fn f : (T) -> U | (x) -> body` shape). All bench/*_kernel.pie use this
+   form and are blocked on it.
+4. **~40 advisory passes** (theory_nbe "counting & demo only", pfront_vecloop
+   "No code is transformed", pfront_licm/pfront_inline with real analysis
+   but no mutations, etc.) need to be promoted to real rewrites.
+5. Pointer-as-i64 convention: inttoptr/ptrtoint produce redundant casts that
+   mem2reg should eliminate but we still see 2 hops (slot→load→inttoptr→gep).
+   A peephole pass or fixing the bind to hold pointers natively (mark_ptr +
+   Lvalue typed ptrs) would clean up the IR and let GVN/LICM do better.
 
 ## Build / run
 ```
-bash scripts/agent3-env.sh        # fetches c3c 0.8.4 + libLLVM-23.so into ~/.cache
-bash scripts/agent3-build.sh      # builds ./pfrontc
-make test-pear                    # 12 PASS / 1 XFAIL (p92 clause) + p91 luck-pass
+bash scripts/agent3-env.sh        # c3c 0.8.4 + libLLVM-23 into ~/.cache
+bash scripts/agent3-build.sh      # builds ./pfrontc (chmod +x afterwards — c3c sometimes drops +x)
+make test-pear                    # 18 PASS / 1 XFAIL (p92 clause)
 ```
-Push auth uses the `ghp_...` PAT already configured on origin/dev (do NOT
-paste it into files — secret scanner rejects pushes). Do not commit bench
-binaries, *.air, tmp/*.pie.
+Push uses the PAT already set on origin/dev. Do NOT paste `ghp_...` tokens
+into tracked files — GitHub's secret scanner rejects pushes. Do not commit
+bench binaries, *.air, tmp/*.pie.

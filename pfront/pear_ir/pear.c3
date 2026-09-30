@@ -862,16 +862,35 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
         {
             Lvalue base_int = v;
             Lvalue idx_v = cg.prd_i64(k.prd);
-            Lvalue base_p = ll_build_inttoptr(cg.b, base_int, cg.i8ptrty, cg.mktmp());
-            Lvalue addr = ll_build_gep2(cg.b, cg.i8ty, base_p, &idx_v, 1, cg.mktmp());
+            long esz = k.idx;
+            if (esz <= 0) esz = 1;
+            if (esz > 8) esz = 8;
+            // Choose source element type for GEP + load based on esz.
+            // Pointers-as-ints are held as i64; bitcast base_p to the
+            // appropriate element pointer type, GEP by scaled idx, then
+            // load/zext/trunc to i64.
+            Ltype el_ty;
+            Ltype el_ptr_ty;
+            Ltype load_ty;
+            bool load_sext = false;
+            if (esz == 1)      { el_ty = cg.i8ty;  load_ty = cg.i8ty;  }
+            else if (esz == 2) { el_ty = ll_i16_ty(cg.ctx); load_ty = ll_i16_ty(cg.ctx); }
+            else if (esz == 4) { el_ty = cg.i32ty; load_ty = cg.i32ty; }
+            else               { el_ty = cg.i64ty; load_ty = cg.i64ty; }
+            el_ptr_ty = ll_ptr_ty(el_ty, 0);
+            Lvalue base_p = ll_build_inttoptr(cg.b, base_int, el_ptr_ty, cg.mktmp());
+            Lvalue addr = ll_build_gep2(cg.b, el_ty, base_p, &idx_v, 1, cg.mktmp());
             if (k.tail != null && k.tail.tag == ACNS_STORE)
             {
                 Lvalue addr_int = ll_build_ptrtoint(cg.b, addr, cg.i64ty, cg.mktmp());
                 return cg.cns(addr_int, k.tail);
             }
-            Lvalue lv = ll_build_load2(cg.b, cg.i8ty, addr, cg.mktmp());
-            ll_set_volatile(lv, 1);
-            Lvalue ext = ll_build_zext(cg.b, lv, cg.i64ty, cg.mktmp());
+            Lvalue lv = ll_build_load2(cg.b, load_ty, addr, cg.mktmp());
+            Lvalue ext;
+            if (esz == 1)      { ext = ll_build_zext(cg.b, lv, cg.i64ty, cg.mktmp()); }
+            else if (esz == 2) { ext = ll_build_sext(cg.b, lv, cg.i64ty, cg.mktmp()); }
+            else if (esz == 4) { ext = ll_build_sext(cg.b, lv, cg.i64ty, cg.mktmp()); }
+            else               { ext = lv; }
             return cg.cns(ext, k.tail);
         }
         case ACNS_DEREF:
@@ -884,13 +903,28 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
         }
         case ACNS_STORE:
         {
-            // <addr_int | STORE(val_prd, k)>:
+            // <addr_int | STORE(val_prd, k)>: addr comes as int; k.idx holds
+            // the byte size of the element being stored (1/2/4/8). Truncate
+            // val to the right width, cast addr to the matching pointer
+            // type, store.
             Lvalue addr_int = v;
-            Lvalue addr_p = ll_build_inttoptr(cg.b, addr_int, cg.i8ptrty, cg.mktmp());
+            long sesz = k.idx;
+            if (sesz <= 0) sesz = 1;
+            if (sesz > 8) sesz = 8;
+            Ltype s_el_ty;
+            if (sesz == 1)      { s_el_ty = cg.i8ty; }
+            else if (sesz == 2) { s_el_ty = ll_i16_ty(cg.ctx); }
+            else if (sesz == 4) { s_el_ty = cg.i32ty; }
+            else                { s_el_ty = cg.i64ty; }
+            Ltype s_ptr_ty = ll_ptr_ty(s_el_ty, 0);
+            Lvalue addr_p = ll_build_inttoptr(cg.b, addr_int, s_ptr_ty, cg.mktmp());
             Lvalue val = cg.prd_i64(k.prd);
-            Lvalue v8 = ll_build_trunc(cg.b, val, cg.i8ty, cg.mktmp());
-            Lvalue st = ll_build_store(cg.b, v8, addr_p);
-            ll_set_volatile(st, 1);
+            Lvalue v_to_store;
+            if (sesz == 1)      { v_to_store = ll_build_trunc(cg.b, val, cg.i8ty, cg.mktmp()); }
+            else if (sesz == 2) { v_to_store = ll_build_trunc(cg.b, val, ll_i16_ty(cg.ctx), cg.mktmp()); }
+            else if (sesz == 4) { v_to_store = ll_build_trunc(cg.b, val, cg.i32ty, cg.mktmp()); }
+            else                { v_to_store = val; }
+            (void)ll_build_store(cg.b, v_to_store, addr_p);
             return cg.cns(ll_const_int(cg.i64ty, 0, 0), k.tail);
         }
         case ACNS_FIELD:

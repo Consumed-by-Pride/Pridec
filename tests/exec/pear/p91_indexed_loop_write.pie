@@ -1,10 +1,7 @@
 -- EXIT: 3
--- NOTE (v0.8.7): passes exit-code check only by little-endian accident.
--- ACNS_INDEX uses byte-level GEP (i8* + idx) so for *i64 the offset is in
--- bytes, not elements; a[3] reads byte 3, which happens to equal the low
--- byte of value 3 stored at byte offset 24. A proper fix requires elem-size
--- aware indexing (see A2A/from_pear_bro.md v0.8.8). Add a non-trivial test
--- (e.g., a[3]=77) once multi-byte indexing is fixed.
+-- PEAR v0.8.8: indexed stores inside a while-loop survive and a[i] on *i64
+-- computes element offsets (multi-byte GEP). Stores a[i]=i for i=0..7 then
+-- reads a[3] → 3.
 fn main(_) -> i64 ! [Alloc] {
   let a : *i64 = alloc [i64; 8];
   let mut i : i64 = 0;

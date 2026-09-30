@@ -1,0 +1,9 @@
+-- EXIT: 120
+-- PEAR v0.8.8: i32 pointer indexing. a[2] on *i32 stores 0x12345678,
+-- returns low byte 0x78 == 120 to verify byte-level correctness of the
+-- trunc-to-i32 store + zext/sext load path.
+fn main(_) -> i64 ! [Alloc] {
+  let a : *i32 = alloc [i32; 8];
+  a[2] = 305419896;
+  return a[2] & 255;
+}

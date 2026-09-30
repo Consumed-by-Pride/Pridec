@@ -1,28 +1,27 @@
-# PEAR / Pridec A2A Task Board (updated 2026-09-29 v0.8.7, PEAR-bro)
-Pushed v0.8.7 to `dev`. See A2A/from_pear_bro.md for handoff.
+# PEAR / Pridec A2A Task Board (updated 2026-09-30 v0.8.8, PEAR-bro)
+Pushed v0.8.8 to `dev`. See A2A/from_pear_bro.md for handoff.
 
 ---
 
 ## Kept from the v0.8.5 board (so the rewrite does not lose actionable items)
 
-- **PEAR-bro** (this agent) — PEAR LLVM backend, AIR mid-end, turning advisory passes into real mutations. Branch `dev` (merged Agent-3 integration).
+- **PEAR-bro** (this agent) — PEAR LLVM backend, AIR mid-end, turning advisory passes into real mutations. Branch `dev`.
 - **Father-of-Pride** — architecture / λ̄μμ̃ theory / type system.
 - **Ayonex-GOAT** — optimizer / theory / benchmarking / perf harness.
-## CRITICAL BLOCKER RESOLVED (v0.8.7)
-**Indexed store/load** — arr1 `a[0]=7; return a[0]` now returns 7.
-- Agent-3 fixed air_lower.c3 stmts() fallthrough (fresh-k admin continuation
-  for statement-position blocks so non-last statements don't cut directly to
-  %ret). PEAR-bro fixed pear.c3: single-index byte GEP (avoids LLVM 23
-  EarlyCSE SIGSEGV on gep i8, base_p, 0, idx); __pear_alloca now allocates a
-  static [256 x i8] entry-BB buffer (was 8 bytes; dynamic array_alloca also
-  crashed EarlyCSE).
-- 13/15 PEAR exec tests green; p91 (multi-byte i64 indexing) is lucky-LE-pass
-  and kept XFAIL; p92 (clause-style) still SIGTRAP.
-## NEXT UP (v0.8.8)
-- Multi-byte pointer indexing (elem-size-aware GEP/load in ACNS_INDEX).
+## CRITICAL BLOCKERS RESOLVED (v0.8.7 / v0.8.8)
+- **Indexed byte store/load** (arr1) fixed by Agent-3's stmts() fallthrough patch
+  + PEAR-bro's single-index GEP + 256-byte static alloca.
+- **EarlyCSE SIGSEGV** from `gep i8, base_p, 0, idx` double-index → single idx.
+- **Multi-byte pointer indexing** (*i32/*i64 array access): AirCns.idx now
+  carries elem size; ACNS_INDEX/STORE select correct GEP/load/store types
+  with proper sext/zext/trunc. Verified: a[3]=77 on *i64 returns 77, i32
+  write/read returns correct byte.
+
+## NEXT UP (v0.8.9)
 - __pear_alloca → malloc + per-fn effect attrs (nofree only on non-Alloc fns).
-- Restore default<O0> once ISel tolerates our gep/inttoptr shape.
-- Promote advisory passes to real mutations.
+- Restore default<O0> now that GEP is type-correct (FastISel previously crashed).
+- p92 clause-style function bodies (blocker for bench/*_kernel.pie).
+- Promote advisory passes to real mutations (theory_nbe, pfront_vecloop, pfront_licm, pfront_inline, …).
 ## Conventions
 - Task files as `A2A/task<id>_<shortname>.md`.
 - No synthetic counters in pass reports. If a report prints "X folded", X must be the number of actual rewrites performed, not an estimate. If a file header says "counting & demo only" that is a BUG, not a TODO.
