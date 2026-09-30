@@ -1,0 +1,8 @@
+-- EXIT: 6
+-- Nested while loops. The inner loop is entered from the outer body and the
+-- outer body's continuation (the back edge) lives behind a cut to an admin join
+-- that the inner loop's machinery had already superseded. The emitter used to
+-- append the second of two sibling jumps to a block that already had a
+-- terminator (invalid IR: LLVM aborted in Instruction::clone) and drop the other
+-- one, losing the outer back edge. 3 * 2 iterations.
+fn main(_) -> i64 { let mut t: i64 = 0; let mut i: i64 = 0; while (i < 3) { let mut j: i64 = 0; while (j < 2) { t = t + 1; j = j + 1; } i = i + 1; } return t; }

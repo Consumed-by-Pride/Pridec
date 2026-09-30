@@ -1,0 +1,4 @@
+-- EXIT: 24
+-- Three levels of nesting: 2 * 3 * 4 = 24 iterations, so three joins are live
+-- at once and each loop's back edge has to land in its own join block.
+fn main(_) -> i64 { let mut t: i64 = 0; let mut i: i64 = 0; while (i < 2) { let mut j: i64 = 0; while (j < 3) { let mut k: i64 = 0; while (k < 4) { t = t + 1; k = k + 1; } j = j + 1; } i = i + 1; } return t; }

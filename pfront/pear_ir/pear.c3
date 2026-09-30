@@ -95,7 +95,6 @@ extern fn Lvalue ll_build_unreachable(Lbuilder b) @cname("LLVMBuildUnreachable")
 
 extern fn Lvalue ll_get_named_fn(Lmodule m, char* n) @cname("LLVMGetNamedFunction");
 extern fn int ll_write_bc(Lmodule m, char* p) @cname("LLVMWriteBitcodeToFile");
-
 // ── LLVM-C: Target machine (for native .o emission) ──────────────────
 alias Ltarget = void*;
 alias Ltarget_machine = void*;
@@ -222,6 +221,69 @@ fn Lvalue PearCg.alloc_slot_typed(PearCg* cg, char* nm, Ltype ty)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+
+// bb_open — is this block still looking for a terminator? A block that already
+// ends in br/ret/unreachable must never receive a second terminator: the module
+// is invalid, and LLVM aborts inside its own optimiser when it clones such an
+// instruction (Instruction::clone → "Out of bounds memory access").
+// dead_bb — a fresh block to hold a terminator that has nowhere else to go.
+// An orphan block with a terminator is valid IR (LLVM deletes it), whereas a
+// second terminator in a live block is not.
+fn Lblock PearCg.dead_bb(PearCg* cg)
+{
+    char[64] b;
+    (void)snprintf(&b[0], 64, "dead%u", cg.blk); cg.blk++;
+    Lblock bb = ll_append_bb(cg.ctx, cg.cur_fn, &b[0]);
+    ll_pos_builder(cg.b, bb);
+    cg.terminated = false;
+    return bb;
+}
+
+// pending_open_join -- the innermost admin continuation (%kN) that has been
+// entered (a cut redirected flow into it) but has NOT been filled yet: its block
+// is still waiting for a terminator. `exclude` is the block we are already in.
+fn Lblock PearCg.pending_open_join(PearCg* cg, Lblock exclude)
+{
+    for (uint z = cg.lbl_n; z > 0; z--)
+    {
+        char* nm = &cg.lbl_names[z - 1][0];
+        if (nm[0] != 'k' || nm[1] < '0' || nm[1] > '9') continue;
+        Lblock bb = cg.lbl_bbs[z - 1];
+        if (bb == null || bb == exclude) continue;
+        if (cg.bb_open(bb)) return bb;
+    }
+    return null;
+}
+
+// sync_pos -- put the insert point where the remaining flow belongs.
+//
+// A CPS sequence can reach a point where the current block is already closed
+// (its terminator emitted) while an admin join is still pending: the cut
+// <()|%kN> that redirected flow into kN is still waiting for the rest of the
+// sequence to be emitted INTO kN. Without this, the following commands are
+// either dropped (ACMD_SEQ stops as soon as a command reports "terminated") or
+// appended after a terminator, which is invalid IR and makes LLVM abort inside
+// its own optimiser (Instruction::clone).
+//
+// Only an OPEN join attracts the position: a join that already has its
+// terminator must never receive a second one.
+fn void PearCg.sync_pos(PearCg* cg)
+{
+    Lblock cur = ll_get_insert(cg.b);
+    if (cg.bb_open(cur)) return;
+    Lblock pend = cg.pending_open_join(cur);
+    if (pend == null) return;
+    ll_pos_builder(cg.b, pend);
+    cg.terminated = false;
+}
+
+fn bool PearCg.bb_open(PearCg* cg, Lblock bb)
+{
+    if (bb == null) return false;
+    Lvalue last = ll_get_last_inst(bb);
+    if (last == null) return true;
+    return ll_is_terminator(last) == null;
+}
 
 fn char* PearCg.mktmp(PearCg* cg)
 {
@@ -1025,6 +1087,9 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
 fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
 {
     if (c == null) return false;
+    // If the current block is closed and a join is still waiting to be filled,
+    // the commands that follow belong to that join.
+    cg.sync_pos();
     switch (c.tag)
     {
         case ACMD_CUT:
@@ -1087,7 +1152,6 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
         case ACMD_SEQ:
         {
             bool t = cg.cmd(c.body);
-            if (t) { return true; }
             return cg.cmd(c.next);
         }
         case ACMD_LET:
@@ -1187,6 +1251,7 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
             (void)snprintf(&exit_n[0], 64, "loop.exit%u", cg.blk);
             cg.blk++;
             Lblock cond_bb = ll_append_bb(cg.ctx, cg.cur_fn, &cond_n[0]);
+            { /* diag */ }
             Lblock body_bb = ll_append_bb(cg.ctx, cg.cur_fn, &body_n[0]);
             Lblock exit_bb = ll_append_bb(cg.ctx, cg.cur_fn, &exit_n[0]);
             ll_build_br(cg.b, cond_bb); cg.terminated = true;
@@ -1243,14 +1308,11 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
                     // Emit label body into bb.
                     ll_pos_builder(cg.b, bb); cg.terminated = false;
                     (void)cg.cmd(c.body);
-                    // After emitting label body, bb now ends in some terminator
-                    // (jump/ret/unreachable) inserted by cg.cmd recursing into
-                    // the body (which always ends in a CUT→jump/ret). Restore
-                    // insert point to the outer block but keep TERMINATED=false
-                    // if the outer block was still open (so subsequent SEQ
-                    // commands — e.g. another LABEL or a JUMP — can emit into
-                    // it). The label body itself is terminated; saved_term is
-                    // the pre-label state which is "not terminated".
+                    // After emitting the label body, bb ends in whatever
+                    // terminator its body produced (jump/ret/unreachable).
+                    // Restore the insert point to the enclosing block so the
+                    // commands that FOLLOW this label definition (typically the
+                    // loop's entry/back-edge jump) continue there.
                     ll_pos_builder(cg.b, saved); cg.terminated = saved_term;
                     return false;
                 }
@@ -1261,12 +1323,45 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
         {
             char* nm = c.target_label;
             if (nm != null && nm[0] == '%') { nm = &nm[1]; }
-            if (nm != null)
+            if (nm == null) return true;
+            Lblock bb = cg.get_lbl(nm);
+            if (bb == null) return true;
+
+            // Where does this branch belong?
+            //
+            // Normally the current block. But a CPS sequence can carry sibling
+            // jumps: the first closes the current block (e.g. a loop's entry
+            // branch) and the second is the CONTENT of a pending join — the
+            // block a cut `<()|%kN>` redirected the continuation into, which
+            // has not been filled yet. Two things go wrong if we ignore that:
+            // appending the second branch to the closed block puts two
+            // terminators in it (invalid IR; LLVM aborts in Instruction::clone),
+            // and reporting "terminated" makes ACMD_SEQ drop the rest of the
+            // sequence, which is exactly the join's content — the loop loses its
+            // back edge and the join block is left unterminated.
+            // cg.cmd already ran sync_pos, so if we are in a closed block there
+            // was no open join to move to.
+            Lblock cur = ll_get_insert(cg.b);
+            if (!cg.bb_open(cur))
             {
-                Lblock bb = cg.get_lbl(nm);
-                if (bb != null) { ll_build_br(cg.b, bb); cg.terminated = true; }
+                // Park the branch in a fresh unreachable block: dropping it
+                // outright would silently lose a back edge if a later command
+                // turns out to need this target, and an orphan block is valid IR
+                // (LLVM deletes it).
+                ll_pos_builder(cg.b, cg.dead_bb());
+                ll_build_br(cg.b, bb); cg.terminated = true;
+                return true;
             }
-            return true;
+            ll_build_br(cg.b, bb); cg.terminated = true;
+            // A jump closes the current block. If a join is still open, the rest
+            // of this sequence is that join's content -- the shape of a NESTED
+            // loop is [jump %loopN; mu-tilde c. <jump %loopN>], where the first
+            // jump enters the inner loop and the continuation of the outer
+            // body's cut is the outer back edge. Reporting "terminated" here made
+            // ACMD_SEQ drop it, which lost the outer back edge and left the join
+            // block unterminated -- invalid IR, and LLVM aborted in
+            // Instruction::clone.
+            return cg.pending_open_join(cur) == null;
         }
         case ACMD_RET:
         {

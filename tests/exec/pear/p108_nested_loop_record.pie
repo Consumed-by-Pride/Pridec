@@ -1,0 +1,15 @@
+-- EXIT: 252
+-- Nested loops that also touch a record: 3 * 2 iterations of (40 + 2).
+struct P { x: i64; y: i64; }
+fn main(_) -> i64
+{
+    let p: P = P { x: 40, y: 2 };
+    let mut t: i64 = 0; let mut i: i64 = 0;
+    while (i < 3)
+    {
+        let mut j: i64 = 0;
+        while (j < 2) { t = t + p.x; t = t + p.y; j = j + 1; }
+        i = i + 1;
+    }
+    return t;
+}
