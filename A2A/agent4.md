@@ -166,9 +166,149 @@ please run it before every push.
 
 ---
 
+# Round 4 — deep testing (2026-09-30, @ `014f3fe` = pear v0.8.9)
+
+**Scope:** everything past the standard suites — `-O1` tier, per-case cross-tier
+consistency, the examples corpus, malformed-input robustness, determinism,
+concurrency, the bench harness. Toolchain was restored again from a wiped
+`~/.cache` via `scripts/agent3-env.sh` (3.6 s — that script keeps earning its keep).
+
+## 6. CRITICAL — `for..in` range loops crash the compiler, unconditionally, with zero test coverage
+
+**Any `for i in a..b` loop segfaults pfrontc (exit 139, deterministic).** Not a
+regression from today's pushes — reproduced at every commit I tested:
+`771ed80` (baseline) → `278a536` → `a0036bd` → `014f3fe` (HEAD). Minimal repro
+(4 lines, no stdlib):
+
+```pie
+fn main(_) -> i64 {
+  let mut n: i64 = 0;
+  for j1 in 1..6
+    n = n + 1;
+  return n; }
+```
+
+`./pfrontc repro.pie --emit-air` → SIGSEGV; `--emit-exe -O2` → same. Crash
+signature (26 KB trace on stderr):
+
+```
+ERROR: 'Out of bounds memory access.'
+  in snprintf (libc)
+  in air_scope.AirScope.fresh_label  (pfront/pear_ir/air_scope.c3:189)
+  in air_lower.AirLower.fresh_lbl    (pfront/pear_ir/air_lower.c3:311)
+  in air_lower.AirLower.loop_        (pfront/pear_ir/air_lower.c3:2323)
+  in air_lower.AirLower.expr_to_cns  (…1438) ← cmd (…882) ← loop_ (…2353) ← …
+```
+
+Facts pinned down:
+- `while` loops are fine (exec suite green; I additionally tested nested
+  `while` to depth 12 — compiles and runs).
+- `for..in` crashes at **depth 1** — nesting is not required; clause-style fns
+  not required (plain `fn main(_)` crashes).
+- Kills **3 shipped examples**: `examples/showcase.pie`, `resolve_demo.pie`,
+  `ssi_demo.pie` (all SIGSEGV, same signature).
+- **Why the suites stayed green: there is not a single `for..in` case in
+  tests/exec, tests/pfront, conformance, or the pear corpus** — they are all
+  `while`-based. A whole language construct has no execution coverage at all.
+
+**Recommended:** (1) fix `loop_`/`fresh_label` for the for-range desugar (the
+`hint` args there are literals — suspect the range-node path into
+`expr_to_cns` → `loop_` recursion, i.e. loop_ being entered from a *value*
+position with a half-built scope); (2) add a `tests/exec/pear` case for
+`for..in` (and one nested), so this can never ship green again. The crash
+message itself goes to stderr and is honest — good.
+
+## 7. HIGH — long constant expressions crash SCCP (second, distinct SIGSEGV)
+
+A single-line const expression with ~50 000 `+` operators (100 KB line)
+segfaults pfrontc (exit 139) in **unbounded recursion**:
+
+```
+ERROR: 'Out of bounds memory access.'
+  in pfront_sccp.Sccp.apply (pfront/pfront_sccp.c3:643)
+  in pfront_sccp.Sccp.apply (pfront/pfront_sccp.c695)   ← self-recursive
+```
+
+The parser itself is fine — 2 000-deep nested parens exit cleanly with a
+diagnostic (exit 2). It is the constant folder's recursion depth that is
+unbounded. Deep-expression fuzzing will find this constantly. Recommend a
+recursion depth cap + iterative fold in SCCP, and a fuzz case with long
+chains.
+
+## 8. Optimizer health — strongest result of the round
+
+- **`-O1` tier now tested** (was missing from rounds 1–3): `tests/exec/run.sh`
+  at `-O0` / `-O1` / `-O2` → **35 pass / 0 fail / 47 xfail, byte-identical
+  summaries at all three tiers.**
+- **Independent per-case cross-tier check** (my own harness, not run.sh): all
+  76 exec corpus files compiled at all 3 tiers (228 compiles), comparing exit
+  code + stdout per case: **0 mismatches**. The optimizer is
+  behaviour-preserving on the entire corpus.
+
+## 9. Examples corpus (`examples/`, 37 files)
+
+| Stage | Result |
+|---|---|
+| `--emit-air` | **34 / 37 OK** — 3 crash on the §6 for-in bug |
+| `--emit-exe -O2` → run | **3 / 37 runnable** (`fib`, `micro_c`, `rewrite_demo`, all rc=0); 34 produce no binary — blocked by the known legacy gaps (multi-clause bodies, stdlib imports, effects at runtime), consistent with XFAIL.tsv's stated blockers |
+| traps/hangs | **0** — nothing crashes *at runtime*; all failures are compile-time |
+
+The examples dir doubles as an unplanned regression net for the front end —
+worth a tiny harness (`for f in examples/*.pie: pfrontc --emit-air` must not
+segfault) since 3 of 37 currently fail that bar.
+
+## 10. `make test` @ v0.8.9 — one stale line from fully green
+
+| Suite | Result | Gate |
+|---|---|---|
+| build | OK, 0 errors | — |
+| pfront | pass=158 fail=5 | ✅ at baseline (baselines.tsv) |
+| conformance | pass=218 fail=44 | ✅ at baseline |
+| **pear exec** | **pass=29 fail=0 xfail=0** — v0.8.9 fixed clause-style; `p92` promoted | ✅ first fully green round |
+| exec suite | pass=35 fail=0 xfail=47 **xpass=1** (`pear/p92_clause_style`) | ❌ exits 1 |
+
+`make test` exits non-zero **solely** because `tests/exec/XFAIL.tsv` still
+carries `pear/p92_*` — the suite's own output says it: "fixes landed —
+promote these out of XFAIL.tsv: + pear/p92_clause_style". One-line deletion,
+and `make test` goes fully green as a pre-push gate (the suites themselves
+compare against `tests/baselines.tsv`, so the known 5+44 failures no longer
+block — that's the right design, nice work).
+
+## 11. Robustness / UX sweep
+
+| Input | Result |
+|---|---|
+| empty file, comment-only file | exit 0, graceful ✅ |
+| 512 B binary garbage, invalid UTF-8 | exit 2, graceful ✅ |
+| 2 000-deep nested parens | exit 2, graceful ✅ (bounded) |
+| ~50 k-op const expression | **SIGSEGV** — §7 |
+| any `for..in` loop | **SIGSEGV** — §6 |
+| nonexistent file | exit 2 ✅ |
+| **directory as input** | **exit 0** — silently "succeeds"; should be a diagnostic |
+| unknown flag (`--frobnicate`) | exit 2 ✅ |
+| unsupported `-o PATH` (not a flag) | misleading `errors=1` summary naming PATH, not "unknown option" — cost me a false 0/37 sweep until I checked; cheap to diagnose properly |
+| crash diagnostics stream | §6 crash prints to stderr correctly ✅ (my round-3 note that it hit stdout was wrong — corrected) |
+| determinism | `--emit-air` twice → byte-identical `.air` ✅ |
+| concurrency | 8 parallel pfrontc emits → all succeeded ✅ |
+| bench harness post-`a65e91d` | runs end-to-end, produces PEAR vs gcc-O2 numbers ✅ (sub-ms kernels → ratios are noise here; bigger kernels would help) |
+
+## 12. Round-4 recommended actions
+
+1. **`for..in` crash (§6)** — top priority: a core construct SIGSEGVs the
+   compiler with zero coverage. Fix + add exec cases (single + nested).
+2. **Promote `pear/p92_*` out of `tests/exec/XFAIL.tsv`** — one line, makes
+   `make test` fully green today.
+3. **SCCP recursion cap (§7)** — any long const expression is a remote-free
+   crash trigger.
+4. Directory-as-input should error (exit 0 today); `-o` should say "unknown
+   option".
+5. Consider an examples smoke target (`--emit-air` over `examples/*.pie`,
+   assert no crash) — it would have caught §6 regardless of suite coverage.
+
+---
+
 *Report file: `A2A/agent4.md` only — per my mandate, no source changes pushed.
-Where I applied fixes locally to unblock testing (run.sh newline), the file
-was restored to its upstream state afterwards; the verified fix is specified
-in §0.2.*
+Round-4 repro files live in /tmp of my sandbox; the §6 repro is 4 lines and
+inlined above.*
 
 — Pride-Agent-4
