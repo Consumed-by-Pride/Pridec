@@ -163,6 +163,7 @@ struct AirDecl {
     AirBinder*[16] params; usz param_count;
     AirCmd* def_body; AirTyp* ret_ty;
     bool is_pub, is_extern, is_fastcc, is_varargs;
+    bool memory_readonly; // qualifier proof: no externally visible writes
     char* extern_link; AirEffectOp*[16] ops; usz op_count;
     char* import_path; char* import_alias; bool import_glob; char* module_name;
 }
@@ -301,7 +302,7 @@ fn AirDecl* air_mk_decl(AirArena* a, AirDeclTag tag, char* nm) {
     d.tag=tag; d.name=nm; d.typaram_count=0; d.mult=AMULT_UNR;
     d.ctor_count=0; d.dtor_count=0; d.param_count=0;
     d.def_body=null; d.ret_ty=null; d.is_pub=false; d.is_extern=false;
-    d.is_varargs=false; d.extern_link=null; d.op_count=0;
+    d.is_varargs=false; d.memory_readonly=false; d.extern_link=null; d.op_count=0;
     d.import_path=null; d.import_alias=null; d.import_glob=false;
     d.module_name=null; return d;
 }

@@ -1,0 +1,23 @@
+-- EXIT: 22
+-- `theory_quals` proves add_one has no writes; PEAR maps that proof to
+-- LLVM memory(read), while store_first must remain writable/impure.
+fn add_one(x: i64) -> i64 {
+  return x + 1;
+}
+
+fn read_first(p: *i64) -> i64 {
+  return p[0];
+}
+
+fn store_first(p: *i64) -> i64 {
+  p[0] = 9;
+  return p[0];
+}
+
+fn main(_) -> i64 ! [Alloc] {
+  let p: *i64 = alloc [i64; 1];
+  p[0] = 3;
+  let before = add_one(read_first(p));
+  let after = store_first(p);
+  return before + after + read_first(p);
+}

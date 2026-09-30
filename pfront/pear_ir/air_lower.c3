@@ -3327,6 +3327,10 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
     char* nm2 = lr.dup(nm);
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DEF, nm2);
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
+    // `NF_PURE_FN` means the qualifier pass proved no externally visible
+    // writes. It may still read memory or diverge, so do not infer `memory(none)`
+    // or termination attributes from this fact.
+    d.memory_readonly = (n.flags & pfront_core::NF_PURE_FN) != 0;
     // Return type: if the fn uses clause syntax (has N_CLAUSE children) the
     // parser attaches an N_TY_FN covering the entire clause as type_ann, so we
     // force t_infer and let PEAR infer the real arrow type. Otherwise trust

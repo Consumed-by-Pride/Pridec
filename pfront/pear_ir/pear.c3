@@ -191,6 +191,7 @@ struct PearCg {
     // name, so pear_emit_fn needs the declaration list to spot duplicates.
     AirModule* air;
     bool     terminated;
+    usz      memory_read_attrs; // qualifier-proven LLVM memory(read) functions
     // Memory-backed locals (mem2reg friendly): for each name in vals[], mark
     // whether it is an alloca pointer (needs load on read, store on write).
     // Bootstrap: ALL let-bindings become alloca+store; params stay as SSA.
@@ -1783,6 +1784,10 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     // segfault (movb $0x7,0x0). Re-enable once malloc carries the right
     // allockind string attrs (see pear_setup).
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
+    // `memory(read)` means no writes to externally observable memory. This is
+    // weaker than memory(none): pointer/global reads and divergence remain
+    // legal, so the attribute does not claim termination or purity of values.
+    if (d.memory_readonly) { pear_tag_memory_read(cg, cg.cur_fn); }
     // nofree: only if the fn has no Alloc effect (conservative for now: OFF)
     // willreturn / nosync / mustprogress: OFF pending malloc fix.
 }
@@ -1811,6 +1816,18 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 {
     Lvalue a = ll_create_enum_attr(cg.ctx, (uint)kind, 0);
     ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, a);
+}
+
+fn void pear_tag_memory_read(PearCg* cg, Lvalue fnv)
+{
+    if (cg == null || fnv == null) { return; }
+    Lvalue a = ll_create_string_attr(cg.ctx,
+        (char*)"memory", 6u, (char*)"read", 4u);
+    if (a != null)
+    {
+        ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, a);
+        cg.memory_read_attrs = cg.memory_read_attrs + 1;
+    }
 }
 
 
@@ -1879,6 +1896,7 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
     cg.air = mod;
     cg.ctx = ctx; cg.mod = m; cg.b = b; cg.tmp = 0; cg.blk = 0;
     cg.name_n = 0; cg.lbl_n = 0; cg.terminated = false;
+    cg.memory_read_attrs = 0;
     cg.i64ty = ll_i64_ty(ctx);
     cg.i32ty = ll_i32_ty(ctx);
     cg.i8ty  = ll_i8_ty(ctx);
@@ -2050,6 +2068,11 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path, int opt_level)
         ll_dispose_msg(emsg);
     }
 
+    if (cg.memory_read_attrs > 0)
+    {
+        (void)printf((char*)"pear qualifier attrs: %d function(s) tagged LLVM memory(read)\n",
+                     (int)cg.memory_read_attrs);
+    }
     ll_dispose_tm(tm);
     ll_builder_dispose(b);
     ll_mod_dispose(m);
