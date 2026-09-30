@@ -12,10 +12,10 @@ The source type checker runs before `TheoryPipeline`. `theory_term.clone_term` a
 - extraction copies those fields on rebuilt nodes and carries the original typed site onto the extracted root;
 - `--theory-metadata-selftest` covers clone preservation and root metadata propagation; `tests/pfront/run.sh` executes it;
 - absint's `NF_TYPED` misuse was separated into `NF_BOUNDS_PROVEN`, so a bounds fact cannot impersonate a type fact;
-- the production MatchRefiner now queries `theory_subtype_engine` over the pipeline's shared `TypeStore` for supported set-algebra aliases and let/const/static annotations. It emits W3291/W3292 only under `--lint` on definite empty-type proofs; unknown aliases widen conservatively (including beneath negation).
+- the production MatchRefiner now queries `theory_subtype_engine` over the pipeline's shared `TypeStore` for supported set-algebra aliases and let/const/static annotations. It follows resolved transparent aliases; nominal/unsupported forms propagate an unknown sentinel through compound types, and negation widens unknown to TOP. It emits W3291/W3292 only under `--lint` on definite empty-type proofs.
 - the `theory_matching` `NF_DENSE_SWITCH` fact now reaches PEAR through AIR and selects LLVM `switch` for the validated dense scalar subset; `theory_pglcert` recognizes wildcard coverage of infinite scalar domains and no longer emits false W4090 on those cases.
 
-`--theory-metadata-selftest` reports PASS (0 failures); `--subtype-selftest` remains 47/47; the fixture exercises the real engine (4 queries: 2 emptiness proofs, 2 refutations) and verifies alias/binding warning opt-in; `35_egraph_rewrite.pie` still rewrites to a shift.
+`--theory-metadata-selftest` reports PASS (0 failures); `--subtype-selftest` remains 47/47; the fixture exercises the real engine (5 queries: 3 emptiness proofs, 2 refutations), follows a transparent integer alias, proves its complement empty, and keeps an opaque pointer alias under negation quiet; W3291/W3292 remain `--lint`-only. `35_egraph_rewrite.pie` still rewrites to a shift.
 
 ## Wiring status to retain for follow-up
 
@@ -34,4 +34,4 @@ See `docs/THEORY_INTEGRATION_AUDIT.md` for the full consumer/gap matrix and veri
 
 ## LOC target measurement
 
-Agent-4's latest postscript reports the pushed `dev` tree at 84,686 `pfront/**/*.c3` lines (42.4% of 200K). I independently reproduced that count from the local `dev` ref (`d2548f8`) and measured this PR head at 85,201 lines (42.6%). This branch adds real tested paths rather than generated filler; the 200K target remains open. The known 5 pfront and 44 conformance failures are unchanged/out of scope here. The pfront script also prints two existing `n: command not found` messages around lines 1715/1717. Build in the restored workspace used C3 0.8.4 + LLVM 23, a clean stdlib root (`C3C_LIB=/home/user/c3lib-clean`), and `--max-stack-object-size 256000`; the default `/home/user/c3lib` contains duplicate stdlib roots here.
+Agent-4's latest postscript reports the pushed `dev` tree at 84,686 `pfront/**/*.c3` lines (42.4% of 200K). I independently reproduced that count from the local `dev` ref (`d2548f8`) and measured the pre-alias PR head at 85,201 lines; the alias-resolution slice now measures 85,208 lines (42.6%). This branch adds real tested paths rather than generated filler; the 200K target remains open. The known 5 pfront and 44 conformance failures are unchanged/out of scope here. The pfront script also prints two existing `n: command not found` messages around lines 1715/1717. Build in the restored workspace used C3 0.8.4 + LLVM 23, a clean stdlib root (`C3C_LIB=/home/user/c3lib-clean`), and `--max-stack-object-size 256000`; the default `/home/user/c3lib` contains duplicate stdlib roots here.

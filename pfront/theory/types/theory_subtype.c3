@@ -854,6 +854,13 @@ fn int ast_type_to_set_type(SetStore* ts, Node* t, int depth)
             if (ast_type_name_is(t, "never", 5)) { return ts.bot_idx; }
             if (ast_type_name_is(t, "any", 3) || ast_type_name_is(t, "top", 3))
             { return ts.top_idx; }
+            // Follow only resolved transparent aliases. Nominal declarations
+            // stay unknown; depth bounds also break recursive alias cycles.
+            if (t.resolved != null && t.resolved.kind == Nk.N_DECL_TYPE
+                && t.resolved.type_ann != null)
+            {
+                return ast_type_to_set_type(ts, t.resolved.type_ann, depth + 1);
+            }
             return AST_SET_UNKNOWN;
         }
         case Nk.N_TY_UNION:
@@ -862,7 +869,7 @@ fn int ast_type_to_set_type(SetStore* ts, Node* t, int depth)
             for (usz i = 0; i < t.child_count; i++)
             {
                 int child = ast_type_to_set_type(ts, t.children[i], depth + 1);
-                if (child < 0) { return ts.top_idx; }
+                if (child < 0) { return AST_SET_UNKNOWN; }
                 result = ts.my_union(result, child);
             }
             return result;
@@ -873,51 +880,51 @@ fn int ast_type_to_set_type(SetStore* ts, Node* t, int depth)
             for (usz i = 0; i < t.child_count; i++)
             {
                 int child = ast_type_to_set_type(ts, t.children[i], depth + 1);
-                if (child < 0) { return ts.top_idx; }
+                if (child < 0) { return AST_SET_UNKNOWN; }
                 result = ts.my_inter(result, child);
             }
             return result;
         }
         case Nk.N_TY_NEGATION:
         {
-            if (t.child_count == 0) { return ts.top_idx; }
+            if (t.child_count == 0) { return AST_SET_UNKNOWN; }
             int child = ast_type_to_set_type(ts, t.children[0], depth + 1);
             return child < 0 ? ts.top_idx : ts.neg(child);
         }
         case Nk.N_TY_ARRAY:
         case Nk.N_TY_SLICE:
         {
-            if (t.child_count == 0) { return ts.mk_array(ts.top_idx); }
+            if (t.child_count == 0) { return AST_SET_UNKNOWN; }
             int elem = ast_type_to_set_type(ts, t.children[0], depth + 1);
-            return elem < 0 ? ts.top_idx : ts.mk_array(elem);
+            return elem < 0 ? AST_SET_UNKNOWN : ts.mk_array(elem);
         }
         case Nk.N_TY_TUPLE:
         {
-            if (t.child_count == 0) { return ts.top_idx; }
+            if (t.child_count == 0) { return AST_SET_UNKNOWN; }
             int result = ast_type_to_set_type(ts, t.children[0], depth + 1);
-            if (result < 0) { return ts.top_idx; }
+            if (result < 0) { return AST_SET_UNKNOWN; }
             for (usz i = 1; i < t.child_count; i++)
             {
                 int child = ast_type_to_set_type(ts, t.children[i], depth + 1);
-                if (child < 0) { return ts.top_idx; }
+                if (child < 0) { return AST_SET_UNKNOWN; }
                 result = ts.mk_binary(SetKind.ST_TUPLE, result, child);
             }
             return result;
         }
         case Nk.N_TY_FN:
         {
-            if (t.child_count == 0) { return ts.mk_arrow(ts.top_idx, ts.top_idx); }
+            if (t.child_count == 0) { return AST_SET_UNKNOWN; }
             int result = ast_type_to_set_type(ts, t.children[t.child_count - 1], depth + 1);
-            if (result < 0) { return ts.top_idx; }
+            if (result < 0) { return AST_SET_UNKNOWN; }
             for (usz i = 0; i + 1 < t.child_count; i++)
             {
                 int arg = ast_type_to_set_type(ts, t.children[i], depth + 1);
-                if (arg < 0) { return ts.top_idx; }
+                if (arg < 0) { return AST_SET_UNKNOWN; }
                 result = ts.mk_arrow(arg, result);
             }
             return result;
         }
-        default: return ts.top_idx;
+        default: return AST_SET_UNKNOWN;
     }
 }
 
