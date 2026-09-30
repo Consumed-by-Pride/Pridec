@@ -42,6 +42,7 @@ bench/*_c
 # extensionless file beside the .pie. Keep the sources, ignore everything else.
 /tests/exec/pear/*
 !/tests/exec/pear/*.pie
+!/tests/exec/pear/run.sh
 # ── bench binaries ──────────────────────────────────────────────────────
 # Built by bench/run.sh and bench/bench.sh; must never be committed.
 /bench/fib

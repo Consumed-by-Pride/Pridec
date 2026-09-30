@@ -1,6 +1,7 @@
 -- EXIT: 7
--- BLOCKER (XFAIL): indexed store is dropped by air_lower and PEAR never
--- dispatches ACNS_STORE/ACNS_INDEX, so this returns 0. See A2A/from_agent3.md.
+-- PEAR v0.8.7: indexed byte store/load through a pointer slot.
+-- Guard against regressing the stmts() fallthrough bug that dropped
+-- non-terminal assignments.
 fn main(_) -> i64 ! [Alloc] {
   let a : *u8 = alloc [u8; 16];
   a[0] = 7;

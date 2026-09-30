@@ -60,6 +60,7 @@ extern fn uint   ll_count_bbs(Lvalue f) @cname("LLVMCountBasicBlocks");
 extern fn Lvalue ll_get_param(Lvalue f, uint i) @cname("LLVMGetParam");
 extern fn Lvalue ll_const_int(Ltype t, ulong n, int sext) @cname("LLVMConstInt");
 extern fn Lvalue ll_build_alloca(Lbuilder b, Ltype t, char* n) @cname("LLVMBuildAlloca");
+extern fn Ltype   ll_array_type(Ltype el, ulong n) @cname("LLVMArrayType");
 extern fn Lvalue ll_build_store(Lbuilder b, Lvalue v, Lvalue p) @cname("LLVMBuildStore");
 extern fn void   ll_set_volatile(Lvalue i, int v) @cname("LLVMSetVolatile");
 extern fn Lvalue ll_build_load2(Lbuilder b, Ltype t, Lvalue p, char* n) @cname("LLVMBuildLoad2");
@@ -757,9 +758,7 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             Lvalue base_int = v;
             Lvalue idx_v = cg.prd_i64(k.prd);
             Lvalue base_p = ll_build_inttoptr(cg.b, base_int, cg.i8ptrty, cg.mktmp());
-            Lvalue zero = ll_const_int(cg.i64ty, 0, 0);
-            Lvalue[2] gep_idx; gep_idx[0] = zero; gep_idx[1] = idx_v;
-            Lvalue addr = ll_build_gep2(cg.b, cg.i8ty, base_p, &gep_idx[0], 2, cg.mktmp());
+            Lvalue addr = ll_build_gep2(cg.b, cg.i8ty, base_p, &idx_v, 1, cg.mktmp());
             if (k.tail != null && k.tail.tag == ACNS_STORE)
             {
                 Lvalue addr_int = ll_build_ptrtoint(cg.b, addr, cg.i64ty, cg.mktmp());
@@ -851,17 +850,16 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             Lvalue r;
             if (is_alloca_intrinsic)
             {
-                // __pear_alloca(n): emit a stack buffer. alloc_slot() creates
-                // an i64 alloca in the entry BB and returns its ADDRESS (i64*).
-                // That address is a pointer to 8 bytes of stack storage —
-                // exactly the buffer we want to return. We bitcast to i64
-                // (address-as-int). The value r IS the pointer to the buffer
-                // (NOT a pointer to the slot — we're not storing through a
-                // slot here; we're returning the alloca address directly).
-                Lblock saved = ll_get_insert(cg.b);
+                // __pear_alloca(n): emit a static [256 x i8] stack buffer in
+                // the entry BB (bootstrap). Dynamically-sized array_alloca
+                // tickles an LLVM 23 EarlyCSE crash (simplifyGEPInst null
+                // TypeAllocSize) and the current benches only need ≤256 B.
+                // TODO: switch to malloc once heap bootstrap is wired up.
+                Lblock saved_bb = ll_get_insert(cg.b);
                 ll_pos_builder(cg.b, cg.entry_bb);
-                Lvalue buf = ll_build_alloca(cg.b, cg.i64ty, cg.mktmp());
-                ll_pos_builder(cg.b, saved);
+                Ltype arr_ty = ll_array_type(cg.i8ty, 256);
+                Lvalue buf = ll_build_alloca(cg.b, arr_ty, cg.mktmp());
+                ll_pos_builder(cg.b, saved_bb);
                 r = ll_build_ptrtoint(cg.b, buf, cg.i64ty, nm);
                 ret_is_ptr = true;
             }
