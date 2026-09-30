@@ -98,7 +98,7 @@ fn void* air_new_raw(AirArena* a, usz size_) {
 }
 
 // ── Auxiliary records ─────────────────────────────────────────────────────
-struct AirBinder { uint id; char* name; AirMult mult; int mult_exact; AirTyp* ty; bool is_mutable; }
+struct AirBinder { uint id; char* name; AirMult mult; int mult_exact; AirTyp* ty; bool is_mutable; bool no_capture; }
 struct AirField { uint id; char* name; AirMult mult; AirTyp* ty; bool is_mut; }
 struct AirBranch { uint id; AirPat* pat; AirCmd* body; AirCmd* guard; }
 struct AirCoBranch { uint id; char* dtor_name; char*[16] binders; usz binder_count; AirCmd* body; }
@@ -287,7 +287,7 @@ fn void AirCmd.add_branch(AirCmd* c, AirBranch* b){ if(c==null||b==null)return; 
 // ── Smart constructors ───────────────────────────────────────────────────
 fn AirBinder* air_mk_binder(AirArena* a, char* nm, AirTyp* ty, AirMult m) {
     AirBinder* b=air_new_AirBinder(a); if(b==null)return null;
-    b.name=nm; b.ty=ty; b.mult=m; b.mult_exact=0; b.is_mutable=false; return b;
+    b.name=nm; b.ty=ty; b.mult=m; b.mult_exact=0; b.is_mutable=false; b.no_capture=false; return b;
 }
 fn AirField* air_mk_field(AirArena* a, char* nm, AirTyp* ty, AirMult m) {
     AirField* f=air_new_AirField(a); if(f==null)return null;

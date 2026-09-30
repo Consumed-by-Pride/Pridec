@@ -3369,16 +3369,24 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
         {
             char* pnm = (char*)"_";
             AirTyp* pty = lr.mod.t_infer;
-            if (c.child_count > 0)
+            Node* pp = c.child_count > 0 ? c.children[0] : null;
+            if (pp != null)
             {
-                Node* pp = c.children[0];
                 pnm = node_text(pp, lr.it);
                 if (pnm == null) pnm = (char*)"_";
             }
+            // Parameter annotations and inferred slots may live on the pattern
+            // child rather than the N_DECL_PARAM wrapper. Preserve that source
+            // type in AIR so pointer-typed parameters keep their real LLVM ABI.
             if (c.type_ann != null) { pty = air_types::air_ty(lr.mod, c.type_ann, lr.it); }
             else if (c.type_slot != null) { pty = air_types::air_ty(lr.mod, c.type_slot, lr.it); }
+            else if (pp != null && pp.type_ann != null) { pty = air_types::air_ty(lr.mod, pp.type_ann, lr.it); }
+            else if (pp != null && pp.type_slot != null) { pty = air_types::air_ty(lr.mod, pp.type_slot, lr.it); }
             char* an = lr.scope.bind_var(pnm, c);
             AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
+            bool is_llvm_ptr = pty != null && (pty.tag == air_ir::AirTypTag.ATYP_PTR
+                || pty.tag == air_ir::AirTypTag.ATYP_REF || pty.tag == air_ir::AirTypTag.ATYP_REF_MUT);
+            pb.no_capture = (c.flags & pfront_core::NF_READONLY_PARAM) != 0 && is_llvm_ptr;
             d.add_param(pb);
         }
         else if (c.kind == Nk.N_CLAUSE)

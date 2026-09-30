@@ -192,6 +192,7 @@ struct PearCg {
     AirModule* air;
     bool     terminated;
     usz      memory_read_attrs; // qualifier-proven LLVM memory(read) functions
+    usz      captures_none_param_attrs;
     // Memory-backed locals (mem2reg friendly): for each name in vals[], mark
     // whether it is an alloca pointer (needs load on read, store on write).
     // Bootstrap: ALL let-bindings become alloca+store; params stay as SSA.
@@ -1788,6 +1789,7 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     // weaker than memory(none): pointer/global reads and divergence remain
     // legal, so the attribute does not claim termination or purity of values.
     if (d.memory_readonly) { pear_tag_memory_read(cg, cg.cur_fn); }
+    pear_tag_captures_none_params(cg, cg.cur_fn, d);
     // nofree: only if the fn has no Alloc effect (conservative for now: OFF)
     // willreturn / nosync / mustprogress: OFF pending malloc fix.
 }
@@ -1827,6 +1829,25 @@ fn void pear_tag_memory_read(PearCg* cg, Lvalue fnv)
     {
         ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, a);
         cg.memory_read_attrs = cg.memory_read_attrs + 1;
+    }
+}
+
+// NF_READONLY_PARAM also proves the pointer is not retained. Use only that
+// component here: LLVM `readonly` would be too strong if a different, aliased
+// parameter is written. LLVM 23 spells the no-capture fact `captures(none)`.
+fn void pear_tag_captures_none_params(PearCg* cg, Lvalue fnv, AirDecl* d)
+{
+    if (cg == null || fnv == null || d == null) { return; }
+    for (usz i = 0; i < d.param_count && i < 64; i++)
+    {
+        AirBinder* p = d.params[i];
+        if (p == null || !p.no_capture) { continue; }
+        Lvalue a = ll_create_string_attr(cg.ctx,
+            (char*)"captures", 8u, (char*)"none", 4u);
+        if (a == null) { continue; }
+        // LLVM attribute positions are 1-based for the first parameter.
+        ll_add_attr_at_idx(fnv, (int)(i + 1), a);
+        cg.captures_none_param_attrs = cg.captures_none_param_attrs + 1;
     }
 }
 
@@ -1897,6 +1918,7 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
     cg.ctx = ctx; cg.mod = m; cg.b = b; cg.tmp = 0; cg.blk = 0;
     cg.name_n = 0; cg.lbl_n = 0; cg.terminated = false;
     cg.memory_read_attrs = 0;
+    cg.captures_none_param_attrs = 0;
     cg.i64ty = ll_i64_ty(ctx);
     cg.i32ty = ll_i32_ty(ctx);
     cg.i8ty  = ll_i8_ty(ctx);
@@ -2072,6 +2094,11 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path, int opt_level)
     {
         (void)printf((char*)"pear qualifier attrs: %d function(s) tagged LLVM memory(read)\n",
                      (int)cg.memory_read_attrs);
+    }
+    if (cg.captures_none_param_attrs > 0)
+    {
+        (void)printf((char*)"pear qualifier attrs: %d parameter(s) tagged LLVM captures(none)\n",
+                     (int)cg.captures_none_param_attrs);
     }
     ll_dispose_tm(tm);
     ll_builder_dispose(b);
