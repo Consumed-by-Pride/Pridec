@@ -1,0 +1,9 @@
+-- EXIT: 42
+-- Forward reference: `g` is DEFINED after `main` calls it. Calls resolved their
+-- callee by name against the LLVM module, and bodies were emitted in declaration
+-- order, so `g` did not exist yet when main's body was emitted; the call site
+-- fell back to `callee = ll_const_int(i64, 0, 0)` — a call to address 0. The
+-- program compiled and linked, then segfaulted on the first call (exit 139).
+-- All definitions are now pre-created before any body is emitted.
+fn main(_) -> i64 { return g(41); }
+fn g(x: i64) -> i64 { return x + 1; }

@@ -276,6 +276,17 @@ struct AirLower
     usz          total_cmd;  // # of AirCmd allocated (debug)
     usz          total_decl; // # of AirDecl allocated (debug)
     usz          errors;     // # of lowered nodes that fell to poison/default
+
+    // ── Nested function hoisting ──────────────────────────────────────────
+    // `fn` declarations inside a body were lowered to a nop, so call sites kept
+    // referring to a name no decl defined: AIR contained `<inner|call(3; ...)>`
+    // with no `fn inner`, codegen resolved the callee to null and emitted a call
+    // to address 0 — a binary that segfaults on the first call. stmts() records
+    // such decls (binding their name so calls resolve) and module_body() emits
+    // them as top-level defs after the main walk.
+    Node*[64]    hoist_nodes;
+    char*[64]    hoist_names;
+    usz          hoist_count;
 }
 
 fn void AirLower.init(AirLower* lr, AirModule* m, AirScope* sc, pfront_core::Interner* it)
@@ -289,6 +300,7 @@ fn void AirLower.init(AirLower* lr, AirModule* m, AirScope* sc, pfront_core::Int
     lr.labels = 0; lr.lets = 0;
     lr.total_prd = 0; lr.total_cns = 0; lr.total_cmd = 0; lr.total_decl = 0;
     lr.errors = 0;
+    lr.hoist_count = 0;
 }
 
 // ── Small helpers ──────────────────────────────────────────────────────────
@@ -868,6 +880,74 @@ fn bool pclaim_pat_wild(Node* c)
     return c.kind == Nk.N_PAT_WILDCARD;
 }
 
+// ── Nested function hoisting ────────────────────────────────────────────────
+// mod_has_fn — is there already a module-level function (definition or extern
+// declaration) with this name?
+fn bool AirLower.mod_has_fn(AirLower* lr, char* nm)
+{
+    if (nm == null) return false;
+    for (usz i = 0; i < lr.mod.decl_count; i++)
+    {
+        AirDecl* d = lr.mod.decls[i];
+        if (d == null || d.name == null) continue;
+        if (d.tag != ADECL_DEF && d.tag != ADECL_DECLARE) continue;
+        usz j = 0;
+        while (d.name[j] != 0 && nm[j] != 0) { if (d.name[j] != nm[j]) break; j++; }
+        if (d.name[j] == 0 && nm[j] == 0) return true;
+    }
+    return false;
+}
+
+// hoist_name_taken — is this AIR name already used by a previously hoisted local
+// function? Hoisted defs only enter the module at the end of the walk, so
+// mod_has_fn() cannot see them.
+fn bool AirLower.hoist_name_taken(AirLower* lr, char* nm)
+{
+    if (nm == null) return false;
+    for (usz i = 0; i < lr.hoist_count; i++)
+    {
+        char* h = lr.hoist_names[i];
+        if (h == null) continue;
+        usz j = 0;
+        while (h[j] != 0 && nm[j] != 0) { if (h[j] != nm[j]) break; j++; }
+        if (h[j] == 0 && nm[j] == 0) return true;
+    }
+    return false;
+}
+
+// hoist_local_fn — a `fn` declared inside a body: pick an AIR name for its
+// definition and bind the SOURCE name in the current scope, so call sites in
+// this body resolve to it (AirScope.bind_as keeps key and emitted name apart).
+// The definition is emitted later, from module_body().
+fn char* AirLower.hoist_local_fn(AirLower* lr, Node* n)
+{
+    if (n == null) return null;
+    for (usz i = 0; i < lr.hoist_count; i++)
+    {
+        if (lr.hoist_nodes[i] == n) { return lr.hoist_names[i]; }
+    }
+    char* base = node_text(n, lr.it);
+    if (base == null || base[0] == 0) { base = (char*)"_fn"; }
+    // Free AIR name: the plain name when nothing else uses it, else `base$N`.
+    // C3 identifiers cannot contain '$', so a mangled name never collides with
+    // a user-written one.
+    char* air = base;
+    for (usz n2 = 1; n2 < 1000; n2++)
+    {
+        if (!lr.scope.air_name_used(air) && !lr.mod_has_fn(air) && !lr.hoist_name_taken(air)) { break; }
+        (void)snprintf(&lr.tmp[0], 256, "%s$%d", base, (int)n2);
+        air = lr.dup(&lr.tmp[0]);
+    }
+    char* bound = lr.scope.bind_as(base, air, n);
+    if (lr.hoist_count < 64)
+    {
+        lr.hoist_nodes[lr.hoist_count] = n;
+        lr.hoist_names[lr.hoist_count] = bound;
+        lr.hoist_count++;
+    }
+    return bound;
+}
+
 fn AirCmd* AirLower.stmts(AirLower* lr, Node* container, char* k, bool tail_is_k)
 {
     if (container == null || container.child_count == 0)
@@ -893,6 +973,13 @@ fn AirCmd* AirLower.stmts(AirLower* lr, Node* container, char* k, bool tail_is_k
     {
         Node* ps = container.children[pi];
         if (ps == null) continue;
+        if (ps.kind == Nk.N_DECL_FN)
+        {
+            // Nested function: bind its name now so the tail lowered below
+            // resolves calls to it; the definition is emitted after the walk.
+            (void)lr.hoist_local_fn(ps);
+            continue;
+        }
         if (ps.kind != Nk.N_DECL_LET && ps.kind != Nk.N_DECL_CONST
          && ps.kind != Nk.N_DECL_STATIC) continue;
         if (lr.scope.lookup_decl(ps) != null) continue;    // already bound
@@ -1284,8 +1371,14 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         {
             char* nm = node_text(n, lr.it);
             if (nm == null) nm = (char*)"_";
+            // A path can name a LOCAL binding (the resolver emits a plain
+            // function reference, including a call callee, as a path node), so
+            // consult the scope before falling back to the literal text —
+            // otherwise a nested function's definition and its call sites end up
+            // under different names and the call goes to the wrong function.
+            char* bound = lr.scope.lookup_var(nm);
             lr.total_prd++;
-            return lr.cut(air_ir::air_mk_var(lr.arena, lr.dup(nm)), k);
+            return lr.cut(air_ir::air_mk_var(lr.arena, bound != null ? bound : lr.dup(nm)), k);
         }
         case Nk.N_EXPR_TUPLE:       return lr.tuple_lit(n, k);
         case Nk.N_EXPR_ARRAY:       return lr.array_lit(n, k);
@@ -2822,7 +2915,13 @@ fn AirDecl* AirLower.decl(AirLower* lr, Node* n)
 
 fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
 {
-    char* nm = node_text(n, lr.it);
+    // A hoisted nested function is emitted under the AIR name chosen for it.
+    char* nm = null;
+    for (usz hi = 0; hi < lr.hoist_count; hi++)
+    {
+        if (lr.hoist_nodes[hi] == n) { nm = lr.hoist_names[hi]; break; }
+    }
+    if (nm == null) nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"_fn";
     char* nm2 = lr.dup(nm);
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DEF, nm2);
@@ -3346,5 +3445,11 @@ fn void AirLower.module_body(AirLower* lr, Node* root)
     // and any accidental free `return` at module scope).
     (void)lr.scope.bind_covar("%ret", root);
     lr.walk_decls(root);
+    // Emit nested functions collected while lowering bodies (hoist_local_fn).
+    for (usz i = 0; i < lr.hoist_count; i++)
+    {
+        Node* fn_node = lr.hoist_nodes[i];
+        if (fn_node != null) { lr.decl_inner(fn_node); }
+    }
     lr.scope.leave();
 }

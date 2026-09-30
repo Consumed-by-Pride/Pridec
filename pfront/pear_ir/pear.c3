@@ -1234,6 +1234,52 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
 
 // ── Function emission ────────────────────────────────────────────────
 
+// ── Function symbols ────────────────────────────────────────────────────────
+// One LLVM function per source function: the type is derived from the AirDecl
+// (each parameter is widened to i64 unless it carries an annotation, and a void
+// return maps to void), and the function is created once and then reused.
+//
+// This matters because calls resolve their callee by NAME (prd_i64 ->
+// ll_get_named_fn). Emitting bodies in declaration order meant a call to a
+// function defined LATER in the file found no symbol, and the call site fell
+// back to `callee = ll_const_int(i64, 0)` — a call to address 0, so the program
+// compiled, linked, and then segfaulted on the first forward call:
+//   fn main(_) -> i64 { return g(41); }   // g defined below
+//   fn g(x: i64) -> i64 { return x + 1; }   -> SIGSEGV (139), want 42
+fn Ltype pear_fn_type(PearCg* cg, AirDecl* d, Ltype* ptys, char** pnms, uint* pc_out)
+{
+    uint pc = (uint)d.param_count;
+    if (pc > 16) pc = 16;
+    for (uint i = 0; i < pc; i++)
+    {
+        AirBinder* p = d.params[i];
+        ptys[i] = cg.i64ty;
+        if (pnms != null) { pnms[i] = (p != null && p.name != null) ? p.name : (char*)"_"; }
+        if (p != null && p.ty != null && !pear_is_void(p.ty)) { ptys[i] = pear_llvm_ty(cg, p.ty); }
+    }
+    *pc_out = pc;
+    Ltype rty = pear_is_void(d.ret_ty) ? cg.voidty : pear_llvm_ty(cg, d.ret_ty);
+    return ll_fn_ty(rty, &ptys[0], pc, 0);
+}
+
+// Get the LLVM function for `d`, creating it if this is the first mention. A
+// pre-pass in pear_setup() calls this for every definition so that all functions
+// are visible to each other regardless of source order; pear_emit_fn() calls it
+// again and receives the same symbol, so the body lands in the pre-created
+// function instead of a duplicate (`LLVMAddFunction` renames collisions).
+fn Lvalue pear_fn_get_or_create(PearCg* cg, AirDecl* d)
+{
+    if (d == null) return null;
+    char* nm = d.name; if (nm == null) nm = (char*)"_anon";
+    Lvalue existing = ll_get_named_fn(cg.mod, nm);
+    if (existing != null) return existing;
+    Ltype[16] ptys;
+    char*[16] pnms;
+    uint pc = 0;
+    Ltype fty = pear_fn_type(cg, d, &ptys[0], &pnms[0], &pc);
+    return ll_add_fn(cg.mod, nm, fty);
+}
+
 fn void pear_emit_fn(PearCg* cg, AirDecl* d)
 {
     if (d == null) return;
@@ -1241,25 +1287,11 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     cg.tmp = 0; cg.blk = 0; cg.name_n = 0; cg.lbl_n = 0;
     for (uint i = 0; i < 32; i++) cg.lbl_kfilled[i] = false;
     cg.cur_k_bb = null;
-    bool is_void = pear_is_void(d.ret_ty);
-
     Ltype[16] ptys;
     char*[16] pnms;
-    uint pc = (uint)d.param_count;
-    if (pc > 16) pc = 16;
-    for (uint i = 0; i < pc; i++)
-    {
-        AirBinder* p = d.params[i];
-        ptys[i] = cg.i64ty;
-        pnms[i] = (p != null && p.name != null) ? p.name : "_";
-        if (p != null && p.ty != null && !pear_is_void(p.ty))
-        {
-            ptys[i] = pear_llvm_ty(cg, p.ty);
-        }
-    }
-    Ltype rty = is_void ? cg.voidty : pear_llvm_ty(cg, d.ret_ty);
-    Ltype fty = ll_fn_ty(rty, &ptys[0], pc, 0);
-    Lvalue fnv = ll_add_fn(cg.mod, nm, fty);
+    uint pc = 0;
+    (void)pear_fn_type(cg, d, &ptys[0], &pnms[0], &pc);
+    Lvalue fnv = pear_fn_get_or_create(cg, d);
     cg.cur_fn = fnv;
     // TWO BBs at function entry:
     //   entry (alloca-only) — holds all alloca instructions (static slots).
@@ -1289,7 +1321,7 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     }
     if (!term)
     {
-        if (is_void) { ll_build_ret_void(cg.b); cg.terminated = true; }
+        if (pear_is_void(d.ret_ty)) { ll_build_ret_void(cg.b); cg.terminated = true; }
         else { ll_build_ret(cg.b, ll_const_int(cg.i64ty, 0, 0)); }
     }
     // Close entry BB: branch from entry → body. Entry now ends in a br
@@ -1443,6 +1475,15 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
         AirDecl* d = mod.decls[i];
         if (d == null) continue;
         if (d.tag == ADECL_DECLARE) { pear_declare(cg, d); }
+    }
+    // Pre-create EVERY definition as an LLVM function before any body is
+    // emitted, so calls resolve regardless of source order (a forward call used
+    // to become a call to address 0 — see pear_fn_get_or_create).
+    for (uint i = 0; i < mod.decl_count; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d == null) continue;
+        if (d.tag == ADECL_DEF) { (void)pear_fn_get_or_create(cg, d); }
     }
     for (uint i = 0; i < mod.decl_count; i++)
     {

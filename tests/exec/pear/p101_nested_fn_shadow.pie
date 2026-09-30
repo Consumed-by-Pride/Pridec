@@ -1,0 +1,10 @@
+-- EXIT: 12
+-- A nested function that shadows a top-level one of the same name: the nested
+-- definition is mangled (inner$1) while every call inside that body still says
+-- `inner`, so AirScope.bind_as() keeps the lookup key and the emitted AIR name
+-- apart. f(0) = inner(1) with the LOCAL inner = 6; inner(3) at top level uses the
+-- global (3*2 = 6); 6 + 6 = 12. (Before the fix this returned 200: both calls
+-- went to the global.)
+fn inner(a: i64) -> i64 { return a * 2; }
+fn f(_) -> i64 { fn inner(a: i64) -> i64 { return a + 5; } return inner(1); }
+fn main(_) -> i64 { return f(0) + inner(3); }

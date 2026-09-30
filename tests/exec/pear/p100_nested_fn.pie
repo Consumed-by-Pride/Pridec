@@ -1,0 +1,7 @@
+-- EXIT: 3
+-- A `fn` declared inside a body was lowered to a nop, so the AIR kept the call
+-- `<inner|call(3; %ret_2)>` with no matching definition; codegen resolved the
+-- callee to null and called address 0 (exit 139). Nested functions are now
+-- hoisted to top-level defs after the walk, and their names are bound in the
+-- enclosing scope so call sites resolve to them.
+fn main(_) -> i64 { fn inner(a: i64) -> i64 { return a; } return inner(3); }

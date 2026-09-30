@@ -96,6 +96,37 @@ fn char* AirScope.bind(AirScope* s, char* src_nm, bool is_covar, PNode* decl) {
     s.local_count++; return nm;
 }
 fn char* AirScope.bind_var(AirScope* s, char* nm, PNode* decl) { return s.bind(nm, false, decl); }
+
+// bind_as — bind with DISTINCT lookup key and AIR name. `src_nm` is what call
+// sites look up (the source identifier); `air_nm` is the identifier emitted in
+// the IR. bind() derives the AIR name from shadow counts, which is right for
+// variables but wrong for a hoisted nested function whose definition must be
+// mangled (inner$1) while every call site in the body still says `inner`:
+// passing the mangled string to bind() would also use it as the lookup key, so
+// the calls would miss and silently resolve to whatever global shared the name.
+fn char* AirScope.bind_as(AirScope* s, char* src_nm, char* air_nm, PNode* decl) {
+    if (s.local_count >= AIR_SCOPE_LOCALS) return (char*)"_err";
+    char* key = (src_nm == null || src_nm[0] == 0) ? (char*)"_" : src_nm;
+    char* air = (air_nm == null || air_nm[0] == 0) ? (char*)"_err" : air_nm;
+    AirLocal* loc_ = &s.locals[s.local_count];
+    loc_.source_name = s.arena.dup(key, (usz)air_cstrlen(key));
+    loc_.air_name = s.arena.dup(air, (usz)air_cstrlen(air));
+    loc_.is_covar = false;
+    loc_.depth = s.depth;
+    loc_.decl = decl;
+    s.local_count++;
+    return loc_.air_name;
+}
+
+// air_name_used — is this AIR name already taken by a live binding? A hoisted
+// function must not share an AIR name with a local variable of the same name.
+fn bool AirScope.air_name_used(AirScope* s, char* nm) {
+    if (nm == null) return false;
+    for (usz i = 0; i < s.local_count; i++) {
+        if (streq(s.locals[i].air_name, nm)) return true;
+    }
+    return false;
+}
 fn char* AirScope.bind_covar(AirScope* s, char* nm, PNode* decl) { return s.bind(nm, true, decl); }
 
 fn char* AirScope.lookup(AirScope* s, char* src_nm, bool is_covar) {

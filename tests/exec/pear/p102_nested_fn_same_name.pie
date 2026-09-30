@@ -1,0 +1,8 @@
+-- EXIT: 31
+-- Two different bodies each declaring a local helper with the SAME name: the
+-- first keeps the plain name, the second is mangled to inner$1, and each body's
+-- calls bind to its own definition. f = 1+1 = 2, g = 1+10 = 11, 2*10 + 11 = 31.
+-- (Before the fix both calls went to the first definition: 22.)
+fn f(_) -> i64 { fn inner(a: i64) -> i64 { return a + 1; } return inner(1); }
+fn g(_) -> i64 { fn inner(a: i64) -> i64 { return a + 10; } return inner(1); }
+fn main(_) -> i64 { return f(0) * 10 + g(0); }
