@@ -634,10 +634,21 @@ fn Node* Sccp.replace_const(Sccp* s, Node* n)
 }
 
 // Walk tree, replacing nodes with constant values and folding constant ifs.
+// Added depth limit to prevent stack overflow on 50k-op chains (Agent-4 §7).
 fn Node* Sccp.apply(Sccp* s, Node* n)
+{
+    return s.apply_depth(n, 0);
+}
+
+fn Node* Sccp.apply_depth(Sccp* s, Node* n, int depth)
 {
     if (n == null) return null;
     if (n.kind == Nk.N_INVALID) return n;
+    if (depth > 500)
+    {
+        // Too deep — stop recursing, just try to replace this node without descending further.
+        return s.replace_const(n);
+    }
 
     // Fold if-constant: if cond is CONST, replace with live arm only.
     if (n.kind == Nk.N_EXPR_IF && n.child_count >= 3)
@@ -645,7 +656,7 @@ fn Node* Sccp.apply(Sccp* s, Node* n)
         // Recurse into children first so the cond is simplified.
         for (usz i = 0; i < n.child_count; i++)
         {
-            n.set_child(i, s.apply(n.children[i]));
+            n.set_child(i, s.apply_depth(n.children[i], depth + 1));
         }
         Node* cond = n.children[0];
         if (cond != null && cond.kind == Nk.N_EXPR_BOOL)
@@ -669,7 +680,7 @@ fn Node* Sccp.apply(Sccp* s, Node* n)
     {
         for (usz i = 0; i < n.child_count; i++)
         {
-            n.set_child(i, s.apply(n.children[i]));
+            n.set_child(i, s.apply_depth(n.children[i], depth + 1));
         }
         Node* cond = n.children[0];
         if (cond != null && cond.kind == Nk.N_EXPR_BOOL && cond.p.ival == 0)
@@ -692,7 +703,7 @@ fn Node* Sccp.apply(Sccp* s, Node* n)
     for (usz i = 0; i < n.child_count; i++)
     {
         if (lhs_is_place && i == 0) continue;
-        n.set_child(i, s.apply(n.children[i]));
+        n.set_child(i, s.apply_depth(n.children[i], depth + 1));
     }
     return s.replace_const(n);
 }

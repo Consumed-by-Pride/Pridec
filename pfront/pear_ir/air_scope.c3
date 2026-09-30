@@ -8,10 +8,10 @@ import air_ir;
 extern fn void* memset(void* dst, int v, usz n);
 extern fn int   snprintf(char* buf, usz n, char* fmt, ...);
 
-const usz AIR_SCOPE_LOCALS = 256;
-const usz AIR_SCOPE_SCRATCH = 128;
-const int AIR_SCOPE_DEPTH = 128;
-const int AIR_SCOPE_LABELS = 64;
+const usz AIR_SCOPE_LOCALS = 2048;
+const usz AIR_SCOPE_SCRATCH = 256;
+const int AIR_SCOPE_DEPTH = 256;
+const int AIR_SCOPE_LABELS = 256;
 
 struct AirLocal {
     char* source_name; char* air_name; bool is_covar; int depth; PNode* decl;
@@ -25,7 +25,7 @@ struct AirScope {
     AirLocal[AIR_SCOPE_LOCALS] locals; usz local_count;
     int[AIR_SCOPE_DEPTH] depth_marks; int depth_mark_count;
     AirLoopLabel[AIR_SCOPE_LABELS] loops; int loop_count;
-    char*[64] rets; int ret_count;
+    char*[256] rets; int ret_count;
     char[AIR_SCOPE_SCRATCH] scratch;
 }
 
@@ -57,7 +57,7 @@ fn void AirScope.leave(AirScope* s) {
 // than the outer one.
 fn char* AirScope.push_ret(AirScope* s, char* nm) {
     char* bound = s.bind_covar(nm, null);
-    if (s.ret_count < 64) { s.rets[s.ret_count] = bound; s.ret_count++; }
+    if (s.ret_count < 256) { s.rets[s.ret_count] = bound; s.ret_count++; }
     return bound;
 }
 fn void AirScope.pop_ret(AirScope* s) {

@@ -248,6 +248,7 @@ import air_scope;
 import air_types;
 
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
+extern fn int printf(char* fmt, ...);
 
 alias Node = pfront_core::PNode;
 alias Nk   = pfront_core::NodeKind;
@@ -1233,6 +1234,9 @@ fn bool terminal_escapes(AirCmd* c, char* alpha)
 // subsequent let.
 fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
 {
+    // printf("DEBUG letlike ENTRY\n");
+    // For testing, if nm is b, force trap to see if called
+    // if (s != null && s.name_id != 0) { printf("letlike called\n"); }
     if (s.child_count == 0) return rest;
 
     // Detect wildcard pattern vs named binder.
@@ -1247,14 +1251,37 @@ fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
     if (!wildcard && nm != null && nm[0] == '_' && nm[1] == 0) wildcard = true;
 
     Node* val = null;
+    Node* pat_node = null;
     for (usz i = 0; i < s.child_count; i++)
     {
         Node* c = s.children[i];
         if (c == null) continue;
         if (c.kind == Nk.N_DECL_TYPEPARAM || c.kind == Nk.N_DECL_PARAM) continue;
-        if (pfront_core::is_pattern(c.kind)) continue;
+        if (pfront_core::is_pattern(c.kind))
+        {
+            if (pat_node == null) pat_node = c;
+            continue;
+        }
         val = c;
         break;
+    }
+
+    // Effective type annotation: let node may have it, or its pattern child may
+    // (e.g. `let a: u8 = 255` parses type on pat-ident, not on let itself).
+    Node* eff_type_ann = s.type_ann;
+    if (eff_type_ann == null && pat_node != null)
+    {
+        eff_type_ann = pat_node.type_ann;
+        // Also check nested pat-ident if pat_node is tuple/struct etc? For now check first child
+        if (eff_type_ann == null && pat_node.child_count > 0)
+        {
+            // pat_node may contain nested pattern with type_ann (unlikely)
+            for (usz pi = 0; pi < pat_node.child_count; pi++)
+            {
+                Node* pc = pat_node.children[pi];
+                if (pc != null && pc.type_ann != null) { eff_type_ann = pc.type_ann; break; }
+            }
+        }
     }
 
     if (wildcard)
@@ -1280,12 +1307,106 @@ fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
     if (is_value_node(val))
     {
         AirPrd* vp = lr.prd(val);
+        // Truncate narrow types to fix Agent-4 §18: narrow-type arithmetic compared untruncated
+        // If let has explicit type annotation like u8/i16, truncate the value before binding
+        // eff_type_ann handles both `let x: u8` (type on let) and `let a: u8` parsed as pat-ident type
+        if (eff_type_ann != null)
+        {
+            AirTyp* aty = air_types::air_ty(lr.mod, eff_type_ann, lr.it);
+            if (aty != null)
+            {
+                if (aty.tag == ATYP_U8)
+                {
+                    AirPrd* mask = air_ir::air_mk_int(lr.arena, 255);
+                    vp = air_ir::air_mk_binop(lr.arena, ABIN_AND, vp, mask);
+                }
+                else if (aty.tag == ATYP_I8)
+                {
+                    AirPrd* sh = air_ir::air_mk_int(lr.arena, 56);
+                    AirPrd* tmp = air_ir::air_mk_binop(lr.arena, ABIN_SHL, vp, sh);
+                    vp = air_ir::air_mk_binop(lr.arena, ABIN_SHR, tmp, sh);
+                }
+                else if (aty.tag == ATYP_U16)
+                {
+                    AirPrd* mask = air_ir::air_mk_int(lr.arena, 65535);
+                    vp = air_ir::air_mk_binop(lr.arena, ABIN_AND, vp, mask);
+                }
+                else if (aty.tag == ATYP_I16)
+                {
+                    AirPrd* sh = air_ir::air_mk_int(lr.arena, 48);
+                    AirPrd* tmp = air_ir::air_mk_binop(lr.arena, ABIN_SHL, vp, sh);
+                    vp = air_ir::air_mk_binop(lr.arena, ABIN_SHR, tmp, sh);
+                }
+                else if (aty.tag == ATYP_U32)
+                {
+                    AirPrd* mask = air_ir::air_mk_int(lr.arena, 4294967295);
+                    vp = air_ir::air_mk_binop(lr.arena, ABIN_AND, vp, mask);
+                }
+                else if (aty.tag == ATYP_I32)
+                {
+                    AirPrd* sh = air_ir::air_mk_int(lr.arena, 32);
+                    AirPrd* tmp = air_ir::air_mk_binop(lr.arena, ABIN_SHL, vp, sh);
+                    vp = air_ir::air_mk_binop(lr.arena, ABIN_SHR, tmp, sh);
+                }
+                else if (aty.tag == ATYP_BOOL)
+                {
+                    AirPrd* mask = air_ir::air_mk_int(lr.arena, 1);
+                    vp = air_ir::air_mk_binop(lr.arena, ABIN_AND, vp, mask);
+                }
+            }
+        }
         lr.lets++;
         return air_ir::air_mk_let(lr.arena, x, vp, rest);
     }
     // Compound init: evaluate it into a fresh μ̃-bound xv, then let x=xv in rest.
     char* xv = lr.fresh_x();
     AirPrd* xp = air_ir::air_mk_var(lr.arena, xv);
+    // Truncate narrow types for compound inits too (same fix as value case)
+    if (eff_type_ann != null)
+    {
+        AirTyp* aty2 = air_types::air_ty(lr.mod, eff_type_ann, lr.it);
+        if (aty2 != null)
+        {
+            if (aty2.tag == ATYP_U8)
+            {
+                AirPrd* mask = air_ir::air_mk_int(lr.arena, 255);
+                xp = air_ir::air_mk_binop(lr.arena, ABIN_AND, xp, mask);
+            }
+            else if (aty2.tag == ATYP_I8)
+            {
+                AirPrd* sh = air_ir::air_mk_int(lr.arena, 56);
+                AirPrd* tmp = air_ir::air_mk_binop(lr.arena, ABIN_SHL, xp, sh);
+                xp = air_ir::air_mk_binop(lr.arena, ABIN_SHR, tmp, sh);
+            }
+            else if (aty2.tag == ATYP_U16)
+            {
+                AirPrd* mask = air_ir::air_mk_int(lr.arena, 65535);
+                xp = air_ir::air_mk_binop(lr.arena, ABIN_AND, xp, mask);
+            }
+            else if (aty2.tag == ATYP_I16)
+            {
+                AirPrd* sh = air_ir::air_mk_int(lr.arena, 48);
+                AirPrd* tmp = air_ir::air_mk_binop(lr.arena, ABIN_SHL, xp, sh);
+                xp = air_ir::air_mk_binop(lr.arena, ABIN_SHR, tmp, sh);
+            }
+            else if (aty2.tag == ATYP_U32)
+            {
+                AirPrd* mask = air_ir::air_mk_int(lr.arena, 4294967295);
+                xp = air_ir::air_mk_binop(lr.arena, ABIN_AND, xp, mask);
+            }
+            else if (aty2.tag == ATYP_I32)
+            {
+                AirPrd* sh = air_ir::air_mk_int(lr.arena, 32);
+                AirPrd* tmp = air_ir::air_mk_binop(lr.arena, ABIN_SHL, xp, sh);
+                xp = air_ir::air_mk_binop(lr.arena, ABIN_SHR, tmp, sh);
+            }
+            else if (aty2.tag == ATYP_BOOL)
+            {
+                AirPrd* mask = air_ir::air_mk_int(lr.arena, 1);
+                xp = air_ir::air_mk_binop(lr.arena, ABIN_AND, xp, mask);
+            }
+        }
+    }
     lr.lets++;
     AirCmd* bind = air_ir::air_mk_let(lr.arena, x, xp, rest);
     return lr.expr_to_cns(val, air_ir::air_mk_comu_cns(lr.arena, xv, bind));
@@ -1434,8 +1555,8 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         case Nk.N_EXPR_IF:        return lr.if_(n, k);
         case Nk.N_EXPR_MATCH:     return lr.match_(n, k);
         case Nk.N_EXPR_WHILE:
-        case Nk.N_EXPR_LOOP:
-        case Nk.N_EXPR_FOR:       return lr.loop_(n, k);
+        case Nk.N_EXPR_LOOP:      return lr.loop_(n, k);
+        case Nk.N_EXPR_FOR:       return lr.for_(n, k);
         case Nk.N_EXPR_LAMBDA:    return lr.lambda(n, k);
         case Nk.N_EXPR_BINARY:    return lr.binop(n, k);
         case Nk.N_EXPR_UNARY:     return lr.unop(n, k);
@@ -2315,6 +2436,100 @@ fn AirCmd* AirLower.match_(AirLower* lr, Node* n, AirCns* k)
     AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
     lr.scope.leave();
     return out;
+}
+
+fn AirCmd* AirLower.for_(AirLower* lr, Node* n, AirCns* k)
+{
+    if (n.child_count < 3)
+    {
+        return lr.cut(lr.mod.p_unit, k);
+    }
+    Node* pat = n.children[0];
+    Node* iter = n.children[1];
+    Node* body = n.children[2];
+
+    if (iter == null || iter.kind != Nk.N_EXPR_RANGE)
+    {
+        lr.scope.enter();
+        char* pat_nm = null;
+        if (pat != null) { pat_nm = node_text(pat, lr.it); }
+        if (pat_nm == null || pat_nm[0] == 0) { pat_nm = (char*)"_"; }
+        char* pat_bound = lr.scope.bind_var(pat_nm, pat);
+        AirPrd* iter_prd = lr.prd_or_bind(iter);
+        AirCmd* body_cmd = body != null ? lr.expr_to_cns(body, k) : lr.cut(lr.mod.p_unit, k);
+        AirCmd* let_pat = air_ir::air_mk_let(lr.arena, pat_bound, iter_prd, body_cmd);
+        lr.scope.leave();
+        return let_pat;
+    }
+
+    Node* left = iter.child_count > 0 ? iter.children[0] : null;
+    Node* right = iter.child_count > 1 ? iter.children[1] : null;
+    bool inclusive = (iter.flags & pfront_core::NF_INCLUSIVE) != 0;
+
+    lr.scope.enter();
+    char* i_name = lr.fresh_x();
+    char* end_name = lr.fresh_x();
+
+    AirPrd* left_prd = left != null ? lr.prd_or_bind(left) : air_ir::air_mk_int(lr.arena, 0);
+    AirPrd* right_prd = right != null ? lr.prd_or_bind(right) : air_ir::air_mk_int(lr.arena, 0);
+
+    char* brk = lr.fresh_lbl("exit");
+    char* cont = lr.fresh_lbl("loop");
+    lr.scope.push_loop(brk, cont);
+
+    lr.scope.enter();
+    char* pat_nm = null;
+    if (pat != null) { pat_nm = node_text(pat, lr.it); }
+    if (pat_nm == null || pat_nm[0] == 0) { pat_nm = (char*)"_"; }
+    char* pat_bound = lr.scope.bind_var(pat_nm, pat);
+
+    char* after_body = lr.fresh_k();
+    AirCmd* user_body_cmd = body != null ? lr.cmd(body, after_body) : lr.cut(lr.mod.p_unit, lr.cns_k(after_body));
+
+    AirPrd* i_var_inc = air_ir::air_mk_var(lr.arena, lr.dup(i_name));
+    AirPrd* one = air_ir::air_mk_int(lr.arena, 1);
+    AirPrd* inc_prd = air_ir::air_mk_binop(lr.arena, ABIN_ADD, i_var_inc, one);
+    AirCmd* jmp_cont = air_ir::air_mk_jump0(lr.arena, cont);
+    AirCmd* let_inc = air_ir::air_mk_let(lr.arena, i_name, inc_prd, jmp_cont);
+
+    AirCmd* body_seq = air_ir::air_mk_seq(lr.arena, user_body_cmd, let_inc);
+
+    AirPrd* i_var_pat = air_ir::air_mk_var(lr.arena, lr.dup(i_name));
+    AirCmd* let_pat = air_ir::air_mk_let(lr.arena, pat_bound, i_var_pat, body_seq);
+
+    lr.scope.leave();
+
+    AirPrd* i_for_cond = air_ir::air_mk_var(lr.arena, lr.dup(i_name));
+    AirPrd* end_for_cond = air_ir::air_mk_var(lr.arena, lr.dup(end_name));
+    AirBinop cmp_op = inclusive ? ABIN_LE : ABIN_LT;
+    AirPrd* cond_prd = air_ir::air_mk_binop(lr.arena, cmp_op, i_for_cond, end_for_cond);
+
+    AirBranch*[2] bs;
+    bs[0] = air_ir::air_mk_branch(lr.arena, air_ir::air_mk_pat_bool(lr.arena, true), let_pat);
+    lr.jumps++;
+    bs[1] = air_ir::air_mk_branch(lr.arena, air_ir::air_mk_pat_bool(lr.arena, false), air_ir::air_mk_jump0(lr.arena, brk));
+    lr.total_cns++;
+    AirCmd* cond_cut = lr.cut(cond_prd, air_ir::air_mk_case(lr.arena, &bs[0], 2));
+
+    AirBinder*[1] no_args_arr;
+    no_args_arr[0] = null;
+    lr.labels++;
+    AirCmd* loop_lbl = air_ir::air_mk_label(lr.arena, cont, &no_args_arr[0], 0, cond_cut);
+    lr.jumps++;
+    AirCmd* jmp_loop = air_ir::air_mk_jump0(lr.arena, cont);
+    AirCmd* exit_body = lr.cut(lr.mod.p_unit, k);
+    lr.labels++;
+    AirCmd* exit_lbl = air_ir::air_mk_label(lr.arena, brk, &no_args_arr[0], 0, exit_body);
+    AirCmd* out = air_ir::air_mk_seq(lr.arena,
+        air_ir::air_mk_seq(lr.arena, exit_lbl,
+            air_ir::air_mk_seq(lr.arena, loop_lbl, jmp_loop)), null);
+
+    AirCmd* let_i = air_ir::air_mk_let(lr.arena, i_name, left_prd, out);
+    AirCmd* let_end = air_ir::air_mk_let(lr.arena, end_name, right_prd, let_i);
+
+    lr.scope.pop_loop();
+    lr.scope.leave();
+    return let_end;
 }
 
 fn AirCmd* AirLower.loop_(AirLower* lr, Node* n, AirCns* k)

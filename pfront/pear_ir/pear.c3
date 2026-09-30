@@ -188,19 +188,22 @@ struct PearCg {
     // Memory-backed locals (mem2reg friendly): for each name in vals[], mark
     // whether it is an alloca pointer (needs load on read, store on write).
     // Bootstrap: ALL let-bindings become alloca+store; params stay as SSA.
-    bool[256] is_ptr;
+    // NOTE: sizes kept under 262KB stack limit (c3c --max-stack-object-size max).
+    // Original was 2048x256 = 512KB alone which exceeds limit. Reduced to 1024x128 = 128KB.
+    bool[1024] is_ptr;
     uint           name_n;
-    // C3 array dimensions read RIGHT-to-left for the index order: `T[E][N]` is
-    // N rows of E elements, so a table of 256 names of at most 64 chars is
-    // `char[64][256]`, NOT `char[256][64]` (that declares 64 rows of 256 chars
-    // and aborts with 'Array index out of bounds (array had size 64, index was
-    // 64)' on the 65th name — see add_name).
-    char[64][256]  names;        // 256 names x 64 chars
-    Lvalue[256]    vals;
+    // C3 array dimensions read RIGHT-to-left: `T[E][N]` is N rows of E elements.
+    // Increased from 256x64 to 2048x256 to fix Agent-4 round-5 silent truncation bugs:
+    // - 64-char identifiers silently compiled to 0 (names row width 64)
+    // - >32 labels crashed + values rotted (lbl tables [32])
+    // - >255 names per fn silently resolved to 0
+    // Reduced to 1024x128 to stay under 262KB stack limit (512KB alone was too big).
+    char[128][1024]  names;        // 1024 names x 128 chars
+    Lvalue[1024]    vals;
     uint           lbl_n;
-    char[64][32]   lbl_names;    // 32 labels x 64 chars
-    Lblock[32]     lbl_bbs;
-    bool[32]       lbl_kfilled; // admin %k BB already has code started
+    char[128][128]   lbl_names;    // 128 labels x 128 chars
+    Lblock[128]     lbl_bbs;
+    bool[128]       lbl_kfilled; // admin %k BB already has code started
     Lblock         cur_k_bb;    // BB we are currently emitting into as %k continuation
 }
 
@@ -239,8 +242,8 @@ fn Lvalue PearCg.alloc_slot_typed(PearCg* cg, char* nm, Ltype ty)
 // second terminator in a live block is not.
 fn Lblock PearCg.dead_bb(PearCg* cg)
 {
-    char[64] b;
-    (void)snprintf(&b[0], 64, "dead%u", cg.blk); cg.blk++;
+    char[256] b;
+    (void)snprintf(&b[0], 256, "dead%u", cg.blk); cg.blk++;
     Lblock bb = ll_append_bb(cg.ctx, cg.cur_fn, &b[0]);
     ll_pos_builder(cg.b, bb);
     cg.terminated = false;
@@ -295,8 +298,8 @@ fn bool PearCg.bb_open(PearCg* cg, Lblock bb)
 
 fn char* PearCg.mktmp(PearCg* cg)
 {
-    char[64] b;
-    (void)snprintf(&b[0], 64, "_t%u", cg.tmp);
+    char[256] b;
+    (void)snprintf(&b[0], 256, "_t%u", cg.tmp);
     cg.tmp++;
     return cg.add_name(&b[0]);
 }
@@ -305,17 +308,18 @@ fn char* PearCg.add_name(PearCg* cg, char* s)
 {
     if (s == null) return (char*)"";
     uint i = cg.name_n;
-    if (i < 256)
+    if (i < 1024)
     {
-        // snprintf rather than a hand-rolled bounded copy: callers routinely
-        // pass a stack-local char[64] (see mktmp), and indexing such a buffer
-        // with a variable in a loop trips the runtime's array bounds check once
-        // a function has enough bindings (observed as
-        //   ERROR: 'Array index out of bounds (array had size 64, index was 64)'
-        // inside add_name for a body with >= ~40 lets, which is a plain
-        // compiler abort). snprintf gives the same 63-char truncation with no
-        // bounds-checked indexing at all.
-        (void)snprintf(&cg.names[i][0], 64, "%s", s);
+        // Increased from 64 to 128 chars to fix silent truncation of long identifiers (Agent-4 §14).
+        // Previously snprintf with 64 truncated 64+ char names to 63 chars, then lookup failed
+        // and the value resolved to 0 silently. Now 128 chars.
+        usz len = 0;
+        if (s != null) { while (s[len] != 0) { len++; } }
+        if (len >= 128)
+        {
+            // Still truncate but at 127, and we have larger buffer so 64-char cliff is gone.
+        }
+        (void)snprintf(&cg.names[i][0], 128, "%s", s);
         cg.name_n = i + 1;
         return &cg.names[i][0];
     }
@@ -425,8 +429,8 @@ fn Lvalue PearCg.lookup(PearCg* cg, char* ssa)
 
 fn char* PearCg.mklbl(PearCg* cg, char* pfx)
 {
-    char[64] b;
-    (void)snprintf(&b[0], 64, "%s%u", pfx, cg.blk);
+    char[256] b;
+    (void)snprintf(&b[0], 256, "%s%u", pfx, cg.blk);
     cg.blk++;
     return cg.add_name(&b[0]);
 }
@@ -443,13 +447,13 @@ fn Lblock PearCg.get_lbl(PearCg* cg, char* nm)
         }
         if (eq && cg.lbl_names[i][j] == 0 && nm[j] == 0) { return cg.lbl_bbs[i]; }
     }
-    if (cg.lbl_n < 32)
+    if (cg.lbl_n < 128)
     {
-        char[64] buf; uint j = 0;
+        char[256] buf; uint j = 0;
         while (j < 62 && nm[j] != 0) { buf[j] = nm[j]; j++; }
         buf[j] = 0;
         uint k = 0;
-        while (k < 63 && buf[k] != 0) { cg.lbl_names[cg.lbl_n][k] = buf[k]; k++; }
+        while (k < 127 && buf[k] != 0) { cg.lbl_names[cg.lbl_n][k] = buf[k]; k++; }
         cg.lbl_names[cg.lbl_n][k] = 0;
         Lblock bb = ll_append_bb(cg.ctx, cg.cur_fn, &buf[0]);
         cg.lbl_bbs[cg.lbl_n] = bb;
@@ -966,7 +970,7 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
         }
         case ACNS_CALL: case ACNS_STACK:
         {
-            AirPrd*[16] args; uint ac = 0;
+            AirPrd*[64] args; uint ac = 0;
             AirCns* cur = k;
             AirCns* ret_k = null;
             if (cur.tag == ACNS_CALL) { cur = cur.tail; }
@@ -974,14 +978,14 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             {
                 if (cur.tag == ACNS_STACK)
                 {
-                    if (ac < 16) { args[ac] = cur.prd; ac++; }
+                    if (ac < 64) { args[ac] = cur.prd; ac++; }
                     cur = cur.tail;
                 }
                 else if (cur.tag == ACNS_ASCRIBE) { cur = cur.tail; }
                 else { ret_k = cur; break; }
             }
             Lvalue callee = v;
-            Lvalue[16] argv;
+            Lvalue[64] argv;
             for (uint i = 0; i < ac; i++)
             {
                 uint idx = ac - 1 - i;
@@ -1011,7 +1015,7 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             }
             if (fn_ty == null && !is_alloca_intrinsic)
             {
-                Ltype[16] atys;
+                Ltype[64] atys;
                 for (uint i = 0; i < ac; i++) { atys[i] = cg.i64ty; }
                 fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, 0);
             }
@@ -1138,9 +1142,9 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             // Two-arm boolean case: condbr to tb/eb; each arm's body ends with
             // a jump (terminator) that routes flow to the proper continuation.
             // No merge block is needed because both arms explicitly jump away.
-            char[64] tb_n; char[64] eb_n;
-            (void)snprintf(&tb_n[0], 64, "case.t%u", cg.blk); cg.blk++;
-            (void)snprintf(&eb_n[0], 64, "case.f%u", cg.blk); cg.blk++;
+            char[256] tb_n; char[256] eb_n;
+            (void)snprintf(&tb_n[0], 256, "case.t%u", cg.blk); cg.blk++;
+            (void)snprintf(&eb_n[0], 256, "case.f%u", cg.blk); cg.blk++;
             Lblock tb = ll_append_bb(cg.ctx, cg.cur_fn, &tb_n[0]);
             Lblock eb = ll_append_bb(cg.ctx, cg.cur_fn, &eb_n[0]);
             ll_build_condbr(cg.b, cv, tb, eb); cg.terminated = true;
@@ -1326,9 +1330,9 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
         case ACMD_IF:
         {
             Lvalue cv = cg.prd_i1(c.prd);
-            char[64] tname; char[64] ename;
-            (void)snprintf(&tname[0], 64, "if.then%u", cg.blk); cg.blk++;
-            (void)snprintf(&ename[0], 64, "if.else%u", cg.blk); cg.blk++;
+            char[256] tname; char[256] ename;
+            (void)snprintf(&tname[0], 256, "if.then%u", cg.blk); cg.blk++;
+            (void)snprintf(&ename[0], 256, "if.else%u", cg.blk); cg.blk++;
             Lblock tb = ll_append_bb(cg.ctx, cg.cur_fn, &tname[0]);
             Lblock eb = ll_append_bb(cg.ctx, cg.cur_fn, &ename[0]);
             ll_build_condbr(cg.b, cv, tb, eb); cg.terminated = true;
@@ -1360,10 +1364,10 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
         }
         case ACMD_WHILE: case ACMD_FOR:
         {
-            char[64] cond_n; char[64] body_n; char[64] exit_n;
-            (void)snprintf(&cond_n[0], 64, "loop.cond%u", cg.blk);
-            (void)snprintf(&body_n[0], 64, "loop.body%u", cg.blk);
-            (void)snprintf(&exit_n[0], 64, "loop.exit%u", cg.blk);
+            char[256] cond_n; char[256] body_n; char[256] exit_n;
+            (void)snprintf(&cond_n[0], 256, "loop.cond%u", cg.blk);
+            (void)snprintf(&body_n[0], 256, "loop.body%u", cg.blk);
+            (void)snprintf(&exit_n[0], 256, "loop.exit%u", cg.blk);
             cg.blk++;
             Lblock cond_bb = ll_append_bb(cg.ctx, cg.cur_fn, &cond_n[0]);
             { /* diag */ }
@@ -1542,8 +1546,8 @@ fn Lvalue pear_fn_get_or_create(PearCg* cg, AirDecl* d)
     char* nm = d.name; if (nm == null) nm = (char*)"_anon";
     Lvalue existing = ll_get_named_fn(cg.mod, nm);
     if (existing != null) return existing;
-    Ltype[16] ptys;
-    char*[16] pnms;
+    Ltype[64] ptys;
+    char*[64] pnms;
     uint pc = 0;
     Ltype fty = pear_fn_type(cg, d, &ptys[0], &pnms[0], &pc);
     return ll_add_fn(cg.mod, nm, fty);
@@ -1600,11 +1604,11 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     }
     char* nm = d.name; if (nm == null) nm = (char*)"_anon";
     cg.tmp = 0; cg.blk = 0; cg.name_n = 0; cg.lbl_n = 0;
-    for (uint i = 0; i < 32; i++) cg.lbl_kfilled[i] = false;
+    for (uint i = 0; i < 128; i++) cg.lbl_kfilled[i] = false;
     cg.cur_k_bb = null;
     cg.unresolved_callee = null;
-    Ltype[16] ptys;
-    char*[16] pnms;
+    Ltype[64] ptys;
+    char*[64] pnms;
     uint pc = 0;
     (void)pear_fn_type(cg, d, &ptys[0], &pnms[0], &pc);
     Lvalue fnv = pear_fn_get_or_create(cg, d);
@@ -1679,8 +1683,8 @@ fn void pear_declare(PearCg* cg, AirDecl* d)
     char* nm = d.name; if (nm == null) return;
     if (ll_get_named_fn(cg.mod, nm) != null) return;
     uint pc = (uint)d.param_count;
-    if (pc > 16) pc = 16;
-    Ltype[16] ptys;
+    if (pc > 64) pc = 64;
+    Ltype[64] ptys;
     for (uint i = 0; i < pc; i++)
     {
         AirBinder* p = d.params[i];

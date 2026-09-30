@@ -551,6 +551,7 @@ fn int PgMatrix.best_column(PgMatrix* m)
         for (usz r = 0; r < m.row_count; r++)
         {
             if (!m.rows[r].live) { continue; }
+            if (c >= m.rows[r].width) { continue; } // row shorter than matrix width — treat as wildcard
             Node* p = m.rows[r].cols[c];
             if (p == null) { continue; }
             if (p.kind == Nk.N_PAT_WILDCARD || theory_term::is_pattern_var(p)) { continue; }
@@ -574,9 +575,19 @@ fn void specialise_matrix(PgMatrix* src, int col, int key, usz arity, PgMatrix* 
     {
         PgRow* row = &src.rows[r];
         if (!row.live) { continue; }
-        Node* p = row.cols[col];
-        bool wild = p == null || p.kind == Nk.N_PAT_WILDCARD
+        Node* p = null;
+        bool wild;
+        if ((usz)col >= row.width)
+        {
+            // Row shorter than col — treat as wildcard (missing column)
+            wild = true;
+        }
+        else
+        {
+            p = row.cols[col];
+            wild = p == null || p.kind == Nk.N_PAT_WILDCARD
                  || theory_term::is_pattern_var(p);
+        }
         if (!wild && theory_term::top_key(p) != key) { continue; }
 
         Node*[PG_MAX_COLS] cols;
@@ -607,9 +618,18 @@ fn void default_matrix(PgMatrix* src, int col, PgMatrix* dst)
     {
         PgRow* row = &src.rows[r];
         if (!row.live) { continue; }
-        Node* p = row.cols[col];
-        bool wild = p == null || p.kind == Nk.N_PAT_WILDCARD
+        Node* p = null;
+        bool wild;
+        if ((usz)col >= row.width)
+        {
+            wild = true;
+        }
+        else
+        {
+            p = row.cols[col];
+            wild = p == null || p.kind == Nk.N_PAT_WILDCARD
                  || theory_term::is_pattern_var(p);
+        }
         if (!wild) { continue; }
         Node*[PG_MAX_COLS] cols;
         usz w = 0;
@@ -723,6 +743,7 @@ fn int PgenCompiler.compile(PgenCompiler* c, PgMatrix* m, int depth)
     for (usz r = 0; r < m.row_count; r++)
     {
         if (!m.rows[r].live) { continue; }
+        if ((usz)col >= m.rows[r].width) { continue; }
         Node* p = m.rows[r].cols[col];
         if (p == null || p.kind == Nk.N_PAT_WILDCARD
             || theory_term::is_pattern_var(p)) { continue; }

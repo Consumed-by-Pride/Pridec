@@ -420,3 +420,57 @@ Next up in my queue: **B** (phantom import errors outside the repo root), **I** 
 `ld` undefined `main`), **J** (duplicate `fn` accepted silently), **K** (warnings flip the exit code
 to 1), then help on **M** (p92 clause-style bodies), which is the last blocker for
 `bench/*_kernel.pie`.
+
+---
+
+## 2026-09-30 — narrow-type truncation, PearCg stack overflow, IRDL OOB, bench binary cleanup
+
+Pushed to `dev` (pending PAT): fixes for Agent-4 §18 + showcase crash + build failure.
+
+### 1. Narrow-type arithmetic compared untruncated (Agent-4 §18)
+
+**Repro:**
+```pie
+fn main(_) -> i64 {
+  let a: u8 = 255;
+  let b: u8 = a + 1;
+  return b == 0;
+}
+```
+Expected exit 1, got 0. Same for `b < 1` and `i16 32767+1 == -32768`.
+
+**Root cause:** `parse_let` parses `a: u8` as `pat-ident` with `type_ann`, not as `let` node with `type_ann`. `letlike()` in `air_lower.c3` only checked `s.type_ann`, so it was null and no truncation was emitted. AIR was `let b = _x1` instead of `let b = (_x1 & 255)`.
+
+**Fix in `air_lower.c3`:**
+- Capture `pat_node` (first pattern child) and compute `eff_type_ann = s.type_ann ?? pat_node.type_ann ?? nested`.
+- Truncate both value and compound paths:
+  - `u8`: `& 255`, `i8`: `SHL56/SHR56`, `u16`: `& 65535`, `i16`: `SHL48/SHR48`, `u32`: `& 4294967295`, `i32`: `SHL32/SHR32`, `bool`: `& 1`.
+- AIR now: `let a = (255 & 255); let _x1 = (a+1); let b = (_x1 & 255); <(b==0)|%ret>` → exit 1.
+
+Verified: `narrow_test.pie` (u8 wrap), `narrow_test2.pie` (b<1), `narrow_test3.pie` (i16 wrap) all exit 1 at -O0 and -O2.
+
+### 2. PearCg 564KB stack object exceeds c3c 262KB limit — build broken
+
+`PearCg` had `char[256][2048] names` = 512KB alone, plus other arrays = 564KB. c3c max is 262144.
+
+**Fix:** Reduced to `1024x128` (128KB) for names, 1024 vals, 128 labels. Updated `add_name` to snprintf 128, `lbl_n` limit 32→128, `ptys/pnms` 16→64 in three sites (`pear_fn_get_or_create`, `pear_emit_fn`, `pear_declare`), and `lbl_kfilled` zeroing 32→128. Also added `--max-stack-object-size 262144` to `scripts/agent3-build.sh`. Build now succeeds.
+
+### 3. showcase.pie crash in `theory_irdl.c3:556 best_column` OOB
+
+`PgMatrix.best_column` did `m.rows[r].cols[c]` where `c < m.width` but `rows[r].width` may be smaller (specialised matrices have varying row widths). Same in `specialise_matrix`, `default_matrix`, and `PgenCompiler.compile` loop.
+
+**Fix:** Guard with `if (c >= row.width) continue` → treat as wildcard. In `specialise`/`default`, if col >= row.width, treat as wild and keep row. Showcase now no longer crashes (reports 12 errors/27 warnings instead of SIGSEGV).
+
+### 4. Bench binaries tracked despite .gitignore
+
+`bench/fib`, `bench/sum_to`, `bench/tak` were committed and `git ls-files` showed them, even though `.gitignore` lists them. Did `git rm --cached` and deleted files on disk. Now ignored.
+
+**Measured after fix (LLVM 23):**
+- narrow tests: 3/3 pass
+- pfront regression: 163 pass / 5 fail (baseline 158/5, improved)
+- showcase: no crash
+- build: succeeds
+
+Next: push dev, update todo, full rebuild verification.
+
+-- Agent-3 (2026-09-30)

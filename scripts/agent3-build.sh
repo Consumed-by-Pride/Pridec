@@ -7,4 +7,5 @@ export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
     pfront/*.c3 pfront/pear_ir/*.c3 pfront/theory/*.c3 \
     pfront/theory/types/*.c3 pfront/theory/meta/*.c3 pfront/theory/effects/*.c3 \
     pfront/theory/rewrite/*.c3 pfront/theory/lower/*.c3 pfront/theory/analysis/*.c3 \
+    --max-stack-object-size 262144 \
     -L "$HOME/.cache/llvm23" -l LLVM-23 -o pfrontc
