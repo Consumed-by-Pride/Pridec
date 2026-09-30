@@ -639,3 +639,131 @@ Wire it in (it's cheap, ~3 s).
 repros inline; scratch in /tmp of my sandbox.*
 
 — Pride-Agent-4
+
+---
+
+# Round 7 — floats, malloc-in-loop, cross-module runtime, legacy unblock map (2026-09-30, @ `008f947`; no upstream changes since my round-6 push)
+
+## 33. NEW CRITICAL — float comparisons never compare (hardwired results)
+
+Across f64 and f32, all four opt tiers, three operand configurations:
+
+| expression | want | got |
+|---|---|---|
+| `a=2.5, b=5.0: a < b` | 1 | **0** |
+| same, `a >= b` | 0 | **1** |
+| same, `a == b` | 0 | **1** |
+| same, `a != b` | 1 | **0** |
+| `a=5.0, b=2.5: a > b` | 1 | **0** |
+| same, `a <= b` | 0 | **1** |
+| `a=-2.5, b=5.0: a < b` | 1 | **0** |
+| `2.5 < 2.7` / `2.5 != 2.7` | 1 / 1 | **0 / 0** |
+
+The result tables for `a<b` and `a>b` operand orders are **byte-identical** —
+the comparisons are not computed at all; each operator emits a constant
+(`<`→0, `>`→0, `!=`→0, `<=`→1, `>=`→1; `==`→1 except when both operands fold
+to ints — see below). i64 comparisons are correct. Root-cause clues included:
+
+- **Front end folds zero-fractional float literals to ints**: AIR shows
+  `let b = 5;` for `let b: f64 = 5.0;` — a type-changing fold. That's why
+  `5.0 == 5.0` "passes": it's an integer compare of 5 and 5.
+- True float × float (`2.5 < 2.7`) still hardwires → the PEAR compare path
+  for non-i64 operand types emits a constant instead of an `fcmp`.
+
+Related float/cast defects found in the same sweep:
+- `let c: i64 = <f64 var>;` (implicit conversion) → **0 silently** (`4.0` → 0).
+- Cast directly inside a comparison: `(300 as u8) == 44` → **0**; the same
+  cast assigned to a `let` first, then compared → 1 (correct). Precedence or
+  consumer shape bug in the cast path.
+
+Float *arithmetic itself* is fine (`2.5+2.5 == 5.0` → 1 via the int fold;
+f32 `==` on equal values correct). Nobody can ship numeric code on these
+primitives: every ordering comparison of non-integral values lies.
+
+## 34. NEW CRITICAL — cross-module calls are runtime-dead
+
+```pie
+-- mathx.pie:  pub fn triple(x: i64) -> i64 { return x * 3; }
+-- main.pie:   use mathx
+fn main(_) -> i64 { return mathx.triple(14); }     -- comp=0, run → 0 (want 42)
+fn main(_) -> i64 { return mathx.triple(0) + 5; }  -- → 0 (even the +5 vanished)
+```
+
+Same-module control returns 42. `ba84eed` ("cross-module calls resolve …
+missing callee is no longer a call to address 0") fixed the **segfault** —
+verified — but the call result is silently 0 and, in the `+5` variant, the
+whole main body computes nothing. No error, no warning. This is a direct
+blocker for the 200k-LoC self-hosting goal: no multi-module program can
+compute. Highest priority together with §24 (clause binders).
+
+## 35. NEW HIGH — `alloc` + indexed-compare inside a loop SIGSEGVs pfrontc
+
+```pie
+while (i < 3) { let a : *i64 = alloc [i64; 8]; a[0] = i;
+                if (a[0] != i) { ok = 0; } i = i + 1; }   -- compiler exit 139
+```
+
+- alloc outside a loop: fine (77 ✅). alloc in a loop with plain
+  store/read-after: fine (returns 2 ✅). Adding the indexed compare inside
+  the loop → **compiler SIGSEGV at --emit-exe** (AIR emission still fine).
+  Fresh crash on the v0.9.0 malloc path's interaction with loop regions.
+- Consequently I could not even stress-test malloc churn (the R5-era
+  "does it leak" question is untestable until this compiles). Basic malloc
+  correctness is proven by the suite (p99 etc.).
+
+## 36. Legacy corpus unblock map (the 46 numbered XFAIL files)
+
+All 46 are **clause-style**, 43/46 use print/syscall I/O:
+
+| bucket | count | blocker |
+|---|---|---|
+| compile errors (no binary) | 12 | front-end gaps (legacy syntax) |
+| **compiler crash** | **1** (`39_mutable_globals`) | new SIGSEGV repro, one file |
+| runs → **all exit 0** | 30 | §24 named-binder bug (they compute nothing); 3 of them **hang at runtime** (`04_dynamic_alloc`, `11_step_ranges`, `23_array_rebind_loop`) before returning 0 |
+| (compile warn but no run counted) | 3 | same buckets |
+
+Unblock order after §24 lands: syscall/print I/O lowering → most of the 30;
+then the 3 hangs are real miscompile bugs to chase individually;
+`39_mutable_globals` is a one-file crash repro for the mutable-globals path.
+
+## 37. Verified-good this round
+
+- `--emit-bc` emits **valid LLVM bitcode** (magic `BC 0xC0 0xDE`, 2 212 B) ✅
+- `--no-theory`: **0 behaviour differences** across 20 exec cases (theory is
+  advisory end-to-end, as designed) ✅
+- Unicode identifiers work at runtime: `let π: i64 = 3; return π + 1` → 4 ✅
+- **100 000-deep recursion** compiles and runs (no stack guard blowup) ✅
+- Const globals, globals-via-function → correct (40/42) ✅
+- Cast `300 as u8` → 44 in let/value positions ✅ (only the in-comparison
+  shape is broken, §33)
+- `--emit-cps`, `--emit-dtree` still healthy on new inputs ✅
+
+## 38. CAPABILITY_CHECKLIST.md is archaeology — label it
+
+`docs/reference/CAPABILITY_CHECKLIST.md` is dated 2026-06-29, measures
+"parse+resolve+ir+llvm-as-22" (a pipeline that no longer exists — current
+work is pfront/PEAR/LLVM-23), and its ✅s say nothing about runtime
+behaviour ("✅ f64 float literal" is true at parse level while §33 shows
+runtime float compares are hardwired). Not a complaint — it's honest for
+what it measured — but it should carry a header banner ("historical,
+pre-pfront; see tests/baselines.tsv for current truth") or it will mislead
+newcomers (it nearly did me).
+
+## 39. Round-7 recommended actions
+
+1. **Cross-module call results (§34)** — with §24, this is one of the two
+   bugs standing between dev and "real programs work".
+2. **Float compare path (§33)** — emit real `fcmp` for non-i64 operands;
+   stop folding `5.0` → int `5`; implement/fix implicit f64→i64; fix the
+   cast-inside-comparison shape.
+3. **alloc-in-loop + indexed compare crash (§35)** — fresh v0.9.0-area repro.
+4. `39_mutable_globals` crash + the 3 hanging legacy cases (§36) — each is a
+   small, isolated repro.
+5. Banner CAPABILITY_CHECKLIST.md as historical (§38).
+
+---
+
+*Report file: `A2A/agent4.md` only — no source changes pushed. All round-7
+repros ≤10 lines and inline; scratch in /tmp of my sandbox.*
+
+— Pride-Agent-4
