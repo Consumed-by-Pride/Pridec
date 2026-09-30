@@ -842,10 +842,15 @@ fn bool RecordLattice.verify_type_algebra(RecordLattice* rl)
     bool disjoint_empty = theory_subtype_full::is_empty(rl.ts, disjoint, 0);
     bool int_outside_bool_empty = theory_subtype_full::is_empty(rl.ts, outside_bool, 0);
     rl.n_type_checks += 6;
-    if (same && !int_to_bool && !bool_to_int && bool_in_choice && disjoint_empty
-        && !int_outside_bool_empty) return true;
-    rl.n_type_law_errors++;
-    return false;
+    bool primitive_laws = same && !int_to_bool && !bool_to_int && bool_in_choice
+        && disjoint_empty && !int_outside_bool_empty;
+    if (!primitive_laws) rl.n_type_law_errors++;
+    theory_subtype_full::SubtypeAudit audit;
+    audit.init();
+    bool audit_ok = theory_subtype_full::verify_semantic_laws(rl.ts, &audit);
+    rl.n_type_checks += audit.checks;
+    rl.n_type_law_errors += audit.failures;
+    return primitive_laws && audit_ok;
 }
 
 fn void RecordLattice.materialize_type(RecordLattice* rl, int row_id)

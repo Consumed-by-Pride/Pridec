@@ -1956,7 +1956,10 @@ rec_ok=1; rec_why=""
 echo "$rec_sem" | grep -Eq 'records +: [0-9]+ rows from 5 structs, 13 typed fields' || { rec_ok=0; rec_why="$rec_why typed rows"; }
 echo "$rec_sem" | grep -q 'record-relations .*cert errors=0, skipped=0' || { rec_ok=0; rec_why="$rec_why relation certificates"; }
 echo "$rec_sem" | grep -q 'record-formulas .*overflow=0, validation errors=0' || { rec_ok=0; rec_why="$rec_why formula budgets"; }
-echo "$rec_sem" | grep -q 'record-semantic .*soundness errors=0' || { rec_ok=0; rec_why="$rec_why semantic laws"; }
+echo "$rec_sem" | grep -Eq 'record-semantic +: [3-9][0-9][0-9] Boolean checks, soundness errors=0' || { rec_ok=0; rec_why="$rec_why semantic law matrix"; }
+echo "$rec_sem" | grep -q 'dnf laws .*11 checks, 0 failures' || { rec_ok=0; rec_why="$rec_why DNF normalization laws"; }
+echo "$rec_wide" | grep -Eq 'record-semantic +: [3-9][0-9][0-9] Boolean checks, soundness errors=0' || { rec_ok=0; rec_why="$rec_why wide semantic law matrix"; }
+echo "$rec_wide" | grep -q 'dnf laws .*11 checks, 0 failures' || { rec_ok=0; rec_why="$rec_why wide DNF normalization laws"; }
 echo "$rec_wide" | grep -Eq '141 typed fields' || { rec_ok=0; rec_why="$rec_why wide field count"; }
 echo "$rec_wide" | grep -q 'record-relations .*cert errors=0, skipped=0' || { rec_ok=0; rec_why="$rec_why wide row certificate"; }
 echo "$rec_wide" | grep -q 'record-formulas .*overflow=0, validation errors=0' || { rec_ok=0; rec_why="$rec_why wide formula budgets"; }

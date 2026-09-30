@@ -150,8 +150,33 @@ fn bool Clause.add(Clause* c, Atom a)
     return true;
 }
 
+fn bool Clause.contains(Clause* c, Atom* atom)
+{
+    if (c == null || atom == null) return false;
+    for (usz i = 0; i < c.count && i < ST_MAX_ATOMS; i++)
+    {
+        if (atom_eq(&c.atoms[i], atom) && c.atoms[i].negated == atom.negated) return true;
+    }
+    return false;
+}
+
+// A conjunction with fewer literals denotes a superset of one with more
+// literals. DNF union can discard the narrower clause without losing values.
+fn bool Clause.subsumes(Clause* general, Clause* specific)
+{
+    if (general == null || specific == null
+        || general.count > ST_MAX_ATOMS || specific.count > ST_MAX_ATOMS
+        || general.count > specific.count) return false;
+    for (usz i = 0; i < general.count; i++)
+    {
+        if (!specific.contains(&general.atoms[i])) return false;
+    }
+    return true;
+}
+
 fn bool Clause.is_empty(Clause* c)
 {
+    if (c == null || c.count > ST_MAX_ATOMS) return false;
     if (c.known_empty) { return true; }
     // A clause with a positive BOTTOM is empty; one with only negations of
     // TOP is empty too.
@@ -169,34 +194,217 @@ struct Dnf
 {
     Clause[ST_MAX_CLAUSES] clauses;
     usz                    count;
+    usz                    duplicate_drops;
+    usz                    absorbed_drops;
     bool                   overflowed;
 }
 
 fn void Dnf.init(Dnf* d)
 {
     d.count = 0;
+    d.duplicate_drops = 0;
+    d.absorbed_drops = 0;
     d.overflowed = false;
 }
 
 fn bool Dnf.add_clause(Dnf* d, Clause* c)
 {
+    if (d == null || c == null || d.overflowed) return false;
+    if (d.count > ST_MAX_CLAUSES)
+    {
+        d.overflowed = true;
+        return false;
+    }
     // An empty clause contributes nothing to a union.
-    if (c.is_empty()) { return true; }
+    if (c.is_empty()) return true;
+    if (c.count > ST_MAX_ATOMS) { d.overflowed = true; return false; }
+    usz i = 0;
+    while (i < d.count)
+    {
+        Clause* existing = &d.clauses[i];
+        if (existing.subsumes(c))
+        {
+            if (c.subsumes(existing))
+            {
+                d.duplicate_drops++;
+            }
+            else
+            {
+                d.absorbed_drops++;
+            }
+            return true;
+        }
+        if (c.subsumes(existing))
+        {
+            for (usz j = i + 1; j < d.count; j++) d.clauses[j - 1] = d.clauses[j];
+            d.count--;
+            d.absorbed_drops++;
+            continue;
+        }
+        i++;
+    }
     if (d.count >= ST_MAX_CLAUSES) { d.overflowed = true; return false; }
     d.clauses[d.count] = *c;
-    d.count = d.count + 1;
+    d.count++;
     return true;
 }
 
 // The whole type is empty exactly when every clause is.
 fn bool Dnf.is_empty(Dnf* d)
 {
-    if (d.overflowed) { return false; }   // cannot prove: assume inhabited
+    if (d == null || d.overflowed || d.count > ST_MAX_CLAUSES) { return false; }
+    // Cannot prove emptiness after a budget or shape failure.
     for (usz i = 0; i < d.count; i++)
     {
         if (!d.clauses[i].is_empty()) { return false; }
     }
     return true;
+}
+
+struct DnfAudit
+{
+    usz checks;
+    usz failures;
+    usz absorption_cases;
+    usz duplicate_cases;
+    usz overflow_cases;
+}
+
+fn void DnfAudit.expect(DnfAudit* audit, bool condition)
+{
+    audit.checks++;
+    if (!condition)
+    {
+        audit.failures++;
+        printf("  dnf law failure : check %d\n", (int)audit.checks);
+    }
+}
+
+fn Atom audit_primitive_atom(uint identity)
+{
+    Atom atom;
+    atom.kind = AtomKind.AT_PRIM;
+    atom.name_id = identity;
+    atom.decl = null;
+    atom.node = null;
+    atom.negated = false;
+    return atom;
+}
+
+// Run inexpensive representation-level checks once per subtyper instance.
+// These guard absorption ordering, truth/false encodings, fixed-capacity
+// overflow, and duplicate normalization used by every subsequent query.
+fn DnfAudit dnf_verify_laws()
+{
+    DnfAudit audit;
+    audit.checks = 0; audit.failures = 0;
+    audit.absorption_cases = 0; audit.duplicate_cases = 0; audit.overflow_cases = 0;
+    Dnf* dnf = (Dnf*)malloc(Dnf::size);
+    if (dnf == null)
+    {
+        audit.failures = 1;
+        audit.overflow_cases++;
+        return audit;
+    }
+    Node broad_node;
+    broad_node.kind = Nk.N_TY_TUPLE;
+    broad_node.p.op = 0;
+    broad_node.name_id = 0x7101u;
+    broad_node.child_count = 0;
+    Node narrow_node;
+    narrow_node.kind = Nk.N_TY_TUPLE;
+    narrow_node.p.op = 0;
+    narrow_node.name_id = 0x7102u;
+    narrow_node.child_count = 0;
+    Atom broad_atom;
+    broad_atom.kind = AtomKind.AT_TUPLE;
+    broad_atom.name_id = 0;
+    broad_atom.decl = null;
+    broad_atom.node = &broad_node;
+    broad_atom.negated = false;
+    Atom narrow_atom;
+    narrow_atom.kind = AtomKind.AT_TUPLE;
+    narrow_atom.name_id = 0;
+    narrow_atom.decl = null;
+    narrow_atom.node = &narrow_node;
+    narrow_atom.negated = false;
+    Clause broad; broad.init(); broad.add(broad_atom);
+    Clause narrow; narrow.init(); narrow.add(broad_atom); narrow.add(narrow_atom);
+
+    dnf.init();
+    dnf.add_clause(&narrow);
+    dnf.add_clause(&broad);
+    audit.expect(dnf.count == 1 && dnf.clauses[0].count == 1
+        && dnf.clauses[0].atoms[0].node == broad_atom.node
+        && dnf.absorbed_drops == 1 && !dnf.overflowed);
+    audit.absorption_cases++;
+
+    dnf.init();
+    dnf.add_clause(&broad);
+    dnf.add_clause(&narrow);
+    audit.expect(dnf.count == 1 && dnf.absorbed_drops == 1 && !dnf.overflowed);
+    audit.absorption_cases++;
+
+    dnf.init();
+    dnf.add_clause(&broad);
+    dnf.add_clause(&broad);
+    audit.expect(dnf.count == 1 && dnf.duplicate_drops == 1);
+    audit.duplicate_cases++;
+
+    dnf.init();
+    Clause truth; truth.init();
+    dnf.add_clause(&broad);
+    dnf.add_clause(&truth);
+    audit.expect(dnf.count == 1 && dnf.clauses[0].count == 0 && !dnf.is_empty());
+    audit.absorption_cases++;
+
+    dnf.init();
+    audit.expect(dnf.is_empty());
+    Clause contradiction; contradiction.init(); contradiction.known_empty = true;
+    dnf.add_clause(&contradiction);
+    audit.expect(dnf.count == 0 && dnf.is_empty());
+    Atom complement = broad_atom;
+    complement.negated = true;
+    Clause complementary_pair; complementary_pair.init();
+    complementary_pair.add(broad_atom);
+    complementary_pair.add(complement);
+    audit.expect(complementary_pair.is_empty());
+
+    dnf.init();
+    for (uint i = 0; i < ST_MAX_CLAUSES + 1; i++)
+    {
+        Clause candidate; candidate.init();
+        Atom atom = audit_primitive_atom(0x7200u + i);
+        candidate.add(atom);
+        dnf.add_clause(&candidate);
+    }
+    audit.expect(dnf.overflowed && !dnf.is_empty());
+    audit.overflow_cases++;
+
+    Clause capped; capped.init();
+    bool all_atoms_fit = true;
+    for (uint i = 0; i < ST_MAX_ATOMS; i++)
+    {
+        Atom atom = audit_primitive_atom(0x7300u + i);
+        if (!capped.add(atom)) all_atoms_fit = false;
+    }
+    Atom extra = audit_primitive_atom(0x7400u);
+    bool rejected_extra = !capped.add(extra);
+    audit.expect(all_atoms_fit && rejected_extra && capped.count == ST_MAX_ATOMS);
+    audit.overflow_cases++;
+
+    Clause malformed_clause; malformed_clause.init();
+    malformed_clause.count = ST_MAX_ATOMS + 1;
+    dnf.init();
+    bool accepted_malformed_clause = dnf.add_clause(&malformed_clause);
+    audit.expect(!accepted_malformed_clause && dnf.overflowed && !dnf.is_empty());
+
+    dnf.init();
+    dnf.count = ST_MAX_CLAUSES + 1;
+    bool accepted_malformed_dnf = dnf.add_clause(&broad);
+    audit.expect(!accepted_malformed_dnf && dnf.overflowed && !dnf.is_empty());
+    free((void*)dnf);
+    return audit;
 }
 
 // ── Conversion to DNF ───────────────────────────────────────────────────────
@@ -288,14 +496,30 @@ fn void DnfBuilder.to_dnf(DnfBuilder* b, Node* t, bool negate, Dnf* out, int dep
     {
         case N_TY_NEGATION:
         {
+            if (t.child_count != 1)
+            {
+                out.overflowed = true;
+                b.overflows++;
+                return;
+            }
             // ¬¬A ≡ A; otherwise push the negation inward.
-            b.demorgan_steps = b.demorgan_steps + 1;
-            b.to_dnf(t.child(0), !negate, out, depth + 1);
+            b.demorgan_steps++;
+            b.to_dnf(t.children[0], !negate, out, depth + 1);
             return;
         }
 
         case N_TY_UNION:
         {
+            if (t.child_count == 0)
+            {
+                if (negate)
+                {
+                    Clause truth;
+                    truth.init();
+                    out.add_clause(&truth);
+                }
+                return;
+            }
             if (!negate)
             {
                 // A ∪ B in DNF: the clauses of A followed by those of B.
@@ -313,6 +537,16 @@ fn void DnfBuilder.to_dnf(DnfBuilder* b, Node* t, bool negate, Dnf* out, int dep
 
         case N_TY_INTERSECT:
         {
+            if (t.child_count == 0)
+            {
+                if (!negate)
+                {
+                    Clause truth;
+                    truth.init();
+                    out.add_clause(&truth);
+                }
+                return;
+            }
             if (!negate)
             {
                 b.conjoin_children(t, false, out, depth);
@@ -348,9 +582,23 @@ fn void DnfBuilder.conjoin_children(DnfBuilder* b, Node* t, bool negate_each,
     if (acc == null) { out.overflowed = true; return; }
     acc.init();
 
-    // Seed with the first operand.
-    if (t.child_count == 0) { free((void*)acc); return; }
+    // Empty conjunction is true; empty union is handled by to_dnf before here.
+    if (t.child_count == 0)
+    {
+        Clause truth;
+        truth.init();
+        out.add_clause(&truth);
+        free((void*)acc);
+        return;
+    }
     b.to_dnf(t.children[0], negate_each, acc, depth + 1);
+    if (acc.overflowed)
+    {
+        out.overflowed = true;
+        b.overflows++;
+        free((void*)acc);
+        return;
+    }
 
     Dnf* tmp = (Dnf*)malloc(Dnf::size);
     if (tmp == null) { free((void*)acc); out.overflowed = true; return; }
@@ -358,9 +606,21 @@ fn void DnfBuilder.conjoin_children(DnfBuilder* b, Node* t, bool negate_each,
     for (usz i = 1; i < t.child_count; i++)
     {
         Dnf* rhs = (Dnf*)malloc(Dnf::size);
-        if (rhs == null) { break; }
+        if (rhs == null)
+        {
+            out.overflowed = true;
+            b.overflows++;
+            break;
+        }
         rhs.init();
         b.to_dnf(t.children[i], negate_each, rhs, depth + 1);
+        if (rhs.overflowed)
+        {
+            out.overflowed = true;
+            b.overflows++;
+            free((void*)rhs);
+            break;
+        }
 
         tmp.init();
         // Cross product: every clause of acc with every clause of rhs.
@@ -369,17 +629,33 @@ fn void DnfBuilder.conjoin_children(DnfBuilder* b, Node* t, bool negate_each,
             for (usz y = 0; y < rhs.count; y++)
             {
                 Clause merged = acc.clauses[x];
+                bool clause_complete = true;
                 for (usz k = 0; k < rhs.clauses[y].count; k++)
                 {
-                    merged.add(rhs.clauses[y].atoms[k]);
+                    if (!merged.add(rhs.clauses[y].atoms[k]))
+                    {
+                        clause_complete = false;
+                        break;
+                    }
                 }
-                if (!merged.is_empty()) { tmp.add_clause(&merged); }
-                b.distributions = b.distributions + 1;
+                if (!clause_complete)
+                {
+                    tmp.overflowed = true;
+                }
+                else if (!merged.is_empty())
+                {
+                    tmp.add_clause(&merged);
+                }
+                b.distributions++;
             }
         }
         *acc = *tmp;
         free((void*)rhs);
-        if (acc.overflowed) { b.overflows = b.overflows + 1; break; }
+        if (acc.overflowed)
+        {
+            b.overflows++;
+            break;
+        }
     }
 
     for (usz i = 0; i < acc.count; i++) { out.add_clause(&acc.clauses[i]); }
@@ -401,6 +677,7 @@ struct CacheEntry
 struct SemanticSubtyper
 {
     DnfBuilder builder;
+    DnfAudit dnf_laws;
     CacheEntry[ST_MAX_CACHE] cache;
     usz                      cache_count;
 
@@ -421,6 +698,7 @@ fn void SemanticSubtyper.init(SemanticSubtyper* s, Arena* a,
                               pfront_core::Interner* it, char* file)
 {
     s.builder.init(a, d, file);
+    s.dnf_laws = dnf_verify_laws();
     s.cache_count = 0;
     s.diags = d;
     s.interner = it;
@@ -460,6 +738,7 @@ fn void SemanticSubtyper.cache_put(SemanticSubtyper* s, Node* a, Node* b, bool r
 fn bool SemanticSubtyper.is_empty(SemanticSubtyper* s, Node* t)
 {
     s.emptiness_checks = s.emptiness_checks + 1;
+    if (s.dnf_laws.failures > 0) return false;
     Dnf* d = (Dnf*)malloc(Dnf::size);
     if (d == null) { return false; }
     d.init();
@@ -476,6 +755,7 @@ fn bool SemanticSubtyper.subtype(SemanticSubtyper* s, Node* a, Node* b)
     if (a == null || b == null) { return false; }
     if (a == b) { return true; }
     s.queries = s.queries + 1;
+    if (s.dnf_laws.failures > 0) return false;
 
     bool cached = false;
     if (s.cache_get(a, b, &cached)) { return cached; }
@@ -501,11 +781,16 @@ fn bool SemanticSubtyper.subtype(SemanticSubtyper* s, Node* a, Node* b)
         for (usz j = 0; j < db.count && all_empty; j++)
         {
             Clause merged = da.clauses[i];
+            bool clause_complete = true;
             for (usz k = 0; k < db.clauses[j].count; k++)
             {
-                merged.add(db.clauses[j].atoms[k]);
+                if (!merged.add(db.clauses[j].atoms[k]))
+                {
+                    clause_complete = false;
+                    break;
+                }
             }
-            if (!merged.is_empty()) { all_empty = false; }
+            if (!clause_complete || !merged.is_empty()) all_empty = false;
         }
     }
 
@@ -588,17 +873,22 @@ fn bool SemanticSubtyper.overlaps(SemanticSubtyper* s, Node* a, Node* b)
     s.builder.to_dnf(a, false, da, 0);
     s.builder.to_dnf(b, false, db, 0);
 
-    bool found = false;
+    bool found = da.overflowed || db.overflowed;
     for (usz i = 0; i < da.count && !found; i++)
     {
         for (usz j = 0; j < db.count && !found; j++)
         {
             Clause merged = da.clauses[i];
+            bool clause_complete = true;
             for (usz k = 0; k < db.clauses[j].count; k++)
             {
-                merged.add(db.clauses[j].atoms[k]);
+                if (!merged.add(db.clauses[j].atoms[k]))
+                {
+                    clause_complete = false;
+                    break;
+                }
             }
-            if (!merged.is_empty()) { found = true; }
+            if (!clause_complete || !merged.is_empty()) found = true;
         }
     }
     free((void*)da);
@@ -649,6 +939,10 @@ fn void SemanticSubtyper.report(SemanticSubtyper* s)
         printf("  type emptiness   : %d proved uninhabited, %d undecided (overflow)\n",
                (int)s.proved_empty, (int)s.builder.overflows);
     }
+    printf("  dnf laws         : %d checks, %d failures (absorptions=%d, duplicates=%d, budget=%d)\n",
+           (int)s.dnf_laws.checks, (int)s.dnf_laws.failures,
+           (int)s.dnf_laws.absorption_cases, (int)s.dnf_laws.duplicate_cases,
+           (int)s.dnf_laws.overflow_cases);
 }
 
 // ── Type-directed match refinement ──────────────────────────────────────────

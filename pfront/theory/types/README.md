@@ -7,7 +7,7 @@ Implementations of type-system engines drawn from the literature.
 | `theory_setops.c3`      | Type algebra core — DNF, union/intersection/negation nodes (Frisch/Castagna/Benzaken) |
 | `theory_mu.c3`          | Recursive μ-types: shift/subst, contractivity, coinductive subtyping w/ memo        |
 | `theory_subtype.c3`     | Semantic subtyping driver (Frisch/Castagna/Benzaken 2008 J.ACM)                     |
-| `theory_subtype_full.c3`| Atom-level emptiness: FCB binary-arrow rule, record atoms, AST→TypeStore translation |
+| `theory_subtype_full.c3`| Bounded atom-level emptiness: products, rows, arrays, options, arrows, checked AST translation |
 | `theory_records.c3`     | Record type lattice (Castagna et al. ICFP'23): width+depth subtyping, field inter.  |
 | `theory_rowinfer.c3`    | Row types for effects/records — Wand/Rémy-style polymorphic rows                    |
 | `theory_bidi.c3`        | Bidirectional typing (Pierce/Turner): check ↔ infer modes, modal box types          |
@@ -17,9 +17,14 @@ Implementations of type-system engines drawn from the literature.
 
 ## Central operations
 
-- **Emptiness check** (`theory_subtype_full::is_empty`): a type T is empty iff
-  its DNF has no satisfiable atom-clause. Arrow types use the FCB rule
-  `(d→c) ∧ ¬(d'→c') ≃ ∅ ⇐ d' ≤ d ∧ c ≤ c'`.
+- **Emptiness check** (`theory_subtype_full::is_empty`): a type is declared
+  empty only when bounded atom-level reasoning proves every DNF clause
+  inconsistent. Malformed references, allocation/atom-budget failures, and
+  recursion cutoffs return “not proven empty” rather than a false proof.
+  Supported clauses check primitive/nominal contradictions, product
+  projections, record width/depth, array/option payloads, and arrow
+  contra-/covariance. `verify_semantic_laws` runs a bounded matrix of Boolean,
+  constructor-variance, record, and malformed-input regression checks.
 - **Coinductive subtyping** (`theory_mu`, `theory_session`): memo table of
   pairs assumed true during the proof, plus depth budget, avoids infinite
   unfold on μ-types.
