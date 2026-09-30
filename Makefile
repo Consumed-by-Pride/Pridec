@@ -60,7 +60,7 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -85,7 +85,12 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec
+test: test-pfront test-conform test-pear test-exec test-harness
+
+# Test the test infrastructure too: missing/crashing compilers must never
+# produce a false EXPECT-CLEAN pass.
+test-harness:
+	python3 -m unittest discover -s tests/harness -p 'test_*.py'
 
 test-pfront: $(BINARY)
 	@echo "==> tests/pfront regression"

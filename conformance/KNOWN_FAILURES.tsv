@@ -1,0 +1,116 @@
+# Measured on unmodified dev compiler source 5e20e0a (2026-09-30).
+# Current pfront/--plain; NOT the missing legacy ./pride harness.
+# case<TAB>unmet contracts; no failures are hidden by aggregate counts.
+01_undefined_name.pie	resolve@3:10 text!~'undefined name'
+02_dup_binding_pattern.pie	resolve@3:9 text!~'duplicate binding'
+04_if_cond_not_bool.pie	missing type-warn at 3:13
+05_arity_too_few.pie	missing type-warn at 5:11
+06_arity_too_many.pie	missing type-warn at 5:11
+07_arith_nonnumeric.pie	missing type-warn at 3:12
+08_mixed_numeric.pie	count type-warn want=1 got=0
+103_newtype.pie	expected CLEAN, got 2 errors/warnings; 1 unexpected compile errors
+106_multi_return.pie	expected CLEAN, got 1 errors/warnings
+107_closure_capture.pie	2 unexpected compile errors
+10_field_nonstruct.pie	count type-warn want=1 got=0
+112_bitops.pie	1 unexpected compile errors
+114_generic_identity.pie	4 unexpected compile errors
+115_module_path.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
+11_logical_nonbool.pie	missing type-warn at 3:10
+120_extern_cc.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
+121_naked_fn.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
+124_closure_multi_arg.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+124_higher_order.pie	2 unexpected compile errors
+126_recursive_let.pie	expected CLEAN, got 1 errors/warnings
+127_labeled_break.pie	2 unexpected compile errors
+127_match_int_ranges.pie	expected CLEAN, got 1 errors/warnings
+129_effect_compose.pie	expected CLEAN, got 1 errors/warnings
+12_index_nonindex.pie	count type-warn want=1 got=0
+130_newtype_wrapper.pie	2 unexpected compile errors
+131_module_type_use.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+132_newtype_arith.pie	expected CLEAN, got 7 errors/warnings; 3 unexpected compile errors
+134_ub_divide.pie	expected CLEAN, got 4 errors/warnings; 2 unexpected compile errors
+142_ring_buffer.pie	expected CLEAN, got 1 errors/warnings
+143_number_theory.pie	expected CLEAN, got 4 errors/warnings
+144_utf8.pie	expected CLEAN, got 1 errors/warnings
+147_effect_result.pie	expected CLEAN, got 2 errors/warnings
+153_extern_puts.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
+154_extern_multi.pie	expected CLEAN, got 5 errors/warnings; 5 unexpected compile errors
+15_effect_undeclared.pie	missing effect-warn at 4:1
+164_higher_order.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+168_effect_io.pie	expected CLEAN, got 1 errors/warnings
+170_extern_math.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
+171_extern_stdio.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
+175_pattern_guards.pie	expected CLEAN, got 3 errors/warnings
+17_ub_bang.pie	count effect-err want=0 got=1; 1 unexpected compile errors
+180_closure_basics.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
+188_channel_ops.pie	expected CLEAN, got 3 errors/warnings
+18_match_nonexhaustive.pie	count lint-warn want=1 got=2
+194_compression.pie	expected CLEAN, got 1 errors/warnings
+196_break_label.pie	expected CLEAN, got 4 errors/warnings; 4 unexpected compile errors
+197_continue_label.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
+199_label_for.pie	expected CLEAN, got 4 errors/warnings; 4 unexpected compile errors
+19_match_exhaustive_bool.pie	expected CLEAN, got 1 errors/warnings
+201_naked_fn.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
+206_full_pipeline.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
+207_ascii_type_union.pie	expected CLEAN, got 1 errors/warnings
+208_multiarm_handler.pie	expected CLEAN, got 1 errors/warnings
+211_ascii_union_inline.pie	expected CLEAN, got 1 errors/warnings
+21_generic_constraint_violated.pie	missing type-warn at 5:13
+243_enum_payload_oversize.pie	count type-err want=1 got=0
+244_enum_payload_multi.pie	count type-err want=1 got=0
+247_effect_arm_outer_assign.pie	count type-err want=1 got=0; 1 unexpected compile errors
+249_effect_row_polymorphism.pie	expected CLEAN, got 5 errors/warnings; 3 unexpected compile errors
+24_struct_field_mismatch.pie	missing type-warn at 6:27
+250_enum_match_sealed.pie	expected CLEAN, got 2 errors/warnings
+251_enum_arm_order.pie	expected CLEAN, got 2 errors/warnings
+252_enum_pattern_binder_overflow.pie	count type-err want=1 got=0
+253_enum_clause_patterns.pie	expected CLEAN, got 4 errors/warnings
+255_mutable_globals.pie	expected CLEAN, got 3 errors/warnings
+257_comptime_stage_generic.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+258_effect_handler_multi_op.pie	expected CLEAN, got 1 errors/warnings
+25_struct_unknown_field.pie	missing type-warn at 5:12
+260_lint_self_assign.pie	count lint-warn want=1 got=0
+261_lint_const_condition.pie	count lint-warn want=1 got=0
+26_mutate_immutable.pie	missing type-warn at 5:7
+27_assign_type_mismatch.pie	missing type-warn at 5:11
+28_return_type_mismatch.pie	missing type-warn at 3:10
+30_union_subtype_bad.pie	missing type-warn at 6:15
+33_handler_partial_leak.pie	missing effect-warn at 6:1
+34_open_row_ok.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+35_match_no_catchall.pie	lint-warn@4:7 text!~'non-exhaustive'
+36_deref_nonpointer.pie	missing type-warn at 3:10
+38_shift_float.pie	missing type-warn at 3:12
+39_compare_kinds.pie	missing type-warn at 3:17
+41_matmul_mismatch.pie	missing type-warn at 6:18; 3 unexpected compile errors
+44_if_typed_branch_warns.pie	missing type-warn at 3:10
+45_match_literal_adapts.pie	expected CLEAN, got 1 errors/warnings
+47_class_guidance.pie	missing parse at 2:1; 4 unexpected compile errors
+50_realistic_kernel.pie	1 unexpected compile errors
+55_generic_map.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+56_concrete_field_still_warns.pie	missing type-warn at 6:22
+58_use_alias.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
+59_cross_module_collision.pie	expected CLEAN, got 2 errors/warnings
+60_str_primitive.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
+61_aggregate_cmp_warns.pie	missing type-warn at 5:17
+62_bool_order_warns.pie	missing type-warn at 3:17
+63_union_exhaustive_clean.pie	expected CLEAN, got 1 errors/warnings
+64_call_nonfn_warns.pie	missing type-warn at 3:11
+65_fn_param_call_clean.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+66_pgen_metavars.pie	expected CLEAN, got 5 errors/warnings; 1 unexpected compile errors
+67_rewrite_metavars.pie	expected CLEAN, got 1 errors/warnings
+68_rank3_tensor.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
+69_tensor_elemwise_mismatch.pie	missing type-warn at 4:11; 2 unexpected compile errors
+70_if_assign_hint.pie	missing type-warn at 4:12; 2 unexpected compile errors
+71_irdl_dialect_clean.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
+72_irdl_unknown_opcode.pie	missing irdl-err at 7:3; 2 unexpected compile errors
+74_handler_resume.pie	expected CLEAN, got 1 errors/warnings
+75_with_binding.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
+76_irdl_multirule.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
+78_standalone_graph.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
+79_irdl_guarded.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
+80_irdl_variadic.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+81_clause_guard_typed.pie	missing type-warn at 3:10
+82_xmod_arg_check.pie	missing type-warn at 8:20; 2 unexpected compile errors
+83_xmod_field_check.pie	missing type-warn at 9:12
+90_poison_freeze.pie	expected CLEAN, got 1 errors/warnings
+91_trap_assume.pie	expected CLEAN, got 2 errors/warnings
