@@ -1945,8 +1945,7 @@ fn long AirLower.index_elem_size(AirLower* lr, Node* n)
     {
         Node* bt = base.type_ann;
         // *T → look at children[0] which should be T.
-        if (bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF
-            || bt.kind == Nk.N_TY_REF_MUT)
+        if (bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF)
         {
             if (bt.child_count > 0 && bt.children[0] != null
                 && bt.children[0].kind == Nk.N_TY_PATH)
@@ -1965,12 +1964,15 @@ fn long AirLower.index_elem_size(AirLower* lr, Node* n)
     // a pointer/array (lookup in scope). Fallback 8.
     if (base != null && base.kind == Nk.N_EXPR_PATH)
     {
-        Node* bnd = lr.scope.lookup(base);
+        // AirScope.lookup() maps a source name to its AIR name and is not a
+        // declaration lookup; decl_for() gives the AST declaration so we can
+        // read the variable's type annotation.
+        char* bname = node_text(base, lr.it);
+        Node* bnd = bname != null ? lr.scope.decl_for(bname) : null;
         if (bnd != null && bnd.type_ann != null)
         {
             Node* bt = bnd.type_ann;
-            if ((bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF
-                 || bt.kind == Nk.N_TY_REF_MUT)
+            if ((bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF)
                 && bt.child_count > 0 && bt.children[0] != null
                 && bt.children[0].kind == Nk.N_TY_PATH)
             {
@@ -1988,8 +1990,7 @@ fn long AirLower.index_elem_size_for_deref(AirLower* lr, Node* base)
     if (base != null && base.type_ann != null)
     {
         Node* bt = base.type_ann;
-        if ((bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF
-             || bt.kind == Nk.N_TY_REF_MUT)
+        if ((bt.kind == Nk.N_TY_PTR || bt.kind == Nk.N_TY_REF)
             && bt.child_count > 0 && bt.children[0] != null
             && bt.children[0].kind == Nk.N_TY_PATH)
         {

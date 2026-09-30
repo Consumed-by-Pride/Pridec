@@ -143,6 +143,21 @@ fn char* AirScope.lookup(AirScope* s, char* src_nm, bool is_covar) {
 // pre-binding pass in AirLower.stmts: the declaration is bound before the block
 // tail is lowered, and the later `let` statement must reuse that binding rather
 // than create a second one.
+// decl_for -- the AST declaration a bound source name came from, or null.
+// The inverse direction of lookup_decl(): callers that hold a name (for example
+// an index base like `a` in `a[i]`) use this to reach the declaration's type
+// annotation. A covar name is not a variable, so only variable bindings answer.
+fn PNode* AirScope.decl_for(AirScope* s, char* src_nm) {
+    if (src_nm == null) return null;
+    long i = (long)s.local_count - 1;
+    while (i >= 0) {
+        AirLocal* loc_ = &s.locals[(usz)i];
+        if (!loc_.is_covar && streq(loc_.source_name, src_nm)) return loc_.decl;
+        i--;
+    }
+    return null;
+}
+
 fn char* AirScope.lookup_decl(AirScope* s, PNode* decl) {
     if (decl == null) return null;
     long i = (long)s.local_count - 1;
