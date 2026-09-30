@@ -6,7 +6,7 @@ Implementations of type-system engines drawn from the literature.
 |-------------------------|-------------------------------------------------------------------------------------|
 | `theory_setops.c3`      | Type algebra core — DNF, union/intersection/negation nodes (Frisch/Castagna/Benzaken) |
 | `theory_mu.c3`          | Recursive μ-types: shift/subst, contractivity, coinductive subtyping w/ memo        |
-| `theory_subtype.c3`     | Semantic subtyping driver (Frisch/Castagna/Benzaken 2008 J.ACM)                     |
+| `theory_subtype.c3`     | Semantic DNF subtyping: absorption, bounded distribution, conservative fallbacks, match refinement |
 | `theory_subtype_full.c3`| Bounded atom-level emptiness: products, rows, arrays, options, arrows, checked AST translation |
 | `theory_records.c3`     | Record type lattice (Castagna et al. ICFP'23): width+depth subtyping, field inter.  |
 | `theory_rowinfer.c3`    | Row types for effects/records — Wand/Rémy-style polymorphic rows                    |
@@ -25,6 +25,13 @@ Implementations of type-system engines drawn from the literature.
   projections, record width/depth, array/option payloads, and arrow
   contra-/covariance. `verify_semantic_laws` runs a bounded matrix of Boolean,
   constructor-variance, record, and malformed-input regression checks.
+- **DNF subtyping driver** (`theory_subtype::SemanticSubtyper`): subtyping is
+  reduced to emptiness of `A ∩ ¬B`. DNF insertion removes duplicate and
+  subsumed clauses before they consume the fixed clause budget; Cartesian
+  distribution, De Morgan conversion, empty-former identities, malformed AST
+  arities, and depth/clause overflow all have executable invariant checks.
+  Failed audits disable DNF-based proof queries, so the driver fails
+  conservatively rather than trusting a broken normalizer.
 - **Coinductive subtyping** (`theory_mu`, `theory_session`): memo table of
   pairs assumed true during the proof, plus depth budget, avoids infinite
   unfold on μ-types.

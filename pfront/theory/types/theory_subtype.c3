@@ -268,6 +268,8 @@ struct DnfAudit
     usz absorption_cases;
     usz duplicate_cases;
     usz overflow_cases;
+    usz conversion_cases;
+    usz distribution_cases;
 }
 
 fn void DnfAudit.expect(DnfAudit* audit, bool condition)
@@ -299,6 +301,7 @@ fn DnfAudit dnf_verify_laws()
     DnfAudit audit;
     audit.checks = 0; audit.failures = 0;
     audit.absorption_cases = 0; audit.duplicate_cases = 0; audit.overflow_cases = 0;
+    audit.conversion_cases = 0; audit.distribution_cases = 0;
     Dnf* dnf = (Dnf*)malloc(Dnf::size);
     if (dnf == null)
     {
@@ -479,7 +482,12 @@ fn Atom make_atom(Node* t, bool negated)
 // negation inward swaps union and intersection.
 fn void DnfBuilder.to_dnf(DnfBuilder* b, Node* t, bool negate, Dnf* out, int depth)
 {
-    if (depth > ST_MAX_DEPTH) { out.overflowed = true; return; }
+    if (depth > ST_MAX_DEPTH)
+    {
+        out.overflowed = true;
+        b.overflows++;
+        return;
+    }
     if (depth > b.max_depth) { b.max_depth = depth; }
     b.conversions = b.conversions + 1;
 
@@ -664,6 +672,167 @@ fn void DnfBuilder.conjoin_children(DnfBuilder* b, Node* t, bool negate_each,
     free((void*)acc);
 }
 
+// The builder audit uses tiny synthetic type ASTs so it exercises the real
+// AST-to-DNF conversion and cross-product path without parser or resolver
+// dependencies. Every node field read by make_atom/term_eq is initialized.
+fn void dnf_audit_node(Node* node, Nk kind, uint identity,
+                       Node** children, usz child_count)
+{
+    node.kind = kind;
+    node.p.op = 0;
+    node.name_id = identity;
+    node.resolved = null;
+    node.children = children;
+    node.child_count = child_count;
+}
+
+fn void DnfBuilder.verify_laws(DnfBuilder* b, DnfAudit* audit)
+{
+    DnfBuilder probe;
+    probe.init(b.arena, b.diags, b.file);
+    Dnf* dnf = (Dnf*)malloc(Dnf::size);
+    if (dnf == null)
+    {
+        audit.failures++;
+        return;
+    }
+    Node atom_a; dnf_audit_node(&atom_a, Nk.N_TY_TUPLE, 0x7501u, null, 0);
+    Node atom_b; dnf_audit_node(&atom_b, Nk.N_TY_TUPLE, 0x7502u, null, 0);
+    Node atom_c; dnf_audit_node(&atom_c, Nk.N_TY_TUPLE, 0x7503u, null, 0);
+
+    Node*[2] union_children;
+    union_children[0] = &atom_a;
+    union_children[1] = &atom_b;
+    Node union_ab;
+    dnf_audit_node(&union_ab, Nk.N_TY_UNION, 0, &union_children[0], 2);
+
+    dnf.init();
+    probe.to_dnf(&union_ab, false, dnf, 0);
+    audit.expect(dnf.count == 2 && !dnf.overflowed
+        && dnf.clauses[0].count == 1 && dnf.clauses[1].count == 1);
+    audit.conversion_cases++;
+
+    Node*[2] intersect_children;
+    intersect_children[0] = &union_ab;
+    intersect_children[1] = &atom_c;
+    Node union_intersect_c;
+    dnf_audit_node(&union_intersect_c, Nk.N_TY_INTERSECT, 0, &intersect_children[0], 2);
+    usz distributions_before = probe.distributions;
+    dnf.init();
+    probe.to_dnf(&union_intersect_c, false, dnf, 0);
+    audit.expect(dnf.count == 2 && !dnf.overflowed
+        && dnf.clauses[0].count == 2 && dnf.clauses[1].count == 2
+        && probe.distributions - distributions_before == 2);
+    audit.distribution_cases++;
+
+    Node*[1] unary_child;
+    unary_child[0] = &union_ab;
+    Node not_union;
+    dnf_audit_node(&not_union, Nk.N_TY_NEGATION, 0, &unary_child[0], 1);
+    dnf.init();
+    probe.to_dnf(&not_union, false, dnf, 0);
+    audit.expect(dnf.count == 1 && dnf.clauses[0].count == 2
+        && dnf.clauses[0].atoms[0].negated && dnf.clauses[0].atoms[1].negated);
+    audit.conversion_cases++;
+
+    Node*[2] atom_pair;
+    atom_pair[0] = &atom_a;
+    atom_pair[1] = &atom_b;
+    Node intersect_ab;
+    dnf_audit_node(&intersect_ab, Nk.N_TY_INTERSECT, 0, &atom_pair[0], 2);
+    unary_child[0] = &intersect_ab;
+    Node not_intersection;
+    dnf_audit_node(&not_intersection, Nk.N_TY_NEGATION, 0, &unary_child[0], 1);
+    dnf.init();
+    probe.to_dnf(&not_intersection, false, dnf, 0);
+    audit.expect(dnf.count == 2 && dnf.clauses[0].count == 1
+        && dnf.clauses[1].count == 1
+        && dnf.clauses[0].atoms[0].negated && dnf.clauses[1].atoms[0].negated);
+    audit.conversion_cases++;
+
+    Node empty_union;
+    dnf_audit_node(&empty_union, Nk.N_TY_UNION, 0, null, 0);
+    dnf.init();
+    probe.to_dnf(&empty_union, false, dnf, 0);
+    audit.expect(dnf.count == 0 && dnf.is_empty());
+    audit.conversion_cases++;
+    dnf.init();
+    probe.to_dnf(&empty_union, true, dnf, 0);
+    audit.expect(dnf.count == 1 && dnf.clauses[0].count == 0 && !dnf.is_empty());
+    audit.conversion_cases++;
+
+    Node empty_intersection;
+    dnf_audit_node(&empty_intersection, Nk.N_TY_INTERSECT, 0, null, 0);
+    dnf.init();
+    probe.to_dnf(&empty_intersection, false, dnf, 0);
+    audit.expect(dnf.count == 1 && dnf.clauses[0].count == 0 && !dnf.is_empty());
+    audit.conversion_cases++;
+    dnf.init();
+    probe.to_dnf(&empty_intersection, true, dnf, 0);
+    audit.expect(dnf.count == 0 && dnf.is_empty());
+    audit.conversion_cases++;
+
+    Node malformed_negation;
+    dnf_audit_node(&malformed_negation, Nk.N_TY_NEGATION, 0, &union_children[0], 2);
+    dnf.init();
+    probe.to_dnf(&malformed_negation, false, dnf, 0);
+    audit.expect(dnf.overflowed && !dnf.is_empty());
+    audit.overflow_cases++;
+
+    dnf.init();
+    usz overflow_before = probe.overflows;
+    probe.to_dnf(&atom_a, false, dnf, ST_MAX_DEPTH + 1);
+    audit.expect(dnf.overflowed && !dnf.is_empty() && probe.overflows == overflow_before + 1);
+    audit.overflow_cases++;
+
+    Node[12] left_atoms;
+    Node*[12] left_children;
+    Node[12] right_atoms;
+    Node*[12] right_children;
+    for (uint i = 0; i < 12; i++)
+    {
+        dnf_audit_node(&left_atoms[i], Nk.N_TY_TUPLE, 0x7600u + i, null, 0);
+        dnf_audit_node(&right_atoms[i], Nk.N_TY_TUPLE, 0x7700u + i, null, 0);
+        left_children[i] = &left_atoms[i];
+        right_children[i] = &right_atoms[i];
+    }
+    Node left_union; dnf_audit_node(&left_union, Nk.N_TY_UNION, 0, &left_children[0], 12);
+    Node right_union; dnf_audit_node(&right_union, Nk.N_TY_UNION, 0, &right_children[0], 12);
+    Node*[2] wide_product_children;
+    wide_product_children[0] = &left_union;
+    wide_product_children[1] = &right_union;
+    Node wide_product;
+    dnf_audit_node(&wide_product, Nk.N_TY_INTERSECT, 0, &wide_product_children[0], 2);
+    distributions_before = probe.distributions;
+    dnf.init();
+    probe.to_dnf(&wide_product, false, dnf, 0);
+    audit.expect(dnf.overflowed && !dnf.is_empty()
+        && probe.distributions - distributions_before == 144);
+    audit.distribution_cases++;
+    audit.overflow_cases++;
+
+    Node bottom;
+    dnf_audit_node(&bottom, Nk.N_TY_BOTTOM, 0, null, 0);
+    dnf.init();
+    probe.to_dnf(&bottom, false, dnf, 0);
+    audit.expect(dnf.count == 0 && dnf.is_empty());
+    audit.conversion_cases++;
+    dnf.init();
+    probe.to_dnf(&bottom, true, dnf, 0);
+    audit.expect(dnf.count == 1 && !dnf.is_empty());
+    audit.conversion_cases++;
+
+    dnf.init();
+    probe.to_dnf(null, false, dnf, 0);
+    audit.expect(dnf.count == 1 && !dnf.is_empty());
+    audit.conversion_cases++;
+    dnf.init();
+    probe.to_dnf(null, true, dnf, 0);
+    audit.expect(dnf.count == 0 && dnf.is_empty());
+    audit.conversion_cases++;
+    free((void*)dnf);
+}
+
 // ── Semantic subtyping ──────────────────────────────────────────────────────
 // A <: B  ⟺  ⟦A ∩ ¬B⟧ = ∅. Reducing subtyping to emptiness is what makes the
 // distributive laws fall out automatically instead of being special-cased.
@@ -699,6 +868,7 @@ fn void SemanticSubtyper.init(SemanticSubtyper* s, Arena* a,
 {
     s.builder.init(a, d, file);
     s.dnf_laws = dnf_verify_laws();
+    s.builder.verify_laws(&s.dnf_laws);
     s.cache_count = 0;
     s.diags = d;
     s.interner = it;
@@ -939,10 +1109,11 @@ fn void SemanticSubtyper.report(SemanticSubtyper* s)
         printf("  type emptiness   : %d proved uninhabited, %d undecided (overflow)\n",
                (int)s.proved_empty, (int)s.builder.overflows);
     }
-    printf("  dnf laws         : %d checks, %d failures (absorptions=%d, duplicates=%d, budget=%d)\n",
+    printf("  dnf laws         : %d checks, %d failures (absorptions=%d, duplicates=%d, budget=%d, conversions=%d, distributions=%d)\n",
            (int)s.dnf_laws.checks, (int)s.dnf_laws.failures,
            (int)s.dnf_laws.absorption_cases, (int)s.dnf_laws.duplicate_cases,
-           (int)s.dnf_laws.overflow_cases);
+           (int)s.dnf_laws.overflow_cases, (int)s.dnf_laws.conversion_cases,
+           (int)s.dnf_laws.distribution_cases);
 }
 
 // ── Type-directed match refinement ──────────────────────────────────────────
