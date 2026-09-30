@@ -56,6 +56,7 @@ const uint NF_ERROR       = 4096;   // error-recovery placeholder
 const uint NF_SYNTHETIC   = 8192;   // compiler-generated, not from source
 const uint NF_ADDR_TAKEN  = 16384;  // `&x` appears somewhere
 const uint NF_TAIL        = 32768;  // tail-call annotated
+const uint NF_BOUNDS_PROVEN = 65536; // abstract analysis proved an index in bounds
 /*
  A `do ... while cond` loop: the body runs BEFORE the first test.
 

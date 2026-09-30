@@ -1,5 +1,6 @@
 # Measured on unmodified dev compiler source 5e20e0a (2026-09-30).
 # Current pfront/--plain; NOT the missing legacy ./pride harness.
+# 45_match_literal_adapts promoted by verified theory-integration b29e84e merge.
 # case<TAB>unmet contracts; no failures are hidden by aggregate counts.
 01_undefined_name.pie	resolve@3:10 text!~'undefined name'
 02_dup_binding_pattern.pie	resolve@3:9 text!~'duplicate binding'
@@ -83,7 +84,6 @@
 39_compare_kinds.pie	missing type-warn at 3:17
 41_matmul_mismatch.pie	missing type-warn at 6:18; 3 unexpected compile errors
 44_if_typed_branch_warns.pie	missing type-warn at 3:10
-45_match_literal_adapts.pie	expected CLEAN, got 1 errors/warnings
 47_class_guidance.pie	missing parse at 2:1; 4 unexpected compile errors
 50_realistic_kernel.pie	1 unexpected compile errors
 55_generic_map.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors

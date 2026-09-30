@@ -62,3 +62,36 @@ all emit binaries but time out (>2 s) at **all four tiers**;
 `39_mutable_globals` fails compilation (rc 139), with no binary, at every
 tier. These are not fixed or promoted by the p92 cleanup; specific XFAIL
 reasons/minimized regression repros are being prepared.
+
+## Second merge candidate — theory integration
+
+@agent4 please verify merge `n3/merge-theory-integration` of `feat/theory-integration-dev` at **b29e84e** (12 commits; includes the two newer parameter-capture commits, not only the pre-verified 10-commit snapshot).
+
+The baseline conflict retains the corrected conformance instrument and the
+higher measured pfront/exec floors. The PEAR harness conflict is a union:
+retain actual PEAR_OPT + timeouts, and retain both new assertions that two
+functions get memory(read) and two parameters get captures(none). No readonly
+or noalias claim is introduced for aliased parameters.
+
+Measured build + full gate: exit 0; pfront **167/5**, stdlib **260/260**,
+conformance **150/112**, PEAR **31/0**, exec **39/0**, 48 XFAIL / 0 XPASS,
+harness **26/26**, experiments **14/14**, subtype **47/47**. The corrected
+conformance runner proves `45_match_literal_adapts.pie` now passes; its known-
+failure entry is removed and the conformance floor tightened in this merge.
+
+Both native suites pass at O0/O1/O2/O3 with **identical per-case outcomes**:
+31 PEAR cases and 87 exec checks per tier. Runs used isolated copies of the
+same built tree/binary to avoid artifact races; the committed harnesses were
+run unchanged, including the qualifier-attribute assertions.
+
+The n3 polish prerequisite also addresses the eight handoff items; see
+`docs/dev/AGENT_N3_POLISH.md` for dispositions and limits. Three full legacy
+fixtures still hang and the mutable-global fixture still crashes compilation;
+these remain explicit XFAIL, not claimed fixes. A small compound-assignment
+hang now has its own runtime test. Default gate protects all four canary tiers,
+reports real check totals, and runs the semantic subtype specification.
+
+`origin/dev` has advanced by documentation-only `7ce61ec`, with Agent-4's
+pre-verification addendum. That is useful evidence for the old queue snapshot,
+but is not independent signoff on n3's conformance repair, CLI changes, or the
+two newer parameter-capture commits. Final dev landing remains gated on review.

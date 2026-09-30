@@ -223,11 +223,16 @@ fn Node* clone_term(Arena* a, Node* n, int depth)
     if (n == null || depth > TERM_MAX_DEPTH) { return null; }
     Node* c = a.node(n.kind, n.line, n.col);
     if (c == null) { return null; }
+    c.span_start = n.span_start;
+    c.span_end = n.span_end;
     c.name_id = n.name_id;
     c.flags = n.flags;
     c.effects = n.effects;
     c.type_ann = n.type_ann;
+    c.type_slot = n.type_slot;
+    c.type_id = n.type_id;
     c.resolved = n.resolved;
+    c.sym = n.sym;
     c.owner = n.owner;
     c.p = n.p;
     for (usz i = 0; i < n.child_count; i++)

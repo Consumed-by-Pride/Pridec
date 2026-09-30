@@ -58,6 +58,14 @@ for src in "$TDIR"/p*.pie; do
         fi
         continue
     fi
+    if [ "$name" = "p111_quals_memory_read" ] \
+       && { ! grep -Fq 'pear qualifier attrs: 2 function(s) tagged LLVM memory(read)' "$errlog" \
+            || ! grep -Fq 'pear qualifier attrs: 2 parameter(s) tagged LLVM captures(none)' "$errlog"; }; then
+        echo "FAIL $name (qualifier proof did not reach PEAR memory(read)/captures(none) attributes)"
+        rm -f "$bin" "$errlog"
+        fail=$((fail+1))
+        continue
+    fi
     timeout "$TIMEOUT" "$bin" >/dev/null 2>&1; got=$?
     rm -f "$bin" "$errlog"
     if [ "$got" = "$expect" ]; then

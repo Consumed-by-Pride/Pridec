@@ -2432,6 +2432,10 @@ fn AirCmd* AirLower.match_(AirLower* lr, Node* n, AirCns* k)
     }
     lr.total_cns++;
     AirCns* cs = air_ir::air_mk_case(lr.arena, &bs[0], bc);
+    if (cs != null)
+    {
+        cs.dense_switch = (n.flags & pfront_core::NF_DENSE_SWITCH) != 0;
+    }
     AirCmd* fin = lr.cut(scr, cs);
     AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
     lr.scope.leave();
@@ -3323,6 +3327,10 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
     char* nm2 = lr.dup(nm);
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DEF, nm2);
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
+    // `NF_PURE_FN` means the qualifier pass proved no externally visible
+    // writes. It may still read memory or diverge, so do not infer `memory(none)`
+    // or termination attributes from this fact.
+    d.memory_readonly = (n.flags & pfront_core::NF_PURE_FN) != 0;
     // Return type: if the fn uses clause syntax (has N_CLAUSE children) the
     // parser attaches an N_TY_FN covering the entire clause as type_ann, so we
     // force t_infer and let PEAR infer the real arrow type. Otherwise trust
@@ -3361,16 +3369,24 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
         {
             char* pnm = (char*)"_";
             AirTyp* pty = lr.mod.t_infer;
-            if (c.child_count > 0)
+            Node* pp = c.child_count > 0 ? c.children[0] : null;
+            if (pp != null)
             {
-                Node* pp = c.children[0];
                 pnm = node_text(pp, lr.it);
                 if (pnm == null) pnm = (char*)"_";
             }
+            // Parameter annotations and inferred slots may live on the pattern
+            // child rather than the N_DECL_PARAM wrapper. Preserve that source
+            // type in AIR so pointer-typed parameters keep their real LLVM ABI.
             if (c.type_ann != null) { pty = air_types::air_ty(lr.mod, c.type_ann, lr.it); }
             else if (c.type_slot != null) { pty = air_types::air_ty(lr.mod, c.type_slot, lr.it); }
+            else if (pp != null && pp.type_ann != null) { pty = air_types::air_ty(lr.mod, pp.type_ann, lr.it); }
+            else if (pp != null && pp.type_slot != null) { pty = air_types::air_ty(lr.mod, pp.type_slot, lr.it); }
             char* an = lr.scope.bind_var(pnm, c);
             AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
+            bool is_llvm_ptr = pty != null && (pty.tag == air_ir::AirTypTag.ATYP_PTR
+                || pty.tag == air_ir::AirTypTag.ATYP_REF || pty.tag == air_ir::AirTypTag.ATYP_REF_MUT);
+            pb.no_capture = (c.flags & pfront_core::NF_READONLY_PARAM) != 0 && is_llvm_ptr;
             d.add_param(pb);
         }
         else if (c.kind == Nk.N_CLAUSE)
@@ -3518,6 +3534,10 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
             else
             {
                 body = air_ir::air_mk_match(lr.arena, scr, &bs[0], bc);
+                if (body != null)
+                {
+                    body.dense_switch = (n.flags & pfront_core::NF_DENSE_SWITCH) != 0;
+                }
             }
         }
         else

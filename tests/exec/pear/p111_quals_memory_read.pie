@@ -1,0 +1,30 @@
+-- EXIT: 35
+-- `theory_quals` proves add_one has no writes; PEAR maps that proof to
+-- LLVM memory(read). An aliased p/q write checks we infer captures(none),
+-- not readonly, for the non-retained p parameter.
+fn add_one(x: i64) -> i64 {
+  return x + 1;
+}
+
+fn read_first(p: *i64) -> i64 {
+  return p[0];
+}
+
+fn store_first(p: *i64) -> i64 {
+  p[0] = 9;
+  return p[0];
+}
+
+fn write_via_q(p: *i64, q: *i64) -> i64 {
+  q[0] = 11;
+  return p[0];
+}
+
+fn main(_) -> i64 ! [Alloc] {
+  let p: *i64 = alloc [i64; 1];
+  p[0] = 3;
+  let before = add_one(read_first(p));
+  let after = store_first(p);
+  let alias_read = write_via_q(p, p);
+  return before + after + alias_read + read_first(p);
+}

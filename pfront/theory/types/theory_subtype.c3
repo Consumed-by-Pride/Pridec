@@ -35,11 +35,17 @@ module theory_subtype;
 import pfront_lex;
 import pfront_core;
 import theory_term;
+import theory_setops;
+import theory_subtype_engine;
 
 alias Tk    = pfront_lex::TokenType;
 alias Node  = pfront_core::PNode;
 alias Nk    = pfront_core::NodeKind;
 alias Arena = pfront_core::Arena;
+alias SetStore = theory_setops::TypeStore;
+alias SetKind = theory_setops::StKind;
+alias PrimTag = theory_setops::PrimTag;
+alias Engine = theory_subtype_engine::Engine;
 
 extern fn void* malloc(usz size);
 extern fn void  free(void* ptr);
@@ -658,6 +664,8 @@ fn void SemanticSubtyper.report(SemanticSubtyper* s)
 struct MatchRefiner
 {
     SemanticSubtyper*      sub;
+    SetStore*              set_store;
+    Engine*                set_engine;
     pfront_core::DiagBag*  diags;
     char*                  file;
     usz arms_checked;
@@ -665,19 +673,31 @@ struct MatchRefiner
     usz refinements;
     usz aliases_checked;
     usz empty_aliases;
+    usz bindings_checked;
+    usz empty_bindings;
 }
 
 fn void MatchRefiner.init(MatchRefiner* m, SemanticSubtyper* s,
                           pfront_core::DiagBag* d, char* file)
 {
     m.sub = s;
+    m.set_store = null;
+    m.set_engine = null;
     m.diags = d;
     m.file = file;
     m.arms_checked = 0;
     m.aliases_checked = 0;
     m.empty_aliases = 0;
+    m.bindings_checked = 0;
+    m.empty_bindings = 0;
     m.impossible_arms = 0;
     m.refinements = 0;
+}
+
+fn void MatchRefiner.attach_engine(MatchRefiner* m, SetStore* store, Engine* engine)
+{
+    m.set_store = store;
+    m.set_engine = engine;
 }
 
 fn void MatchRefiner.check_match(MatchRefiner* m, Node* match_expr)
@@ -729,6 +749,15 @@ fn void MatchRefiner.walk(MatchRefiner* m, Node* n, int depth)
     {
         m.check_alias(n);
     }
+    // An alias declaration describes a set; an annotated binding is an
+    // actual use of that set. Surface the same emptiness proof at the binding
+    // site so an impossible annotation is actionable where the value is
+    // introduced, not only where its alias was declared.
+    if (n.kind == Nk.N_DECL_LET || n.kind == Nk.N_DECL_CONST
+        || n.kind == Nk.N_DECL_STATIC)
+    {
+        m.check_binding(n);
+    }
     for (usz i = 0; i < n.child_count; i++) { m.walk(n.children[i], depth + 1); }
 }
 
@@ -736,7 +765,7 @@ fn void MatchRefiner.walk(MatchRefiner* m, Node* n, int depth)
 fn void MatchRefiner.check_alias(MatchRefiner* m, Node* decl)
 {
     Node* ty = decl.type_ann;
-    if (ty == null || m.sub == null) { return; }
+    if (ty == null || (m.sub == null && m.set_engine == null)) { return; }
 
     // Only the set-theoretic forms are interesting; a plain alias to a
     // nominal type has nothing to decide.
@@ -745,16 +774,193 @@ fn void MatchRefiner.check_alias(MatchRefiner* m, Node* decl)
 
     m.aliases_checked = m.aliases_checked + 1;
 
-    // Uninhabited alias: no value can ever have this type. Reported as an
-    // advisory because Pride is untyped -- writing it is legal, and it may
-    // even be deliberate (a "never" marker).
-    if (m.sub.is_empty(ty))
+    // Uninhabited alias: no value can ever have this type. Use the same
+    // three-valued engine as binding annotations when it is attached to the
+    // production pipeline. Unsupported forms remain unknown and do not
+    // manufacture a proof. The legacy semantic procedure is only a fallback
+    // for standalone callers without an engine.
+    bool proven_empty = false;
+    if (m.set_store != null && m.set_engine != null)
+    {
+        int translated = ast_type_to_set_type(m.set_store, ty, 0);
+        if (translated >= 0)
+        {
+            int verdict = m.set_engine.subtype(translated, m.set_store.bot_idx);
+            proven_empty = verdict == theory_subtype_engine::TRI_TRUE;
+        }
+    }
+    else if (m.sub != null)
+    {
+        proven_empty = m.sub.is_empty(ty);
+    }
+    if (proven_empty)
     {
         m.empty_aliases = m.empty_aliases + 1;
         m.diags.advisory_hint(pfront_core::Phase.PH_RESOLVE, 3291,
                               decl.line, decl.col,
                               "this type is uninhabited: no value can inhabit it",
                               "an intersection of disjoint sets reduces to the empty set",
+                              m.file);
+    }
+}
+
+fn bool ast_type_name_is(Node* t, char* literal, usz length)
+{
+    if (t == null || t.p.sptr == null || t.p.slen != length) { return false; }
+    for (usz i = 0; i < length; i++)
+    {
+        if (t.p.sptr[i] != literal[i]) { return false; }
+    }
+    return true;
+}
+
+fn int ast_type_prim(Node* t)
+{
+    if (ast_type_name_is(t, "int", 3) || ast_type_name_is(t, "i8", 2)
+        || ast_type_name_is(t, "i16", 3) || ast_type_name_is(t, "i32", 3)
+        || ast_type_name_is(t, "i64", 3) || ast_type_name_is(t, "u8", 2)
+        || ast_type_name_is(t, "u16", 3) || ast_type_name_is(t, "u32", 3)
+        || ast_type_name_is(t, "u64", 3)) { return (int)PrimTag.PRIM_INT; }
+    if (ast_type_name_is(t, "float", 5) || ast_type_name_is(t, "f32", 3)
+        || ast_type_name_is(t, "f64", 3)) { return (int)PrimTag.PRIM_FLOAT; }
+    if (ast_type_name_is(t, "bool", 4)) { return (int)PrimTag.PRIM_BOOL; }
+    if (ast_type_name_is(t, "char", 4)) { return (int)PrimTag.PRIM_CHAR; }
+    if (ast_type_name_is(t, "str", 3) || ast_type_name_is(t, "string", 6))
+    { return (int)PrimTag.PRIM_STRING; }
+    if (ast_type_name_is(t, "unit", 4)) { return (int)PrimTag.PRIM_UNIT; }
+    return -1;
+}
+
+const int AST_SET_UNKNOWN = -1;
+
+// Translate only type forms for which the set engine has a conservative
+// interpretation. Unknown forms use a sentinel so negation can widen the
+// *whole* expression to TOP; directly mapping an unknown to TOP and then
+// negating it would unsoundly turn it into the empty type.
+fn int ast_type_to_set_type(SetStore* ts, Node* t, int depth)
+{
+    if (t == null || depth > 64) { return AST_SET_UNKNOWN; }
+    switch (t.kind)
+    {
+        case Nk.N_TY_BOTTOM: return ts.bot_idx;
+        case Nk.N_TY_SELF:
+        case Nk.N_TY_INFER: return AST_SET_UNKNOWN;
+        case Nk.N_TY_UNIT: return ts.mk_prim(PrimTag.PRIM_UNIT);
+        case Nk.N_TY_NAME:
+        case Nk.N_TY_PATH:
+        {
+            int prim = ast_type_prim(t);
+            if (prim >= 0) { return ts.mk_prim((PrimTag)prim); }
+            if (ast_type_name_is(t, "never", 5)) { return ts.bot_idx; }
+            if (ast_type_name_is(t, "any", 3) || ast_type_name_is(t, "top", 3))
+            { return ts.top_idx; }
+            // Follow only resolved transparent aliases. Nominal declarations
+            // stay unknown; depth bounds also break recursive alias cycles.
+            if (t.resolved != null && t.resolved.kind == Nk.N_DECL_TYPE
+                && t.resolved.type_ann != null)
+            {
+                return ast_type_to_set_type(ts, t.resolved.type_ann, depth + 1);
+            }
+            return AST_SET_UNKNOWN;
+        }
+        case Nk.N_TY_UNION:
+        {
+            int result = ts.bot_idx;
+            for (usz i = 0; i < t.child_count; i++)
+            {
+                int child = ast_type_to_set_type(ts, t.children[i], depth + 1);
+                if (child < 0) { return AST_SET_UNKNOWN; }
+                result = ts.my_union(result, child);
+            }
+            return result;
+        }
+        case Nk.N_TY_INTERSECT:
+        {
+            int result = ts.top_idx;
+            for (usz i = 0; i < t.child_count; i++)
+            {
+                int child = ast_type_to_set_type(ts, t.children[i], depth + 1);
+                if (child < 0) { return AST_SET_UNKNOWN; }
+                result = ts.my_inter(result, child);
+            }
+            return result;
+        }
+        case Nk.N_TY_NEGATION:
+        {
+            if (t.child_count == 0) { return AST_SET_UNKNOWN; }
+            int child = ast_type_to_set_type(ts, t.children[0], depth + 1);
+            return child < 0 ? ts.top_idx : ts.neg(child);
+        }
+        case Nk.N_TY_ARRAY:
+        case Nk.N_TY_SLICE:
+        {
+            if (t.child_count == 0) { return AST_SET_UNKNOWN; }
+            int elem = ast_type_to_set_type(ts, t.children[0], depth + 1);
+            return elem < 0 ? AST_SET_UNKNOWN : ts.mk_array(elem);
+        }
+        case Nk.N_TY_TUPLE:
+        {
+            if (t.child_count == 0) { return AST_SET_UNKNOWN; }
+            int result = ast_type_to_set_type(ts, t.children[0], depth + 1);
+            if (result < 0) { return AST_SET_UNKNOWN; }
+            for (usz i = 1; i < t.child_count; i++)
+            {
+                int child = ast_type_to_set_type(ts, t.children[i], depth + 1);
+                if (child < 0) { return AST_SET_UNKNOWN; }
+                result = ts.mk_binary(SetKind.ST_TUPLE, result, child);
+            }
+            return result;
+        }
+        case Nk.N_TY_FN:
+        {
+            if (t.child_count == 0) { return AST_SET_UNKNOWN; }
+            int result = ast_type_to_set_type(ts, t.children[t.child_count - 1], depth + 1);
+            if (result < 0) { return AST_SET_UNKNOWN; }
+            for (usz i = 0; i + 1 < t.child_count; i++)
+            {
+                int arg = ast_type_to_set_type(ts, t.children[i], depth + 1);
+                if (arg < 0) { return AST_SET_UNKNOWN; }
+                result = ts.mk_arrow(arg, result);
+            }
+            return result;
+        }
+        default: return AST_SET_UNKNOWN;
+    }
+}
+
+// Check an annotated value against the three-valued set-theoretic engine.
+// Unknown translations/results are deliberately silent; only a proved empty
+// type becomes an opt-in warning under the language's advisory policy.
+fn void MatchRefiner.check_binding(MatchRefiner* m, Node* decl)
+{
+    Node* ty = decl.type_ann;
+    if (ty == null && decl.child_count > 0 && decl.children[0] != null)
+    {
+        ty = decl.children[0].type_ann;
+    }
+    if (ty == null || m.sub == null || !has_set_operator(ty, 0)) { return; }
+    m.bindings_checked = m.bindings_checked + 1;
+    bool proven_empty = false;
+    if (m.set_store != null && m.set_engine != null)
+    {
+        int translated = ast_type_to_set_type(m.set_store, ty, 0);
+        if (translated >= 0)
+        {
+            int verdict = m.set_engine.subtype(translated, m.set_store.bot_idx);
+            proven_empty = verdict == theory_subtype_engine::TRI_TRUE;
+        }
+    }
+    else if (m.sub != null)
+    {
+        proven_empty = m.sub.is_empty(ty);
+    }
+    if (proven_empty)
+    {
+        m.empty_bindings = m.empty_bindings + 1;
+        m.diags.advisory_hint(pfront_core::Phase.PH_RESOLVE, 3292,
+                              decl.line, decl.col,
+                              "binding is annotated with an uninhabited type",
+                              "no value can satisfy this type annotation",
                               m.file);
     }
 }
@@ -782,7 +988,15 @@ fn void MatchRefiner.report(MatchRefiner* m)
         printf("  type algebra     : %d aliases analysed, %d uninhabited\n",
                (int)m.aliases_checked, (int)m.empty_aliases);
     }
-    if (m.arms_checked == 0) { return; }
-    printf("  match refinement : %d arms typed, %d impossible, %d refined\n",
-           (int)m.arms_checked, (int)m.impossible_arms, (int)m.refinements);
+    if (m.bindings_checked > 0)
+    {
+        printf("  type annotations : %d bindings analysed, %d uninhabited\n",
+               (int)m.bindings_checked, (int)m.empty_bindings);
+    }
+    if (m.set_engine != null && m.set_engine.queries > 0) { m.set_engine.report(); }
+    if (m.arms_checked > 0)
+    {
+        printf("  match refinement : %d arms typed, %d impossible, %d refined\n",
+               (int)m.arms_checked, (int)m.impossible_arms, (int)m.refinements);
+    }
 }

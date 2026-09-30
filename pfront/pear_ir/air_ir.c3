@@ -98,7 +98,7 @@ fn void* air_new_raw(AirArena* a, usz size_) {
 }
 
 // ── Auxiliary records ─────────────────────────────────────────────────────
-struct AirBinder { uint id; char* name; AirMult mult; int mult_exact; AirTyp* ty; bool is_mutable; }
+struct AirBinder { uint id; char* name; AirMult mult; int mult_exact; AirTyp* ty; bool is_mutable; bool no_capture; }
 struct AirField { uint id; char* name; AirMult mult; AirTyp* ty; bool is_mut; }
 struct AirBranch { uint id; AirPat* pat; AirCmd* body; AirCmd* guard; }
 struct AirCoBranch { uint id; char* dtor_name; char*[16] binders; usz binder_count; AirCmd* body; }
@@ -135,6 +135,7 @@ struct AirCns {
     AirCns* cont_k;
     AirBranch*[64] branches; usz branch_count;
     AirCoBranch*[64] cobranches; usz cobranch_count;
+    bool dense_switch; // analysis-certified dense scalar dispatch hint
     AirCmd* body; char* bind; AirTyp* ty;
     char* label_name; AirBinder*[16] label_args; usz label_arg_count; AirCmd* label_body;
     char*[16] subst_vars; AirPrd*[16] subst_prds; usz subst_count;
@@ -148,6 +149,7 @@ struct AirCmd {
     AirCmd* then_c;
     AirCmd* else_c;
     AirBranch*[64] branches; usz branch_count;
+    bool dense_switch; // propagated from NF_DENSE_SWITCH after match analysis
     AirCmd* handled; char* eff_op; char* target_label;
     char*[16] jump_args; usz jump_arg_count;
     char* ub_msg; int asm_dialect; char* asm_text; AirTyp* poison_ty;
@@ -161,6 +163,7 @@ struct AirDecl {
     AirBinder*[16] params; usz param_count;
     AirCmd* def_body; AirTyp* ret_ty;
     bool is_pub, is_extern, is_fastcc, is_varargs;
+    bool memory_readonly; // qualifier proof: no externally visible writes
     char* extern_link; AirEffectOp*[16] ops; usz op_count;
     char* import_path; char* import_alias; bool import_glob; char* module_name;
 }
@@ -284,7 +287,7 @@ fn void AirCmd.add_branch(AirCmd* c, AirBranch* b){ if(c==null||b==null)return; 
 // ── Smart constructors ───────────────────────────────────────────────────
 fn AirBinder* air_mk_binder(AirArena* a, char* nm, AirTyp* ty, AirMult m) {
     AirBinder* b=air_new_AirBinder(a); if(b==null)return null;
-    b.name=nm; b.ty=ty; b.mult=m; b.mult_exact=0; b.is_mutable=false; return b;
+    b.name=nm; b.ty=ty; b.mult=m; b.mult_exact=0; b.is_mutable=false; b.no_capture=false; return b;
 }
 fn AirField* air_mk_field(AirArena* a, char* nm, AirTyp* ty, AirMult m) {
     AirField* f=air_new_AirField(a); if(f==null)return null;
@@ -299,7 +302,7 @@ fn AirDecl* air_mk_decl(AirArena* a, AirDeclTag tag, char* nm) {
     d.tag=tag; d.name=nm; d.typaram_count=0; d.mult=AMULT_UNR;
     d.ctor_count=0; d.dtor_count=0; d.param_count=0;
     d.def_body=null; d.ret_ty=null; d.is_pub=false; d.is_extern=false;
-    d.is_varargs=false; d.extern_link=null; d.op_count=0;
+    d.is_varargs=false; d.memory_readonly=false; d.extern_link=null; d.op_count=0;
     d.import_path=null; d.import_alias=null; d.import_glob=false;
     d.module_name=null; return d;
 }
@@ -357,7 +360,7 @@ fn AirCmd* air_mk_handle(AirArena* a, AirCmd* comp, AirBranch** bs, usz bc) {
 }
 fn AirCmd* air_mk_match(AirArena* a, AirPrd* scrutee, AirBranch** bs, usz bc) {
     AirCmd* c=air_new_AirCmd(a); if(c==null)return null;
-    c.tag=ACMD_MATCH; c.prd=scrutee; c.branch_count=0;
+    c.tag=ACMD_MATCH; c.prd=scrutee; c.branch_count=0; c.dense_switch=false;
     for(usz i=0;i<bc&&i<64;i++){c.add_branch(bs[i]);} return c;
 }
 fn AirCmd* air_mk_break(AirArena* a, char* lbl)
@@ -449,7 +452,7 @@ fn AirCns* air_mk_call(AirArena* a, AirPrd** args, usz ac, AirCns* k) {
     return call;
 }
 fn AirCns* air_mk_case(AirArena* a, AirBranch** bs, usz bc) {
-    AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_CASE; e.branch_count=0;
+    AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_CASE; e.branch_count=0; e.dense_switch=false;
     for(usz i=0;i<bc&&i<64;i++){e.branches[e.branch_count]=bs[i]; e.branch_count++;}
     e.tail=null; return e;
 }

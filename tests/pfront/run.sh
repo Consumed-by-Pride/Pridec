@@ -1488,6 +1488,34 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s confluence: W4031=%s N4032=%s ok=%s bad=%s d=%s\n' "trs_confluence" "$w" "$n" "$okc" "$badc" "$d"
 fi
 
+# Cloning and E-graph extraction must preserve type/resolution metadata.
+meta=$("$BIN" --theory-metadata-selftest 2>&1)
+if echo "$meta" | grep -q 'theory metadata preservation: PASS'; then
+  pass=$((pass+1)); printf '  PASS  %-26s (clone + extraction metadata)\n' "theory_metadata"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "theory_metadata" "$meta"
+fi
+
+# The production set engine follows resolved transparent primitive aliases,
+# but must preserve unknown through unsupported forms beneath negation. The
+# result is advisory only under --lint.
+sub=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt --lint 2>&1)
+sub_default=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt 2>&1)
+sub_w=$(echo "$sub" | grep -c 'warning\[W3292\]')
+sub_default_w=$(echo "$sub_default" | grep -c 'warning\[W3292\]')
+sub_alias_w=$(echo "$sub" | grep -c 'warning\[W3291\]')
+sub_default_alias_w=$(echo "$sub_default" | grep -c 'warning\[W3291\]')
+sub_engine=$(echo "$sub" | grep -c 'subtype engine.*6 queries, 3 proved, 3 refuted')
+if [ "$sub_w" = "2" ] && [ "$sub_default_w" = "0" ] \
+   && [ "$sub_alias_w" = "1" ] && [ "$sub_default_alias_w" = "0" ] \
+   && [ "$sub_engine" = "1" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (transparent aliases + conservative opaque complement; lint only)\n' "subtype_annotation"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s binding=%s/%s alias=%s/%s engine=%s\n' \
+    "subtype_annotation" "$sub_w" "$sub_default_w" \
+    "$sub_alias_w" "$sub_default_alias_w" "$sub_engine"
+fi
+
 # 31/35 must actually FIRE at their `|>` sites.
 f31=$("$BIN" tests/pfront/31_trs_rule.pie 2>&1 | grep -oE '[0-9]+ firings' | grep -oE '^[0-9]+')
 f35=$(trs_ast 35_egraph_rewrite | sed -n "/fn 'f'/,\$p" | grep -c "binary <<")
@@ -1739,6 +1767,19 @@ if [ $dt_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (complete enum switch, shared DAG, dense jump table, or-rows, guard fallthrough, 0 disagreements)\n' "dtree"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "dtree" "$dt_why"
+fi
+
+# Dense scalar-match analysis is a lowering input, and a wildcard must certify
+# an infinite integer/char domain as exhaustive rather than inventing a gap.
+ms=$("$BIN" tests/exec/pear/p110_dense_switch.pie -I stdlib -I . --lint --emit-dtree 2>&1)
+ms_rc=$?
+ms_dense=$(echo "$ms" | grep -Ec 'dtree: (match|fn) .*dense]')
+ms_false_gap=$(echo "$ms" | grep -c 'warning\[W4090\]')
+if [ "$ms_rc" = "0" ] && [ "$ms_dense" = "3" ] && [ "$ms_false_gap" = "0" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (dense int/char/clause flags; wildcard proves exhaustive)\n' "dense_match_certificate"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s rc=%s dense=%s false-gap=%s\n' \
+    "dense_match_certificate" "$ms_rc" "$ms_dense" "$ms_false_gap"
 fi
 
 # Qualifiers: purity must be interprocedural (bump_twice impure only through
