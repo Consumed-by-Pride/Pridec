@@ -21,7 +21,13 @@ fi
 pass=0; fail=0; xfail=0; xpass=0
 TDIR="tests/exec/pear"
 # Clean stale binaries from prior runs.
-find "$TDIR" -maxdepth 1 -type f -executable -not -name '*.pie' -not -name '*.sh' -delete 2>/dev/null
+find "$TDIR" -maxdepth 1 -type f -executable -not -name '*.pie' -not -name '*.sh' -not -name '*.txt' -delete 2>/dev/null
+# Also clean the common case where pfrontc writes the binary next to the
+# .pie WITHOUT +x (--emit-exe with warnings returns rc=1, binary still produced).
+for f in "$TDIR"/p*.pie; do
+    b="${f%.pie}"
+    if [ -f "$b" ] && [ ! -x "$b" ]; then rm -f "$b"; fi
+done
 
 for src in "$TDIR"/p*.pie; do
     [ -f "$src" ] || continue
@@ -50,8 +56,7 @@ for src in "$TDIR"/p*.pie; do
         continue
     fi
     "$bin" >/dev/null 2>&1; got=$?
-    rm -f "$bin" "$errlog"
-    if [ "$got" = "$expect" ]; then
+    rm -f "$bin" "$errlog"    if [ "$got" = "$expect" ]; then
         if [ $is_xfail -eq 1 ]; then
             echo "UNXPASS $name (expect=$expect got=$got, was XFAIL — promote!)"
             xpass=$((xpass+1))

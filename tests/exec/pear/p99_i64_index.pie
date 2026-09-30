@@ -1,0 +1,9 @@
+-- EXIT: 77
+-- PEAR v0.8.8: multi-byte (i64) pointer indexing. a[3] on *i64 must
+-- compute element 3 (byte offset 24), not byte offset 3. Guards the
+-- elem-size-aware GEP/load/store in ACNS_INDEX/STORE.
+fn main(_) -> i64 ! [Alloc] {
+  let a : *i64 = alloc [i64; 8];
+  a[3] = 77;
+  return a[3];
+}

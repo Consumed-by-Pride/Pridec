@@ -395,8 +395,8 @@ fn AirCns* air_mk_proj(AirArena* a, long n, AirCns* k)
     { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_PROJ; e.idx=n; e.tail=k; return e; }
 fn AirCns* air_mk_field_cns(AirArena* a, char* f, AirCns* k)
     { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_FIELD; e.name=f; e.tail=k; return e; }
-fn AirCns* air_mk_index(AirArena* a, AirPrd* i, AirCns* k)
-    { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_INDEX; e.prd=i; e.tail=k; return e; }
+fn AirCns* air_mk_index(AirArena* a, AirPrd* i, long esz, AirCns* k)
+    { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_INDEX; e.prd=i; e.idx=esz; e.tail=k; return e; }
 fn AirCns* air_mk_deref(AirArena* a, AirCns* k)
     { AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_DEREF; e.prd=null; e.tail=k; return e; }
 // ACNS_STORE: the "prd" field holds the destination ADDRESS producer
