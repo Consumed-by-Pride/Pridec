@@ -4,13 +4,16 @@
 # For each tests/exec/pear/p*.pie:
 #   - reads -- EXIT: N  as the expected exit code
 #   - reads -- BLOCKER (XFAIL): ... markers; XFAIL cases that pass are UNXPASS
-#   - compiles with pfrontc --emit-exe at -O2, runs, checks exit code
+#   - compiles with pfrontc --emit-exe at PEAR_OPT (default -O2), runs, checks exit code
 #
 # Usage (from repo root): bash tests/exec/pear/run.sh [pfrontc path]
 set -u
 cd "$(dirname "$0")/../../.."
 ROOT="$PWD"
 PF="${1:-./pfrontc}"
+PEAR_OPT=${PEAR_OPT:--O2}
+TIMEOUT=${TIMEOUT:-5}
+case "$PEAR_OPT" in -O0|-O1|-O2|-O3) ;; *) echo "invalid PEAR_OPT: $PEAR_OPT"; exit 2 ;; esac
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 
 if [ ! -x "$PF" ]; then
@@ -41,7 +44,7 @@ for src in "$TDIR"/p*.pie; do
     if grep -q 'BLOCKER (XFAIL)' "$src"; then is_xfail=1; fi
     bin="${src%.pie}"
     errlog="/tmp/pear_${name}.err"
-    "$PF" "$src" --emit-exe -O2 --quiet >"$errlog" 2>&1
+    "$PF" "$src" --emit-exe "$PEAR_OPT" --quiet >"$errlog" 2>&1
     compile_rc=$?
     # pfrontc returns 0 on clean compile, 1 if warnings only, 2+ on errors.
     if [ $compile_rc -ge 2 ] || [ ! -x "$bin" ]; then
@@ -55,7 +58,7 @@ for src in "$TDIR"/p*.pie; do
         fi
         continue
     fi
-    "$bin" >/dev/null 2>&1; got=$?
+    timeout "$TIMEOUT" "$bin" >/dev/null 2>&1; got=$?
     rm -f "$bin" "$errlog"
     if [ "$got" = "$expect" ]; then
         if [ $is_xfail -eq 1 ]; then
@@ -78,5 +81,5 @@ done
 
 echo ""
 echo "=== PEAR exec: pass=$pass fail=$fail xfail=$xfail unxpass=$xpass ==="
-if [ $fail -gt 0 ]; then exit 1; fi
+if [ $fail -gt 0 ] || [ $xpass -gt 0 ]; then exit 1; fi
 exit 0

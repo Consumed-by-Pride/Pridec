@@ -1,5 +1,13 @@
 # Pride Capability Checklist
 
+> **Historical snapshot (2026-06-29; pre-pfront/PEAR).** Its checkmarks mean
+> parse/resolve/IR/`llvm-as-22` passed at that time; they do **not** claim
+> current native-code or runtime behavior. For current front-end and theory
+> results, run `make test` (including the experiment probes). The current
+> no-regression contract is `tests/baselines.tsv`, with unmet conformance
+> contracts listed individually in `conformance/KNOWN_FAILURES.tsv`. A green
+> gate does not mean all language or runtime capabilities are implemented.
+
 Generated: 2026-06-29
 
 ```

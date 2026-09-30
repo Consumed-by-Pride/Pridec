@@ -60,13 +60,13 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
 
 $(BINARY): $(SOURCES) | c3c
-	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) $(LDFLAGS) -o $(BINARY)
+	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) --max-stack-object-size 262144 $(LDFLAGS) -o $(BINARY)
 
 # ── Bootstrap c3c if missing ────────────────────────────────────────────
 c3c:
@@ -85,7 +85,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness
+test: test-pfront test-conform test-pear test-exec test-harness test-experiments
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -113,6 +113,11 @@ test-pear: $(BINARY)
 test-exec: $(BINARY)
 	@echo "==> exec suite (--emit-exe -> native -> run)"
 	bash tests/exec/run.sh
+
+# Cross-cutting probes for theory contracts, diagnostics, and module loading.
+test-experiments: $(BINARY)
+	@echo "==> theory experiments"
+	bash experiments/run.sh
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)
