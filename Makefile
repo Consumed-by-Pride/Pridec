@@ -60,7 +60,7 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -85,7 +85,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments
+test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -118,6 +118,10 @@ test-exec: $(BINARY)
 test-experiments: $(BINARY)
 	@echo "==> theory experiments"
 	bash experiments/run.sh
+
+test-subtype: $(BINARY)
+	@echo "==> semantic subtype specification"
+	./$(BINARY) --subtype-selftest
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)
