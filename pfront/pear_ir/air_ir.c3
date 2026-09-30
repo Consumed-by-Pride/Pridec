@@ -135,6 +135,7 @@ struct AirCns {
     AirCns* cont_k;
     AirBranch*[64] branches; usz branch_count;
     AirCoBranch*[64] cobranches; usz cobranch_count;
+    bool dense_switch; // analysis-certified dense scalar dispatch hint
     AirCmd* body; char* bind; AirTyp* ty;
     char* label_name; AirBinder*[16] label_args; usz label_arg_count; AirCmd* label_body;
     char*[16] subst_vars; AirPrd*[16] subst_prds; usz subst_count;
@@ -148,6 +149,7 @@ struct AirCmd {
     AirCmd* then_c;
     AirCmd* else_c;
     AirBranch*[64] branches; usz branch_count;
+    bool dense_switch; // propagated from NF_DENSE_SWITCH after match analysis
     AirCmd* handled; char* eff_op; char* target_label;
     char*[16] jump_args; usz jump_arg_count;
     char* ub_msg; int asm_dialect; char* asm_text; AirTyp* poison_ty;
@@ -357,7 +359,7 @@ fn AirCmd* air_mk_handle(AirArena* a, AirCmd* comp, AirBranch** bs, usz bc) {
 }
 fn AirCmd* air_mk_match(AirArena* a, AirPrd* scrutee, AirBranch** bs, usz bc) {
     AirCmd* c=air_new_AirCmd(a); if(c==null)return null;
-    c.tag=ACMD_MATCH; c.prd=scrutee; c.branch_count=0;
+    c.tag=ACMD_MATCH; c.prd=scrutee; c.branch_count=0; c.dense_switch=false;
     for(usz i=0;i<bc&&i<64;i++){c.add_branch(bs[i]);} return c;
 }
 fn AirCmd* air_mk_break(AirArena* a, char* lbl)
@@ -449,7 +451,7 @@ fn AirCns* air_mk_call(AirArena* a, AirPrd** args, usz ac, AirCns* k) {
     return call;
 }
 fn AirCns* air_mk_case(AirArena* a, AirBranch** bs, usz bc) {
-    AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_CASE; e.branch_count=0;
+    AirCns* e=air_new_AirCns(a); if(e==null)return null; e.tag=ACNS_CASE; e.branch_count=0; e.dense_switch=false;
     for(usz i=0;i<bc&&i<64;i++){e.branches[e.branch_count]=bs[i]; e.branch_count++;}
     e.tail=null; return e;
 }

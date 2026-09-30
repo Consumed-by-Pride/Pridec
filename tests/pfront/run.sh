@@ -1769,6 +1769,19 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "dtree" "$dt_why"
 fi
 
+# Dense scalar-match analysis is a lowering input, and a wildcard must certify
+# an infinite integer/char domain as exhaustive rather than inventing a gap.
+ms=$("$BIN" tests/exec/pear/p110_dense_switch.pie -I stdlib -I . --lint --emit-dtree 2>&1)
+ms_rc=$?
+ms_dense=$(echo "$ms" | grep -Ec 'dtree: (match|fn) .*dense]')
+ms_false_gap=$(echo "$ms" | grep -c 'warning\[W4090\]')
+if [ "$ms_rc" = "0" ] && [ "$ms_dense" = "3" ] && [ "$ms_false_gap" = "0" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (dense int/char/clause flags; wildcard proves exhaustive)\n' "dense_match_certificate"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s rc=%s dense=%s false-gap=%s\n' \
+    "dense_match_certificate" "$ms_rc" "$ms_dense" "$ms_false_gap"
+fi
+
 # Qualifiers: purity must be interprocedural (bump_twice impure only through
 # bump; wasted stays pure), recursion must not break purity, pointer
 # parameters that are only read are flagged, discarded pure results warn,

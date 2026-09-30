@@ -91,6 +91,8 @@ extern fn Lvalue ll_build_ret(Lbuilder b, Lvalue v) @cname("LLVMBuildRet");
 extern fn Lvalue ll_build_ret_void(Lbuilder b) @cname("LLVMBuildRetVoid");
 extern fn Lvalue ll_build_br(Lbuilder b, Lblock bb) @cname("LLVMBuildBr");
 extern fn Lvalue ll_build_condbr(Lbuilder b, Lvalue c, Lblock t, Lblock e) @cname("LLVMBuildCondBr");
+extern fn Lvalue ll_build_switch(Lbuilder b, Lvalue value, Lblock default_bb, uint case_hint) @cname("LLVMBuildSwitch");
+extern fn void ll_add_case(Lvalue switch_inst, Lvalue value, Lblock dest) @cname("LLVMAddCase");
 extern fn Lvalue ll_build_unreachable(Lbuilder b) @cname("LLVMBuildUnreachable");
 
 extern fn Lvalue ll_get_named_fn(Lmodule m, char* n) @cname("LLVMGetNamedFunction");
@@ -730,6 +732,112 @@ fn Lvalue PearCg.prd_i1(PearCg* cg, AirPrd* p)
 
 // ── Consumers ────────────────────────────────────────────────────────
 
+// Consume the frontend's dense-switch certificate only for the narrow case
+// we can lower without losing source semantics: distinct integer/character
+// literals, no guards, and an optional final wildcard or binding pattern. All
+// other patterns keep the existing conservative path.
+fn int PearCg.emit_dense_scalar_switch(PearCg* cg, Lvalue scrutinee, AirCns* k)
+{
+    if (k == null || !k.dense_switch || scrutinee == null
+        || k.branch_count == 0 || k.branch_count > 64) { return -1; }
+
+    int wildcard = -1;
+    uint literal_count = 0;
+    for (uint i = 0; i < (uint)k.branch_count; i++)
+    {
+        AirBranch* br = k.branches[i];
+        if (br == null || br.guard != null || br.pat == null) { return -1; }
+        if (br.pat.tag == APAT_WILD || br.pat.tag == APAT_BIND)
+        {
+            if (wildcard >= 0 || i + 1 != (uint)k.branch_count) { return -1; }
+            if (br.pat.tag == APAT_BIND && br.pat.name == null) { return -1; }
+            wildcard = (int)i;
+            continue;
+        }
+        if (br.pat.tag != APAT_INT && br.pat.tag != APAT_CHAR) { return -1; }
+        for (uint j = 0; j < i; j++)
+        {
+            AirBranch* prev = k.branches[j];
+            if (prev != null && prev.pat != null
+                && (prev.pat.tag == APAT_INT || prev.pat.tag == APAT_CHAR)
+                && prev.pat.ival == br.pat.ival) { return -1; }
+        }
+        literal_count++;
+    }
+    if (literal_count < 4) { return -1; }
+
+    Lblock[64] targets;
+    Lblock default_bb = null;
+    for (uint i = 0; i < (uint)k.branch_count; i++)
+    {
+        AirBranch* br = k.branches[i];
+        if ((int)i == wildcard) { continue; }
+        char[256] name;
+        (void)snprintf(&name[0], 256, "switch.case%u", cg.blk);
+        cg.blk++;
+        targets[i] = ll_append_bb(cg.ctx, cg.cur_fn, &name[0]);
+    }
+    if (wildcard >= 0)
+    {
+        char[256] name;
+        (void)snprintf(&name[0], 256, "switch.default%u", cg.blk);
+        cg.blk++;
+        default_bb = ll_append_bb(cg.ctx, cg.cur_fn, &name[0]);
+        targets[wildcard] = default_bb;
+    }
+    else
+    {
+        char[256] name;
+        (void)snprintf(&name[0], 256, "switch.default%u", cg.blk);
+        cg.blk++;
+        default_bb = ll_append_bb(cg.ctx, cg.cur_fn, &name[0]);
+    }
+
+    Lvalue sw = ll_build_switch(cg.b, scrutinee, default_bb, literal_count);
+    cg.terminated = true;
+    for (uint i = 0; i < (uint)k.branch_count; i++)
+    {
+        if ((int)i == wildcard) { continue; }
+        AirPat* pat = k.branches[i].pat;
+        Lvalue cv = ll_const_int(cg.i64ty, (ulong)pat.ival, 1);
+        ll_add_case(sw, cv, targets[i]);
+    }
+
+    Lblock join_before = cg.cur_k_bb;
+    bool any_join_fill = false;
+    for (uint i = 0; i < (uint)k.branch_count; i++)
+    {
+        ll_pos_builder(cg.b, targets[i]);
+        cg.terminated = false;
+        AirBranch* br = k.branches[i];
+        if ((int)i == wildcard && br.pat.tag == APAT_BIND)
+        {
+            cg.bind_direct(br.pat.name, scrutinee, false);
+        }
+        bool terminated = cg.cmd(br.body);
+        bool filled_join = cg.cur_k_bb != join_before;
+        if (!terminated && !filled_join)
+        {
+            ll_build_unreachable(cg.b);
+            cg.terminated = true;
+        }
+        if (filled_join) { any_join_fill = true; }
+    }
+    if (wildcard < 0)
+    {
+        ll_pos_builder(cg.b, default_bb);
+        ll_build_unreachable(cg.b);
+        cg.terminated = true;
+    }
+    if (any_join_fill)
+    {
+        ll_pos_builder(cg.b, cg.cur_k_bb);
+        cg.terminated = false;
+        return 0;
+    }
+    return 1;
+}
+
 fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
 {
     if (k == null)
@@ -1074,6 +1182,8 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
         }
         case ACNS_CASE:
         {
+            int dense_result = cg.emit_dense_scalar_switch(v, k);
+            if (dense_result >= 0) { return dense_result != 0; }
             // Boolean or pattern-matching dispatch. Bootstrap: handle the
             // 2-arm bool case used by if/while/for (true→…; false→…).
             // Evaluate `v` as i1, then cond_br to arms. Fallthrough arm
@@ -1325,6 +1435,7 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
             for (usz zi = 0; zi < 64; zi++) { kase.branches[zi] = null; kase.cobranches[zi] = null; }
             for (usz zi = 0; zi < 16; zi++) { kase.label_args[zi] = null; }
             kase.branch_count = c.branch_count;
+            kase.dense_switch = c.dense_switch;
             for (usz i = 0; i < c.branch_count && i < 64; i++) { kase.branches[i] = c.branches[i]; }
             return cg.cns(sv, &kase);
         }

@@ -2432,6 +2432,10 @@ fn AirCmd* AirLower.match_(AirLower* lr, Node* n, AirCns* k)
     }
     lr.total_cns++;
     AirCns* cs = air_ir::air_mk_case(lr.arena, &bs[0], bc);
+    if (cs != null)
+    {
+        cs.dense_switch = (n.flags & pfront_core::NF_DENSE_SWITCH) != 0;
+    }
     AirCmd* fin = lr.cut(scr, cs);
     AirCmd* out = binds == null ? fin : air_ir::air_mk_seq(lr.arena, binds, fin);
     lr.scope.leave();
@@ -3518,6 +3522,10 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
             else
             {
                 body = air_ir::air_mk_match(lr.arena, scr, &bs[0], bc);
+                if (body != null)
+                {
+                    body.dense_switch = (n.flags & pfront_core::NF_DENSE_SWITCH) != 0;
+                }
             }
         }
         else
