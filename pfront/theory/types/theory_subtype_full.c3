@@ -49,6 +49,7 @@ struct AtomSet
     int*     nom_pos;  int* nom_neg;  usz nom_pos_count;  usz nom_neg_count;
     int*     prod_l;   int* prod_r;   usz prod_count;
     int*     rec_ids;  usz  rec_count;
+    int*     rec_neg_ids; usz rec_neg_count;
     int*     arr_dom;  int* arr_cod;  usz arr_count;
     int*     arr_neg_dom; int* arr_neg_cod; usz arr_neg_count;
     int*     arr_elem; usz  arr_elem_count;
@@ -62,6 +63,7 @@ fn void atomset_init(AtomSet* a)
     a.nom_pos = null; a.nom_neg = null; a.nom_pos_count = 0; a.nom_neg_count = 0;
     a.prod_l = null; a.prod_r = null; a.prod_count = 0;
     a.rec_ids = null; a.rec_count = 0;
+    a.rec_neg_ids = null; a.rec_neg_count = 0;
     a.arr_dom = null; a.arr_cod = null; a.arr_count = 0;
     a.arr_neg_dom = null; a.arr_neg_cod = null; a.arr_neg_count = 0;
     a.arr_elem = null; a.arr_elem_count = 0;
@@ -102,6 +104,7 @@ fn void atomset_free(AtomSet* a)
     if (a.prod_l != null) { free((void*)a.prod_l); a.prod_l = null; }
     if (a.prod_r != null) { free((void*)a.prod_r); a.prod_r = null; }
     if (a.rec_ids != null) { free((void*)a.rec_ids); a.rec_ids = null; }
+    if (a.rec_neg_ids != null) { free((void*)a.rec_neg_ids); a.rec_neg_ids = null; }
     if (a.arr_dom != null) { free((void*)a.arr_dom); a.arr_dom = null; }
     if (a.arr_cod != null) { free((void*)a.arr_cod); a.arr_cod = null; }
     if (a.arr_neg_dom != null) { free((void*)a.arr_neg_dom); a.arr_neg_dom = null; }
@@ -159,6 +162,7 @@ fn void collect_atoms(TypeStore* ts, int ty, AtomSet* a, bool pos, int depth)
                                     nn.children[0], nn.children[1]);
                     }
                     break;
+                case St.ST_RECORD: append_i(&a.rec_neg_ids, &a.rec_neg_count, t); break;
                 default: break;
             }
             continue;
@@ -281,22 +285,72 @@ fn bool is_empty(TypeStore* ts, int ty, int depth)
         if (is_empty(ts, ld, depth + 1) || is_empty(ts, rd, depth + 1)) result = true;
     }
 
-    // records
+    // Records are width-subtyped structural maps. Intersecting positive
+    // rows intersects the payload constraints for every required label;
+    // a bottom payload makes the whole record conjunction uninhabited.
     if (!result && a.rec_count > 0)
     {
-        int ti = ts.top_idx;
-        for (usz i = 0; i < a.rec_count; i++)
+        for (usz i = 0; i < a.rec_count && !result; i++)
         {
-            theory_setops::StNode* rn = &ts.nodes[a.rec_ids[i]];
-            if (rn.child_count >= 1 && rn.children[0] >= 0) ti = ts.my_inter(ti, rn.children[0]);
-        }
-        int tid = theory_setops::st_dnf(ts, ti);
-        if (is_empty(ts, tid, depth + 1))
-        {
-            for (usz i = 0; i < a.rec_count; i++)
+            theory_setops::StNode* row = &ts.nodes[a.rec_ids[i]];
+            if (row.fe_idx < 0 || (usz)row.fe_idx >= ts.fentry_count) continue;
+            theory_setops::StFieldEntry* fields = &ts.field_entries[row.fe_idx];
+            if (fields.field_count > 0 && fields.fields == null) continue;
+            for (usz f = 0; f < fields.field_count && !result; f++)
             {
-                theory_setops::StNode* rn = &ts.nodes[a.rec_ids[i]];
-                if (rn.child_count >= 1 && rn.children[0] == ts.bot_idx) { result = true; break; }
+                int payload = ts.top_idx;
+                for (usz r = 0; r < a.rec_count; r++)
+                {
+                    theory_setops::StNode* other = &ts.nodes[a.rec_ids[r]];
+                    if (other.fe_idx < 0 || (usz)other.fe_idx >= ts.fentry_count) continue;
+                    theory_setops::StFieldEntry* other_fields = &ts.field_entries[other.fe_idx];
+                    if (other_fields.field_count > 0 && other_fields.fields == null) continue;
+                    for (usz g = 0; g < other_fields.field_count; g++)
+                    {
+                        if (other_fields.fields[g].name_id == fields.fields[f].name_id)
+                        {
+                            payload = ts.my_inter(payload, other_fields.fields[g].child);
+                        }
+                    }
+                }
+                int payload_dnf = theory_setops::st_dnf(ts, payload);
+                if (is_empty(ts, payload_dnf, depth + 1)) result = true;
+            }
+        }
+    }
+    // A positive row intersected with the complement of a negative row is
+    // empty when the positive row is a width/depth subtype of that row.
+    if (!result && a.rec_count > 0 && a.rec_neg_count > 0)
+    {
+        for (usz neg_i = 0; neg_i < a.rec_neg_count && !result; neg_i++)
+        {
+            theory_setops::StNode* target = &ts.nodes[a.rec_neg_ids[neg_i]];
+            if (target.fe_idx < 0 || (usz)target.fe_idx >= ts.fentry_count) continue;
+            theory_setops::StFieldEntry* target_fields = &ts.field_entries[target.fe_idx];
+            if (target_fields.field_count > 0 && target_fields.fields == null) continue;
+            for (usz pos_i = 0; pos_i < a.rec_count && !result; pos_i++)
+            {
+                theory_setops::StNode* source = &ts.nodes[a.rec_ids[pos_i]];
+                if (source.fe_idx < 0 || (usz)source.fe_idx >= ts.fentry_count) continue;
+                theory_setops::StFieldEntry* source_fields = &ts.field_entries[source.fe_idx];
+                if (source_fields.field_count > 0 && source_fields.fields == null) continue;
+                bool covered = true;
+                for (usz target_i = 0; target_i < target_fields.field_count && covered; target_i++)
+                {
+                    int source_payload = -1;
+                    for (usz source_i = 0; source_i < source_fields.field_count; source_i++)
+                    {
+                        if (source_fields.fields[source_i].name_id == target_fields.fields[target_i].name_id)
+                        {
+                            source_payload = source_fields.fields[source_i].child;
+                        }
+                    }
+                    if (source_payload < 0) { covered = false; break; }
+                    int diff = ts.my_inter(source_payload, ts.neg(target_fields.fields[target_i].child));
+                    int diff_dnf = theory_setops::st_dnf(ts, diff);
+                    if (!is_empty(ts, diff_dnf, depth + 1)) covered = false;
+                }
+                if (covered) result = true;
             }
         }
     }

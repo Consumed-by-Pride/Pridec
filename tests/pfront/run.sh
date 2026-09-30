@@ -1669,7 +1669,7 @@ hneed '88_handlers.pie:80:27: note\[N4182\]: the continuation of `ask` is resume
 hdeny '88_handlers.pie:1[6-8]:[0-9]*: warning\[W418'                                                        "declared row reported"
 hdeny '88_handlers.pie:3[0-3]:[0-9]*: warning\[W418'                                                        "lexically handled perform reported"
 hdeny '88_handlers.pie:5[89]:[0-9]*: \(warning\|note\)\[[WN]418[27]'                                        "mixed abort/resume arm given a verdict"
-hdeny 'W4072'                                                                                               "phantom `op` operation (parser)"
+hdeny 'W4072'                                                                                               "phantom \`op\` operation (parser)"
 if [ $eh_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (undeclared/leaked effects; tail/multi-shot/stray/escaping resume; dead arm; arity)\n' "handlers"
 else
@@ -1689,9 +1689,9 @@ cneed '89_closures.pie:18:18: warning\[W4190\]: this closure writes to the captu
 cneed '89_closures.pie:26:9: note\[N4191\]: `x` is reassigned here after the closure `f` (created at 25:15)'       "stale capture"
 cneed '89_closures.pie:39:8: warning\[W4193\]: `g` is a lambda of 2 parameters but is called here with 1 argument' "lambda arity"
 cneed 'closure-escape   : 2 escape (1 returned, 1 as argument, 0 stored, 0 via another closure), 5 do not (1 immediate, 4 inline candidates' "escape census"
-cneed 'closures         : 7 lambdas, 4 captures (2 mutable, 1 written; max 1 per closure), 1 binders marked address-taken' "capture census (shadowed `n` not captured)"
+cneed 'closures         : 7 lambdas, 4 captures (2 mutable, 1 written; max 1 per closure), 1 binders marked address-taken' "capture census (shadowed \`n\` not captured)"
 cdeny '89_closures.pie:3[0-4]:[0-9]*: warning\[W419'                                                              "immutable capture passed to a call warned"
-cdeny '89_closures.pie:4[6-9]:[0-9]*: \(warning\|note\)\[[WN]419[013]'                                             "shadowing inner `n` treated as a capture"
+cdeny '89_closures.pie:4[6-9]:[0-9]*: \(warning\|note\)\[[WN]419[013]'                                             "shadowing inner \`n\` treated as a capture"
 if [ $cl_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (escape/inline, boxed mutable capture, stale capture, lambda arity; shadowing quiet)\n' "closures"
 else
@@ -1946,6 +1946,24 @@ if [ "$noise" -eq 0 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x/W419x/W4200/W422x across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
+fi
+
+# Record row semantics: exercise typed width/depth rows, incompatible field
+# intersections, Boolean row formulas, and dynamic storage beyond 64 labels.
+rec_sem=$("$BIN" tests/pfront/100_records_semantics.pie -I stdlib -I . 2>&1)
+rec_wide=$("$BIN" tests/pfront/101_records_wide.pie -I stdlib -I . 2>&1)
+rec_ok=1; rec_why=""
+echo "$rec_sem" | grep -Eq 'records +: [0-9]+ rows from 5 structs, 13 typed fields' || { rec_ok=0; rec_why="$rec_why typed rows"; }
+echo "$rec_sem" | grep -q 'record-relations .*cert errors=0, skipped=0' || { rec_ok=0; rec_why="$rec_why relation certificates"; }
+echo "$rec_sem" | grep -q 'record-formulas .*overflow=0, validation errors=0' || { rec_ok=0; rec_why="$rec_why formula budgets"; }
+echo "$rec_sem" | grep -q 'record-semantic .*soundness errors=0' || { rec_ok=0; rec_why="$rec_why semantic laws"; }
+echo "$rec_wide" | grep -Eq '141 typed fields' || { rec_ok=0; rec_why="$rec_why wide field count"; }
+echo "$rec_wide" | grep -q 'record-relations .*cert errors=0, skipped=0' || { rec_ok=0; rec_why="$rec_why wide row certificate"; }
+echo "$rec_wide" | grep -q 'record-formulas .*overflow=0, validation errors=0' || { rec_ok=0; rec_why="$rec_why wide formula budgets"; }
+if [ $rec_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (typed width/depth rows, empty intersections, formula laws, 70+ field storage)\n' "record_semantics"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "record_semantics" "$rec_why"
 fi
 
 echo "---"

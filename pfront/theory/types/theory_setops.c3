@@ -109,6 +109,7 @@ struct Field
 // which simplifies hashing, interning, and GC of transient nodes during
 // emptiness checks.
 const usz ST_CAP = 65536;
+const usz ST_MAX_RECORD_FIELDS = 16384;
 const int ST_MAX_RECURSION_DEPTH = 200;
 
 struct StNode
@@ -251,15 +252,67 @@ fn int ts_mk_fe(Field* flds, usz count)
 
 fn int TypeStore.mk_record(TypeStore* ts, Field* flds, usz count, int tail)
 {
-    // Build a StFieldEntry
-    if (ts.fentry_count >= ts.fentry_cap) { return ts.bot_idx; }
-    int feid = (int)ts.fentry_count; ts.fentry_count = ts.fentry_count + 1;
+    if (ts.nodes == null || ts.field_entries == null || ts.fentry_count >= ts.fentry_cap
+        || ts.node_count >= ts.node_cap || tail < 0 || (usz)tail >= ts.node_count
+        || count > ST_MAX_RECORD_FIELDS || (count > 0 && flds == null)) return ts.bot_idx;
+    Field* owned = null;
+    if (count > 0)
+    {
+        owned = (Field*)malloc((long)(count * Field::size));
+        if (owned == null) return ts.bot_idx;
+        for (usz i = 0; i < count; i++)
+        {
+            if (flds[i].child < 0 || (usz)flds[i].child >= ts.node_count)
+            {
+                free((void*)owned);
+                return ts.bot_idx;
+            }
+            owned[i] = flds[i];
+        }
+        // Keep the type store's record projection deterministic.
+        for (usz i = 1; i < count; i++)
+        {
+            Field key = owned[i];
+            long j = (long)i - 1;
+            while (j >= 0 && owned[j].name_id > key.name_id)
+            {
+                owned[j + 1] = owned[j];
+                j--;
+            }
+            owned[j + 1] = key;
+        }
+        usz unique = 0;
+        for (usz i = 0; i < count; i++)
+        {
+            if (unique > 0 && owned[unique - 1].name_id == owned[i].name_id)
+            {
+                int left = owned[unique - 1].child;
+                int right = owned[i].child;
+                if (left > right) { int swap = left; left = right; right = swap; }
+                owned[unique - 1].child = ts.my_inter(left, right);
+            }
+            else
+            {
+                owned[unique++] = owned[i];
+            }
+        }
+        count = unique;
+    }
+    int feid = (int)ts.fentry_count++;
     StFieldEntry* fe = &ts.field_entries[feid];
-    fe.fields = null; fe.field_count = count; fe.next = -1; fe.hash = 0;
-    // We don't copy fields; we just stash count+tail; for the subtyping
-    // algorithm we consult per-field typing via the children array.
-    (void)flds;
+    fe.fields = owned;
+    fe.field_count = count;
+    fe.next = -1;
+    fe.hash = 0;
     int id = ts.mk_simple(ST_RECORD);
+    if (id == ts.bot_idx && ts.nodes[id].kind != ST_RECORD)
+    {
+        if (owned != null) free((void*)owned);
+        fe.fields = null;
+        fe.field_count = 0;
+        ts.fentry_count--;
+        return ts.bot_idx;
+    }
     ts.nodes[id].child_count = 1;
     ts.nodes[id].children[0] = tail;
     ts.nodes[id].fe_idx = feid;
@@ -567,7 +620,17 @@ fn void TypeStore.report(TypeStore* ts)
 
 fn void TypeStore.destroy(TypeStore* ts)
 {
+    if (ts.field_entries != null)
+    {
+        for (usz i = 0; i < ts.fentry_count; i++)
+        {
+            if (ts.field_entries[i].fields != null) free((void*)ts.field_entries[i].fields);
+        }
+        free((void*)ts.field_entries);
+        ts.field_entries = null;
+    }
     if (ts.nodes != null) { free((void*)ts.nodes); ts.nodes = null; }
-    if (ts.field_entries != null) { free((void*)ts.field_entries); ts.field_entries = null; }
     if (ts.buckets != null) { free((void*)ts.buckets); ts.buckets = null; }
+    ts.node_count = 0;
+    ts.fentry_count = 0;
 }
