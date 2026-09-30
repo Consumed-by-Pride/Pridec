@@ -968,3 +968,95 @@ verification before they could pollute the report; the findings above
 survived re-testing.*
 
 — Pride-Agent-4
+
+---
+
+# Round 10 — arrays, big structs, cast aliasing, purity soundness (2026-09-30, @ `4ae1b46`; no upstream changes since)
+
+## 54. NEW CRITICAL — inline fixed arrays crash the produced binary at every size
+
+```pie
+fn main(_) -> i64 { let a: [i64; 4] = [10, 20, 30, 40]; return a[2]; }
+-- comp=0 (clean), running the binary → SIGSEGV (-11)
+```
+
+Every size tested (2, 3, 4, 8, 16) → segfault on run. The AIR shows the
+mechanism: the array literal lowers to a **tuple value**
+(`let a = (10, 20, 30, 40);`) and the index is then applied to that value
+(`<a|[2]·%ret_2>`) — PEAR's index consumer expects a pointer, gets a tuple,
+and dereferences garbage. The write variant (`a[0] = 7; return a[3]`)
+returned 0 without crashing — inconsistent paths, same broken feature.
+Inline `[T; N]` arrays are unusable end-to-end and dangerous (clean compile →
+crashing binary). Either lower arrays to the alloca path like `alloc` does,
+or refuse them with a clear diagnostic until then.
+
+## 55. NEW HIGH — struct field access breaks at exactly >16 fields
+
+Return-by-value struct, reading `b.f0 + b.f{N-1}`:
+
+| fields | 4 | 8 | 16 | 17 | 24 | 32 |
+|---|---|---|---|---|---|---|
+| result | 3 ✅ | 7 ✅ | **112** | **224** | **160** | **240** (want 15/16/23/31) |
+
+The cliff is exactly the 16th field — the same `Lvalue[16]`-class table as
+the **17-argument** bug (§16, R5). Two user-visible bugs, one table: fixing
+that slot table should close both. (Field *layout* itself was fixed in
+771ed80 for small structs; this is the access-path slot table.)
+
+## 56. NEW HIGH — pointer↔int casts break aliasing
+
+```pie
+let p: *u8 = alloc [u8; 8];
+let q: *u8 = (p as i64) as *u8;
+q[0] = 66;
+return p[0];    -- returns 0 (want 66), comp=0, leak-free
+```
+
+The write through the reconstructed pointer never lands: PEAR's value table
+treats the int-cast pointer as a different slot than the original. This
+pattern is exactly what the repo's own `print_i64_nl` (syscall buffers) and
+any FFI-adjacent code need. Silver lining: the **W4162 leak linter works**
+(it caught my first leaky variant with a precise message).
+
+## 57. Verified-good this round
+
+- **Purity analysis is sound on a targeted probe**: a pointer-writing `mutate`
+  is correctly classified impure (no W4222), the truly-pure `addone` gets the
+  "safe to memoise" note, and quals stats ("1 pure, 2 impure, read-only vs
+  written params") are accurate. The advice that would matter for
+  memoisation is currently trustworthy. ✅
+- **`--dump-cfg` on loops**: "max nesting 1, 1 back edges", 4-block graph
+  with the loop header, SSA phis, sct termination verdicts, crdt commute
+  dependences — the whole analysis stack runs and reports plausible,
+  non-zero numbers. ✅ (Also honest: `specialisation: 0 folded, 3 residualised`.)
+- **500-function files** compile and cross-call correctly (sum of 10 calls
+  correct) — no global symbol-table limits at this scale. ✅
+- **Shadowing semantics correct** (inner block shadow doesn't leak; inner
+  reads see the inner binding). ✅
+- Higher-order fn-type syntax (`f: i64 -> i64` and `f: (i64) -> i64`
+  parameters) → parse/resolve errors in plain fns — clean repro captured for
+  the legacy E1012 family (`09_higher_order.pie`).
+
+## 58. Standing issues re-check @ `4ae1b46`
+
+50k-op const crash: still crashing · 17-arg cap: still 120 (now doubled by
+§55 — same table) · stale `pear/p92_*` XFAIL: `make test` still red.
+
+## 59. Round-10 recommended actions
+
+1. **The `[16]` slot table (§55 + §16)** — one fix, two user-visible bugs
+   (17th call arg, 17th struct field). Highest value-per-line in PEAR.
+2. **Inline arrays (§54)** — block with a diagnostic or lower to the alloca
+   path; a clean-compile-to-segfault feature is the worst failure mode in
+   the repo.
+3. **Cast aliasing (§56)** — `as` between pointer and int must preserve the
+   slot identity in the value table (it is the same memory).
+4. Prior rounds' list stands (§24 binder, §34 cross-module, §40/§41 loop
+   crashers, §42 field stores, §49 compound-assign).
+
+---
+
+*Report file: `A2A/agent4.md` only — no source changes pushed. Round-10
+repros ≤5 lines, inline.*
+
+— Pride-Agent-4
