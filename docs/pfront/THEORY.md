@@ -47,6 +47,7 @@ item is withdrawn.
 | `theory_poly.c3` | 804 | **Polymorphism: constraint solving + real instantiation.** Unifies declared parameter types against call arguments to produce a substitution θ, checks bounds, applies θ to build a monomorphic signature per instance |
 | `theory_absint.c3` | ~1150 | Abstract interpretation: sign, interval (threshold widening), nullness; branch narrowing; loop fixpoint with `break`/`continue` states |
 | `theory_dataflow.c3` | 1,011 | Generic monotone bitvector engine instantiated on a real multi-function CFG: reaching definitions, available expressions, very-busy expressions, live variables; bounded circular worklist, correct may/must boundary identities, lattice law / monotonicity / fixed-point equation certificates |
+| `theory_ssa.c3` | 1,000+ | Real clause CFG dominator forest + sparse DF, binder/site definition universe, IDF phi placement, dominator-tree versions/use mapping and ordered predecessor operands; reciprocal edge, liveness-equation, small-graph dominator/DF, IDF, version, and operand certificates; bounded CFG overflow reported as partial |
 | `theory_hered.c3` | 1,407 | Hash-consed de Bruijn terms; binder-aware AST translation; hereditary β substitution (typed decreasing metric), δ arithmetic/boolean, π pair projections, literal-if, η-contraction, modal β; opaque imperative boundary; N4270 βη-equivalent units, N4271 η-wrappers, N4272 source β-redex, N4273 staging redex |
 | `theory_mu.c3` | ~830 | Iso-recursive μ-types built from the declarations (struct/enum/newtype → μ; `*T` → option); contractivity, least-fixpoint inhabitation W4250, coinductive shape equality between nominal recursive types N4251 |
 | `theory_session.c3` | ~1,230 | Session types over `stdlib/channel`: endpoints from `let (tx, rx) = oneshot()/bounded()/unbounded()` and `*…Sender/*…Receiver` parameters; a protocol per party from its control flow (seq → prefix, if/match → choice, loop → μ); duality decided coinductively — W4260 ends not dual (with the first disagreement), W4261 oneshot sent twice on a path, N4262 parameter protocol under `--lint` |
@@ -590,7 +591,7 @@ a false positive miscompiles.
 ```
 $ bash pfront_tests/run.sh
 pfront regression: pass=100 fail=0
-stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
+stdlib self-clean: 260 / 260   (baseline before rewrite: 4)
 ```
 
 | Test | Asserts |
@@ -608,7 +609,8 @@ stdlib self-clean: 258 / 258   (baseline before rewrite: 4)
 | `82_symexe_paths` + `symexe_paths` | W4055/W4057/N4056 with witnesses; silence on pruned paths, after `break` loops, after rejoins; narrow/absint no longer flag `if/else` or `10 / a` after `if a == 0 { return }` |
 | `83_nbe_normalise` + `nbe_normalise` | β/δ/η shapes; `read()` bound once; `emit(1)` before `emit(2)`; capture refused (counted); `mut` never inlined; escaping closure materialised with its capture |
 | `84_eclass_analysis` + `eclass_analysis` | `x + 5` from saturation + an analysis fold (not the TRS); unsound set → W4034 with both constants |
-| `98_dataflow` + `dataflow` | actual 7-block/7-edge CFG (diamond + loop): reaching (14 defs, 8 pops), available (7 exprs, must), very-busy (backward must), live (8 vars, backward may); all four lattice/transfer checks pass, worklists drain, every fixed-point equation verifies |
+| `98_dataflow` + `dataflow` | actual 8-block/8-edge CFG (diamond + loop, explicit loop preheader): reaching (14 defs), available (7 exprs, must), very-busy (backward must), live (8 vars, backward may); all four lattice/transfer checks pass |
+| `99_ssa_cfg` + `ssa_cfg` | actual 8-block/2-clause CFG; 9 source definitions map to 6 binders; branch and loop-carried variables each get an IDF phi with two concrete predecessor versions; 8 uses, 0 unresolved values, 0 certificate errors |
 | `97_hered` + `hered` | `inc2` / `add2` η-wrappers, let-expanded/direct `inc(inc(x))` equality, closures with distinct binder names but same capture, source β `(fn x. x*2)(21) → 42`, modal β, literal if; no false equality for imperative loops and 0 fuel cuts |
 | `95_mu` + `mu` | IntList ≡ IntList2 (N4251) while BoolList / IntSeq are not; Stream W4250; Chain / Server quiet; memo hits > 0 |
 | `94_strata` + `strata` | E4240 ×3 (self + mutual alias cycles, plus fuzz `type T = T`), NF_RECURSIVE_TY on Tree/Link, N4241 variant recursion, N4242 negative occurrence, W4243 `Nest<Box<T>>`; Box / TreeRef / Link quiet |

@@ -1,0 +1,20 @@
+-- SSA placement and renaming over a real diamond and loop CFG.
+-- Both values have distinct incoming versions; EXPECT: 0 errors.
+
+fn branch_join : (bool, i64, i64) -> i64
+  | (take_left, left, right) ->
+      let mut x : i64 = 0i64
+      if take_left then {
+        x = left
+      } else {
+        x = right
+      }
+      x
+
+fn loop_join : i64 -> i64
+  | limit ->
+      let mut i : i64 = 0i64
+      while i < limit do {
+        i = i + 1i64
+      }
+      i

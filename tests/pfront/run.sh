@@ -103,6 +103,7 @@ declare -A EXPECT=(
   [90_cps]=0                  # CPS: tail verdicts, `tail` misuse, joins, loops as continuations, contification
   [91_matching]=0             # decision trees: complete enum switch, DAG sharing, or-rows, guards, dense switch, verification
   [98_dataflow]=0             # real CFG dataflow: reaching defs, must-available and very-busy expressions over diamond + loop
+  [99_ssa_cfg]=0              # real CFG SSA with branch and loop-carried phi inputs
   [97_hered]=0                # hereditary substitution: βη normal forms/equivalence, η wrappers, source β, staging modal beta, metrics/no cuts
   [96_session]=0              # session types over channels: starved receiver + extra send (W4260), oneshot double send (W4261), μ-loops dual, param protocol (N4262)
   [95_mu]=0                   # μ-types from declarations: IntList ≡ IntList2 (N4251), Stream uninhabited (W4250), Bool/Seq/Chain/Server quiet
@@ -1896,11 +1897,11 @@ fi
 df=$("$BIN" tests/pfront/98_dataflow.pie -I stdlib -I . --emit-ast 2>&1)
 df_ok=1; df_why=""
 dfneed() { echo "$df" | grep -q "$1" || { df_ok=0; df_why="$df_why missing[$2]"; }; }
-dfneed 'df-reaching     : 7 blks, 14 bits, 8 wl pops, 8 iters, gen=14 kill=30' "reaching defs fixed point"
-dfneed 'df-avail        : 7 blks, 7 bits, 8 wl pops, 8 iters, gen=8 kill=14' "available expressions"
-dfneed 'df-vbusy        : 7 blks, 7 bits, 9 wl pops, 9 iters, gen=8 kill=14' "very-busy expressions"
-dfneed 'df-live         : 7 blks, 8 bits, 11 wl pops, 11 iters, gen=9 kill=14' "backward live variables"
-dfneed 'df-bundle        : 2 functions, 7 real CFG blocks / 7 edges, 10 reaching-def writes, 14 defs, 8 vars, 7 pure exprs (complete)' "real CFG census"
+dfneed 'df-reaching     : 8 blks, 14 bits, 11 wl pops, 11 iters, gen=14 kill=30' "reaching defs fixed point"
+dfneed 'df-avail        : 8 blks, 7 bits, 9 wl pops, 9 iters, gen=8 kill=14' "available expressions"
+dfneed 'df-vbusy        : 8 blks, 7 bits, 10 wl pops, 10 iters, gen=8 kill=14' "very-busy expressions"
+dfneed 'df-live         : 8 blks, 8 bits, 15 wl pops, 15 iters, gen=10 kill=14' "backward live variables"
+dfneed 'df-bundle        : 2 functions, 8 real CFG blocks / 8 edges, 10 reaching-def writes, 14 defs, 8 vars, 7 pure exprs (complete)' "real CFG census"
 dfneed 'df-cert        : reaching, monotone violations=0, equation violations=0, worklist remaining=0' "reaching fixed-point certificate"
 dfneed 'df-cert        : avail, monotone violations=0, equation violations=0, worklist remaining=0' "available fixed-point certificate"
 dfneed 'df-cert        : vbusy, monotone violations=0, equation violations=0, worklist remaining=0' "very-busy fixed-point certificate"
@@ -1910,6 +1911,28 @@ if [ $df_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (4 real bitvector analyses: reaching defs / available / very busy / live on diamond + loop CFG)\n' "dataflow"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "dataflow" "$df_why"
+fi
+
+# Phi placement and rename-version resolution use real local definitions.
+ssa_out=$("$BIN" tests/pfront/99_ssa_cfg.pie -I stdlib -I . --emit-ast 2>&1)
+ssa_ok=1; ssa_why=""
+echo "$ssa_out" | grep -Eq 'ssa +: 8 real blocks / 2 entries, 8 analyzed, .*6 vars / 9 source defs / 2 IDF phis \(complete\)' || { ssa_ok=0; ssa_why="$ssa_why graph/defs"; }
+echo "$ssa_out" | grep -q 'ssa-live.*8 live-in facts, 3 iterations, equation errors=0' || { ssa_ok=0; ssa_why="$ssa_why liveness-certificate"; }
+echo "$ssa_out" | grep -q 'ssa-rename.*11 versions, 8 uses, 0 no-reaching.*cert dom=0 DF=0 CFG=0 use=0 phi-arg=0 SSA=0' || { ssa_ok=0; ssa_why="$ssa_why rename-certificates"; }
+[ "$(echo "$ssa_out" | grep -c '^  ssa-phi')" = 2 ] || { ssa_ok=0; ssa_why="$ssa_why phi-sites"; }
+[ "$(echo "$ssa_out" | grep -Ec '^  ssa-phi.*args=\[[0-9]+,[0-9]+\] result=[0-9]+$')" = 2 ] || { ssa_ok=0; ssa_why="$ssa_why incoming-versions"; }
+if [ $ssa_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (real branch/loop IDF phis and predecessor versions certified)\n' "ssa_cfg"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "ssa_cfg" "$ssa_why"
+fi
+
+# Bounded CFG adjacency must never masquerade as a complete SSA certificate.
+cap_out=$("$BIN" tests/pfront/syntax/x09_torture_scale.pie -I stdlib -I . --emit-ast 2>&1)
+if echo "$cap_out" | grep -q 'ssa .*partial/capacity'; then
+  pass=$((pass+1)); printf '  PASS  %-26s (saturated CFG is explicitly partial)\n' "ssa_capacity"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "ssa_capacity" "missing partial/capacity status"
 fi
 
 # The corpus must stay quiet: symexe and narrow may not shout at the stdlib.

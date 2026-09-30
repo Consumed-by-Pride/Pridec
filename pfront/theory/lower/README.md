@@ -11,7 +11,7 @@ construction, defunctionalization, and bitvector dataflow + liveness.
 | `theory_irdlverify.c3`  | IRDL trait verification: SSA form, dominance, purity, termination              |
 | `theory_pglcert.c3`     | PGL pattern-certificate compiler: exhaustiveness witnesses, redundant clauses  |
 | `theory_matching.c3`    | Maranget (2008) decision-tree compiler: column scoring, specialization matrix  |
-| `theory_ssa.c3`         | Cooper-Harvey-Kennedy iterative dominators; dominance frontier; φ counting     |
+| `theory_ssa.c3`         | Real clause CFG dominators/frontiers, binder-aware IDF phis, value renaming, predecessor operands, CFG/DF/liveness/version certificates |
 | `theory_defun.c3`       | Defunctionalization (Reynolds 1972; Danvy/Nielsen 2001): lambda census,       |
 |                         | free-variable capture, escape analysis, inline-candidate classification        |
 | `theory_dataflow.c3`    | Generic monotone bitvector dataflow framework (FORWARD/BACKWARD, OR/AND),      |
@@ -29,10 +29,16 @@ construction, defunctionalization, and bitvector dataflow + liveness.
   patterns are switched on first; specialisation projects one column; the
   default matrix keeps wild-only rows; exhaustiveness leaves a non-empty
   default at a leaf.
-- **Cooper-Harvey-Kennedy** (`theory_ssa.c3`): iterative dominator calculation
-  over reverse-postorder, with the standard `intersect` helper walking up the
-  idom tree. Dominance frontier from the "anything that doesn't strictly
-  dominate a successor but whose block dominates a predecessor" rule.
+- **Cytron SSA plan** (`theory_ssa.c3`): builds a dominator forest per real
+  function-clause CFG, sparse dominance frontiers, and a source-definition
+  table keyed by binder and assignment site. Iterated-frontier worklists place
+  variable-specific phis; a dominator-tree traversal assigns versions, maps
+  local uses, and resolves each phi operand from ordered predecessor exits.
+  CFG reciprocity, liveness equations, small-graph dominators, full small-graph
+  DF closure, IDF closure, version identity and operand dominance are checked.
+  If CFG inline edge caps are reached, the report marks the analysis partial
+  rather than certifying a silently truncated graph. This is an analysis plan,
+  not an AST rewrite.
 - **Defunctionalization** (`theory_defun.c3`): each lambda gets a tag + env
   record; `apply(fn, args)` dispatches. Census counts free variables per
   lambda, arity histogram, and escaping lambdas (passed/returned/stored);

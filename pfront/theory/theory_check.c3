@@ -693,7 +693,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     if (tp.strat != null) { tp.strat.init(a); tp.strat.attach(d, it, file); }
     if (tp.nbe != null) { tp.nbe.init(a); }
     if (tp.crdt != null) { tp.crdt.init(a); tp.crdt.attach(d, it, file); }
-    if (tp.ssa != null) { tp.ssa.init(a, null); tp.ssa.run(); }
+    if (tp.ssa != null) tp.ssa.init(a, null);
     if (tp.lin != null) { tp.lin.init(a); tp.lin.attach(d, it, file); }
     if (tp.sym != null) { tp.sym.init(a); tp.sym.attach(d, it, file); }
     if (tp.qual != null) { tp.qual.init(a); tp.qual.attach(d, it, file); }
@@ -839,6 +839,7 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.sess != null) { tp.sess.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.sct != null) { tp.sct.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.dfb != null) { tp.dfb.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
+    if (tp.ssa != null) { tp.ssa.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     t0 = tp.tick("fcb+cmtt+irdl+eclass+eff", t0);
 
     // 2b. The CMTT typing judgment, which subsumes the operational check with
