@@ -644,6 +644,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.irdlv.init(d, it, file);
     tp.pglcert.init(d, it, file);
     tp.semsub.init(a, d, it, file);
+    tp.semsub.verify_query_laws();
     tp.refiner.init(tp.semsub, d, file);
     tp.features.init();
     tp.audit.init(d, file);

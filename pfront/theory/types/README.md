@@ -29,8 +29,10 @@ Implementations of type-system engines drawn from the literature.
   reduced to emptiness of `A ∩ ¬B`. DNF insertion removes duplicate and
   subsumed clauses before they consume the fixed clause budget; Cartesian
   distribution, De Morgan conversion, empty-former identities, malformed AST
-  arities, and depth/clause overflow all have executable invariant checks.
-  Failed audits disable DNF-based proof queries, so the driver fails
+  arities, and depth/clause overflow all have executable invariant checks;
+  a separate 12-case query matrix covers subtype, equivalence, overlap,
+  simplification, and audit-failure fallbacks. Failed audits disable DNF-based
+  proof queries, so the driver fails
   conservatively rather than trusting a broken normalizer.
 - **Coinductive subtyping** (`theory_mu`, `theory_session`): memo table of
   pairs assumed true during the proof, plus depth budget, avoids infinite

@@ -270,6 +270,7 @@ struct DnfAudit
     usz overflow_cases;
     usz conversion_cases;
     usz distribution_cases;
+    usz query_cases;
 }
 
 fn void DnfAudit.expect(DnfAudit* audit, bool condition)
@@ -301,7 +302,7 @@ fn DnfAudit dnf_verify_laws()
     DnfAudit audit;
     audit.checks = 0; audit.failures = 0;
     audit.absorption_cases = 0; audit.duplicate_cases = 0; audit.overflow_cases = 0;
-    audit.conversion_cases = 0; audit.distribution_cases = 0;
+    audit.conversion_cases = 0; audit.distribution_cases = 0; audit.query_cases = 0;
     Dnf* dnf = (Dnf*)malloc(Dnf::size);
     if (dnf == null)
     {
@@ -1030,6 +1031,8 @@ fn bool SemanticSubtyper.equivalent(SemanticSubtyper* s, Node* a, Node* b)
 // match arm is reachable given the scrutinee's type.
 fn bool SemanticSubtyper.overlaps(SemanticSubtyper* s, Node* a, Node* b)
 {
+    // On an audit failure, preserve reachability rather than diagnosing an arm dead.
+    if (s.dnf_laws.failures > 0) return true;
     Dnf* da = (Dnf*)malloc(Dnf::size);
     Dnf* db = (Dnf*)malloc(Dnf::size);
     if (da == null || db == null)
@@ -1071,6 +1074,7 @@ fn bool SemanticSubtyper.overlaps(SemanticSubtyper* s, Node* a, Node* b)
 fn Node* SemanticSubtyper.simplify(SemanticSubtyper* s, Node* t)
 {
     if (t == null) { return null; }
+    if (s.dnf_laws.failures > 0) { return t; }
     if (t.kind != Nk.N_TY_UNION && t.kind != Nk.N_TY_INTERSECT) { return t; }
 
     Dnf* d = (Dnf*)malloc(Dnf::size);
@@ -1097,6 +1101,93 @@ fn Node* SemanticSubtyper.simplify(SemanticSubtyper* s, Node* t)
     return t;
 }
 
+// Exercise public semantic queries against small synthetic ASTs. Snapshot
+// transient counters/cache state so the law audit does not masquerade as
+// analysis of the user's program or poison its query cache with stack nodes.
+fn void SemanticSubtyper.verify_query_laws(SemanticSubtyper* s)
+{
+    if (s.dnf_laws.failures > 0) return;
+    DnfBuilder saved_builder = s.builder;
+    usz saved_cache_count = s.cache_count;
+    usz saved_queries = s.queries;
+    usz saved_cache_hits = s.cache_hits;
+    usz saved_emptiness_checks = s.emptiness_checks;
+    usz saved_proved_empty = s.proved_empty;
+    usz saved_arrow_conservative = s.arrow_conservative;
+
+    Node atom_a; dnf_audit_node(&atom_a, Nk.N_TY_TUPLE, 0x7801u, null, 0);
+    Node atom_b; dnf_audit_node(&atom_b, Nk.N_TY_TUPLE, 0x7802u, null, 0);
+    Node bottom; dnf_audit_node(&bottom, Nk.N_TY_BOTTOM, 0, null, 0);
+    Node*[2] union_children;
+    union_children[0] = &atom_a;
+    union_children[1] = &atom_b;
+    Node union_ab;
+    dnf_audit_node(&union_ab, Nk.N_TY_UNION, 0, &union_children[0], 2);
+    Node*[2] reversed_children;
+    reversed_children[0] = &atom_b;
+    reversed_children[1] = &atom_a;
+    Node union_ba;
+    dnf_audit_node(&union_ba, Nk.N_TY_UNION, 0, &reversed_children[0], 2);
+    Node*[2] intersect_children;
+    intersect_children[0] = &atom_a;
+    intersect_children[1] = &atom_b;
+    Node intersection_ab;
+    dnf_audit_node(&intersection_ab, Nk.N_TY_INTERSECT, 0, &intersect_children[0], 2);
+    Node*[2] empty_intersection_children;
+    empty_intersection_children[0] = &atom_a;
+    empty_intersection_children[1] = &bottom;
+    Node empty_intersection;
+    dnf_audit_node(&empty_intersection, Nk.N_TY_INTERSECT, 0,
+                   &empty_intersection_children[0], 2);
+    Node empty_union;
+    dnf_audit_node(&empty_union, Nk.N_TY_UNION, 0, null, 0);
+
+    s.dnf_laws.expect(s.subtype(&atom_a, &union_ab));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(s.subtype(&atom_b, &union_ab));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(!s.subtype(&union_ab, &atom_a));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(s.subtype(&intersection_ab, &atom_a));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(s.is_empty(&empty_intersection));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(s.overlaps(&atom_a, &atom_b));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(!s.overlaps(&atom_a, &bottom));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(s.equivalent(&union_ab, &union_ba));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(s.subtype(&empty_union, &atom_a));
+    s.dnf_laws.query_cases++;
+    s.dnf_laws.expect(!s.subtype(&atom_a, &empty_union));
+    s.dnf_laws.query_cases++;
+
+    Node*[2] duplicate_children;
+    duplicate_children[0] = &atom_a;
+    duplicate_children[1] = &atom_a;
+    Node duplicate_union;
+    dnf_audit_node(&duplicate_union, Nk.N_TY_UNION, 0, &duplicate_children[0], 2);
+    s.dnf_laws.expect(s.simplify(&duplicate_union) == &atom_a);
+    s.dnf_laws.query_cases++;
+
+    usz prior_failures = s.dnf_laws.failures;
+    s.dnf_laws.failures = prior_failures + 1;
+    bool safe_overlap = s.overlaps(&atom_a, &bottom);
+    Node* safe_simplify = s.simplify(&duplicate_union);
+    s.dnf_laws.failures = prior_failures;
+    s.dnf_laws.expect(safe_overlap && safe_simplify == &duplicate_union);
+    s.dnf_laws.query_cases++;
+
+    s.builder = saved_builder;
+    s.cache_count = saved_cache_count;
+    s.queries = saved_queries;
+    s.cache_hits = saved_cache_hits;
+    s.emptiness_checks = saved_emptiness_checks;
+    s.proved_empty = saved_proved_empty;
+    s.arrow_conservative = saved_arrow_conservative;
+}
+
 fn void SemanticSubtyper.report(SemanticSubtyper* s)
 {
     printf("  semantic subtype : %d queries, %d cached, %d emptiness checks\n",
@@ -1114,6 +1205,7 @@ fn void SemanticSubtyper.report(SemanticSubtyper* s)
            (int)s.dnf_laws.absorption_cases, (int)s.dnf_laws.duplicate_cases,
            (int)s.dnf_laws.overflow_cases, (int)s.dnf_laws.conversion_cases,
            (int)s.dnf_laws.distribution_cases);
+    printf("  subtype laws    : %d query checks\n", (int)s.dnf_laws.query_cases);
 }
 
 // ── Type-directed match refinement ──────────────────────────────────────────
