@@ -1684,9 +1684,9 @@ cneed '89_closures.pie:18:18: warning\[W4190\]: this closure writes to the captu
 cneed '89_closures.pie:26:9: note\[N4191\]: `x` is reassigned here after the closure `f` (created at 25:15)'       "stale capture"
 cneed '89_closures.pie:39:8: warning\[W4193\]: `g` is a lambda of 2 parameters but is called here with 1 argument' "lambda arity"
 cneed 'closure-escape   : 2 escape (1 returned, 1 as argument, 0 stored, 0 via another closure), 5 do not (1 immediate, 4 inline candidates' "escape census"
-cneed 'closures         : 7 lambdas, 4 captures (2 mutable, 1 written; max 1 per closure), 1 binders marked address-taken' "capture census (shadowed `n` not captured)"
+cneed 'closures         : 7 lambdas, 4 captures (2 mutable, 1 written; max 1 per closure), 1 binders marked address-taken' 'capture census (shadowed `n` not captured)'
 cdeny '89_closures.pie:3[0-4]:[0-9]*: warning\[W419'                                                              "immutable capture passed to a call warned"
-cdeny '89_closures.pie:4[6-9]:[0-9]*: \(warning\|note\)\[[WN]419[013]'                                             "shadowing inner `n` treated as a capture"
+cdeny '89_closures.pie:4[6-9]:[0-9]*: \(warning\|note\)\[[WN]419[013]'                                             'shadowing inner `n` treated as a capture'
 if [ $cl_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (escape/inline, boxed mutable capture, stale capture, lambda arity; shadowing quiet)\n' "closures"
 else
