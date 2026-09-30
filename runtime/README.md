@@ -1,4 +1,13 @@
-# Pride Runtime — production
+# Pride C Runtime — preserved implementation
+
+> **Historical build path / not the current PEAR runtime contract.**
+> The instructions below describe the preserved `compiler_rt.c` and LLVM-22
+> pipeline; those `make runtime`/`make compile` targets are not provided by the
+> current root Makefile. PEAR v0.9 links libc directly (`malloc`, `free`, `write`)
+> and does **not** automatically link this C HOSE runtime. See the root README
+> for current native builds. `scripts/check_hose_consistency.py` checks this
+> runtime's compiled symbol inventory against stdlib externs and current PEAR
+> libc declarations; success there is not proof of native HOSE execution.
 
 "The over-engineered C."
 
