@@ -1,0 +1,8 @@
+-- EXIT: 42
+-- Field projection was a bootstrap stub: APRD_RECORD fell through to
+-- `default: return 0` and ACNS_FIELD passed its value through unchanged, so
+-- `p.x + p.y` was 0 + 0. Records now have a real layout (a stack buffer with one
+-- i64 slot per field, in DECLARATION order, carried as an address) and
+-- ACNS_FIELD GEPs to the field's slot and loads it.
+struct P { x: i64; y: i64; }
+fn main(_) -> i64 { let p: P = P { x: 40, y: 2 }; let s: i64 = p.x + p.y; return s; }

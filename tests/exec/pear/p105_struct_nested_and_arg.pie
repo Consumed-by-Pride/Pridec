@@ -1,0 +1,9 @@
+-- EXIT: 44
+-- Nested records plus a record passed as an argument: `o.i.v` projects through
+-- two records (each projection yields the inner record's address) and `sum`
+-- receives the record's address and projects from it.
+-- sum(o.i) = 40 + 2 = 42; + o.k (1) + 1 = 44.
+struct Inner { v: i64; }
+struct Outer { i: Inner; k: i64; }
+fn sum(p: Inner) -> i64 { return p.v + 2; }
+fn main(_) -> i64 { let o: Outer = Outer { i: Inner { v: 40 }, k: 1 }; return sum(o.i) + o.k + 1; }

@@ -572,6 +572,49 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             // 0 without running body here.
             return ll_const_int(cg.i64ty, 0, 0);
         }
+        case APRD_RECORD:
+        {
+            // A record value is the ADDRESS of a stack buffer with one i64 slot
+            // per field, in declaration order (the lowerer reorders the inits;
+            // `_fN` markers such as the type name are skipped). Addresses are
+            // carried as i64 throughout this backend, so ptrtoint/inttoptr is
+            // the same convention the pointer paths already use.
+            uint nf = 0;
+            for (usz i = 0; i < p.rec_init_count && i < 16; i++)
+            {
+                AirFieldInit* fi = p.rec_inits[i];
+                if (fi == null || fi.name == null) continue;
+                if (fi.name[0] == '_') continue;
+                nf++;
+            }
+            if (nf == 0)
+            {
+                // Empty record: still yield a valid address so projections do not
+                // dereference null.
+                Lvalue e0 = cg.alloc_slot_typed(cg.mktmp(), ll_array_type(cg.i64ty, 1));
+                return ll_build_ptrtoint(cg.b, e0, cg.i64ty, cg.mktmp());
+            }
+            // NOTE the GEP element type: two-index GEPs index an AGGREGATE, so
+            // the type argument must be the array type the pointer refers to.
+            // Passing the element type (i64) for a two-index GEP — or i8 as the
+            // old INDEX code did — produces an ill-formed instruction that LLVM
+            // aborts on inside its own optimiser.
+            Ltype arr_ty = ll_array_type(cg.i64ty, (ulong)nf);
+            Lvalue buf = cg.alloc_slot_typed(cg.mktmp(), arr_ty);
+            uint slot = 0;
+            for (usz i = 0; i < p.rec_init_count && i < 16; i++)
+            {
+                AirFieldInit* fi = p.rec_inits[i];
+                if (fi == null || fi.name == null) continue;
+                if (fi.name[0] == '_') continue;
+                Lvalue val = cg.prd_i64(fi.value);
+                Lvalue[2] gi; gi[0] = ll_const_int(cg.i64ty, 0, 0); gi[1] = ll_const_int(cg.i64ty, (ulong)slot, 0);
+                Lvalue addr = ll_build_gep2(cg.b, arr_ty, buf, &gi[0], 2, cg.mktmp());
+                (void)ll_build_store(cg.b, val, addr);
+                slot++;
+            }
+            return ll_build_ptrtoint(cg.b, buf, cg.i64ty, cg.mktmp());
+        }
         case APRD_COERCE:
             if (p.sub_count > 0 && p.subs[0] != null) { return cg.prd_i64(p.subs[0]); }
             return ll_const_int(cg.i64ty, 0, 0);
@@ -788,10 +831,28 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             ll_set_volatile(st, 1);
             return cg.cns(ll_const_int(cg.i64ty, 0, 0), k.tail);
         }
-        case ACNS_FST: case ACNS_SND: case ACNS_PROJ: case ACNS_FIELD:
+        case ACNS_FIELD:
         {
-            // Bootstrap: tuple/field projection not yet implemented.
-            // Pass v through unchanged (will address when we implement tuples).
+            // <record | .f · k> where the record value is the address of its
+            // i64 field buffer and k.idx is the field's declaration slot.
+            // A negative index means the lowerer could not resolve the field's
+            // declaration, in which case we keep the old pass-through rather than
+            // dereferencing an address we cannot vouch for.
+            if (k.idx < 0 || v == null) { return cg.cns(v, k.tail); }
+            // The record address is carried as an i64; view it as an i64* and
+            // advance by `idx` ELEMENTS (one-index GEP, element type i64) — the
+            // consumer does not know the record's array type, and a one-index
+            // element GEP is well-formed for any element pointer.
+            Ltype i64p = ll_ptr_ty(cg.i64ty, 0);
+            Lvalue base = ll_build_inttoptr(cg.b, v, i64p, cg.mktmp());
+            Lvalue off = ll_const_int(cg.i64ty, (ulong)k.idx, 0);
+            Lvalue addr = ll_build_gep2(cg.b, cg.i64ty, base, &off, 1, cg.mktmp());
+            Lvalue fv = ll_build_load2(cg.b, cg.i64ty, addr, cg.mktmp());
+            return cg.cns(fv, k.tail);
+        }
+        case ACNS_FST: case ACNS_SND: case ACNS_PROJ:
+        {
+            // Tuple/other projections: still bootstrap (pass value through).
             return cg.cns(v, k.tail);
         }
         case ACNS_CALL: case ACNS_STACK:

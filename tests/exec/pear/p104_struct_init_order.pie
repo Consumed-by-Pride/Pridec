@@ -1,0 +1,7 @@
+-- EXIT: 42
+-- Struct-literal fields may be written in any order; the lowerer reorders them
+-- into declaration order (using the resolved field declarations) so a slot's
+-- position does not depend on how the literal was written.
+-- c = 5 (slot 2), a = 30 (slot 0), b = 7 (slot 1): 30 + 7 + 5 = 42.
+struct T { a: i64; b: i64; c: i64; }
+fn main(_) -> i64 { let t: T = T { c: 5, a: 30, b: 7 }; return t.a + t.b + t.c; }

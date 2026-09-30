@@ -737,10 +737,33 @@ fn AirPrd* AirLower.struct_lit_prd(AirLower* lr, Node* n)
     AirPrd* rec = air_ir::air_new_AirPrd(lr.arena);
     rec.tag = APRD_RECORD;
     rec.rec_init_count = 0;
+    // Emit field inits in DECLARATION order (source order is free — `P { y = 2,
+    // x = 40 }` is legal), so the backend can lay them out sequentially. The
+    // `_fN` markers (the type name and bare positional values) stay in front.
+    Node* sdecl = lr.struct_decl_of(n);
+    AirFieldInit*[16] ordered;
+    for (usz i = 0; i < 16; i++) { ordered[i] = null; }
+    usz ordered_n = 0;
     for (usz i = 0; i < ic && i < 16; i++)
     {
-        rec.rec_inits[rec.rec_init_count] = inits[i];
-        rec.rec_init_count = rec.rec_init_count + 1;
+        AirFieldInit* fi = inits[i];
+        if (fi == null) continue;
+        if (fi.name == null || fi.name[0] == '_' || sdecl == null)
+        {
+            if (ordered_n < 16) { ordered[ordered_n] = fi; ordered_n++; }
+            lr.total_decl = lr.total_decl;   // (no-op keeps the branch shape)
+            continue;
+        }
+        long oi = lr.struct_field_index(sdecl, fi.name);
+        if (oi < 0 || oi > 14 || (usz)oi + 1 >= 16) { if (ordered_n < 16) { ordered[ordered_n] = fi; ordered_n++; } continue; }
+        if (ordered[(usz)oi + 1] != null) { if (ordered_n < 16) { ordered[ordered_n] = fi; ordered_n++; } continue; }
+        ordered[(usz)oi + 1] = fi;
+    }
+    for (usz i = 0; i < 16; i++)
+    {
+        AirFieldInit* fi = ordered[i];
+        if (fi == null) continue;
+        if (rec.rec_init_count < 16) { rec.rec_inits[rec.rec_init_count] = fi; rec.rec_init_count++; }
     }
     lr.total_prd++;
     return rec;
@@ -1592,6 +1615,46 @@ fn AirCmd* AirLower.array_lit(AirLower* lr, Node* n, AirCns* k)
     return out;
 }
 
+// ── Record layout ───────────────────────────────────────────────────────────
+// A record value is the address of a stack buffer with one i64 slot per field,
+// in DECLARATION order (not source-init order). struct_field_index() recovers
+// that order from the resolved AST: a field declaration is an N_DECL_FIELD child
+// of the struct decl, and PNode.parent links a field decl back to its struct, so
+// `p.x` -> resolved field decl -> parent struct -> ordinal.
+fn long AirLower.struct_field_index(AirLower* lr, Node* struct_decl, char* nm)
+{
+    if (struct_decl == null || nm == null) return -1;
+    long idx = 0;
+    for (usz i = 0; i < struct_decl.child_count; i++)
+    {
+        Node* c = struct_decl.children[i];
+        if (c == null) continue;
+        if (c.kind != Nk.N_DECL_FIELD) continue;
+        char* fnm = node_text(c, lr.it);
+        if (fnm == null) { idx++; continue; }
+        usz j = 0;
+        while (fnm[j] != 0 && nm[j] != 0) { if (fnm[j] != nm[j]) break; j++; }
+        if (fnm[j] == 0 && nm[j] == 0) return idx;
+        idx++;
+    }
+    return -1;
+}
+
+// struct_decl_of — the struct declaration a struct literal / field access refers
+// to: the resolver links the node (or its type child) to the struct.
+fn Node* AirLower.struct_decl_of(AirLower* lr, Node* n)
+{
+    if (n == null) return null;
+    if (n.resolved != null && n.resolved.kind == Nk.N_DECL_STRUCT) return n.resolved;
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        Node* c = n.children[i];
+        if (c == null) continue;
+        if (c.resolved != null && c.resolved.kind == Nk.N_DECL_STRUCT) return c.resolved;
+    }
+    return null;
+}
+
 fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
 {
     AirFieldInit*[16] inits; usz ic = 0;
@@ -1793,6 +1856,15 @@ fn AirCmd* AirLower.field_acc(AirLower* lr, Node* n, AirCns* k)
     if (f == null) f = (char*)"f";
     lr.total_cns++;
     AirCns* proj = air_ir::air_mk_field_cns(lr.arena, lr.dup(f), k);
+    // Layout index of the field, from the resolver's link: `p.x` resolves to the
+    // field declaration, whose parent is the struct whose declaration order
+    // defines the slot. -1 means "unknown" and the backend falls back to passing
+    // the record through unchanged.
+    Node* fdecl = n.resolved;
+    if (fdecl != null && fdecl.parent != null && fdecl.parent.kind == Nk.N_DECL_STRUCT)
+    {
+        proj.idx = lr.struct_field_index(fdecl.parent, f);
+    }
     return lr.expr_to_cns(n.children[0], proj);
 }
 
