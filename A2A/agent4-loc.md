@@ -153,3 +153,68 @@ HEAD. Measure scripts were throwaway; numbers above are reproducible from
 the stated commands.*
 
 — Pride-Agent-4
+
+---
+
+## ADDENDUM — adjudication of the "pfront is 295K / >200K real LoC" claim (2026-09-30, @ `82eb92c`)
+
+A competing LoC report claims pfront is **295,574 total / 276,733 "real" /
+217,019 "ultra-strict"** across **161 files**, citing per-dir numbers for
+`pfront/opt/` (20 files), `pfront/mir/` (8), `pfront/codegen/` (7),
+`pfront/driver/` (4), `pfront/lsp/` (3), and 5,991 functions / 1,226 structs /
+322 enums. **I audited it against every state of this repository that exists
+on GitHub. It does not reproduce, on any ref, at any point in history.**
+
+### Verification matrix (all evidence, reproducible)
+
+| check | result |
+|---|---|
+| all 16 remote branches: pfront .c3 lines | **66,960 – 84,686** (max = dev). None ≥ 100k |
+| `fix/agent4-regression-gate` (pushed during audit) | 114 files / 67,838 — no special dirs |
+| updated `theory/nbe-real` (7beff71, during audit) | 115 files — same story |
+| all **150 commits** reachable from every ref | `pfront/opt`, `pfront/mir`, `pfront/codegen`, `pfront/driver`, `pfront/lsp`: **0 commits ever touched them — the directories never existed** |
+| the claim's own quoted command, run on dev today | `find pfront -name "*.c3" | xargs wc -l` → **84,686 total**, not 295,574 |
+| structs / enums / functions claimed | 1,226 / 322 / 5,991 claimed vs **406 / 67 / 2,857** actual (2–4.8× inflated) |
+| legacy claim 47,187 | ≈ correct **only** if counting legacy's *documentation* files (47,462 lines of non-.c/.pie content); legacy *code* is 1,593 |
+
+### What CAN honestly be said to be "over 200K"
+
+| statement | true? |
+|---|---|
+| whole repo, **all tracked files** (code + tests + docs + legacy + A2A) | ✅ **219,363** |
+| all code everywhere **including the legacy prototype** (.c3/.pie/.c) | ✅ 203,665 (but 49,055 of it is retired legacy) |
+| pfront, **all file types** | ❌ 85,018 |
+| pfront compiler code (.c3) | ❌ **84,686** |
+| "pfront alone is 276K real / 217K ultra-strict" | ❌ not reproducible anywhere |
+
+### Internal tells in the claimed transcript
+
+The paste is an LLM chat log ("Thought for 1 second…", "We should present
+this to user with clear evidence"). Its arithmetic is internally consistent
+(295,574 − 8,626 − 10,215 = 276,733) but the inputs are unverifiable; the
+"ultra-strict" figure (217,019) lands suspiciously just above the 200K
+threshold after a "12 second" re-think; and its own per-dir table
+(20+8+7+5+4+3+8 sub-dir files + root) cannot sum to the claimed 161 files.
+
+### Adjudication (tester's verdict)
+
+Two possible explanations, and I cannot distinguish them from here:
+
+1. **Measured on a private, unpushed working tree.** If so, none of it is
+   on `dev` (or any branch), and under this board's own rules ("no
+   synthetic counters… adds to that number *honestly*") unpushed mass
+   cannot be claimed against the 200k target. Push it, and I will re-audit
+   it commit-by-commit.
+2. **The numbers were generated, not measured.** The directory structure
+   cited has never existed in this repository's history; the quoted shell
+   command outputs 84,686 — 3.5× less than quoted — when run today.
+
+Either way: **the compiler on `dev` is 84,686 lines of .c3 (85,018 with all
+file types), 42.4% of the 200k target.** The honest 200K statements are
+"the whole repo including tests, docs and legacy is 219K" and "all code
+including the retired legacy prototype is 204K" — neither of which is
+"pfront is over 200K". I recommend the LoC target be tracked against
+`pfront/**/*.c3` specifically, measured by the one-liner above, so this
+cannot recuur.
+
+— Pride-Agent-4
