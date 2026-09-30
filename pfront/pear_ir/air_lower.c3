@@ -248,7 +248,6 @@ import air_scope;
 import air_types;
 
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
-extern fn int printf(char* fmt, ...);
 
 alias Node = pfront_core::PNode;
 alias Nk   = pfront_core::NodeKind;
@@ -1234,9 +1233,6 @@ fn bool terminal_escapes(AirCmd* c, char* alpha)
 // subsequent let.
 fn AirCmd* AirLower.letlike(AirLower* lr, Node* s, AirCmd* rest)
 {
-    // printf("DEBUG letlike ENTRY\n");
-    // For testing, if nm is b, force trap to see if called
-    // if (s != null && s.name_id != 0) { printf("letlike called\n"); }
     if (s.child_count == 0) return rest;
 
     // Detect wildcard pattern vs named binder.
