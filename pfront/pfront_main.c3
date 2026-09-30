@@ -240,7 +240,72 @@ fn bool path_eq(char* a, char* b)
     return a[i] == 0 && b[i] == 0;
 }
 
-fn RunResult compile_one(char* path, char*[] roots, usz root_count,
+// ── Module search roots ─────────────────────────────────────────────────────
+// The loader resolves an import by trying, for each root: <root>/a/b/c.pie,
+// <root>/a/b/c/mod.pie, <root>/a/b/c and the last-segment form. Roots used to
+// be the literal strings "." and "stdlib" — relative to the PROCESS cwd — so
+// compiling a file from any directory other than the repo root could not find
+// `prelude`. That mattered more than it looks: the loader injects a synthetic
+// `use 'prelude'` into every module it reads, so a file with NO imports at all
+// reported two import errors (E2002 cannot find module / E3001 unresolved
+// import) when run from /tmp, and a binary was still produced.
+//
+// dir_of returns the directory part of a path as "<dir>", "." when there is no
+// separator (a bare filename is in the cwd), and "" when path is null.
+fn char* dir_of(char* path)
+{
+    if (path == null) { return (char*)""; }
+    long cut = -1;
+    long i = 0;
+    while (path[i] != 0) { if (path[i] == '/') { cut = i; } i++; }
+    if (cut < 0) { return (char*)"."; }
+    if (cut == 0) { return (char*)"/"; }
+    // NOTE: a static buffer would be clobbered by a second call, so copy.
+    char* out = (char*)malloc((usz)cut + 1);
+    if (out == null) { return (char*)"."; }
+    long j = 0;
+    while (j < cut) { out[j] = path[j]; j++; }
+    out[cut] = 0;
+    return out;
+}
+
+// join2 — "<a>/<b>", allocated. ""
+fn char* join2(char* a, char* b)
+{
+    if (a == null) { return (char*)""; }
+    if (b == null) { b = (char*)""; }
+    long la = 0; while (a[la] != 0) { la++; }
+    long lb = 0; while (b[lb] != 0) { lb++; }
+    bool slash = (la > 0 && a[la - 1] != '/');
+    char* out = (char*)malloc((usz)(la + lb + 2));
+    if (out == null) { return (char*)""; }
+    long j = 0;
+    while (j < la) { out[j] = a[j]; j++; }
+    if (slash) { out[j] = '/'; j++; }
+    long k = 0;
+    while (k < lb) { out[j + k] = b[k]; k++; }
+    out[j + lb] = 0;
+    return out;
+}
+
+// add_root_unique — add a root unless null/empty or already present, so the
+// search order stays predictable.
+fn void add_root_unique(pfront_resolve::Loader* ld, char** roots, usz* n, char* r)
+{
+    if (ld == null || r == null || r[0] == 0) { return; }
+    for (usz i = 0; i < *n; i++)
+    {
+        char* a = roots[i]; char* b = r;
+        usz j = 0; bool eq = true;
+        while (a[j] != 0 && b[j] != 0) { if (a[j] != b[j]) { eq = false; break; } j++; }
+        if (eq && a[j] == 0 && b[j] == 0) { return; }
+    }
+    if (*n >= 16) { return; }
+    roots[*n] = r; *n = *n + 1;
+    ld.add_root(r);
+}
+
+fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_dir,
                          bool dump_ast, bool dump_mods, bool verify, bool quiet,
                          bool rich, int context_lines, bool strict_types,
                          bool report_dead, bool strict_vis, bool run_theory,
@@ -275,7 +340,18 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
     pfront_source::SourceMap* smap =
         (pfront_source::SourceMap*)malloc(pfront_source::SourceMap::size);
     if (smap != null) { smap.init(arena); ld.attach_source_map(smap); }
+    // Search order: the roots the user asked for (or the conventional pair),
+    // then the input file's own directory, then the compiler's own prefix so a
+    // shipped `stdlib/prelude.pie` is found no matter where the process runs.
     for (usz i = 0; i < root_count; i++) { ld.add_root(roots[i]); }
+    char*[16] extra; usz extra_n = 0;
+    add_root_unique(ld, &extra[0], &extra_n, dir_of(path));
+    if (exe_dir != null && exe_dir[0] != 0)
+    {
+        add_root_unique(ld, &extra[0], &extra_n, join2(exe_dir, "stdlib"));
+        add_root_unique(ld, &extra[0], &extra_n, join2(exe_dir, "../stdlib"));
+        add_root_unique(ld, &extra[0], &extra_n, exe_dir);
+    }
 
     pfront_core::Module* entry = ld.load_entry(path);
 
@@ -487,13 +563,25 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count,
             // emit_air derives the .air sibling path from `path` itself.
             air::emit_air(entry.ast, it, path);
         }
-        if (emit_bc)
+        // Artifacts that are meant to be run or linked are written only when the
+        // program actually compiled. Reporting errors and still leaving an
+        // executable behind makes "it built, so it must be fine" wrong — and the
+        // stale binary then gets run by whatever called the compiler. Air/AST
+        // dumps below stay unconditional: they are diagnostics, and they are
+        // most useful on input that failed.
+        bool emit_ok = (diags.error_count == 0);
+        if (emit_bc || emit_exe)
         {
-            air::emit_bc(entry.ast, it, path, opt_level);
-        }
-        if (emit_exe)
-        {
-            air::emit_exe(entry.ast, it, path, opt_level);
+            if (emit_ok)
+            {
+                if (emit_bc) { air::emit_bc(entry.ast, it, path, opt_level); }
+                if (emit_exe) { air::emit_exe(entry.ast, it, path, opt_level); }
+            }
+            else
+            {
+                printf("pear: %d error(s) — refusing to emit %s\n",
+                       (int)diags.error_count, emit_exe ? "an executable" : "bitcode");
+            }
         }
 
         pfront_ext::Stats st;
@@ -701,7 +789,14 @@ fn int main(String[] args)
         root_count = 2;
     }
 
-    RunResult rr = compile_one(input, roots[..], root_count,
+    // Where does this compiler live? A shipped layout is
+    // <prefix>/bin/pfrontc with <prefix>/stdlib/prelude.pie, so the prefix is
+    // both the binary's own directory and its parent. argv[0] is enough: when it
+    // is a bare name (found through PATH) the cwd is used, which is what the
+    // default roots already cover.
+    char* exe_dir = dir_of(args.len > 0 ? (char*)args[0].ptr : null);
+
+    RunResult rr = compile_one(input, roots[..], root_count, exe_dir,
                                dump_ast, dump_mods, verify, quiet,
                                rich, context_lines, strict_types, report_dead, strict_vis, run_theory,
                                lint, optimize, opt_level, emit_ast, emit_sexp, time_passes, dump_cfg, emit_air, emit_bc, emit_exe, emit_cps, emit_dtree);

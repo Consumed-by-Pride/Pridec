@@ -116,6 +116,51 @@ for O in -O0 -O1 -O2; do
 done
 rm -f "$canary" "${canary%.pie}"
 
+# ── 1b. driver contract ─────────────────────────────────────────────────────
+# Module search used to depend on the PROCESS cwd: the loader's default roots
+# were the literal strings "." and "stdlib". Because the loader injects a
+# synthetic `use 'prelude'` into every module it reads, compiling ANY file from
+# a directory other than the repo root reported two import errors
+# (E2002 cannot find module / E3001 unresolved import) even for a file with no
+# imports — and a binary was emitted anyway, so the failure looked like success
+# to a script. Both halves are checked here, because either one regressing is
+# silent: the first makes valid programs fail outside the repo, the second makes
+# invalid programs produce something runnable.
+echo "=== driver contract (cwd independence, no artifact on errors) ==="
+dc_dir=$(mktemp -d /tmp/pear_dc_XXXXXX)
+printf 'fn main(_) -> i64 { return 42; }\n' > "$dc_dir/ok.pie"
+printf 'use nosuchmodule;\nfn main(_) -> i64 { return 7; }\n' > "$dc_dir/bad.pie"
+abs_bin=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")
+
+# (a) compile from an unrelated cwd; the input file's own directory must be a
+# search root, so the implicit prelude has to be found.
+rm -f "$dc_dir/ok"
+out=$(cd / && "$abs_bin" "$dc_dir/ok.pie" --emit-exe "$PEAR_OPT" --quiet 2>&1); rc=$?
+if [ ! -x "$dc_dir/ok" ]; then
+    record FAIL "driver/emit-from-other-cwd" "no binary (rc=$rc) from a clean cwd — implicit prelude not found?"
+else
+    timeout "$TIMEOUT" "$dc_dir/ok" >/dev/null 2>&1; rrc=$?
+    if [ "$rc" = 0 ] && [ "$rrc" = 42 ]; then
+        record PASS "driver/emit-from-other-cwd" "compiles from / and runs (42)"
+    else
+        record FAIL "driver/emit-from-other-cwd" "rc=$rc run=$rrc want rc=0 run=42"
+    fi
+fi
+
+# (b) a real import error must not leave an executable behind.
+rm -f "$dc_dir/bad"
+out=$(cd / && "$abs_bin" "$dc_dir/bad.pie" --emit-exe "$PEAR_OPT" --quiet 2>&1); rc=$?
+if [ -x "$dc_dir/bad" ]; then
+    record FAIL "driver/no-artifact-on-error" "executable emitted for a program with errors (rc=$rc)"
+else
+    if [ "$rc" = 2 ]; then
+        record PASS "driver/no-artifact-on-error" "rc=2 and no executable"
+    else
+        record FAIL "driver/no-artifact-on-error" "rc=$rc want 2, no executable"
+    fi
+fi
+rm -rf "$dc_dir"
+
 # ── 2. case runs ────────────────────────────────────────────────────────────
 echo "=== execution cases (pipeline tier: $PEAR_OPT) ==="
 cases=$(ls tests/exec/*.pie tests/exec/pear/*.pie 2>/dev/null | sort)
@@ -165,7 +210,7 @@ done
 rm -f /tmp/pear_out_$$
 
 echo "---"
-echo "exec suite: pass=$pass fail=$fail xfail=$xfail xpass=$xpass  (cases=$count, tier=$PEAR_OPT)"
+echo "exec suite: pass=$pass fail=$fail xfail=$xfail xpass=$xpass  (cases=$((count + 2)) [$count files + 2 driver checks], tier=$PEAR_OPT)"
 if [ ${#fail_list[@]} -gt 0 ]; then
     echo "unexpected failures:"; for c in "${fail_list[@]}"; do echo "  - $c"; done
 fi
