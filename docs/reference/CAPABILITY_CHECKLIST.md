@@ -1,5 +1,10 @@
 # Pride Capability Checklist
 
+> **Historical snapshot (2026-06-29; pre-pfront/PEAR).** Its checkmarks mean
+> parse/resolve/IR/`llvm-as-22` passed at that time; they do **not** claim
+> current native-code or runtime behavior. For current front-end and theory
+> results, run `make test` (including the experiment probes).
+
 Generated: 2026-06-29
 
 ```

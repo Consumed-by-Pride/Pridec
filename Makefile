@@ -26,6 +26,12 @@ C3C_URL   := https://github.com/c3lang/c3c/releases/download/$(C3C_VER)/c3-linux
 
 BINARY    := pfrontc
 
+# PEAR calls the LLVM-C API. Keep the backend library overrideable for local
+# toolchains while defaulting to the LLVM 19 ABI used by this branch.
+LLVM_LIBDIR ?= /usr/lib/x86_64-linux-gnu
+LLVM_LIB    ?= LLVM-19
+LDFLAGS     := -L $(LLVM_LIBDIR) -l $(LLVM_LIB)
+
 # ── Sources ──────────────────────────────────────────────────────────────
 PFRONT    := $(wildcard pfront/*.c3)
 PEAR_IR   := $(wildcard pfront/pear_ir/*.c3)
@@ -39,13 +45,15 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-experiments test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
 
 $(BINARY): $(SOURCES) | c3c
-	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) -o $(BINARY)
+	# AirModule/PearCg contain >64 KiB fixed-capacity tables; raise C3's
+	# compile-time local-object ceiling to cover those existing structs.
+	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) --max-stack-object-size 262144 $(LDFLAGS) -o $(BINARY)
 
 # ── Bootstrap c3c if missing ────────────────────────────────────────────
 c3c:
@@ -66,7 +74,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform
+test: test-pfront test-conform test-experiments
 
 test-pfront: $(BINARY)
 	@echo "==> tests/pfront regression"
@@ -75,6 +83,12 @@ test-pfront: $(BINARY)
 test-conform: $(BINARY)
 	@echo "==> conformance"
 	bash conformance/run.sh
+
+# Cross-cutting probes for theory contracts, diagnostics, and module loading.
+# These run quickly and catch capability drift not covered by parser cases.
+test-experiments: $(BINARY)
+	@echo "==> theory experiments"
+	bash experiments/run.sh
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)
