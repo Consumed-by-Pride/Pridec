@@ -31,7 +31,7 @@ See `docs/THEORY_INTEGRATION_AUDIT.md` for the full consumer/gap matrix and veri
 
 ## Test result
 
-`LD_LIBRARY_PATH=/home/user/.cache/llvm23 bash tests/pfront/run.sh`: pass=167, fail=5; the script's recorded baseline is pass≥160/fail≤5, so it returns 0. `bash tests/exec/pear/run.sh ./pfrontc`: pass=31, fail=0, xfail=0; `p110_dense_switch.pie` covers expression and clause-style matches and returns 190 at -O0/-O1/-O2/-O3. `p111_quals_memory_read.pie` verifies two no-write functions receive LLVM `memory(read)`, two non-retained pointer params receive `captures(none)`, and a separate function writes through q while reading aliased p (so attaching `readonly` would be unsound). Runtime stays 35 at -O0/-O1/-O2/-O3. `bash conformance/run.sh`: pass=218, fail=44 (known baseline); `bash experiments/run.sh`: all 14 files behaved as expected.
+`LD_LIBRARY_PATH=/home/user/.cache/llvm23 bash tests/pfront/run.sh`: pass=167, fail=5; the script's recorded baseline is pass≥160/fail≤5, so it returns 0. `bash tests/exec/pear/run.sh ./pfrontc`: pass=31, fail=0, xfail=0 at -O0, -O1, -O2, and -O3 (O0/O1/O3 used a temporary test-runner substitution, removed afterward); `p110_dense_switch.pie` covers expression and clause-style matches and returns 190 at all four tiers. `p111_quals_memory_read.pie` verifies two no-write functions receive LLVM `memory(read)`, two non-retained pointer params receive `captures(none)`, and a separate function writes through q while reading aliased p (so attaching `readonly` would be unsound). Runtime stays 35 at -O0/-O1/-O2/-O3. `bash conformance/run.sh`: pass=218, fail=44 (known baseline); `bash experiments/run.sh`: all 14 files behaved as expected.
 
 ## LOC target measurement
 
