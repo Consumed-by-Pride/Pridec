@@ -1,0 +1,4 @@
+fn f : () -> i64
+  | () ->
+      let impossible : i32 ∩ bool = 0i32
+      1

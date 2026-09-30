@@ -665,6 +665,8 @@ struct MatchRefiner
     usz refinements;
     usz aliases_checked;
     usz empty_aliases;
+    usz bindings_checked;
+    usz empty_bindings;
 }
 
 fn void MatchRefiner.init(MatchRefiner* m, SemanticSubtyper* s,
@@ -676,6 +678,8 @@ fn void MatchRefiner.init(MatchRefiner* m, SemanticSubtyper* s,
     m.arms_checked = 0;
     m.aliases_checked = 0;
     m.empty_aliases = 0;
+    m.bindings_checked = 0;
+    m.empty_bindings = 0;
     m.impossible_arms = 0;
     m.refinements = 0;
 }
@@ -729,6 +733,15 @@ fn void MatchRefiner.walk(MatchRefiner* m, Node* n, int depth)
     {
         m.check_alias(n);
     }
+    // An alias declaration describes a set; an annotated binding is an
+    // actual use of that set. Surface the same emptiness proof at the binding
+    // site so an impossible annotation is actionable where the value is
+    // introduced, not only where its alias was declared.
+    if (n.kind == Nk.N_DECL_LET || n.kind == Nk.N_DECL_CONST
+        || n.kind == Nk.N_DECL_STATIC)
+    {
+        m.check_binding(n);
+    }
     for (usz i = 0; i < n.child_count; i++) { m.walk(n.children[i], depth + 1); }
 }
 
@@ -759,6 +772,30 @@ fn void MatchRefiner.check_alias(MatchRefiner* m, Node* decl)
     }
 }
 
+// Check an annotated value against the same set-theoretic emptiness engine.
+// This remains an opt-in warning: the language's current type policy is
+// advisory, but an annotation that denotes the empty set should not be silent
+// when linting is enabled.
+fn void MatchRefiner.check_binding(MatchRefiner* m, Node* decl)
+{
+    Node* ty = decl.type_ann;
+    if (ty == null && decl.child_count > 0 && decl.children[0] != null)
+    {
+        ty = decl.children[0].type_ann;
+    }
+    if (ty == null || m.sub == null || !has_set_operator(ty, 0)) { return; }
+    m.bindings_checked = m.bindings_checked + 1;
+    if (m.sub.is_empty(ty))
+    {
+        m.empty_bindings = m.empty_bindings + 1;
+        m.diags.advisory_hint(pfront_core::Phase.PH_RESOLVE, 3292,
+                              decl.line, decl.col,
+                              "binding is annotated with an uninhabited type",
+                              "no value can satisfy this type annotation",
+                              m.file);
+    }
+}
+
 // Does this type mention any of ∩ / ∪ / ¬ anywhere inside?
 fn bool has_set_operator(Node* t, int depth)
 {
@@ -782,7 +819,14 @@ fn void MatchRefiner.report(MatchRefiner* m)
         printf("  type algebra     : %d aliases analysed, %d uninhabited\n",
                (int)m.aliases_checked, (int)m.empty_aliases);
     }
-    if (m.arms_checked == 0) { return; }
-    printf("  match refinement : %d arms typed, %d impossible, %d refined\n",
-           (int)m.arms_checked, (int)m.impossible_arms, (int)m.refinements);
+    if (m.bindings_checked > 0)
+    {
+        printf("  type annotations : %d bindings analysed, %d uninhabited\n",
+               (int)m.bindings_checked, (int)m.empty_bindings);
+    }
+    if (m.arms_checked > 0)
+    {
+        printf("  match refinement : %d arms typed, %d impossible, %d refined\n",
+               (int)m.arms_checked, (int)m.impossible_arms, (int)m.refinements);
+    }
 }

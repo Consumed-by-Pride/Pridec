@@ -1488,6 +1488,26 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s confluence: W4031=%s N4032=%s ok=%s bad=%s d=%s\n' "trs_confluence" "$w" "$n" "$okc" "$badc" "$d"
 fi
 
+# Cloning and E-graph extraction must preserve type/resolution metadata.
+meta=$("$BIN" --theory-metadata-selftest 2>&1)
+if echo "$meta" | grep -q 'theory metadata preservation: PASS'; then
+  pass=$((pass+1)); printf '  PASS  %-26s (clone + extraction metadata)\n' "theory_metadata"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "theory_metadata" "$meta"
+fi
+
+# Set-theoretic emptiness is actionable under --lint, but remains advisory in
+# the default untyped-language mode.
+sub=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt --lint 2>&1)
+sub_default=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt 2>&1)
+sub_w=$(echo "$sub" | grep -c 'warning\[W3292\]')
+sub_default_w=$(echo "$sub_default" | grep -c 'warning\[W3292\]')
+if [ "$sub_w" = "1" ] && [ "$sub_default_w" = "0" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (empty annotation warns only under --lint)\n' "subtype_annotation"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s lint=%s default=%s\n' "subtype_annotation" "$sub_w" "$sub_default_w"
+fi
+
 # 31/35 must actually FIRE at their `|>` sites.
 f31=$("$BIN" tests/pfront/31_trs_rule.pie 2>&1 | grep -oE '[0-9]+ firings' | grep -oE '^[0-9]+')
 f35=$(trs_ast 35_egraph_rewrite | sed -n "/fn 'f'/,\$p" | grep -c "binary <<")

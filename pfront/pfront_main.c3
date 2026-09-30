@@ -26,6 +26,7 @@ import pfront_sema;
 import pfront_flow;
 import theory_subtype_engine;
 import theory_check;
+import theory_egraph;
 import pfront_source;
 import pfront_types;
 import pfront_infer;
@@ -771,6 +772,7 @@ fn int main(String[] args)
     bool emit_exe = false;
     bool time_passes = false;
     bool subtype_selftest = false;
+    bool theory_metadata_selftest = false;
     bool dump_cfg = false;
     bool emit_cps = false;
     bool emit_dtree = false;
@@ -796,6 +798,7 @@ fn int main(String[] args)
         // specification (see theory_subtype_engine.c3) and exits with the
         // number of failed cases. No input file required.
         else if (streq(a, "--subtype-selftest")) { subtype_selftest = true; }
+        else if (streq(a, "--theory-metadata-selftest")) { theory_metadata_selftest = true; }
         else if (streq(a, "--no-verify")) { verify = false; }
         else if (streq(a, "--plain"))     { rich = false; }
         else if (streq(a, "--strict-types")) { strict_types = true; }
@@ -836,6 +839,13 @@ fn int main(String[] args)
     if (subtype_selftest)
     {
         int fails = theory_subtype_engine::se_selftest();
+        return fails;
+    }
+    if (theory_metadata_selftest)
+    {
+        int fails = theory_egraph::metadata_selftest();
+        printf("theory metadata preservation: %s (%d failures)\n",
+               fails == 0 ? "PASS" : "FAIL", fails);
         return fails;
     }
     if (input == null) { printf("error: no input file\n"); return 2; }
