@@ -1496,16 +1496,18 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "theory_metadata" "$meta"
 fi
 
-# Set-theoretic emptiness is actionable under --lint, but remains advisory in
-# the default untyped-language mode.
+# The production set engine proves primitive disjointness but must widen
+# unknown aliases conservatively, especially beneath negation. The result is
+# advisory only under --lint.
 sub=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt --lint 2>&1)
 sub_default=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt 2>&1)
 sub_w=$(echo "$sub" | grep -c 'warning\[W3292\]')
 sub_default_w=$(echo "$sub_default" | grep -c 'warning\[W3292\]')
-if [ "$sub_w" = "1" ] && [ "$sub_default_w" = "0" ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (empty annotation warns only under --lint)\n' "subtype_annotation"
+sub_engine=$(echo "$sub" | grep -c 'subtype engine.*3 queries, 1 proved, 2 refuted')
+if [ "$sub_w" = "1" ] && [ "$sub_default_w" = "0" ] && [ "$sub_engine" = "1" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (engine proof; unknown alias conservative; lint only)\n' "subtype_annotation"
 else
-  fail=$((fail+1)); printf '  FAIL  %-26s lint=%s default=%s\n' "subtype_annotation" "$sub_w" "$sub_default_w"
+  fail=$((fail+1)); printf '  FAIL  %-26s lint=%s default=%s engine=%s\n' "subtype_annotation" "$sub_w" "$sub_default_w" "$sub_engine"
 fi
 
 # 31/35 must actually FIRE at their `|>` sites.

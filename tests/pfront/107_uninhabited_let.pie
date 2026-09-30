@@ -1,4 +1,8 @@
+type Alias = i32
+
 fn f : () -> i64
   | () ->
       let impossible : i32 ∩ bool = 0i32
+      let possible : Alias ∩ i32 = 0i32
+      let negated_alias : ¬Alias ∩ i32 = 0i32
       1
