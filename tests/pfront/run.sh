@@ -1503,11 +1503,17 @@ sub=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt --lint
 sub_default=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt 2>&1)
 sub_w=$(echo "$sub" | grep -c 'warning\[W3292\]')
 sub_default_w=$(echo "$sub_default" | grep -c 'warning\[W3292\]')
-sub_engine=$(echo "$sub" | grep -c 'subtype engine.*3 queries, 1 proved, 2 refuted')
-if [ "$sub_w" = "1" ] && [ "$sub_default_w" = "0" ] && [ "$sub_engine" = "1" ]; then
-  pass=$((pass+1)); printf '  PASS  %-26s (engine proof; unknown alias conservative; lint only)\n' "subtype_annotation"
+sub_alias_w=$(echo "$sub" | grep -c 'warning\[W3291\]')
+sub_default_alias_w=$(echo "$sub_default" | grep -c 'warning\[W3291\]')
+sub_engine=$(echo "$sub" | grep -c 'subtype engine.*4 queries, 2 proved, 2 refuted')
+if [ "$sub_w" = "1" ] && [ "$sub_default_w" = "0" ] \
+   && [ "$sub_alias_w" = "1" ] && [ "$sub_default_alias_w" = "0" ] \
+   && [ "$sub_engine" = "1" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (engine proofs for aliases/bindings; lint only)\n' "subtype_annotation"
 else
-  fail=$((fail+1)); printf '  FAIL  %-26s lint=%s default=%s engine=%s\n' "subtype_annotation" "$sub_w" "$sub_default_w" "$sub_engine"
+  fail=$((fail+1)); printf '  FAIL  %-26s binding=%s/%s alias=%s/%s engine=%s\n' \
+    "subtype_annotation" "$sub_w" "$sub_default_w" \
+    "$sub_alias_w" "$sub_default_alias_w" "$sub_engine"
 fi
 
 # 31/35 must actually FIRE at their `|>` sites.

@@ -765,7 +765,7 @@ fn void MatchRefiner.walk(MatchRefiner* m, Node* n, int depth)
 fn void MatchRefiner.check_alias(MatchRefiner* m, Node* decl)
 {
     Node* ty = decl.type_ann;
-    if (ty == null || m.sub == null) { return; }
+    if (ty == null || (m.sub == null && m.set_engine == null)) { return; }
 
     // Only the set-theoretic forms are interesting; a plain alias to a
     // nominal type has nothing to decide.
@@ -774,10 +774,26 @@ fn void MatchRefiner.check_alias(MatchRefiner* m, Node* decl)
 
     m.aliases_checked = m.aliases_checked + 1;
 
-    // Uninhabited alias: no value can ever have this type. Reported as an
-    // advisory because Pride is untyped -- writing it is legal, and it may
-    // even be deliberate (a "never" marker).
-    if (m.sub.is_empty(ty))
+    // Uninhabited alias: no value can ever have this type. Use the same
+    // three-valued engine as binding annotations when it is attached to the
+    // production pipeline. Unsupported forms remain unknown and do not
+    // manufacture a proof. The legacy semantic procedure is only a fallback
+    // for standalone callers without an engine.
+    bool proven_empty = false;
+    if (m.set_store != null && m.set_engine != null)
+    {
+        int translated = ast_type_to_set_type(m.set_store, ty, 0);
+        if (translated >= 0)
+        {
+            int verdict = m.set_engine.subtype(translated, m.set_store.bot_idx);
+            proven_empty = verdict == theory_subtype_engine::TRI_TRUE;
+        }
+    }
+    else if (m.sub != null)
+    {
+        proven_empty = m.sub.is_empty(ty);
+    }
+    if (proven_empty)
     {
         m.empty_aliases = m.empty_aliases + 1;
         m.diags.advisory_hint(pfront_core::Phase.PH_RESOLVE, 3291,

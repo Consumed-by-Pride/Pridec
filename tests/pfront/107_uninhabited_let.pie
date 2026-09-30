@@ -1,4 +1,5 @@
 type Alias = i32
+type EmptyAlias = i32 ∩ bool
 
 fn f : () -> i64
   | () ->
