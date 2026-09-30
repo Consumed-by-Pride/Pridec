@@ -1505,7 +1505,7 @@ sub_w=$(echo "$sub" | grep -c 'warning\[W3292\]')
 sub_default_w=$(echo "$sub_default" | grep -c 'warning\[W3292\]')
 sub_alias_w=$(echo "$sub" | grep -c 'warning\[W3291\]')
 sub_default_alias_w=$(echo "$sub_default" | grep -c 'warning\[W3291\]')
-sub_engine=$(echo "$sub" | grep -c 'subtype engine.*5 queries, 3 proved, 2 refuted')
+sub_engine=$(echo "$sub" | grep -c 'subtype engine.*6 queries, 3 proved, 3 refuted')
 if [ "$sub_w" = "2" ] && [ "$sub_default_w" = "0" ] \
    && [ "$sub_alias_w" = "1" ] && [ "$sub_default_alias_w" = "0" ] \
    && [ "$sub_engine" = "1" ]; then

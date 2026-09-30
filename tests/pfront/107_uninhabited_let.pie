@@ -8,4 +8,5 @@ fn f : () -> i64
       let possible : Alias ∩ i32 = 0i32
       let negated_alias : ¬Alias ∩ i32 = 0i32
       let opaque_complement : ¬Opaque ∩ i32 = 0i32
+      let opaque_union_complement : ¬(Opaque ∪ i32) ∩ i32 = 0i32
       1

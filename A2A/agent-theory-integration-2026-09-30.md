@@ -15,7 +15,7 @@ The source type checker runs before `TheoryPipeline`. `theory_term.clone_term` a
 - the production MatchRefiner now queries `theory_subtype_engine` over the pipeline's shared `TypeStore` for supported set-algebra aliases and let/const/static annotations. It follows resolved transparent aliases; nominal/unsupported forms propagate an unknown sentinel through compound types, and negation widens unknown to TOP. It emits W3291/W3292 only under `--lint` on definite empty-type proofs.
 - the `theory_matching` `NF_DENSE_SWITCH` fact now reaches PEAR through AIR and selects LLVM `switch` for the validated dense scalar subset; `theory_pglcert` recognizes wildcard coverage of infinite scalar domains and no longer emits false W4090 on those cases.
 
-`--theory-metadata-selftest` reports PASS (0 failures); `--subtype-selftest` remains 47/47; the fixture exercises the real engine (5 queries: 3 emptiness proofs, 2 refutations), follows a transparent integer alias, proves its complement empty, and keeps an opaque pointer alias under negation quiet; W3291/W3292 remain `--lint`-only. `35_egraph_rewrite.pie` still rewrites to a shift.
+`--theory-metadata-selftest` reports PASS (0 failures); `--subtype-selftest` remains 47/47; the fixture exercises the real engine (6 queries: 3 emptiness proofs, 3 refutations), follows a transparent integer alias, proves its complement empty, and keeps opaque pointer aliases quiet under both direct and union negation; W3291/W3292 remain `--lint`-only. `35_egraph_rewrite.pie` still rewrites to a shift.
 
 ## Wiring status to retain for follow-up
 
