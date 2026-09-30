@@ -462,6 +462,11 @@ fn Atom make_atom(Node* t, bool negated)
             // A primitive is recognised by spelling; anything else is nominal.
             char* s = t.p.sptr;
             usz n = t.p.slen;
+            if (n == 3 && s != null && s[0] == 'a' && s[1] == 'n' && s[2] == 'y')
+            {
+                a.kind = AtomKind.AT_TOP;
+                return a;
+            }
             bool prim = false;
             if (s != null && n >= 2)
             {

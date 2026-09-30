@@ -1,0 +1,26 @@
+-- Set algebra participates in the language type table and bidirectional inference.
+type IntOrBool = i32 ∪ bool
+type Impossible = i32 ∩ bool
+type NotBool = ¬bool
+type AnyValue = any
+
+fn choose(flag: bool) -> IntOrBool {
+    if flag { return 12; } else { return true; }
+}
+
+fn wants_union(value: IntOrBool) -> i64 { return 0; }
+
+fn main(_) -> i64 {
+    let accepts_int: IntOrBool = 4;
+    let accepts_bool: IntOrBool = false;
+    let accepts_complement: NotBool = 7;
+    let rejects_complement: NotBool = true;
+    let rejects_empty: Impossible = 9;
+    let joined = if true { 1 } else { false };
+    let accepts_join: IntOrBool = joined;
+    let call_accepts_bool = wants_union(true);
+    let call_rejects_float = wants_union(2.5);
+    let accepts_top: AnyValue = true;
+    let accepts_bottom: IntOrBool = unreachable;
+    return 0;
+}

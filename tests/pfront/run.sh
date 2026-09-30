@@ -1948,6 +1948,26 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
 fi
 
+# Set-algebra types are first-class in inference, not merely analyzed by the
+# later theory checker: values flow into unions/complements, branches join to
+# unions, and disjoint/empty assignments are counted as rejected.
+set_sem=$("$BIN" tests/pfront/102_semantic_types.pie -I stdlib -I . 2>&1)
+set_lint=$("$BIN" tests/pfront/102_semantic_types.pie -I stdlib -I . --strict-types --lint 2>&1)
+set_ok=1; set_why=""
+echo "$set_sem" | grep -q 'type mismatches  : 3 ' || { set_ok=0; set_why="$set_why mismatch boundary"; }
+echo "$set_sem" | grep -q 'set algebra .*15 assignability checks (12 accepted, 3 rejected), 1 inferred union joins' || { set_ok=0; set_why="$set_why lattice inference"; }
+echo "$set_lint" | grep -q 'set algebra .*15 assignability checks (12 accepted, 3 rejected), 1 inferred union joins' || { set_ok=0; set_why="$set_why strict lattice inference"; }
+set_type_notes=$(echo "$set_lint" | grep -c '\[W3100\]')
+set_empty_notes=$(echo "$set_lint" | grep -c '\[W3291\]')
+[ "$set_type_notes" = 3 ] || { set_ok=0; set_why="$set_why subtype advice"; }
+[ "$set_empty_notes" = 1 ] || { set_ok=0; set_why="$set_why empty-type note"; }
+echo "$set_sem" | grep -q 'errors    : 0' || { set_ok=0; set_why="$set_why frontend errors"; }
+if [ $set_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (union/complement/top/bottom assignments, call checking, branch joins, advice)\n' "semantic_type_values"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "semantic_type_values" "$set_why"
+fi
+
 # Record row semantics: exercise typed width/depth rows, incompatible field
 # intersections, Boolean row formulas, and dynamic storage beyond 64 labels.
 rec_sem=$("$BIN" tests/pfront/100_records_semantics.pie -I stdlib -I . 2>&1)

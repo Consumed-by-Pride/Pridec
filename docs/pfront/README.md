@@ -115,9 +115,13 @@ Exit codes: `0` clean · `1` warnings · `2` errors.
 
 ## Design decisions that matter
 
-**Pride is untyped.** No analysis may reject a program over types, arity,
-mutability or bounds. Advice routes through `DiagBag.advisory`, is off by
-default, and is never an error. See `THEORY.md` for the enforced policy.
+**Pride is dynamically permissive, but its type algebra is first-class.**
+`TypeTable` retains unions, intersections, negations, and top/bottom instead of
+collapsing a set expression to its first arm. Bidirectional inference uses
+subtyping for annotated lets, returns, assignments, and call arguments; joins
+in `if`/`match` and heterogeneous arrays produce union TypeIds consumed by
+later passes. The policy remains advisory: mismatches inform tooling but do
+not reject a Pride program. See `THEORY.md` for the enforced policy.
 
 **Interning at parse time.** Identifiers become `uint` in the lexer, so
 resolution compares integers. This is what makes a 253-module sweep cheap.
