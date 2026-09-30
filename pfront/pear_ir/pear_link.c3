@@ -73,8 +73,18 @@ fn bool pear_link_exe(AirModule* mod, char* src_path, int opt_level)
         return false;
     }
 
+    // Link with libc so malloc/free/write resolve. `-nostdlib` skips the
+    // compiler driver's runtime boilerplate; -lc pulls in libc.so, and
+    // the dynamic linker path is required so the kernel maps libc at load
+    // time (without it, calls to malloc land on a NULL PLT slot and SIGSEGV).
+    // We must CLEAR LD_LIBRARY_PATH for the link: the driver runs with
+    // LD_LIBRARY_PATH=~/.cache/llvm23 so it can find libLLVM-23.so, and that
+    // directory contains a non-glibc `libc.so` (LLVM's libc plugin shim)
+    // which ld tries and fails to parse as libc → "file format not recognized".
+    // Use an explicit -L/usr/lib/x86_64-linux-gnu and the real libc.so name to
+    // avoid search-path confusion, and zero LD_LIBRARY_PATH in the subshell.
     (void)snprintf(&cmd[0], LINK_PATH_MAX,
-        (char*)"ld %s %s -o %s --entry=_start -nostdlib -no-pie",
+        (char*)"LD_LIBRARY_PATH= ld -L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu %s %s -o %s --entry=_start -nostdlib -no-pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 -lc",
         &start_path[0], &obj_path[0], &exe_path[0]);
     int rc = system(&cmd[0]);
     (void)remove(&obj_path[0]);

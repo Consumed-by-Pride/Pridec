@@ -241,6 +241,36 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
     m.pat_wild=air_mk_pat_wild(a); m.p_true=air_mk_prd_bool(a,true);
     m.p_false=air_mk_prd_bool(a,false); m.p_null=air_mk_prd_null(a);
     m.nop=air_mk_cmd_nop(a,m.p_unit,air_mk_cns_covar(a,a.dup("·",3)));
+    // Pre-register libc intrinsics (malloc/free/write) as ADECL_DECLARE so
+    // calls from `alloc [...]` / `write` / `free` resolve to external
+    // declarations rather than letting the lowerer synthesize zero-return
+    // DEF bodies (which made malloc return 0 and every alloc program
+    // segfault on a NULL-pointer write).
+    {
+        // malloc(i64) -> ptr (i8*)
+        AirDecl* mal = air_mk_decl(a, ADECL_DECLARE, a.dup("malloc",6));
+        mal.is_extern = true;
+        mal.ret_ty = air_mk_typ_ptr(a, m.t_u8);
+        AirBinder* mal_p0 = air_mk_binder(a, a.dup("_",1), m.t_i64, AMULT_UNR);
+        mal.add_param(mal_p0);
+        m.add_decl(mal);
+        // free(ptr) -> void
+        AirDecl* fr = air_mk_decl(a, ADECL_DECLARE, a.dup("free",4));
+        fr.is_extern = true;
+        fr.ret_ty = m.t_unit;
+        AirBinder* fr_p0 = air_mk_binder(a, a.dup("_",1), air_mk_typ_ptr(a, m.t_u8), AMULT_UNR);
+        fr.add_param(fr_p0);
+        m.add_decl(fr);
+        // write(i32, ptr, i64) -> i64
+        AirDecl* wr = air_mk_decl(a, ADECL_DECLARE, a.dup("write",5));
+        wr.is_extern = true;
+        wr.ret_ty = m.t_i64;
+        AirBinder* wr_p0 = air_mk_binder(a, a.dup("_",1), m.t_i32, AMULT_UNR);
+        AirBinder* wr_p1 = air_mk_binder(a, a.dup("_",1), air_mk_typ_ptr(a, m.t_u8), AMULT_UNR);
+        AirBinder* wr_p2 = air_mk_binder(a, a.dup("_",1), m.t_i64, AMULT_UNR);
+        wr.add_param(wr_p0); wr.add_param(wr_p1); wr.add_param(wr_p2);
+        m.add_decl(wr);
+    }
     return (m.t_unit!=null)&&(m.p_unit!=null)&&(m.c_ret!=null);
 }
 

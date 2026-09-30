@@ -1574,15 +1574,19 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         }
         case Nk.N_EXPR_ALLOC:
         {
-            // alloc [T; N] → __pear_alloca(n): stack bump (entry BB alloca,
-            // avoids external malloc dependency for bootstrap).
+            // alloc [T; N] → malloc(n): heap allocate n bytes, return the
+            // pointer as an i64 (PEAR represents pointers as intptr_t).
+            // The v0.8 bootstrap used a static [256 x i8] entry-BB alloca
+            // (__pear_alloca), which capped allocations at 256 B and tickled
+            // EarlyCSE on dynamic alloca sizes. v0.9 moves to real malloc
+            // so kernels like sieve (n+1 byte array) can run.
             lr.total_prd++;
             lr.total_cns++;
             long bytes = lr.alloc_bytes(n);
             if (bytes <= 0) bytes = 16;
             AirPrd* szp = air_ir::air_mk_int(lr.arena, bytes);
             AirPrd*[1] av; av[0] = szp;
-            AirPrd* callee = air_ir::air_mk_var(lr.arena, lr.dup((char*)"__pear_alloca"));
+            AirPrd* callee = air_ir::air_mk_var(lr.arena, lr.dup((char*)"malloc"));
             AirCns* call_k = air_ir::air_mk_call(lr.arena, &av[0], 1, k);
             return lr.cut(callee, call_k);
         }
@@ -3303,6 +3307,19 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
     }
     if (nm == null) nm = node_text(n, lr.it);
     if (nm == null) nm = (char*)"_fn";
+    // libc intrinsics (malloc/free/write) are pre-registered as ADECL_DECLARE
+    // externs in AirModule.init. Never let a stray builtin decl synthesize a
+    // zero-returning DEF body for them — that made malloc ret 0 and every
+    // alloc program wrote through NULL → SIGSEGV.
+    if (lr.mod_has_fn(nm))
+    {
+        bool is_libc = false;
+        char* c = nm;
+        if (c[0]=='m'&&c[1]=='a'&&c[2]=='l'&&c[3]=='l'&&c[4]=='o'&&c[5]=='c'&&c[6]==0) { is_libc = true; }
+        else if (c[0]=='f'&&c[1]=='r'&&c[2]=='e'&&c[3]=='e'&&c[4]==0) { is_libc = true; }
+        else if (c[0]=='w'&&c[1]=='r'&&c[2]=='i'&&c[3]=='t'&&c[4]=='e'&&c[5]==0) { is_libc = true; }
+        if (is_libc) { return null; }
+    }
     char* nm2 = lr.dup(nm);
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DEF, nm2);
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;

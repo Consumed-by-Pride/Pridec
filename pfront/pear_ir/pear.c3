@@ -123,12 +123,15 @@ alias Lpass_opts = void*;
 alias Lerror = void*;
 
 extern fn Ltype      ll_global_val_type(Lvalue g) @cname("LLVMGlobalGetValueType");
+extern fn Ltype      ll_type_of(Lvalue v) @cname("LLVMTypeOf");
 extern fn Lvalue    ll_create_enum_attr(Lcontext c, uint id, ulong v) @cname("LLVMCreateEnumAttribute");
+extern fn Lvalue    ll_create_string_attr(Lcontext c, char* k, uint kl, char* v, uint vl) @cname("LLVMCreateStringAttribute");
 extern fn void      ll_add_attr_at_idx(Lvalue f, int idx, Lvalue a) @cname("LLVMAddAttributeAtIndex");
 extern fn Lpass_opts ll_create_pb_opts() @cname("LLVMCreatePassBuilderOptions");
 extern fn void      ll_dispose_pb_opts(Lpass_opts o) @cname("LLVMDisposePassBuilderOptions");
 extern fn void      ll_pb_set_inliner_threshold(Lpass_opts o, int t) @cname("LLVMPassBuilderOptionsSetInlinerThreshold");
 extern fn Lerror    ll_run_passes(Lmodule m, char* passes, Ltarget_machine tm, Lpass_opts o) @cname("LLVMRunPasses");
+extern fn int       ll_print_mod_to_file(Lmodule m, char* path, char** errmsg) @cname("LLVMPrintModuleToFile");
 extern fn char*     ll_get_err_msg(Lerror e) @cname("LLVMGetErrorMessage");
 extern fn void      ll_consume_error(Lerror e) @cname("LLVMConsumeError");
 
@@ -175,7 +178,8 @@ struct PearCg {
     Ltype    voidty;
     Ltype    i8ptrty;     // i8* — result of malloc
     Lvalue   malloc_fn;   // cached malloc(i64) -> i8* decl
-    bool     callee_is_alloca_intrinsic;
+    Lvalue   free_fn;     // cached free(i8*) -> void decl
+    Lvalue   write_fn;    // cached write(i32, i8*, i64) -> i64 decl
     // Set when a bare-name callee lookup failed (see prd_i64 -> N_EXPR_IDENT).
     // The call site uses it to declare a real external reference instead of
     // calling address 0 — see ACNS_CALL.
@@ -601,19 +605,21 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             {
                 Lvalue f = ll_get_named_fn(cg.mod, p.name);
                 if (f != null) return f;
-                // Not defined in this module. Remember the name so the call
-                // site can emit an external reference to it (a missing symbol
-                // must fail at LINK time with a name in the message, not as a
-                // call to address 0 that segfaults at run time).
-                cg.unresolved_callee = p.name;
-                // Detect __pear_alloca intrinsic by name prefix.
+                // Legacy __pear_alloca intrinsic (v0.8 bootstrap) — redirect
+                // to real malloc so older .air or stale references still work.
                 if (p.name[0] == '_' && p.name[1] == '_'
                     && p.name[2] == 'p' && p.name[3] == 'e'
                     && p.name[4] == 'a' && p.name[5] == 'r'
                     && p.name[6] == '_')
                 {
-                    cg.callee_is_alloca_intrinsic = true;
+                    return cg.malloc_fn != null ? cg.malloc_fn
+                                                : ll_const_int(cg.i64ty, 0, 0);
                 }
+                // Not defined in this module. Remember the name so the call
+                // site can emit an external reference to it (a missing symbol
+                // must fail at LINK time with a name in the message, not as a
+                // call to address 0 that segfaults at run time).
+                cg.unresolved_callee = p.name;
             }
             return ll_const_int(cg.i64ty, 0, 0);
         }
@@ -991,35 +997,44 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 uint idx = ac - 1 - i;
                 argv[idx] = cg.prd_i64(args[idx]);
             }
-            // Use the callee's real function type. If callee is __pear_alloca or
-            // malloc, treat as pointer-returning intrinsic.
+            // Use the callee's real function type. malloc returns i8*;
+            // we prd_i64-ize everything else as i64. Pointer-returning
+            // callees get ptrtoint'd to i64 so they flow through PEAR's
+            // i64-uniform value representation like any other value.
             Ltype fn_ty = null;
             bool ret_is_ptr = false;
-            bool is_alloca_intrinsic = false;
             if (callee == cg.malloc_fn)
             {
                 ret_is_ptr = true;
                 Ltype[1] ma; ma[0] = cg.i64ty;
                 fn_ty = ll_fn_ty(cg.i8ptrty, &ma[0], 1, 0);
             }
-            else
+            else if (callee == cg.free_fn)
             {
-                // Detect __pear_alloca intrinsic by name lookup failure.
-                fn_ty = ll_global_val_type(callee);
-                if (fn_ty == null && ac == 1 && cg.callee_is_alloca_intrinsic)
-                {
-                    is_alloca_intrinsic = true;
-                    ret_is_ptr = true;
-                }
-                cg.callee_is_alloca_intrinsic = false;
+                // free(i8*) -> void
+                Ltype[1] fa; fa[0] = cg.i8ptrty;
+                fn_ty = ll_fn_ty(cg.voidty, &fa[0], 1, 0);
+                // free's argument arrives as i64 (ptrtoint'd); we bitcast
+                // back to i8* at the call site below.
             }
-            if (fn_ty == null && !is_alloca_intrinsic)
+            else if (callee == cg.write_fn)
+            {
+                // write(i32, i8*, i64) -> i64
+                Ltype[3] wa; wa[0] = cg.i32ty; wa[1] = cg.i8ptrty; wa[2] = cg.i64ty;
+                fn_ty = ll_fn_ty(cg.i64ty, &wa[0], 3, 0);
+            }
+            // else user function: we synthesise fn_ty below (opaque-ptr
+            // LLVM means we cannot recover the pointee function type from
+            // a GlobalValue; the fallback i64(...) signature matches how
+            // pear_fn_type and pear_declare build all Pride-declared fns,
+            // which widen params/return to i64 by default).
+            if (fn_ty == null)
             {
                 Ltype[64] atys;
                 for (uint i = 0; i < ac; i++) { atys[i] = cg.i64ty; }
                 fn_ty = ll_fn_ty(cg.i64ty, &atys[0], ac, 0);
             }
-            if (callee == null && !is_alloca_intrinsic)
+            if (callee == null)
             {
                 if (cg.unresolved_callee != null && fn_ty != null && !ret_is_ptr)
                 {
@@ -1041,28 +1056,14 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 if (callee == null) { callee = ll_const_int(cg.i64ty, 0, 0); }
             }
             cg.unresolved_callee = null;
+            // free(p) takes i8* but PEAR holds pointers as i64 — bitcast arg.
+            if (callee == cg.free_fn && ac >= 1)
+            {
+                argv[0] = ll_build_inttoptr(cg.b, argv[0], cg.i8ptrty, cg.mktmp());
+            }
             char* nm = cg.mktmp();
-            Lvalue r;
-            if (is_alloca_intrinsic)
-            {
-                // __pear_alloca(n): emit a static [256 x i8] stack buffer in
-                // the entry BB (bootstrap). Dynamically-sized array_alloca
-                // tickles an LLVM 23 EarlyCSE crash (simplifyGEPInst null
-                // TypeAllocSize) and the current benches only need ≤256 B.
-                // TODO: switch to malloc once heap bootstrap is wired up.
-                Lblock saved_bb = ll_get_insert(cg.b);
-                ll_pos_builder(cg.b, cg.entry_bb);
-                Ltype arr_ty = ll_array_type(cg.i8ty, 256);
-                Lvalue buf = ll_build_alloca(cg.b, arr_ty, cg.mktmp());
-                ll_pos_builder(cg.b, saved_bb);
-                r = ll_build_ptrtoint(cg.b, buf, cg.i64ty, nm);
-                ret_is_ptr = true;
-            }
-            else
-            {
-                r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm);
-            }
-            if (ret_is_ptr && !is_alloca_intrinsic)
+            Lvalue r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm);
+            if (ret_is_ptr)
             {
                 r = ll_build_ptrtoint(cg.b, r, cg.i64ty, nm);
             }
@@ -1662,19 +1663,17 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     //  - Never unwind (nounwind), never free (nofree), no atomics (nosync)
     //  - No callback registration (no-callback), speculatable.
     // These unlock GVN/LICM/speculation C compilers refuse to apply.
-    // Tag with strong attributes PEAR can prove via effect system.
-    // NOTE: do NOT apply nofree here — Pride's `alloc` effect calls malloc,
-    // and marking functions nofree lets LLVM delete malloc() stores/loads as
-    // dead (observed on the arr1.pie repro). willreturn/nounwind etc are safe
-    // for our pure-ish benches but alloc-using fns must NOT be tagged nofree.
-    // A proper fix will tag per-function based on inferred effects; for now
-    // we apply the conservative safe subset.
+    // Tag with attributes PEAR can prove via effect system.
+    // NOTE(v0.9 heap bootstrap): willreturn/mustprogress/nosync are DISABLED
+    // while we wire up malloc properly. LLVM's attribute inference was
+    // marking `main` as `memory(none) nofree` because our hand-declared
+    // @malloc didn't carry `allockind(\"alloc,...\")`, which let the
+    // optimizer delete the malloc call, fold the store to NULL, and
+    // segfault (movb $0x7,0x0). Re-enable once malloc carries the right
+    // allockind string attrs (see pear_setup).
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
-    // Speculatable/nocallback/norecurse/nofree disabled for now: they
-    // interact with malloc and recursion in ways we need to re-verify.
+    // nofree: only if the fn has no Alloc effect (conservative for now: OFF)
+    // willreturn / nosync / mustprogress: OFF pending malloc fix.
 }
 
 fn void pear_declare(PearCg* cg, AirDecl* d)
@@ -1769,7 +1768,6 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
     cg.air = mod;
     cg.ctx = ctx; cg.mod = m; cg.b = b; cg.tmp = 0; cg.blk = 0;
     cg.name_n = 0; cg.lbl_n = 0; cg.terminated = false;
-    cg.callee_is_alloca_intrinsic = false;
     cg.i64ty = ll_i64_ty(ctx);
     cg.i32ty = ll_i32_ty(ctx);
     cg.i8ty  = ll_i8_ty(ctx);
@@ -1777,18 +1775,47 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
     cg.voidty = ll_void_ty(ctx);
     cg.i8ptrty = ll_ptr_ty(cg.i8ty, 0);
     cg.malloc_fn = null;
+    cg.free_fn = null;
+    cg.write_fn = null;
 
-    // Pre-declare libc intrinsics we may reference.
+    // Pre-declare libc intrinsics we may reference and tag them with the
+    // strongest attributes we know hold (so LLVM optimizes through them even
+    // without seeing libc definitions — these match what clang gives libc).
     {
         Ltype i8p = cg.i8ptrty;
         // write(i32 fd, i8* buf, i64 n) -> i64
         Ltype[3] wa; wa[0] = cg.i32ty; wa[1] = i8p; wa[2] = cg.i64ty;
         Ltype wfty = ll_fn_ty(cg.i64ty, &wa[0], 3, 0);
-        (void)ll_add_fn(m, (char*)"write", wfty);
-        // malloc(i64 bytes) -> i8*
+        cg.write_fn = ll_add_fn(m, (char*)"write", wfty);
+        // malloc(i64 bytes) -> i8*  (nounwind/willreturn/nosync. nofree is
+        // WRONG for malloc; it's the thing that *does* alloc.)
         Ltype[1] ma; ma[0] = cg.i64ty;
         Ltype mfty = ll_fn_ty(i8p, &ma[0], 1, 0);
         cg.malloc_fn = ll_add_fn(m, (char*)"malloc", mfty);
+        pear_tag_fn(cg, cg.malloc_fn, LLVM_ATTR_NOUNWIND);
+        // Tell LLVM this is an allocator (returns fresh, uninitialized
+        // memory). Without "allockind" the middle-end treats @malloc as
+        // a black-box external and infers nofree/memory(none) on callers,
+        // which deletes the call and folds stores to NULL → SIGSEGV.
+        // Lengths computed manually: "allockind"=9,
+        // "alloc,uninitialized"=19.
+        {
+            Lvalue sa = ll_create_string_attr(cg.ctx,
+                (char*)"allockind", 9u,
+                (char*)"alloc,uninitialized", 19u);
+            ll_add_attr_at_idx(cg.malloc_fn, LLVM_ATTR_FN_INDEX, sa);
+        }
+        // free(i8*) -> void: "allockind"="free" (4)
+        Ltype[1] fa; fa[0] = i8p;
+        Ltype ffty = ll_fn_ty(cg.voidty, &fa[0], 1, 0);
+        cg.free_fn = ll_add_fn(m, (char*)"free", ffty);
+        pear_tag_fn(cg, cg.free_fn, LLVM_ATTR_NOUNWIND);
+        {
+            Lvalue sa = ll_create_string_attr(cg.ctx,
+                (char*)"allockind", 9u,
+                (char*)"free", 4u);
+            ll_add_attr_at_idx(cg.free_fn, LLVM_ATTR_FN_INDEX, sa);
+        }
     }
 
     for (uint i = 0; i < mod.decl_count; i++)
@@ -1876,7 +1903,6 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path, int opt_level)
     }
     PearCg cg;
     pear_setup(&cg, ctx, m, b, mod);
-
     // Run PEAR mid-end pipeline WITHOUT the TM attached. LLVM 19's DwarfEHPrepare
     // pass segfaults when added to the codegen pipeline on modules containing
     // recursive functions (see https://github.com/llvm/llvm-project/issues/XXXX);
@@ -1894,7 +1920,6 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path, int opt_level)
         }
         ll_dispose_pb_opts(po);
     }
-
     // Use LLVM_CODEGEN_O2 for the TM: FastISel at O0 crashes on GEPs/bitcasts
     // we emit for pointer/index ops (StructType::getTypeAtIndex). Mid-end
     // optimization level is still controlled by pear_pipe_for(opt_level);
