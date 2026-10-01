@@ -1225,3 +1225,21 @@ Integrity note, facts only:
 - **My round-11 APPROVE on #17 (id `5371501218`, 2026-09-30) is still intact**, so this is not a systematic wipe — it is specific to today's two reviews. Deleting reviews requires the review author or a repo admin. My reviews post under the PAT identity (Father-of-Pride), same as several other accounts in this workflow, so a deliberate cleanup of "self-reviews" is the most benign explanation; I have no way to distinguish that from moderation. Not re-litigating — just recording it.
 - Response: full verification text preserved HERE (Round 13 above, verbatim claims + probes) and re-posted as a pointer comment on #19 (the only open PR). #18's record lives in its merge commit message + this ledger. Canonical record remains `A2A/agent4.md` on `dev`.
 - Board re-check 17:06Z: **no new PRs since round 13**; #19 unchanged (draft @ `0210bc71`, no replies to my verification); dev untouched since `163b956` (verified: Round 13 present on origin/dev).
+
+# Round 14 — "merge everything needed": #19 re-verified at new head and merged; board EMPTY (2026-10-01, @ `b8757158`)
+
+Directive: merge everything needed. State on arrival: one open item — #19, un-drafted by its author with a **new head** (`0210bc71` → `0c7edab5`).
+
+## Re-verification of the moved head (my round-13 approval was for `0210bc71`, so the delta needed fresh eyes)
+- Delta inspection: the move = n3's merge `4d1b555` absorbing dev (my rounds 12–13 + #18's p112 work) + an A2A status commit. No new compiler logic beyond already-verified content — but the dev-absorption touched `pear.c3` where BOTH #18 and #19 changed code, so the resolution needed proof-by-execution.
+- **Gate on `0c7edab5`: `make test` exit 0 with both feature sets coexisting** — PEAR 35/0/1 (p112 in, exit 37 re-confirmed) · exec 43/0 xpass=0 · pfront 172/5 · conform 150/112 · experiments 14/14 · subtype 47/47 · **LLVM attrs 5/5 · AIR contracts 10/10**.
+- Runtime probes on the merged result: tuple clause 5 · 'A' 65 · 'é' 233 · p110 = 190 theory ON **and** OFF · fact screen still honest (writer-through-param: bare `checked`, zero positive facts; pure reader: `memory(read) captures(none):p`).
+
+## Merged
+**#19 → dev as `b8757158`** (my verification comment noted un-drafting was the author's call — the author un-drafted, which I read as go-ahead; the user's directive confirmed it).
+
+## Post-merge gate on dev @ `b8757158`: exit 0, full combined matrix
+pfront 172/5 · conformance 150/112 · PEAR 35/0/1 · exec 43/0, xpass=0 · experiments 14/14 · subtype 47/47 · LLVM attrs 5/5 · AIR contracts 10/10.
+
+## Board state: EMPTY
+Zero open PRs. #19 was the last. Session total since the merge directive: **#17, #18, #19 merged after independent verification; 8 stale PRs closed-as-superseded with ancestor-verified containment; #14/#15/#13/#6/#4 merged via API.** Ledger: 2 fixed this week (tuple clause, hose checker) + 1 external find fixed (#18's pointer reader), 12 open from the 14-defect set (§24, §49, §55 among them — all re-confirmed unchanged on the final head).
