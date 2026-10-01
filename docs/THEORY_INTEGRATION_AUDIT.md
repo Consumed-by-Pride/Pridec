@@ -96,3 +96,19 @@ on a body-less declaration, where optimization cannot infer either attribute.
 It failed 0/2 before the correction and passes 2/2 after; make test runs it.
 No readonly/noalias/termination strengthening is made. The four driver-flag
 runtime matrices remain identical after activating these real contracts.
+
+## Agent-4 review follow-up — narrow clause-pointer lowering
+
+The follow-up branch from PR #17 head `7e25543` fixes one reproduced PEAR case:
+a lone `APAT_BIND` clause whose body is exactly `binder[literal-index] -> %ret`.
+PEAR binds that pattern name to the already-evaluated scrutinee, then lowers the
+existing indexed reader. The guard and complete AirCmd/AirCns shape are checked
+before taking this path. General binder bodies, guarded clauses, tuple/enum
+payloads, and clause-parameter qualifier facts remain outside its scope.
+
+The new `p112_clause_binding_pointer.pie` regression returns 37 under -O0/-O1/-O2/-O3,
+and `tests/exec/pear/run.sh` runs those four checks. In this restored workspace,
+that targeted regression passed all tiers after a successful C3 0.8.4 build with
+LLVM 19. The full PEAR runner had 34 passes, one expected XFAIL, and one failure:
+p111's LLVM-23 semantic-attribute assertion cannot pass against LLVM 19. The full
+gate must be rerun with LLVM 23; do not treat the local full-suite result as green.
