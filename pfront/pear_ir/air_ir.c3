@@ -51,6 +51,11 @@ enum AirUnop : int { AUN_NEG, AUN_NOT, AUN_BITNOT, AUN_DEREF, AUN_REF, AUN_ADDR,
 enum AirDeclTag : int { ADECL_DATA, ADECL_CODATA, ADECL_DEF, ADECL_DEFCO,
     ADECL_DECLARE, ADECL_IMPORT, ADECL_MODULE, ADECL_EFFECT }
 
+// Qualifier claims cross an explicit trust boundary: unknown by default,
+// candidate from the final conservative AST analysis, then screened on AIR.
+// This is a supported-fragment validation state, not a formal theorem token.
+enum AirFactState : int { AFACT_UNKNOWN, AFACT_AST_FINAL, AFACT_AIR_CHECKED }
+
 // ── Arena ─────────────────────────────────────────────────────────────────
 const usz AIR_SLAB_SIZE = 1024 * 1024;
 const usz AIR_MAX_SLABS = 256;
@@ -163,7 +168,8 @@ struct AirDecl {
     AirBinder*[16] params; usz param_count;
     AirCmd* def_body; AirTyp* ret_ty;
     bool is_pub, is_extern, is_fastcc, is_varargs;
-    bool memory_readonly; // qualifier proof: no externally visible writes
+    bool memory_readonly; // candidate: no externally visible writes
+    AirFactState fact_state; // only AIR_CHECKED may authorize LLVM attributes
     char* extern_link; AirEffectOp*[16] ops; usz op_count;
     char* import_path; char* import_alias; bool import_glob; char* module_name;
 }
@@ -302,7 +308,7 @@ fn AirDecl* air_mk_decl(AirArena* a, AirDeclTag tag, char* nm) {
     d.tag=tag; d.name=nm; d.typaram_count=0; d.mult=AMULT_UNR;
     d.ctor_count=0; d.dtor_count=0; d.param_count=0;
     d.def_body=null; d.ret_ty=null; d.is_pub=false; d.is_extern=false;
-    d.is_varargs=false; d.memory_readonly=false; d.extern_link=null; d.op_count=0;
+    d.is_varargs=false; d.memory_readonly=false; d.fact_state=AFACT_UNKNOWN; d.extern_link=null; d.op_count=0;
     d.import_path=null; d.import_alias=null; d.import_glob=false;
     d.module_name=null; return d;
 }
@@ -379,8 +385,8 @@ fn AirPrd* air_mk_int(AirArena* a, long v)
     { AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_INT; p.ival=v; return p; }
 fn AirPrd* air_mk_float(AirArena* a, double v)
     { AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_FLOAT; p.fval=v; return p; }
-fn AirPrd* air_mk_char(AirArena* a, char v)
-    { AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_CHAR; p.cval=v; return p; }
+fn AirPrd* air_mk_char(AirArena* a, long v)
+    { AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_CHAR; p.ival=v; p.cval=(char)v; return p; }
 fn AirPrd* air_mk_str(AirArena* a, char* txt, usz len)
     { AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_STRING; p.name=a.dup(txt,len); p.bytes_len=(long)len; return p; }
 fn AirPrd* air_mk_bytes(AirArena* a, char* buf, usz len)

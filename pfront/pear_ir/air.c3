@@ -16,6 +16,7 @@ import air_ir;
 import air_scope;
 import air_lower;
 import air_emit;
+import air_facts;
 import pear;
 
 alias PNode = pfront_core::PNode;
@@ -89,6 +90,8 @@ fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
     lr.init(&mod, &sc, it);
     lr.module_body(root);
 
+    air_facts::validate_module(&mod);
+
     // ── Emit text ──────────────────────────────────────────────────────
     air_emit::emit_module(&mod, &lr, out_path);
 
@@ -138,6 +141,7 @@ fn void emit_bc(PNode* root, pfront_core::Interner* it, char* path, int opt_leve
     lr.init(&mod, &sc, it);
     lr.module_body(root);
 
+    air_facts::validate_module(&mod);
     pear::pear_emit_module(&mod, out_path, opt_level);
 
     sc.destroy();
@@ -174,6 +178,7 @@ fn void emit_exe_program(PNode** roots, usz root_count, pfront_core::Interner* i
         lr.module_body(roots[i]);
     }
 
+    air_facts::validate_module(&mod);
     (void)pear::pear_link_exe(&mod, path, opt_level);
 
     sc.destroy();
@@ -193,6 +198,7 @@ fn void emit_exe(PNode* root, pfront_core::Interner* it, char* path, int opt_lev
     lr.init(&mod, &sc, it);
     lr.module_body(root);
 
+    air_facts::validate_module(&mod);
     (void)pear::pear_link_exe(&mod, path, opt_level);
 
     sc.destroy();

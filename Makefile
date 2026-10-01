@@ -60,7 +60,7 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -85,7 +85,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs
+test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -135,6 +135,12 @@ test-llvm-attrs: c3c
 	mkdir -p tmp/n3
 	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/llvm_attributes.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/llvm-attributes
 	./tmp/n3/llvm-attributes
+
+# Reject stale/forged contracts at the actual AIR boundary.
+test-air-contracts: c3c
+	mkdir -p tmp/n3
+	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/air_contracts.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/air-contracts
+	./tmp/n3/air-contracts
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)

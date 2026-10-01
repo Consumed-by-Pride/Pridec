@@ -2422,6 +2422,62 @@ fn void read_num_suffix(char* s, usz len, char* out_width, bool* out_signed)
     *out_width = (char)w;
 }
 
+// Character payloads are Unicode scalars, not the first source byte or
+// the backslash of an escape. Reject ambiguous multi-scalar literals rather
+// than silently handing AIR a different value.
+fn long Parser.char_value(Parser* p, Tok t)
+{
+    if (t.len < 3 || t.start == null) { p.err_at(1042, t.line, t.col, "invalid character literal"); return 0; }
+    usz n = t.len - 2;
+    char* bytes = t.start + 1;
+    if (bytes[0] == '\\')
+    {
+        if (n == 4 && bytes[1] == 'x')
+        {
+            long value = 0;
+            for (usz i = 2; i < 4; i++)
+            {
+                char c = bytes[i]; int digit = -1;
+                if (c >= '0' && c <= '9') { digit = (int)(c - '0'); }
+                else if (c >= 'a' && c <= 'f') { digit = 10 + (int)(c - 'a'); }
+                else if (c >= 'A' && c <= 'F') { digit = 10 + (int)(c - 'A'); }
+                if (digit < 0) { p.err_at(1042, t.line, t.col, "invalid character escape"); return 0; }
+                value = value * 16 + digit;
+            }
+            return value;
+        }
+        if (n == 2)
+        {
+            switch (bytes[1])
+            {
+                case 'n': return 10; case 'r': return 13; case 't': return 9;
+                case 'a': return 7; case 'b': return 8; case 'f': return 12;
+                case 'v': return 11; case '0': return 0;
+                case '\\': return 92; case '\'': return 39; case '"': return 34; case '?': return 63;
+                default: break;
+            }
+        }
+        p.err_at(1042, t.line, t.col, "invalid character escape"); return 0;
+    }
+    uint head = (uint)bytes[0] & 255;
+    usz width = 1; uint value = head; uint minimum = 0;
+    if (head >= 194 && head <= 223) { width = 2; value = head & 31; minimum = 128; }
+    else if (head >= 224 && head <= 239) { width = 3; value = head & 15; minimum = 2048; }
+    else if (head >= 240 && head <= 244) { width = 4; value = head & 7; minimum = 65536; }
+    else if (head >= 128) { width = 0; }
+    if (width == 0 || n != width)
+    { p.err_at(1042, t.line, t.col, "character literal must contain exactly one Unicode scalar"); return 0; }
+    for (usz i = 1; i < width; i++)
+    {
+        uint c = (uint)bytes[i] & 255;
+        if (c < 128 || c > 191) { p.err_at(1042, t.line, t.col, "invalid UTF-8 character literal"); return 0; }
+        value = (value << 6) | (c & 63);
+    }
+    if (value < minimum || value > 1114111 || (value >= 55296 && value <= 57343))
+    { p.err_at(1042, t.line, t.col, "invalid Unicode scalar in character literal"); return 0; }
+    return (long)value;
+}
+
 fn Node* Parser.parse_literal(Parser* p)
 {
     Tok t = p.advance();
@@ -2461,7 +2517,7 @@ fn Node* Parser.parse_literal(Parser* p)
             Node* n = p.mk_at(Nk.N_EXPR_CHAR, t);
             n.p.sptr = t.start;
             n.p.slen = t.len;
-            n.p.ival = t.len >= 3 ? (ulong)(char)t.start[1] : 0;
+            n.p.ival = (ulong)p.char_value(t);
             return n;
         }
         case TOKEN_LIT_STRING:

@@ -93,8 +93,10 @@ def check_runtime_symbols():
     for symbol in ("malloc", "free", "write"):
         if not re.search(r'll_add_fn\(m,\s*\(char\*\)"' + symbol + r'"\s*,', backend):
             errors.append(f"Current PEAR declaration for libc {symbol} is missing")
-    if '"alloc,uninitialized"' not in backend or '"allockind"' not in backend:
-        errors.append("Current PEAR malloc allocation attributes are missing")
+    if (not re.search(r'pear_tag_alloc_kind\(cg,\s*cg\.malloc_fn,\s*9\)', backend)
+            or not re.search(r'pear_tag_alloc_kind\(cg,\s*cg\.free_fn,\s*4\)', backend)
+            or 'll_enum_attr_kind((char*)"allockind", 9)' not in backend):
+        errors.append("Current PEAR semantic malloc/free allocation attributes are missing")
     if not re.search(r'"LD_LIBRARY_PATH= ld[^"\n]*\s-lc', linker):
         errors.append("Current PEAR linker does not link libc")
     return errors
