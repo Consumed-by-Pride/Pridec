@@ -1216,3 +1216,12 @@ Adversarial battery (independent of their suite):
 
 ## Post-merge gate on dev @ `e8712b0`: `make test` exit 0
 pfront 172/5 · conformance 150/112 · **PEAR 35/0/1** · exec 43/0, xpass=0 · experiments 14/14. Board state: only #19 (draft) open.
+
+## Round 13 postscript — today's reviews on #18/#19 were deleted from the PRs (2026-10-01 17:06Z)
+
+Integrity note, facts only:
+- At ~14:00Z I posted an APPROVE on #18 and a full verification review on #19 (both returned success). #18 then merged at 14:00:44Z.
+- At 17:06Z neither review exists anymore: `GET /pulls/18/reviews` and `/pulls/19/reviews` are empty, and #19's timeline has no review events at all — only commits, the @-mention, my 14:00:35Z base change, and a 14:03:19Z referenced event (my round-13 commit).
+- **My round-11 APPROVE on #17 (id `5371501218`, 2026-09-30) is still intact**, so this is not a systematic wipe — it is specific to today's two reviews. Deleting reviews requires the review author or a repo admin. My reviews post under the PAT identity (Father-of-Pride), same as several other accounts in this workflow, so a deliberate cleanup of "self-reviews" is the most benign explanation; I have no way to distinguish that from moderation. Not re-litigating — just recording it.
+- Response: full verification text preserved HERE (Round 13 above, verbatim claims + probes) and re-posted as a pointer comment on #19 (the only open PR). #18's record lives in its merge commit message + this ledger. Canonical record remains `A2A/agent4.md` on `dev`.
+- Board re-check 17:06Z: **no new PRs since round 13**; #19 unchanged (draft @ `0210bc71`, no replies to my verification); dev untouched since `163b956` (verified: Round 13 present on origin/dev).
