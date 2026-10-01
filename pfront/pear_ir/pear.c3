@@ -49,6 +49,12 @@ extern fn void ll_pos_builder(Lbuilder b, Lblock bb) @cname("LLVMPositionBuilder
 extern fn Lbuilder ll_builder_create(Lcontext c) @cname("LLVMCreateBuilderInContext");
 extern fn void ll_builder_dispose(Lbuilder b) @cname("LLVMDisposeBuilder");
 extern fn Lblock ll_get_insert(Lbuilder b) @cname("LLVMGetInsertBlock");
+extern fn Lblock ll_get_entry_bb(Lvalue f) @cname("LLVMGetEntryBasicBlock");
+extern fn Lblock ll_get_next_bb(Lblock bb) @cname("LLVMGetNextBasicBlock");
+extern fn Lvalue ll_get_last_inst(Lblock bb) @cname("LLVMGetLastInstruction");
+extern fn Lvalue ll_is_terminator(Lvalue v) @cname("LLVMIsATerminatorInst");
+extern fn void   ll_delete_bb(Lblock bb) @cname("LLVMDeleteBasicBlock");
+extern fn uint   ll_count_bbs(Lvalue f) @cname("LLVMCountBasicBlocks");
 
 
 extern fn Lvalue ll_get_param(Lvalue f, uint i) @cname("LLVMGetParam");
@@ -111,7 +117,7 @@ alias Lerror = void*;
 
 extern fn Ltype      ll_global_val_type(Lvalue g) @cname("LLVMGlobalGetValueType");
 extern fn Lvalue    ll_create_enum_attr(Lcontext c, uint id, ulong v) @cname("LLVMCreateEnumAttribute");
-extern fn void      ll_add_attr_at_idx(Lvalue f, uint idx, Lvalue a) @cname("LLVMAddAttributeAtIndex");
+extern fn void      ll_add_attr_at_idx(Lvalue f, int idx, Lvalue a) @cname("LLVMAddAttributeAtIndex");
 extern fn Lpass_opts ll_create_pb_opts() @cname("LLVMCreatePassBuilderOptions");
 extern fn void      ll_dispose_pb_opts(Lpass_opts o) @cname("LLVMDisposePassBuilderOptions");
 extern fn void      ll_pb_set_inliner_threshold(Lpass_opts o, int t) @cname("LLVMPassBuilderOptionsSetInlinerThreshold");
@@ -122,7 +128,7 @@ extern fn void      ll_consume_error(Lerror e) @cname("LLVMConsumeError");
 // PEAR attribute enums (correct for LLVM 19 from Attributes.inc GET_ATTR_ENUM).
 // C3 'bool' is a 1-byte type; LLVM-C 'LLVMBool' is a C int (4 bytes). Keep extern
 // signatures that pass LLVMBool as `int`.
-const uint LLVM_ATTR_FN_INDEX   = ~0u; // LLVMAttributeFunctionIndex = unsigned(-1)
+const int  LLVM_ATTR_FN_INDEX     = -1;  // LLVMAttributeFunctionIndex
 const int  LLVM_ATTR_ALWAYSINLINE = 3;
 const int  LLVM_ATTR_NOUNWIND     = 39; // NoUnwind
 const int  LLVM_ATTR_WILLRETURN   = 71; // WillReturn
@@ -146,7 +152,8 @@ struct PearCg {
     Lcontext ctx;
     Lmodule  mod;
     Lbuilder b;
-    Lblock   entry_bb;
+    Lblock   entry_bb;     // alloca-only entry (all slots go here — static stack)
+    Lblock   body_bb;      // body BB where the real function body starts
     uint     tmp;
     uint     blk;
     Lvalue   cur_fn;
@@ -166,6 +173,40 @@ struct PearCg {
     Lblock[32]     lbl_bbs;
     bool[32]       lbl_kfilled; // admin %k BB already has code started
     Lblock         cur_k_bb;    // BB we are currently emitting into as %k continuation
+}
+
+// Emit an alloca into the ENTRY (alloca) BB and return the slot. We ALWAYS
+// position a fresh insertion in entry_bb, right after any prior allocas but
+// BEFORE the entry→body branch. Allocas in entry become STATIC stack slots
+// (LLVM computes fixed offset in prologue); allocas anywhere else are treated
+// as dynamic (like C VLAs) and grow RSP by 16 bytes every iteration — that
+// was the bug that segfaulted sum_to's 2M-iteration loop.
+fn Lvalue PearCg.alloc_slot(PearCg* cg, char* nm)
+{
+    Lblock saved = ll_get_insert(cg.b);
+    // Position at end of entry_bb — but entry_bb ends with a `br body_bb`.
+    // We must insert BEFORE that terminator. Simpler: delete the br, emit alloca,
+    // re-emit the br. To avoid deleting, instead we re-use a trick: position
+    // at the start of body_bb (before its first instruction, if any) and then
+    // move the new alloca to entry — but LLVM-C doesn't expose move. So we drop
+    // and recreate the branch.
+    // Approach: track whether entry br is already emitted, and if so, we emit
+    // alloca then rewrite by positioning builder at entry and relying on
+    // LLVMPositionBuilderAtEnd to append... but that appends AFTER the br.
+    //
+    // Simpler robust trick: insert alloca into a TINY temporary BB that we
+    // merge with entry via an unconditional br... no. CLEANEST: use TWO
+    // builders, or — simplest — emit allocas BEFORE closing entry with br.
+    // We'll reserve entry as open: before emitting body, entry has no terminator.
+    // When body emission completes, we add the entry→body br. But that means
+    // body's BB must already exist (it does — we create body_bb upfront).
+    // However during body emission LET/COMU fire and need to insert an alloca
+    // into the open entry. PositionBuilderAtEnd(entry) inserts at END, which is
+    // exactly where we want it as long as entry has NO terminator yet.
+    ll_pos_builder(cg.b, cg.entry_bb);
+    Lvalue slot = ll_build_alloca(cg.b, cg.i64ty, nm);
+    ll_pos_builder(cg.b, saved);
+    return slot;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -368,6 +409,20 @@ fn bool is_hole_name(char* nm)
     return nm[0] == (char)(0xc2) && nm[1] == (char)(0xb7);
 }
 
+// Admin covars: "%ret..." (return continuation) and "%kN" (join-point
+// continuations introduced by CPS). These are NEVER value binders — they
+// label BBs, not stack slots. Allocating slots for them (COMU "wild"
+// check missed them because '%' isn't '_') produced stack-relative
+// allocas in the middle of loops, growing RSP on every iteration.
+fn bool is_admin_name(char* nm)
+{
+    if (nm == null || nm[0] != '%') return false;
+    if (is_ret_name(nm)) return true;
+    // %kN pattern (continuation join point).
+    if (nm[1] == 'k' && nm[2] >= '0' && nm[2] <= '9') return true;
+    return false;
+}
+
 // ── Producers (methods so they can mutual-recurse freely) ────────────
 
 fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
@@ -550,7 +605,13 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
         }
         case ACNS_COMU:
         {
-            bool wild = (k.bind == null) || (k.bind[0] == '_' && k.bind[1] == 0);
+            // μ̃x.c  is a consumer binder. When x is an admin continuation
+            // (%ret, %kN) there is NO value to store — x is a label, not a
+            // variable. Treat as wild (no slot, no store) so we don't grow
+            // the stack on every loop iteration.
+            bool wild = (k.bind == null)
+                     || (k.bind[0] == '_' && k.bind[1] == 0)
+                     || is_admin_name(k.bind);
             if (!wild && v != null)
             {
                 uint idx = 0;
@@ -562,10 +623,12 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 }
                 else
                 {
-                    Lblock _cb = ll_get_insert(cg.b);
-                    ll_pos_builder(cg.b, cg.entry_bb);
-                    Lvalue slot = ll_build_alloca(cg.b, cg.i64ty, cg.mktmp());
-                    ll_pos_builder(cg.b, _cb);
+                    // First binding: allocate a static stack slot in entry BB
+                    // (mem2reg will promote to SSA). DO NOT alloca at the
+                    // current insert point — non-entry allocas become dynamic
+                    // stack bumps in LLVM fast-isel, which grow RSP and blow
+                    // the stack after millions of loop iterations.
+                    Lvalue slot = cg.alloc_slot(cg.mktmp());
                     (void)ll_build_store(cg.b, v, slot);
                     cg.bind_direct(k.bind, slot, true);
                 }
@@ -810,11 +873,8 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
                         }
                         else
                         {
-                            // First binding: allocate a stack slot in the ENTRY block (mem2reg-friendly).
-                            Lblock _cb2 = ll_get_insert(cg.b);
-                            ll_pos_builder(cg.b, cg.entry_bb);
-                            Lvalue slot = ll_build_alloca(cg.b, cg.i64ty, cg.mktmp());
-                            ll_pos_builder(cg.b, _cb2);
+                            // First binding: static slot in entry BB (see COMU note).
+                            Lvalue slot = cg.alloc_slot(cg.mktmp());
                             (void)ll_build_store(cg.b, v, slot);
                             cg.bind_direct(c.binder, slot, true);
                         }
@@ -1005,21 +1065,30 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     Ltype fty = ll_fn_ty(rty, &ptys[0], pc, 0);
     Lvalue fnv = ll_add_fn(cg.mod, nm, fty);
     cg.cur_fn = fnv;
+    // TWO BBs at function entry:
+    //   entry (alloca-only) — holds all alloca instructions (static slots).
+    //   body — first real code.
+    // We leave entry UNTERMINATED while emitting body so that alloc_slot()
+    // can position at end(entry) and append new alloca instructions without
+    // inserting past a terminator ("Terminator found in middle of BB").
+    // After body emission, we add `br body` to end entry.
     Lblock entry = ll_append_bb(cg.ctx, fnv, "entry");
+    Lblock body  = ll_append_bb(cg.ctx, fnv, "body");
     cg.entry_bb = entry;
+    cg.body_bb  = body;
     ll_pos_builder(cg.b, entry);
     cg.terminated = false;
     for (uint i = 0; i < pc; i++)
     {
         Lvalue arg = ll_get_param(fnv, i);
-        // User-level param names come through WITHOUT a '%' prefix (e.g. "n"),
-        // while internal covars ("%ret_2", "%k0") carry the '%'. Bind raw.
         cg.bind(pnms[i], arg);
     }
+    // Move builder to body BB for the actual code.
+    ll_pos_builder(cg.b, body);
+    cg.terminated = false;
     bool term = false;
     if (d.def_body != null)
     {
-        // Walk chain via body/next/then_c/else_c recursively.
         term = cg.cmd(d.def_body);
     }
     if (!term)
@@ -1027,6 +1096,11 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
         if (is_void) { ll_build_ret_void(cg.b); cg.terminated = true; }
         else { ll_build_ret(cg.b, ll_const_int(cg.i64ty, 0, 0)); }
     }
+    // Close entry BB: branch from entry → body. Entry now ends in a br
+    // terminator, after all allocas.
+    ll_pos_builder(cg.b, entry);
+    ll_build_br(cg.b, body);
+
     // Pride fns don't throw, don't free, don't do atomics, always return.
     // These attrs unlock better optimization than plain -O2 C gets.
     // PEAR strong attribute set. λ̄μμ̃ gives us global knowledge C lacks:
@@ -1035,12 +1109,16 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     //  - Never unwind (nounwind), never free (nofree), no atomics (nosync)
     //  - No callback registration (no-callback).
     // These unlock GVN/LICM/speculation C compilers refuse to apply.
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOCALLBACK);
-    pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
+    // TODO: re-enable strong attrs after verifying enum IDs against LLVM 23's
+    // Attributes.inc. Earlier LLVM 19 values don't map cleanly onto LLVM 23
+    // (nocallback→noalias, nosync→jumptable, etc.). Strip to get codegen clean
+    // first; attrs are performance, not correctness.
+    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
+    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_WILLRETURN);
+    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOFREE);
+    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOSYNC);
+    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOCALLBACK);
+    // pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_MUSTPROGRESS);
 }
 
 fn void pear_declare(PearCg* cg, AirDecl* d)
@@ -1105,7 +1183,7 @@ fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 // compilers refuse to apply. Passes verified to exist in LLVM 19.
 const char* PEAR_PIPE_O0 = (char*)"default<O0>";
 const char* PEAR_PIPE_O1 = (char*)"default<O1>";
-const char* PEAR_PIPE_O2 = (char*)"default<O2>,instcombine,simplifycfg,bdce,adce,dce,gvn,jump-threading,simplifycfg,instcombine,dce,globaldce,dce";
+const char* PEAR_PIPE_O2 = (char*)"default<O2>";
 const char* PEAR_PIPELINE = PEAR_PIPE_O2;  // default tier; frontend may swap
 
 // Select the PEAR pipeline for an opt level (0/1/2). Level 3 maps to O2.

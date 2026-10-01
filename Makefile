@@ -26,6 +26,11 @@ C3C_URL   := https://github.com/c3lang/c3c/releases/download/$(C3C_VER)/c3-linux
 
 BINARY    := pfrontc
 
+# PEAR backend links against the LLVM-C API (libLLVM 19).
+LLVM_LIBDIR ?= /usr/lib/x86_64-linux-gnu
+LLVM_LIB    ?= LLVM-19
+LDFLAGS     := -L $(LLVM_LIBDIR) -l $(LLVM_LIB)
+
 # ── Sources ──────────────────────────────────────────────────────────────
 PFRONT    := $(wildcard pfront/*.c3)
 PEAR_IR   := $(wildcard pfront/pear_ir/*.c3)
@@ -45,22 +50,20 @@ SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 all: $(BINARY)
 
 $(BINARY): $(SOURCES) | c3c
-	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) -o $(BINARY)
+	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) $(LDFLAGS) -o $(BINARY)
 
 # ── Bootstrap c3c if missing ────────────────────────────────────────────
 c3c:
-	@if [ ! -x "$(C3C)" ]; then \
+	@if [ ! -x "$(C3C)" ] || [ ! -d "$(C3C_LIB)/std" ]; then \
 	  echo "==> fetching c3c $(C3C_VER)"; \
-	  mkdir -p $$(dirname $(C3C)) $$(dirname $(C3C_LIB)) /tmp/c3i; \
+	  mkdir -p $$(dirname $(C3C)) $(C3C_LIB) /tmp/c3i; \
 	  cd /tmp/c3i && curl -sL $(C3C_URL) -o c3.tgz && tar -xzf c3.tgz; \
 	  cp /tmp/c3i/c3/c3c $$(dirname $(C3C))/c3c; \
-	  cp /tmp/c3i/c3/c3fmt $$(dirname $(C3C))/cfmt; \
-	  chmod +x $$(dirname $(C3C))/c3c $$(dirname $(C3C))/cfmt; \
-	  rm -rf $$(dirname $(C3C_LIB))/std; \
-	  cp -r /tmp/c3i/c3/lib/* $$(dirname $(C3C_LIB))/; \
-	  rm -f $$(dirname $(C3C_LIB))/std/std; \
-	  ln -sf $$(dirname $(C3C)) $$HOME/c3bin; \
-	  ln -sf $$(dirname $(C3C_LIB)) $$HOME/c3lib; \
+	  cp /tmp/c3i/c3/c3fmt $$(dirname $(C3C))/cfmt 2>/dev/null || true; \
+	  chmod +x $$(dirname $(C3C))/c3c; \
+	  rm -rf $(C3C_LIB)/std; \
+	  cp -r /tmp/c3i/c3/lib/std $(C3C_LIB)/std; \
+	  rm -f $(C3C_LIB)/std/std; \
 	  rm -rf /tmp/c3i; \
 	fi
 	@$(C3C) --version | head -1
