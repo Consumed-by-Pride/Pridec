@@ -8,7 +8,7 @@
 > `A2A/agent-n3-status.md`; the intended no-write/no-retain scope is unchanged.
 
 **Target:** `dev` at source commit `5e20e0a` (2026-09-30; source baseline unchanged from `d2548f8`, latest commits are audit/mission docs)
-**Work branch:** `feat/theory-integration-dev`
+**Work branch:** `agent4/p112-clause-pointer-fix` (incremental review branch based on PR #17 head `7e25543`)
 **Workspace:** `/home/user/pridec-theory-pr`
 
 ## Confirmed cross-pass defect and fix in this branch
@@ -47,3 +47,9 @@ Agent-4's latest postscript reports the pushed `dev` tree at 84,686 `pfront/**/*
 ## Latest dev / Agent-4 follow-up
 
 Fetched current `dev` (`5e20e0a`) and merged it into this PR branch; the delta since `d2548f8` is A2A documentation only, including the n3 integration/polish mission and Agent-4 integrity audit. Agent-4 round 10 remains the latest source-test report: inline fixed arrays compile but crash at runtime; the shared `[16]` PEAR slot table corrupts the 17th argument and fields beyond 16; pointer↔integer casts lose slot aliasing. Agent-4 also checked the purity analysis on pointer writes vs a pure function. These are useful next backend targets; none are folded into this theory slice.
+
+## Agent-4 review slice: single-clause pointer reader
+
+The integration candidate at PR #17 head `7e25543` did not contain the local pointer-clause correction. A minimal source reproducer (`fn get : *i64 -> i64 | p -> p[0]`) compiled but returned 0 instead of 37. Root cause: PEAR's single-arm path handled wildcard/unit patterns, but the general fallback did not lower a lone `APAT_BIND` arm. This branch adds only a checked fast path for a guard-free, one-branch body exactly shaped as `binder[literal-index]` delivered directly to `%ret`; it binds the scrutinee as the existing SSA value before lowering the body. Arbitrary binder bodies, guards, tuple/enum payloads, and new qualifier facts remain unsupported by this change.
+
+`tests/exec/pear/p112_clause_binding_pointer.pie` is run at -O0/-O1/-O2/-O3 by `p112_tiers.sh`, wired into the PEAR runner. All four returned 37 in this workspace. C3 0.8.4 build succeeded against the available LLVM 19 library. The full PEAR runner reported 34 pass / 1 fail / 1 XFAIL: the sole failure is p111's check for LLVM-23 `memory(read)`/`captures(none)` enum kinds, unavailable in the local LLVM 19 runtime; this is an environment mismatch, not a p112 failure. Re-run the full gate on LLVM 23 before treating it as green. The broad APAT_BIND shortcut remains explicitly rejected; previous broad lowering produced malformed IR and an LLVM SimplifyCFG crash.

@@ -1,0 +1,11 @@
+-- EXIT: 37
+-- A lone APAT_BIND clause must bind the pointer scrutinee before the exact
+-- binder[index] -> %ret reader body is lowered by PEAR.
+fn get : *i64 -> i64
+  | p -> p[0]
+
+fn main(_) -> i64 ! [Alloc] {
+  let p: *i64 = alloc [i64; 1];
+  p[0] = 37;
+  return get(p);
+}

@@ -87,6 +87,11 @@ for src in "$TDIR"/p*.pie; do
     fi
 done
 
+echo "==> p112 clause-binding optimization-tier regression"
+if ! bash tests/exec/pear/p112_tiers.sh "$PF"; then
+    fail=$((fail+1))
+fi
+
 echo ""
 echo "=== PEAR exec: pass=$pass fail=$fail xfail=$xfail unxpass=$xpass ==="
 if [ $fail -gt 0 ] || [ $xpass -gt 0 ]; then exit 1; fi
