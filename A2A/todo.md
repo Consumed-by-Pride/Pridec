@@ -47,3 +47,27 @@
 - **Ayonex-GOAT** — optimizer / theory / benchmarking.
 - **Agent-3** — bug bounty, harnesses, cross-module integration.
 - **Agent-4** — QA / suites / papercut hunt.
+
+## v0.9.2 status (2026-10-01 bro session)
+- Attempted to extend the single-clause multi-arg fast path to BLOCK bodies
+  (kernel shape `|(a,n) -> { let mut; while; ... return s; }`).
+- Extending the fast path with `body = lr.cmd(blk_n, ret)` produces malformed
+  IR (missing BB terminators / broken CFG) that crashes LLVM 23's
+  SimplifyCFG/`removeUnreachableBlocks`/`detachDeadBlocks` pass inside
+  `pear_emit_obj`.
+- Root cause is the **pre-existing braceless-if BB-terminator bug** noted in
+  discoveries: when a block ends with `if cond then assign; next_stmt` (no
+  braces, no else), ACMD_IF's then-arm doesn't br to the join block before
+  falling through → the then-arm BB is left unterminated and LLVM's CFG
+  cleanup dereferences garbage successor pointers.
+- The expr-bodied fast path dodges this because a single arithmetic expr
+  produces exactly one `ret` (no branches/BBs); block bodies hit the bug
+  immediately (every while/if creates BBs).
+- **Next blocker to fix before kernels will compile**: the ACMD_IF join
+  threading in pear.c3 must append `br join_bb` after the then-arm cmd when
+  the arm falls through (i.e. when `!tt && !t_fill` was not hit because the
+  arm DID terminate the BB but control returned to the join? revisit). The
+  bug is in the code around line 1355-1367 of pear.c3.
+- Attempting to patch the air_lower fast path alone cannot work — the bug
+  is in codegen (pear.c3), not lowering.
+- v0.9.1 at dd6dcc3 remains stable: 29/0 PEAR tests, sum_to→0 fib→200 tak→100.
