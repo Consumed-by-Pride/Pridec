@@ -1,0 +1,8 @@
+dialect GpuD
+  opcode gadd : i64
+
+irdl
+  GpuD.gadd [a, b] ↦ a + b
+
+fn f : (i64, i64) -> i64
+  | (x, y) -> GpuD.gadd(x, y)

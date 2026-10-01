@@ -15,7 +15,7 @@ generics_demo.pie	0	0	0	front-end error-free; native behavior unverified
 hose_async_showcase.pie	0	2	1	front-end error-free; native behavior unverified
 hybrid_scoped_effects_showcase.pie	0	21	1	front-end error-free; native behavior unverified
 integration.pie	7	1	2	known compile errors; diagnostic AIR only
-irdl_showcase.pie	7	0	2	known compile errors; diagnostic AIR only
+irdl_showcase.pie	3	0	2	known compile errors (irdl guard, variadic operand, and the use that depends on them are diagnosed as unsupported); diagnostic AIR only
 json.pie	1	0	2	known compile errors; diagnostic AIR only
 member_demo.pie	0	0	0	front-end error-free; native behavior unverified
 micro_c.pie	0	0	0	front-end error-free; native behavior unverified

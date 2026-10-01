@@ -42,7 +42,8 @@ declare -A EXPECT=(
   [29_splice_stage0]=1       # splice with no enclosing quotation IS an error
   [30_gradual_sort]=0        # calling a non-function warns (permissive default)
   [31_trs_rule]=0            # rewrite block collects and fires
-  [32_irdl_dialect]=0        # dialect + opcode registers
+  [32_irdl_dialect]=1        # dialect use with NO lowering rule is rejected (E3212), not compiled to a placeholder
+  [32b_irdl_lowering]=0      # same dialect with an irdl rule lowers cleanly
   [33_comptime_let]=0        # `let x = comptime 3*4` must evaluate, not swallow
   [34_exhaustive_witness]=0  # missing variant -> warning with a named witness
   [35_egraph_rewrite]=0      # e-graph builds classes and saturates
