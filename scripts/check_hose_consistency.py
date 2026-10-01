@@ -1,187 +1,156 @@
 #!/usr/bin/env python3
-"""
-scripts/check_hose_consistency.py
-Automated Python consistency checker for Pride's Untyped Higher-Order & Scoped
-Effects (HOSE) overhaul. Checks syntax, module structure, loop termination
-(explicit break statements), and symbol consistency across C and Pie sources.
-"""
+"""Audit HOSE C/stdlib ABI inventory and the CURRENT PEAR libc declarations.
 
+This is source/build consistency, NOT proof that native PEAR programs can run
+HOSE: pear_link.c3 currently links libc, not runtime/compiler_rt.c. The old
+root-level codegen.c3 and LLVM-22 pipeline are no longer the active backend.
+"""
+import argparse
 import os
-import sys
+from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+HOSE_SYMBOLS = (
+    "__pride_fiber_spawn", "__pride_fiber_yield", "__pride_fiber_resume",
+    "__pride_prompt_install", "__pride_prompt_unwind", "__pride_is_in_scope",
+    "__pride_scoped_yield_in", "__pride_scoped_yield_out", "__pride_split_cont",
+    "__pride_fuse_cont",
+)
+REQUIRED_MODULES = (
+    "stdlib/pride.pie", "stdlib/pride/effects.pie", "stdlib/pride/irdl.pie",
+    "stdlib/pride/msp.pie", "stdlib/pride/ub.pie", "stdlib/pride/subtyping.pie",
+    "stdlib/pride/rewrite.pie", "stdlib/effect_async.pie",
+    "stdlib/effect_async/driver.pie", "stdlib/effect_async/epoll_handler.pie",
+    "stdlib/effect_async/uring_handler.pie", "stdlib/effect_async/nursery.pie",
+    "stdlib/effect_async/timeout.pie", "stdlib/effect_async/bracket.pie",
+    "stdlib/effect_async/fiber_pool.pie",
+)
 
-def check_loop_termination():
-    """Ensure all .pie files use explicit 'break' statements in while loops."""
-    pie_files = []
-    for root, dirs, files in os.walk(REPO_ROOT):
-        if ".git" in root or "build" in root:
-            continue
-        for f in files:
-            if f.endswith(".pie"):
-                pie_files.append(os.path.join(root, f))
-    
-    errors = []
-    for filepath in pie_files:
-        with open(filepath, "r", encoding="utf-8") as file:
-            content = file.read()
-            # Find each while loop start and check the matching brace block
-            pos = 0
-            while True:
-                idx = content.find("while ", pos)
-                if idx == -1:
-                    break
-                do_idx = content.find("do {", idx)
-                if do_idx == -1:
-                    pos = idx + 6
-                    continue
-                # Match balanced braces from do_idx + 3
-                brace_count = 0
-                end_idx = -1
-                for i in range(do_idx + 3, len(content)):
-                    if content[i] == '{':
-                        brace_count += 1
-                    elif content[i] == '}':
-                        if brace_count == 0:
-                            end_idx = i
-                            break
-                        else:
-                            brace_count -= 1
-                if end_idx != -1:
-                    loop_body = content[do_idx:end_idx+1]
-                    if "break" not in loop_body:
-                        rel_path = os.path.relpath(filepath, REPO_ROOT)
-                        errors.append(f"{rel_path}: while loop without explicit 'break' statement")
-                    pos = end_idx + 1
-                else:
-                    pos = do_idx + 4
-    
-    return errors
 
-def check_runtime_symbols():
-    """Verify that all HOSE runtime symbols are declared in codegen.c3 and runtime/compiler_rt.c."""
-    symbols = [
-        "__pride_fiber_spawn", "__pride_fiber_yield", "__pride_fiber_resume",
-        "__pride_prompt_install", "__pride_prompt_unwind", "__pride_is_in_scope",
-        "__pride_scoped_yield_in", "__pride_scoped_yield_out", "__pride_split_cont",
-        "__pride_fuse_cont"
-    ]
-    
-    with open(os.path.join(REPO_ROOT, "codegen.c3"), "r", encoding="utf-8") as f:
-        codegen_text = f.read()
-    
-    with open(os.path.join(REPO_ROOT, "runtime", "compiler_rt.c"), "r", encoding="utf-8") as f:
-        runtime_text = f.read()
-        
-    errors = []
-    for sym in symbols:
-        if sym not in codegen_text:
-            errors.append(f"Symbol {sym} missing from codegen.c3")
-        if sym not in runtime_text:
-            errors.append(f"Symbol {sym} missing from runtime/compiler_rt.c")
-            
-    return errors
+def read_source(relative, errors):
+    try:
+        return (Path(REPO_ROOT) / relative).read_text()
+    except OSError as exc:
+        errors.append(f"Cannot read {relative}: {exc}")
+        return ""
 
-def check_pride_modules():
-    """Verify that stdlib/pride.pie, stdlib/pride/*.pie, and stdlib/effect_async/*.pie modules exist, and that obsolete stdlib/async is deleted."""
-    required_modules = [
-        "stdlib/pride.pie",
-        "stdlib/pride/effects.pie",
-        "stdlib/pride/irdl.pie",
-        "stdlib/pride/msp.pie",
-        "stdlib/pride/ub.pie",
-        "stdlib/pride/subtyping.pie",
-        "stdlib/pride/rewrite.pie",
-        "stdlib/effect_async.pie",
-        "stdlib/effect_async/driver.pie",
-        "stdlib/effect_async/epoll_handler.pie",
-        "stdlib/effect_async/uring_handler.pie",
-        "stdlib/effect_async/nursery.pie",
-        "stdlib/effect_async/timeout.pie",
-        "stdlib/effect_async/bracket.pie",
-        "stdlib/effect_async/fiber_pool.pie"
-    ]
-    errors = []
-    for mod in required_modules:
-        path = os.path.join(REPO_ROOT, mod)
-        if not os.path.exists(path):
-            errors.append(f"Required module {mod} does not exist")
-            
-    obsolete_paths = [
-        "stdlib/async.pie",
-        "stdlib/async"
-    ]
-    for obs in obsolete_paths:
-        path = os.path.join(REPO_ROOT, obs)
-        if os.path.exists(path):
-            errors.append(f"Obsolete legacy path {obs} still exists (should be deleted)")
-            
-    return errors
 
 def resolve_c_runtime_toolchain():
-    """Adaptive C toolchain for the runtime objects.
-
-    Compiler: $CC, else the first of cc/gcc/clang on PATH.
-    Standard: probed via scripts/detect_c_std.sh — the newest the compiler
-    provides in final form (c23 → c2x → gnu18 → c18 → c17 → c11).
-    PRIDE_C_STD forces the flag and skips probing; any probe failure falls
-    back to the -std=c11 baseline.
-    """
     cc = os.environ.get("CC") or next(
         (c for c in ("cc", "gcc", "clang") if shutil.which(c)), "cc")
     flag = os.environ.get("PRIDE_C_STD")
     if not flag:
-        script = os.path.join(REPO_ROOT, "scripts", "detect_c_std.sh")
         try:
-            res = subprocess.run(
-                ["bash", script], capture_output=True, text=True,
-                env={**os.environ, "CC": cc}, timeout=120)
-            candidate = res.stdout.strip().splitlines()[0] if res.stdout.strip() else ""
-            if res.returncode == 0 and candidate.startswith("-std="):
+            run = subprocess.run(["bash", str(Path(REPO_ROOT) / "scripts/detect_c_std.sh")],
+                                 capture_output=True, text=True,
+                                 env={**os.environ, "CC": cc}, timeout=120)
+            candidate = run.stdout.strip().splitlines()[0] if run.stdout.strip() else ""
+            if run.returncode == 0 and candidate.startswith("-std="):
                 flag = candidate
-        except Exception:
-            flag = None
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     return cc, flag or "-std=c11"
 
-def check_runtime_c_build():
-    """Verify that runtime/compiler_rt.c compiles cleanly with the adaptively
-    detected C standard flag (c23/c2x → gnu18/c18/c17 → c11)."""
-    cc, cstd = resolve_c_runtime_toolchain()
-    cmd = [cc, "-O2", "-msse4.1", "-pthread", cstd, "-c",
-           os.path.join(REPO_ROOT, "runtime", "compiler_rt.c"), "-o", "/dev/null", "-Wall"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        return [f"C runtime compilation failed ({cc} {cstd}):\n{res.stderr}"]
-    print(f"   C runtime toolchain: {cc} {cstd}")
-    return []
+
+def build_runtime_exports():
+    """Compile the real C runtime and inspect definitions, not comment strings."""
+    cc, flag = resolve_c_runtime_toolchain()
+    try:
+        with tempfile.TemporaryDirectory(prefix="pride-hose-") as directory:
+            obj = str(Path(directory) / "compiler_rt.o")
+            run = subprocess.run([cc, "-O2", "-msse4.1", "-pthread", flag, "-c",
+                                  str(Path(REPO_ROOT) / "runtime/compiler_rt.c"),
+                                  "-o", obj, "-Wall"], capture_output=True, text=True, timeout=120)
+            if run.returncode:
+                return set(), [f"C runtime build failed ({cc} {flag}): {run.stderr}"]
+            nm = subprocess.run(["nm", "-g", "--defined-only", obj],
+                                capture_output=True, text=True, timeout=10)
+            if nm.returncode:
+                return set(), [f"Cannot inspect C runtime exports: {nm.stderr}"]
+            print(f"   C runtime build/export inventory: {cc} {flag}")
+            return {line.split()[-1] for line in nm.stdout.splitlines() if line.split()}, []
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return set(), [f"C runtime toolchain failed: {exc}"]
+
+
+def check_runtime_symbols():
+    exports, errors = build_runtime_exports()
+    bindings = read_source("stdlib/pride/effects.pie", errors)
+    declared = set(re.findall(r'^fn[^\n]*#extern\("([^"\n]+)"\)', bindings, re.M))
+    for symbol in HOSE_SYMBOLS:
+        if symbol not in declared:
+            errors.append(f"Symbol {symbol} missing from stdlib/pride/effects.pie extern bindings")
+        if symbol not in exports:
+            errors.append(f"Symbol {symbol} missing from compiled C runtime exports")
+
+    backend = read_source("pfront/pear_ir/pear.c3", errors)
+    linker = read_source("pfront/pear_ir/pear_link.c3", errors)
+    # v0.9 PEAR uses real libc allocation, not the old HOSE/stack-buffer ABI.
+    for symbol in ("malloc", "free", "write"):
+        if not re.search(r'll_add_fn\(m,\s*\(char\*\)"' + symbol + r'"\s*,', backend):
+            errors.append(f"Current PEAR declaration for libc {symbol} is missing")
+    if '"alloc,uninitialized"' not in backend or '"allockind"' not in backend:
+        errors.append("Current PEAR malloc allocation attributes are missing")
+    if not re.search(r'"LD_LIBRARY_PATH= ld[^"\n]*\s-lc', linker):
+        errors.append("Current PEAR linker does not link libc")
+    return errors
+
+
+def check_pride_modules():
+    errors = [f"Required module {name} does not exist" for name in REQUIRED_MODULES
+              if not (Path(REPO_ROOT) / name).is_file()]
+    for name in ("stdlib/async.pie", "stdlib/async"):
+        if (Path(REPO_ROOT) / name).exists():
+            errors.append(f"Obsolete legacy path {name} still exists")
+    return errors
+
+
+def check_loop_termination():
+    """Legacy lexical lint only: conditional loops need NOT contain a break.
+
+    This cannot prove termination and is deliberately not a build gate. Retained
+    as an opt-in historical inventory rather than rejecting valid while loops.
+    """
+    findings = []
+    for path in Path(REPO_ROOT).rglob("*.pie"):
+        if any(part in (".git", "build", "tmp") for part in path.parts):
+            continue
+        text = path.read_text()
+        for match in re.finditer(r"\bwhile\s+[^\n]*?\bdo\s*\{", text):
+            start = match.end() - 1
+            depth = 1
+            end = start + 1
+            while end < len(text) and depth:
+                depth += (text[end] == "{") - (text[end] == "}")
+                end += 1
+            if "break" not in text[start:end]:
+                findings.append(f"{path.relative_to(REPO_ROOT)}: lexical loop has no explicit break (not a defect proof)")
+    return findings
+
 
 def main():
-    print("Running Pride HOSE Consistency Checker...")
-    errors = []
-    
-    print("1. Checking C runtime compilation (adaptive C standard)...")
-    errors.extend(check_runtime_c_build())
-    
-    print("2. Checking runtime symbol consistency across codegen.c3 and runtime/compiler_rt.c...")
-    errors.extend(check_runtime_symbols())
-    
-    print("3. Checking stdlib/pride/ module hierarchy...")
-    errors.extend(check_pride_modules())
-    
-    print("4. Checking while loop clean termination (explicit break statements)...")
-    errors.extend(check_loop_termination())
-    
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--legacy-loop-audit", action="store_true",
+                        help="print non-gating historical explicit-break lint")
+    args = parser.parse_args()
+    print("Pride HOSE ABI inventory / PEAR libc source consistency checker")
+    errors = check_runtime_symbols() + check_pride_modules()
+    print("NOTE: native PEAR currently links libc only; C HOSE inventory is not native runtime coverage.")
+    if args.legacy_loop_audit:
+        for finding in check_loop_termination():
+            print("ADVISORY: " + finding)
     if errors:
-        print("FAILED with errors:")
-        for e in errors:
-            print(f"  - {e}")
-        sys.exit(1)
-    else:
-        print("SUCCESS! All HOSE checks passed with 100% consistency.")
-        sys.exit(0)
+        print("FAILED:")
+        for error in errors:
+            print("  - " + error)
+        return 1
+    print("SUCCESS: C/stdlib HOSE symbol inventory and current PEAR libc declarations agree.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -4,11 +4,11 @@
 
 Pride is a gradually-sorted systems language built on the **classical sequent calculus λ̄μμ̃** (Curien–Herbelin 2000): every term is a producer, every evaluation context a consumer, and computation is a *cut* between them. Multi-stage programming, algebraic effects & handlers, semantic subtyping, IRDL dialects (a là MLIR), and PGL decision-tree pattern matching are all built in rather than bolted on.
 
-This repository is **pfrontc** — the current Pride front-end and AIR
-emitter. It takes `.pie` source and produces **AIR 1.0**
-(Abstractive Intermediate Representation), a stable human-readable
-λ̄μμ̃ text format intended for downstream backends (LLVM, C, WASM, a native
-codegen, etc.).
+This repository ships **pfrontc** — the Pride front end, **AIR 1.0**
+(Abstractive Intermediate Representation) emitter, and **PEAR LLVM backend**.
+The current pipeline can emit AIR text, LLVM bitcode, or a native x86-64 Linux
+ELF executable from `.pie` source. Backend coverage is partial; emitting a
+binary is not proof that every language feature works at runtime.
 
 ---
 
@@ -18,21 +18,24 @@ codegen, etc.).
 
 * **c3c 0.8.4** — the C3 compiler (Pridec is implemented in C3).
   `make c3c` will fetch a static build to `~/c3bin/c3c` for you.
-* LLVM 22 is *not* required to build `pfrontc` itself. (The legacy backend
-  under `legacy/pride1/` targets LLVM 22 directly; it is retained for
-  archaeology but not built by default.)
+* **libLLVM 23** — PEAR uses the LLVM-C API and LLVM-23 attribute IDs. LLVM 19
+  is not a supported substitute for optimized native-code testing.
+* Linux x86-64, `ld`, a C compiler, Python 3, and `nm` for the runtime inventory.
+  The preserved `legacy/pride1/` LLVM-22 path is not the default compiler.
 
 ### Build the compiler
 
 ```bash
-make c3c        # one-time: fetch c3c if missing
-make            # builds ./pfrontc
+bash scripts/agent3-env.sh    # restore c3c 0.8.4 + C3 stdlib + libLLVM 23
+make                         # builds ./pfrontc
+export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 ```
 
 ### Run
 
 ```bash
 ./pfrontc path/to/file.pie --emit-air     # writes file.air next to the source
+./pfrontc path/to/file.pie --emit-exe -O2 # writes a native executable next to the source
 ./pfrontc path/to/file.pie --dump-ast     # print the resolved, post-theory AST
 ./pfrontc path/to/file.pie --strict-types # turn sort/type advice into errors
 ./pfrontc --help                          # full flag list
@@ -41,11 +44,23 @@ make            # builds ./pfrontc
 ### Run the test suites
 
 ```bash
-make test                  # all suites
+make test                  # current no-regression gate (known failures stay visible)
 make test-pfront           # pfront regression suite under tests/pfront/
 make test-conform          # semantic conformance under conformance/
 bash scripts/c89c_pfront_regress.sh   # rebuild + known-good workloads
 ```
+
+A green gate means **no regression against recorded contracts**, not full
+language conformance. See `tests/baselines.tsv` and the per-case
+`conformance/KNOWN_FAILURES.tsv`. The old conformance harness could report
+passes without a compiler; its correction and the measured replacement
+baseline are documented in `docs/dev/CONFORMANCE_GATE_REPAIR.md`.
+
+Directory module roots are passed with `-I dir`; positional directory inputs
+are rejected. Modules resolve by file name (`use mm` looks for `mm.pie` or
+`mm/mm.pie`), not by a `mod` declaration in an arbitrarily named file.
+`--dead-code` is opt-in: main/pub/extern functions are roots; units with no
+roots are treated as libraries and do not get dead-function warnings.
 
 ---
 
@@ -143,17 +158,22 @@ theory pipeline  (~40 passes — see pfront/theory/theory_check.c3)
 air_lower  →  AirModule (λ̄μμ̃ IR in slab arena)
    │
    ▼
-air_emit   →  AIR 1.0 text  (.air file)
+├─ air_emit  →  AIR 1.0 text  (.air file)
+└─ PEAR      →  LLVM 23 bitcode / native ELF (--emit-bc / --emit-exe)
 ```
 
 ## Status
 
-* Front-end (lex → parse → resolve → sema → theory): stable on the
-  c89c/pfront/conformance suites.
-* AIR emitter: stubless — no `*k*`, no `*dummy*`, no `<()|·>` admin nops,
-  no source-span leakage, no duplicated code after returns.
-* Backend: in progress. Currently the end of the pipeline is AIR text; a
-  native/LLVM/C backend is next.
+* Front-end and AIR emission: checked by pfront and current conformance
+  contracts; their known unmet cases remain recorded, not hidden.
+* PEAR native backend: exercised by `tests/exec/pear/` and `tests/exec/`;
+  scalar fixtures pass, while broader language/runtime coverage remains
+  incomplete. Known-broken execution cases are tracked in `tests/exec/XFAIL.tsv`.
+* Examples: 21/37 are front-end error-free; the 16 preserved broken showcases
+  are labeled in `examples/README.md` and `examples/STATUS.tsv`. AIR artifacts
+  are diagnostic output, not proof of successful compilation or native behavior.
+* Theory analyses and optimizations have differing consumer coverage; do not
+  infer runtime support from an advisory counter or a historical checklist.
 
 ## Contributing
 

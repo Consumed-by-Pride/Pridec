@@ -1052,7 +1052,7 @@ fn void AbstractInterpreter.transfer(AbstractInterpreter* ai, Node* s, int depth
                     if (!idx.is_bottom && idx.lo >= 0 && idx.hi < n)
                     {
                         ai.bounds_provable = ai.bounds_provable + 1;
-                        s.flags = s.flags | pfront_core::NF_TYPED;
+                        s.flags = s.flags | pfront_core::NF_BOUNDS_PROVEN;
                     }
                     else if (!idx.is_bottom && (idx.hi < 0 || idx.lo >= n))
                     {

@@ -374,8 +374,9 @@ fn void CallGraph.report_dead(CallGraph* g, pfront_core::DiagBag* d,
     {
         FuncInfo* f = &g.funcs[i];
         if (f.reachable || f.is_entry || f.is_extern) { continue; }
-        d.warn(pfront_core::Phase.PH_RESOLVE, 4020, f.decl.line, f.decl.col,
-               "function is never called from any entry point", file);
+        d.add(pfront_core::Severity.SEV_WARNING, pfront_core::Phase.PH_RESOLVE,
+              4020, f.decl.line, f.decl.col,
+              "function is never called from any entry point", it.text(f.name_id), file);
     }
 }
 

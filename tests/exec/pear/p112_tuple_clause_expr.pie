@@ -1,0 +1,7 @@
+-- EXIT: 42
+-- PEAR v0.9.1: each tuple binder is a real function parameter; expr body uses both.
+fn add_pair : (i64, i64) -> i64
+  | (a, b) -> a + b
+fn scale_pair : (i64, i64) -> i64
+  | (a, b) -> a * b
+fn main(_) -> i64 { return add_pair(3, 4) + scale_pair(5, 7); }

@@ -26,6 +26,7 @@ import pfront_sema;
 import pfront_flow;
 import theory_subtype_engine;
 import theory_check;
+import theory_egraph;
 import pfront_source;
 import pfront_types;
 import pfront_infer;
@@ -40,6 +41,8 @@ extern fn void* malloc(usz size);
 extern fn void  free(void* ptr);
 extern fn int   printf(char* fmt, ...);
 extern fn int   strncmp(char* a, char* b, usz n);
+extern fn void* opendir(char* path);
+extern fn int   closedir(void* dir);
 
 alias Node = pfront_core::PNode;
 alias Nk   = pfront_core::NodeKind;
@@ -695,12 +698,14 @@ fn void print_usage()
 {
     printf("pfront — Pride front end (parse + resolve + module load + PEAR backend)\n");
     printf("usage: pfront <file.pie> [-I dir] [options]\n");
+    printf("  input must be a file; directory module roots are supplied with -I <dir>\n");
     printf("  -I <dir>          add a module search root (repeatable; defaults are . and stdlib)\n");
+    printf("  modules resolve by file name: use mm searches for mm.pie or mm/mm.pie\n");
     printf("  -O0 | -O1 | -O2 | -O3   optimisation level for emitted code (default -O2)\n");
     printf("  --no-opt          disable the optimiser (same as -O0 for the middle end)\n");
     printf("  --emit-exe        emit a native executable next to the source\n");
     printf("  --emit-bc         emit LLVM bitcode next to the source\n");
-    printf("  --emit-air        print the AIR of every function\n");
+    printf("  --emit-air        write AIR text next to the source\n");
     printf("  --emit-ast        print the annotated AST with pass flags (pure, readonly, reduction, indep, ...)\n");
     printf("  --emit-sexp       print the AST as s-expressions\n");
     printf("  --emit-cps        print every function's CPS term after eta/beta contraction\n");
@@ -712,6 +717,7 @@ fn void print_usage()
     printf("  --plain           one-line diagnostics (no snippets)\n");
     printf("  --strict-types    report type mismatches as errors\n");
     printf("  --dead-code       warn about functions no entry point reaches\n");
+    printf("                    main/pub/extern are roots; no roots means a library (no warning)\n");
     printf("  --strict-vis      enforce pub/private across module boundaries\n");
     printf("  --no-theory       skip the MSP/TRS/IRDL/effects theory layer\n");
     printf("  --no-verify       skip AST verification\n");
@@ -771,6 +777,7 @@ fn int main(String[] args)
     bool emit_exe = false;
     bool time_passes = false;
     bool subtype_selftest = false;
+    bool theory_metadata_selftest = false;
     bool dump_cfg = false;
     bool emit_cps = false;
     bool emit_dtree = false;
@@ -788,7 +795,14 @@ fn int main(String[] args)
                 root_count = root_count + 1;
                 i = i + 1;
             }
+            else
+            {
+                printf("error: -I requires a module directory (maximum 16 roots)\n");
+                return 2;
+            }
         }
+        else if (streq(a, "--help") || streq(a, "-h")) { print_usage(); return 0; }
+        else if (streq(a, "--version") || streq(a, "-V")) { print_version(); return 0; }
         else if (streq(a, "--dump-ast"))  { dump_ast = true; }
         else if (streq(a, "--dump-mods")) { dump_mods = true; }
         else if (streq(a, "--quiet"))     { quiet = true; }
@@ -796,6 +810,7 @@ fn int main(String[] args)
         // specification (see theory_subtype_engine.c3) and exits with the
         // number of failed cases. No input file required.
         else if (streq(a, "--subtype-selftest")) { subtype_selftest = true; }
+        else if (streq(a, "--theory-metadata-selftest")) { theory_metadata_selftest = true; }
         else if (streq(a, "--no-verify")) { verify = false; }
         else if (streq(a, "--plain"))     { rich = false; }
         else if (streq(a, "--strict-types")) { strict_types = true; }
@@ -824,13 +839,33 @@ fn int main(String[] args)
                 char* v = (char*)args[i + 1].ptr;
                 int nctx = 0;
                 usz k = 0;
-                while (v[k] >= '0' && v[k] <= '9') { nctx = nctx * 10 + (int)(v[k] - '0'); k = k + 1; }
-                if (nctx > 8) { nctx = 8; }
+                while (v[k] >= '0' && v[k] <= '9')
+                {
+                    // Saturate while parsing, so a long decimal cannot overflow.
+                    if (nctx < 8) { nctx = nctx * 10 + (int)(v[k] - '0'); }
+                    if (nctx > 8) { nctx = 8; }
+                    k = k + 1;
+                }
+                if (k == 0 || v[k] != 0)
+                {
+                    printf("error: --context requires a non-negative integer\n");
+                    return 2;
+                }
                 context_lines = nctx;
                 i = i + 1;
             }
+            else
+            {
+                printf("error: --context requires a non-negative integer\n");
+                return 2;
+            }
         }
         else if (a[0] != '-')             { input = a; }
+        else
+        {
+            printf("error: unknown option '%s'\n", a);
+            return 2;
+        }
     }
 
     if (subtype_selftest)
@@ -838,7 +873,21 @@ fn int main(String[] args)
         int fails = theory_subtype_engine::se_selftest();
         return fails;
     }
+    if (theory_metadata_selftest)
+    {
+        int fails = theory_egraph::metadata_selftest();
+        printf("theory metadata preservation: %s (%d failures)\n",
+               fails == 0 ? "PASS" : "FAIL", fails);
+        return fails;
+    }
     if (input == null) { printf("error: no input file\n"); return 2; }
+    void* input_dir = opendir(input);
+    if (input_dir != null)
+    {
+        (void)closedir(input_dir);
+        printf("error: input is a directory; pass a source file and use -I for module roots\n");
+        return 2;
+    }
 
     if (root_count == 0)
     {

@@ -49,6 +49,7 @@ import theory_bidi;
 import theory_irdlverify;
 import theory_pglcert;
 import theory_subtype;
+import theory_subtype_engine;
 import theory_bridge;
 import theory_absint;
 import theory_opt;
@@ -514,6 +515,7 @@ struct TheoryPipeline
     theory_pglcert::PglCertifier* pglcert;
     theory_subtype::SemanticSubtyper* semsub;
     theory_subtype::MatchRefiner*     refiner;
+    theory_subtype_engine::Engine*    setengine;
     theory_bridge::FeatureScan        features;
     theory_bridge::ConventionAudit    audit;
     theory_absint::AbstractInterpreter* absint;
@@ -574,6 +576,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.enabled = true;
     tp.strict_sorts = false;
     tp.passes_run = 0;
+    tp.setengine = null;
     tp.has_diff = false;
     tp.use_egraph = true;
 
@@ -644,6 +647,7 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     tp.irdlv.init(d, it, file);
     tp.pglcert.init(d, it, file);
     tp.semsub.init(a, d, it, file);
+    tp.semsub.verify_query_laws();
     tp.refiner.init(tp.semsub, d, file);
     tp.features.init();
     tp.audit.init(d, file);
@@ -655,12 +659,18 @@ fn bool TheoryPipeline.init(TheoryPipeline* tp, Arena* a, pfront_core::DiagBag* 
     // new theory subsystems — FCB μ-type algebra, CMTT meta-variables,
     // IRDL-SSA, e-class analyses, delimited continuations
     tp.ts = (theory_setops::TypeStore*)malloc(theory_setops::TypeStore::size);
+    tp.setengine = (theory_subtype_engine::Engine*)malloc(theory_subtype_engine::Engine::size);
     tp.mustate = (theory_mu::MuState*)malloc(theory_mu::MuState::size);
     tp.meta = (theory_cmtt_meta::MetaCtx*)malloc(theory_cmtt_meta::MetaCtx::size);
     tp.issa = (theory_irdlssa::IrdlSsa*)malloc(theory_irdlssa::IrdlSsa::size);
     tp.eca = (theory_eclass::EClassAnalyses*)malloc(theory_eclass::EClassAnalyses::size);
     tp.effc = (theory_effcont::EffCont*)malloc(theory_effcont::EffCont::size);
     if (tp.ts != null) tp.ts.init();
+    if (tp.ts != null && tp.setengine != null)
+    {
+        tp.setengine.init(tp.ts);
+        tp.refiner.attach_engine(tp.ts, tp.setengine);
+    }
     if (tp.ts != null && tp.mustate != null) { tp.mustate.init(a, tp.ts); tp.mustate.attach(d, it, file); }
     if (tp.meta != null) tp.meta.init(a);
     if (tp.issa != null) tp.issa.init(a);
@@ -764,6 +774,7 @@ fn void TheoryPipeline.destroy(TheoryPipeline* tp)
     if (tp.sess != null) { tp.sess.destroy(); free((void*)tp.sess); }
     if (tp.sct != null) { tp.sct.destroy(); free((void*)tp.sct); }
     if (tp.defun != null) { tp.defun.destroy(); free((void*)tp.defun); }
+    if (tp.setengine != null) { free((void*)tp.setengine); }
     if (tp.ts != null) { tp.ts.destroy(); free((void*)tp.ts); }
 }
 

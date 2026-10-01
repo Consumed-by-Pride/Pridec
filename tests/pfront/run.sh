@@ -1488,6 +1488,34 @@ else
   fail=$((fail+1)); printf '  FAIL  %-26s confluence: W4031=%s N4032=%s ok=%s bad=%s d=%s\n' "trs_confluence" "$w" "$n" "$okc" "$badc" "$d"
 fi
 
+# Cloning and E-graph extraction must preserve type/resolution metadata.
+meta=$("$BIN" --theory-metadata-selftest 2>&1)
+if echo "$meta" | grep -q 'theory metadata preservation: PASS'; then
+  pass=$((pass+1)); printf '  PASS  %-26s (clone + extraction metadata)\n' "theory_metadata"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "theory_metadata" "$meta"
+fi
+
+# The production set engine follows resolved transparent primitive aliases,
+# but must preserve unknown through unsupported forms beneath negation. The
+# result is advisory only under --lint.
+sub=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt --lint 2>&1)
+sub_default=$("$BIN" tests/pfront/107_uninhabited_let.pie -I stdlib -I . --no-opt 2>&1)
+sub_w=$(echo "$sub" | grep -c 'warning\[W3292\]')
+sub_default_w=$(echo "$sub_default" | grep -c 'warning\[W3292\]')
+sub_alias_w=$(echo "$sub" | grep -c 'warning\[W3291\]')
+sub_default_alias_w=$(echo "$sub_default" | grep -c 'warning\[W3291\]')
+sub_engine=$(echo "$sub" | grep -c 'subtype engine.*6 queries, 3 proved, 3 refuted')
+if [ "$sub_w" = "2" ] && [ "$sub_default_w" = "0" ] \
+   && [ "$sub_alias_w" = "1" ] && [ "$sub_default_alias_w" = "0" ] \
+   && [ "$sub_engine" = "1" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (transparent aliases + conservative opaque complement; lint only)\n' "subtype_annotation"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s binding=%s/%s alias=%s/%s engine=%s\n' \
+    "subtype_annotation" "$sub_w" "$sub_default_w" \
+    "$sub_alias_w" "$sub_default_alias_w" "$sub_engine"
+fi
+
 # 31/35 must actually FIRE at their `|>` sites.
 f31=$("$BIN" tests/pfront/31_trs_rule.pie 2>&1 | grep -oE '[0-9]+ firings' | grep -oE '^[0-9]+')
 f35=$(trs_ast 35_egraph_rewrite | sed -n "/fn 'f'/,\$p" | grep -c "binary <<")
@@ -1684,9 +1712,9 @@ cneed '89_closures.pie:18:18: warning\[W4190\]: this closure writes to the captu
 cneed '89_closures.pie:26:9: note\[N4191\]: `x` is reassigned here after the closure `f` (created at 25:15)'       "stale capture"
 cneed '89_closures.pie:39:8: warning\[W4193\]: `g` is a lambda of 2 parameters but is called here with 1 argument' "lambda arity"
 cneed 'closure-escape   : 2 escape (1 returned, 1 as argument, 0 stored, 0 via another closure), 5 do not (1 immediate, 4 inline candidates' "escape census"
-cneed 'closures         : 7 lambdas, 4 captures (2 mutable, 1 written; max 1 per closure), 1 binders marked address-taken' "capture census (shadowed `n` not captured)"
+cneed 'closures         : 7 lambdas, 4 captures (2 mutable, 1 written; max 1 per closure), 1 binders marked address-taken' 'capture census (shadowed `n` not captured)'
 cdeny '89_closures.pie:3[0-4]:[0-9]*: warning\[W419'                                                              "immutable capture passed to a call warned"
-cdeny '89_closures.pie:4[6-9]:[0-9]*: \(warning\|note\)\[[WN]419[013]'                                             "shadowing inner `n` treated as a capture"
+cdeny '89_closures.pie:4[6-9]:[0-9]*: \(warning\|note\)\[[WN]419[013]'                                             'shadowing inner `n` treated as a capture'
 if [ $cl_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (escape/inline, boxed mutable capture, stale capture, lambda arity; shadowing quiet)\n' "closures"
 else
@@ -1739,6 +1767,19 @@ if [ $dt_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (complete enum switch, shared DAG, dense jump table, or-rows, guard fallthrough, 0 disagreements)\n' "dtree"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "dtree" "$dt_why"
+fi
+
+# Dense scalar-match analysis is a lowering input, and a wildcard must certify
+# an infinite integer/char domain as exhaustive rather than inventing a gap.
+ms=$("$BIN" tests/exec/pear/p110_dense_switch.pie -I stdlib -I . --lint --emit-dtree 2>&1)
+ms_rc=$?
+ms_dense=$(echo "$ms" | grep -Ec 'dtree: (match|fn) .*dense]')
+ms_false_gap=$(echo "$ms" | grep -c 'warning\[W4090\]')
+if [ "$ms_rc" = "0" ] && [ "$ms_dense" = "3" ] && [ "$ms_false_gap" = "0" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (dense int/char/clause flags; wildcard proves exhaustive)\n' "dense_match_certificate"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s rc=%s dense=%s false-gap=%s\n' \
+    "dense_match_certificate" "$ms_rc" "$ms_dense" "$ms_false_gap"
 fi
 
 # Qualifiers: purity must be interprocedural (bump_twice impure only through
@@ -1829,6 +1870,49 @@ if [ "$noise" -eq 0 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (0 W4055/W4057/N4056/W4120/W4140/W4141/W4150/W416x/W418x/W419x/W4200/W422x across stdlib)\n' "flow_noise_floor"
 else
   fail=$((fail+1)); printf '  FAIL  %-26s %s flow diagnostics in stdlib\n' "flow_noise_floor" "$noise"
+fi
+
+# Set-algebra types are first-class in inference, not merely analyzed by the
+# later theory checker: values flow into unions/complements, branches join to
+# unions, and disjoint/empty assignments are counted as rejected.
+set_sem=$("$BIN" tests/pfront/102_semantic_types.pie -I stdlib -I . 2>&1)
+set_lint=$("$BIN" tests/pfront/102_semantic_types.pie -I stdlib -I . --strict-types --lint 2>&1)
+set_ok=1; set_why=""
+echo "$set_sem" | grep -q 'type mismatches  : 3 ' || { set_ok=0; set_why="$set_why mismatch boundary"; }
+echo "$set_sem" | grep -q 'set algebra .*15 assignability checks (12 accepted, 3 rejected), 1 inferred union joins' || { set_ok=0; set_why="$set_why lattice inference"; }
+echo "$set_lint" | grep -q 'set algebra .*15 assignability checks (12 accepted, 3 rejected), 1 inferred union joins' || { set_ok=0; set_why="$set_why strict lattice inference"; }
+set_type_notes=$(echo "$set_lint" | grep -c '\[W3100\]')
+set_empty_notes=$(echo "$set_lint" | grep -c '\[W3291\]')
+[ "$set_type_notes" = 3 ] || { set_ok=0; set_why="$set_why subtype advice"; }
+[ "$set_empty_notes" = 1 ] || { set_ok=0; set_why="$set_why empty-type note"; }
+echo "$set_sem" | grep -q 'errors    : 0' || { set_ok=0; set_why="$set_why frontend errors"; }
+if [ $set_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (union/complement/top/bottom assignments, call checking, branch joins, advice)\n' "semantic_type_values"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "semantic_type_values" "$set_why"
+fi
+
+# Record row semantics: exercise typed width/depth rows, incompatible field
+# intersections, Boolean row formulas, and dynamic storage beyond 64 labels.
+rec_sem=$("$BIN" tests/pfront/100_records_semantics.pie -I stdlib -I . 2>&1)
+rec_wide=$("$BIN" tests/pfront/101_records_wide.pie -I stdlib -I . 2>&1)
+rec_ok=1; rec_why=""
+echo "$rec_sem" | grep -Eq 'records +: [0-9]+ rows from 5 structs, 13 typed fields' || { rec_ok=0; rec_why="$rec_why typed rows"; }
+echo "$rec_sem" | grep -q 'record-relations .*cert errors=0, skipped=0' || { rec_ok=0; rec_why="$rec_why relation certificates"; }
+echo "$rec_sem" | grep -q 'record-formulas .*overflow=0, validation errors=0' || { rec_ok=0; rec_why="$rec_why formula budgets"; }
+echo "$rec_sem" | grep -Eq 'record-semantic +: [3-9][0-9][0-9] Boolean checks, soundness errors=0' || { rec_ok=0; rec_why="$rec_why semantic law matrix"; }
+echo "$rec_sem" | grep -q 'dnf laws .*38 checks, 0 failures' || { rec_ok=0; rec_why="$rec_why DNF normalization laws"; }
+echo "$rec_sem" | grep -q 'subtype laws .*12 query checks' || { rec_ok=0; rec_why="$rec_why semantic subtype query laws"; }
+echo "$rec_wide" | grep -Eq 'record-semantic +: [3-9][0-9][0-9] Boolean checks, soundness errors=0' || { rec_ok=0; rec_why="$rec_why wide semantic law matrix"; }
+echo "$rec_wide" | grep -q 'dnf laws .*38 checks, 0 failures' || { rec_ok=0; rec_why="$rec_why wide DNF normalization laws"; }
+echo "$rec_wide" | grep -q 'subtype laws .*12 query checks' || { rec_ok=0; rec_why="$rec_why wide semantic subtype query laws"; }
+echo "$rec_wide" | grep -Eq '141 typed fields' || { rec_ok=0; rec_why="$rec_why wide field count"; }
+echo "$rec_wide" | grep -q 'record-relations .*cert errors=0, skipped=0' || { rec_ok=0; rec_why="$rec_why wide row certificate"; }
+echo "$rec_wide" | grep -q 'record-formulas .*overflow=0, validation errors=0' || { rec_ok=0; rec_why="$rec_why wide formula budgets"; }
+if [ $rec_ok = 1 ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s (typed width/depth rows, empty intersections, formula laws, 70+ field storage)\n' "record_semantics"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s%s\n' "record_semantics" "$rec_why"
 fi
 
 echo "---"

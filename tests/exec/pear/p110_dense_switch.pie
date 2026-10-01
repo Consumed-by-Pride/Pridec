@@ -1,0 +1,26 @@
+-- EXIT: 190
+-- The match-analysis dense flag reaches LLVM switch lowering for signed
+-- integer and character literals in expression and clause-style matches.
+fn choose(n: i64) -> i64 {
+  match n
+    | 0 -> 10
+    | 1 -> 21
+    | 2 -> 32
+    | 3 -> 43
+    | _ -> 99
+}
+fn choose_char(c: char) -> i64 {
+  match c
+    | 'a' -> 50
+    | 'b' -> 51
+    | 'c' -> 33
+    | 'd' -> 53
+    | _ -> 80
+}
+fn choose_clause : i64 -> i64
+  | 0 -> 15
+  | 1 -> 16
+  | 2 -> 17
+  | 3 -> 18
+  | other -> other + 17
+fn main(_) -> i64 { return choose(2) + choose(9) + choose_char('c') + choose_clause(9); }

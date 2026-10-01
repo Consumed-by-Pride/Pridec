@@ -665,6 +665,20 @@ fn void EGraph.compute_costs(EGraph* g)
     }
 }
 
+// Type equality is implicit in a sound rewrite, but the rule-template AST is
+// not inference-annotated. Preserve the already-inferred type of the original
+// rewrite site on the extracted root so downstream AIR lowering sees it.
+fn Node* EGraph.preserve_site_type(EGraph* g, Node* out, int depth)
+{
+    if (out == null || depth != 0 || g.site == null
+        || (g.site.flags & pfront_core::NF_TYPED) == 0) { return out; }
+    out.type_ann = g.site.type_ann;
+    out.type_slot = g.site.type_slot;
+    out.type_id = g.site.type_id;
+    out.flags = out.flags | pfront_core::NF_TYPED;
+    return out;
+}
+
 // Rebuild an AST from the cheapest node of each class.
 fn Node* EGraph.extract(EGraph* g, int klass, int depth)
 {
@@ -673,29 +687,124 @@ fn Node* EGraph.extract(EGraph* g, int klass, int depth)
     if (c < 0 || (usz)c >= g.class_count) { return null; }
     EClass* cls = &g.classes[c];
     int best = cls.best_node;
-    if (best < 0 || (usz)best >= g.node_count) { return g.representative(c); }
+    if (best < 0 || (usz)best >= g.node_count)
+    {
+        return g.preserve_site_type(g.representative(c), depth);
+    }
 
     ENode* n = &g.nodes[best];
     Node* origin = n.origin;
     if (origin == null) { return null; }
 
     // Leaf: the original node already is the answer.
-    if (n.child_count == 0) { return origin; }
+    if (n.child_count == 0) { return g.preserve_site_type(origin, depth); }
 
     Node* out = g.arena.node(origin.kind, origin.line, origin.col);
-    if (out == null) { return origin; }
+    if (out == null) { return g.preserve_site_type(origin, depth); }
+    out.span_start = origin.span_start;
+    out.span_end = origin.span_end;
     out.name_id = origin.name_id;
     out.flags = origin.flags | pfront_core::NF_SYNTHETIC;
+    out.effects = origin.effects;
     out.p = origin.p;
     out.type_ann = origin.type_ann;
+    out.type_slot = origin.type_slot;
+    out.type_id = origin.type_id;
     out.resolved = origin.resolved;
+    out.sym = origin.sym;
     out.owner = origin.owner;
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* ch = g.extract(n.children[i], depth + 1);
         g.arena.add_child(out, ch);
     }
-    return out;
+    return g.preserve_site_type(out, depth);
+}
+
+// Regression test for metadata that is consumed after rewriting. The clone
+// path must preserve all inferred/resolution data, and the extractor must
+// carry the source site's inferred type onto a newly synthesized root.
+fn int metadata_selftest()
+{
+    Arena arena;
+    if (!arena.init()) { return 1; }
+
+    Node* marker = arena.node(Nk.N_EXPR_INT, 1, 1);
+    Node* source = arena.node(Nk.N_EXPR_BINARY, 2, 3);
+    Node* source_left = arena.node(Nk.N_EXPR_IDENT, 2, 2);
+    Node* source_right = arena.node(Nk.N_EXPR_INT, 2, 6);
+    if (marker == null || source == null || source_left == null || source_right == null)
+    {
+        arena.destroy();
+        return 1;
+    }
+    marker.p.ival = 23;
+    source.p.op = (int)Tk.TOKEN_PLUS;
+    source.name_id = 71;
+    source.span_start = 10;
+    source.span_end = 17;
+    source.flags = pfront_core::NF_TYPED | pfront_core::NF_RESOLVED;
+    source.effects = pfront_core::EFF_PURE;
+    source.type_ann = marker;
+    source.type_slot = marker;
+    source.type_id = 23;
+    source.resolved = source_left;
+    source.sym = (pfront_core::Symbol*)source_left;
+    source.owner = (pfront_core::Module*)source;
+    source_left.name_id = 72;
+    source_left.flags = pfront_core::NF_TYPED;
+    source_left.type_id = 23;
+    arena.add_child(source, source_left);
+    arena.add_child(source, source_right);
+
+    Node* clone = theory_term::clone_term(&arena, source, 0);
+    int failures = 0;
+    if (clone == null || clone == source) { failures = failures + 1; }
+    else
+    {
+        if (clone.span_start != source.span_start || clone.span_end != source.span_end
+            || clone.name_id != source.name_id || clone.flags != source.flags
+            || clone.effects != source.effects || clone.type_ann != source.type_ann
+            || clone.type_slot != source.type_slot || clone.type_id != source.type_id
+            || clone.resolved != source.resolved || clone.sym != source.sym
+            || clone.owner != source.owner || clone.p.op != source.p.op
+            || clone.child_count != source.child_count
+            || clone.children[0].type_id != source.children[0].type_id)
+        { failures = failures + 1; }
+    }
+
+    Node* plain = arena.node(Nk.N_EXPR_BINARY, 2, 3);
+    Node* plain_left = arena.node(Nk.N_EXPR_IDENT, 2, 2);
+    Node* plain_right = arena.node(Nk.N_EXPR_INT, 2, 6);
+    if (plain == null || plain_left == null || plain_right == null)
+    {
+        arena.destroy();
+        return failures + 1;
+    }
+    plain.p.op = (int)Tk.TOKEN_PLUS;
+    arena.add_child(plain, plain_left);
+    arena.add_child(plain, plain_right);
+
+    EGraph* g = (EGraph*)malloc(EGraph::size);
+    if (g == null) { arena.destroy(); return failures + 1; }
+    g.init(&arena, null, null);
+    g.site = source;
+    int root = g.add_term(plain, 0);
+    if (root < 0) { failures = failures + 1; }
+    else
+    {
+        g.compute_costs();
+        Node* extracted = g.extract(root, 0);
+        if (extracted == null || extracted == plain
+            || extracted.type_ann != source.type_ann
+            || extracted.type_slot != source.type_slot
+            || extracted.type_id != source.type_id
+            || (extracted.flags & pfront_core::NF_TYPED) == 0)
+        { failures = failures + 1; }
+    }
+    free((void*)g);
+    arena.destroy();
+    return failures;
 }
 
 fn void EGraph.report(EGraph* g)

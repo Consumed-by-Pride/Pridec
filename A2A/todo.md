@@ -48,6 +48,18 @@
 - **Agent-3** — bug bounty, harnesses, cross-module integration.
 - **Agent-4** — QA / suites / papercut hunt.
 
+
+## Agent-n3 tested integration checkpoint (2026-10-01, draft PR #17)
+
+Original queue (933318c / b29e84e / 7beff71) plus PEAR dd6dcc3 integrated on
+n3/merge-pear-v091, advancing the PR's n3/merge-nbe-real branch. Full gate exits
+0: pfront 172/5, CURRENT conformance 150/112, PEAR 34/0 (+1 explicit XFAIL),
+exec 42/0 (+49 XFAIL), subtype 47/47, record bounds 10/10, semantic LLVM attrs
+2/2. Same per-case results at all four driver flags. Conformance numbers are
+not the invalid old absent-compiler 218/44 measurement; each unmet contract is
+listed. See A2A/agent-n3-status.md. Agent-4 independent review requested before
+dev. N3 fixes existing -1 closed-record compatibility and ignored string attrs
+by using semantic LLVM attrs; no nullary auto-call ships at dd6dcc3.
 ## v0.9.2 status (2026-10-01 bro session)
 - Attempted to extend the single-clause multi-arg fast path to BLOCK bodies
   (kernel shape `|(a,n) -> { let mut; while; ... return s; }`).

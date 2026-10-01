@@ -51,10 +51,11 @@
 //   METRICS       tree nodes vs DAG nodes, worst-case tests along a path,
 //                 average tests weighted uniformly over rows, switch fan-out.
 //
-//   WRITEBACK     NF_DENSE_SWITCH (new flag) on a `match` / fn whose root
-//                 test is an integer or enum switch with ≥ 4 cases whose
-//                 values span at most 2× their count: the backend should
-//                 emit a jump table. N4210 under --lint.
+//   WRITEBACK     NF_DENSE_SWITCH on a `match` / fn whose root test is a
+//                 dense, unguarded integer/character literal switch in the
+//                 subset currently supported by PEAR. The general decision
+//                 tree can be denser than the backend-lowerable subset.
+//                 N4210 reports the dense analysis shape under --lint.
 //
 //   --emit-dtree prints every DAG.
 //
@@ -1185,6 +1186,9 @@ fn void MatchCompiler.compile_site(MatchCompiler* mc, Node* site, Node** arms, u
     Matrix* m = mc.mk_matrix(MC_MAX_ROWS, 1);
     if (m == null) { return; }
     m.occs[0] = mc.occ_root();
+    bool dense_scalar_lowerable = n_arms <= 64;
+    long[64] dense_scalars;
+    usz dense_scalar_count = 0;
     for (usz a = 0; a < n_arms; a++)
     {
         Node* arm = arms[a];
@@ -1196,6 +1200,38 @@ fn void MatchCompiler.compile_site(MatchCompiler* mc, Node* site, Node** arms, u
             if (pat == null && pfront_core::is_pattern(c.kind)) { pat = c; }
             else if (c.kind == Nk.N_GUARD) { guarded = true; }
             else if (i + 1 < arm.child_count && pat != null && pfront_core::is_expr(c.kind)) { guarded = true; }
+        }
+        // NF_DENSE_SWITCH is consumed by a backend path that currently
+        // supports only unguarded scalar literals and a final wildcard.
+        // Do not label expanded or structured patterns as jump-table inputs.
+        if (guarded || pat == null) { dense_scalar_lowerable = false; }
+        else if (pat.kind == Nk.N_PAT_WILDCARD || pat.kind == Nk.N_PAT_IDENT)
+        {
+            // A final binder is a valid default too; PEAR binds the scrutinee
+            // value in that default block before lowering the arm body.
+            if (a + 1 != n_arms) { dense_scalar_lowerable = false; }
+        }
+        else
+        {
+            Node* lit = pat.kind == Nk.N_PAT_LITERAL ? pat.child(0) : null;
+            if (lit == null || (lit.kind != Nk.N_EXPR_INT && lit.kind != Nk.N_EXPR_CHAR))
+            {
+                dense_scalar_lowerable = false;
+            }
+            else if (dense_scalar_count >= 64)
+            {
+                dense_scalar_lowerable = false;
+            }
+            else
+            {
+                for (usz k = 0; k < dense_scalar_count; k++)
+                {
+                    if (dense_scalars[k] == (long)lit.p.ival)
+                    { dense_scalar_lowerable = false; }
+                }
+                dense_scalars[dense_scalar_count] = (long)lit.p.ival;
+                dense_scalar_count++;
+            }
         }
         Alts alts = mc.translate(pat, 0);
         if (alts.n > 1) { mf.n_or_expanded = mf.n_or_expanded + alts.n - 1; mc.n_or_rows = mc.n_or_rows + alts.n - 1; }
@@ -1230,7 +1266,7 @@ fn void MatchCompiler.compile_site(MatchCompiler* mc, Node* site, Node** arms, u
     mf.complete_root = r >= 0 && mc.nodes[r].kind == DtKind.DT_SWITCH && mc.nodes[r].def < 0;
 
     mf.dense = mc.is_dense(mf.root);
-    if (mf.dense)
+    if (mf.dense && dense_scalar_lowerable)
     {
         mc.n_dense = mc.n_dense + 1;
         site.flags = site.flags | pfront_core::NF_DENSE_SWITCH;

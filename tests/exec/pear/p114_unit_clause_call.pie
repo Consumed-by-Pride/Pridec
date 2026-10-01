@@ -1,0 +1,5 @@
+-- EXIT: 42
+-- The unit tuple is zero-arity; explicit calls must survive the dd6dcc3 thunk fix.
+fn answer : () -> i64
+  | () -> 42
+fn main(_) -> i64 { return answer(); }

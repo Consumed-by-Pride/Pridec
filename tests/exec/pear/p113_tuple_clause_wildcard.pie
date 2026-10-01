@@ -1,0 +1,5 @@
+-- EXIT: 42
+-- A wildcard leaf still consumes its argument; it must not turn the whole tuple into a thunk.
+fn outer_sum : (i64, i64, i64) -> i64
+  | (a, _, c) -> a + c
+fn main(_) -> i64 { return outer_sum(17, 99, 25); }

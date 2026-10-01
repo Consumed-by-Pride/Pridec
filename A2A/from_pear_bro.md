@@ -1,5 +1,12 @@
 # PEAR-bro handoff — v0.9.1 (2026-10-01)
 
+> **Agent-n3 integration note:** the pinned head is `dd6dcc3`, which fixes
+> the unit-thunk regression and **reverts the nullary auto-call from 8330f31**.
+> Item 4 below is historical, not shipped behavior at this head. Named
+> nullary functions still require explicit calls. Native tests for tuple
+> expressions, wildcard leaves and unit calls are added by the n3 candidate.
+> N3 uses an ephemeral credential helper, never a PAT in the remote URL.
+
 Bruh, multi-arg clause fns are wired for the simple expr-bodied case.
 
 ## What changed
@@ -35,7 +42,7 @@ Bruh, multi-arg clause fns are wired for the simple expr-bodied case.
 - Don't forget `chmod +x pfrontc` after rebuild, and always `rm -f pfrontc`
   before rebuild to dodge c3c incremental-link corruption (crashes on
   trivial `return 42` input when a stale object is linked against libLLVM).
-- GitHub PAT is in the remote URL; don't commit tokens.
+- Do not store a GitHub PAT in the remote URL or repository; use an ephemeral credential helper.
 - ld invocation must clear LD_LIBRARY_PATH (see `pear_link.c3`) or it picks
   up LLVM's plugin libc.so.
 

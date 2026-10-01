@@ -496,6 +496,22 @@ fn int PglCertifier.find_witness(PglCertifier* pc, CertMatrix* m,
         return w;
     }
 
+    // A live, unguarded row of wildcards covers the entire product domain.
+    // Check this before enumerating constructors: for an infinite scalar
+    // signature, e.g. integer literals plus `_`, constructor enumeration alone
+    // would otherwise invent a gap even though the wildcard covers it.
+    for (usz r = 0; r < m.row_count; r++)
+    {
+        if (!m.rows[r].live || m.rows[r].guarded) { continue; }
+        bool covers_all = true;
+        for (usz c = 0; c < m.width; c++)
+        {
+            Node* p = c < m.rows[r].width ? m.rows[r].cols[c] : null;
+            if (!pat_is_wild(p)) { covers_all = false; break; }
+        }
+        if (covers_all) { return -1; }
+    }
+
     // No columns left and a live row exists: that row matches everything.
     if (m.width == 0) { return -1; }
 
