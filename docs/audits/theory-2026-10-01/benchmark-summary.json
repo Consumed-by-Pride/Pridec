@@ -1,0 +1,92 @@
+[
+  {
+    "target": "pr",
+    "case": "minimal",
+    "on": {
+      "wall_ms": 39.997042500090174,
+      "cpu_ms": 39.668,
+      "peak_rss_kib": 73184.0
+    },
+    "off": {
+      "wall_ms": 27.64088650019403,
+      "cpu_ms": 27.275999999999996,
+      "peak_rss_kib": 61426.0
+    },
+    "wall_ratio_on_off": 1.4470245916247806
+  },
+  {
+    "target": "pr",
+    "case": "lambda",
+    "on": {
+      "wall_ms": 39.8157595000157,
+      "cpu_ms": 39.4945,
+      "peak_rss_kib": 73200.0
+    },
+    "off": {
+      "wall_ms": 27.120587500121474,
+      "cpu_ms": 26.796,
+      "peak_rss_kib": 61438.0
+    },
+    "wall_ratio_on_off": 1.4681009214803096
+  },
+  {
+    "target": "pr",
+    "case": "records_wide",
+    "on": {
+      "wall_ms": 38.34200699975554,
+      "cpu_ms": 37.974500000000006,
+      "peak_rss_kib": 70050.0
+    },
+    "off": {
+      "wall_ms": 27.181670499885513,
+      "cpu_ms": 26.8205,
+      "peak_rss_kib": 61372.0
+    },
+    "wall_ratio_on_off": 1.4105831722122095
+  },
+  {
+    "target": "dev",
+    "case": "minimal",
+    "on": {
+      "wall_ms": 36.02685849955378,
+      "cpu_ms": 35.699,
+      "peak_rss_kib": 71704.0
+    },
+    "off": {
+      "wall_ms": 26.951351499974407,
+      "cpu_ms": 26.403,
+      "peak_rss_kib": 61296.0
+    },
+    "wall_ratio_on_off": 1.3367366196677741
+  },
+  {
+    "target": "dev",
+    "case": "lambda",
+    "on": {
+      "wall_ms": 37.10130900026343,
+      "cpu_ms": 36.73649999999999,
+      "peak_rss_kib": 71724.0
+    },
+    "off": {
+      "wall_ms": 27.205114999560465,
+      "cpu_ms": 26.864999999999995,
+      "peak_rss_kib": 61296.0
+    },
+    "wall_ratio_on_off": 1.3637622557692863
+  },
+  {
+    "target": "dev",
+    "case": "records_wide",
+    "on": {
+      "wall_ms": 34.841443999994226,
+      "cpu_ms": 34.511,
+      "peak_rss_kib": 68208.0
+    },
+    "off": {
+      "wall_ms": 28.467625500070426,
+      "cpu_ms": 28.107,
+      "peak_rss_kib": 61298.0
+    },
+    "wall_ratio_on_off": 1.2238970896925714
+  }
+]

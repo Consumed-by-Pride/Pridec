@@ -1,0 +1,3 @@
+rewrite change
+  | 0i64 ↦ 42i64
+fn main(_) -> i64 { return 0i64 |> change; }

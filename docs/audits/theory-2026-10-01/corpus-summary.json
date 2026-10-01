@@ -1,0 +1,186 @@
+{
+  "files": 83,
+  "compiler_runs": 664,
+  "counts": {
+    "O0/on": {
+      "PASS": 34,
+      "FAIL": 0,
+      "XFAIL": 49,
+      "XPASS": 0
+    },
+    "O0/off": {
+      "PASS": 33,
+      "FAIL": 1,
+      "XFAIL": 49,
+      "XPASS": 0
+    },
+    "O1/on": {
+      "PASS": 34,
+      "FAIL": 0,
+      "XFAIL": 49,
+      "XPASS": 0
+    },
+    "O1/off": {
+      "PASS": 33,
+      "FAIL": 1,
+      "XFAIL": 49,
+      "XPASS": 0
+    },
+    "O2/on": {
+      "PASS": 34,
+      "FAIL": 0,
+      "XFAIL": 49,
+      "XPASS": 0
+    },
+    "O2/off": {
+      "PASS": 33,
+      "FAIL": 1,
+      "XFAIL": 49,
+      "XPASS": 0
+    },
+    "O3/on": {
+      "PASS": 34,
+      "FAIL": 0,
+      "XFAIL": 49,
+      "XPASS": 0
+    },
+    "O3/off": {
+      "PASS": 33,
+      "FAIL": 1,
+      "XFAIL": 49,
+      "XPASS": 0
+    }
+  },
+  "semantic_differences": [
+    {
+      "case": "15_ub_explicit",
+      "tier": 0,
+      "difference": {
+        "binary": [
+          false,
+          true
+        ],
+        "native_shell_rc": [
+          null,
+          0
+        ],
+        "stdout_sha256": [
+          null,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ]
+      },
+      "on_status": "XFAIL",
+      "off_status": "XFAIL"
+    },
+    {
+      "case": "15_ub_explicit",
+      "tier": 1,
+      "difference": {
+        "binary": [
+          false,
+          true
+        ],
+        "native_shell_rc": [
+          null,
+          0
+        ],
+        "stdout_sha256": [
+          null,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ]
+      },
+      "on_status": "XFAIL",
+      "off_status": "XFAIL"
+    },
+    {
+      "case": "15_ub_explicit",
+      "tier": 2,
+      "difference": {
+        "binary": [
+          false,
+          true
+        ],
+        "native_shell_rc": [
+          null,
+          0
+        ],
+        "stdout_sha256": [
+          null,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ]
+      },
+      "on_status": "XFAIL",
+      "off_status": "XFAIL"
+    },
+    {
+      "case": "15_ub_explicit",
+      "tier": 3,
+      "difference": {
+        "binary": [
+          false,
+          true
+        ],
+        "native_shell_rc": [
+          null,
+          0
+        ],
+        "stdout_sha256": [
+          null,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ]
+      },
+      "on_status": "XFAIL",
+      "off_status": "XFAIL"
+    },
+    {
+      "case": "pear/p110_dense_switch",
+      "tier": 0,
+      "difference": {
+        "native_shell_rc": [
+          190,
+          0
+        ]
+      },
+      "on_status": "PASS",
+      "off_status": "FAIL"
+    },
+    {
+      "case": "pear/p110_dense_switch",
+      "tier": 1,
+      "difference": {
+        "native_shell_rc": [
+          190,
+          0
+        ]
+      },
+      "on_status": "PASS",
+      "off_status": "FAIL"
+    },
+    {
+      "case": "pear/p110_dense_switch",
+      "tier": 2,
+      "difference": {
+        "native_shell_rc": [
+          190,
+          0
+        ]
+      },
+      "on_status": "PASS",
+      "off_status": "FAIL"
+    },
+    {
+      "case": "pear/p110_dense_switch",
+      "tier": 3,
+      "difference": {
+        "native_shell_rc": [
+          190,
+          0
+        ]
+      },
+      "on_status": "PASS",
+      "off_status": "FAIL"
+    }
+  ],
+  "binary_identical_pairs": 272,
+  "both_emit_binary_pairs": 276
+}

@@ -1,0 +1,18 @@
+{
+  "choose(2)": {
+    "on": 32,
+    "off": 99
+  },
+  "choose(9)": {
+    "on": 99,
+    "off": 99
+  },
+  "choose_char('c')": {
+    "on": 33,
+    "off": 0
+  },
+  "choose_clause(9)": {
+    "on": 26,
+    "off": 0
+  }
+}

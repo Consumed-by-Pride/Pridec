@@ -1,0 +1,2 @@
+fn retain(out: **i64, p: *i64) -> i64 { out[0] = p; return 0; }
+fn main(_) -> i64 { return 42; }

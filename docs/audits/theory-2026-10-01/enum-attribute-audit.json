@@ -1,0 +1,68 @@
+[
+  {
+    "name": "alwaysinline",
+    "configured_id": 3,
+    "actual_id": 3,
+    "matches": true
+  },
+  {
+    "name": "cold",
+    "configured_id": 5,
+    "actual_id": 5,
+    "matches": true
+  },
+  {
+    "name": "convergent",
+    "configured_id": 6,
+    "actual_id": 6,
+    "matches": true
+  },
+  {
+    "name": "nounwind",
+    "configured_id": 42,
+    "actual_id": 45,
+    "matches": false
+  },
+  {
+    "name": "willreturn",
+    "configured_id": 77,
+    "actual_id": 81,
+    "matches": false
+  },
+  {
+    "name": "nofree",
+    "configured_id": 29,
+    "actual_id": 31,
+    "matches": false
+  },
+  {
+    "name": "nosync",
+    "configured_id": 50,
+    "actual_id": 43,
+    "matches": false
+  },
+  {
+    "name": "norecurse",
+    "configured_id": 45,
+    "actual_id": 38,
+    "matches": false
+  },
+  {
+    "name": "nocallback",
+    "configured_id": 25,
+    "actual_id": 25,
+    "matches": true
+  },
+  {
+    "name": "mustprogress",
+    "configured_id": 20,
+    "actual_id": 20,
+    "matches": true
+  },
+  {
+    "name": "speculatable",
+    "configured_id": 68,
+    "actual_id": 72,
+    "matches": false
+  }
+]

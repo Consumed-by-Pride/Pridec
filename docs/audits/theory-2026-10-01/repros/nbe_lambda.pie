@@ -1,0 +1,4 @@
+fn main : () -> i64
+  | () ->
+      let inc = fn (x: i64) -> i64 { x + 1i64 }
+      inc(41i64)

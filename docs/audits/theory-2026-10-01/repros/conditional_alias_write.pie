@@ -1,0 +1,12 @@
+fn write_choice(p: *i64, q: *i64, flag: bool) -> i64 {
+  let chosen: *i64 = if flag { p } else { q };
+  chosen[0] = 9;
+  return 0;
+}
+fn main(_) -> i64 ! [Alloc] {
+  let p: *i64 = alloc [i64; 1];
+  let q: *i64 = alloc [i64; 1];
+  p[0] = 3; q[0] = 5;
+  write_choice(p, q, true);
+  return p[0];
+}
