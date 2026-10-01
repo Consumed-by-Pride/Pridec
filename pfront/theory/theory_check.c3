@@ -809,12 +809,13 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
 
     // 1. Registration: dialects and effect operations must exist before any
     //    use of them can be validated.
-    tp.dialects.register_dialects(root, 0);
     /*
-     Validate dialect USES against the source tree, before any pass
-     rewrites it. See the note at the lowering step below.
+     Dialect ELABORATION (register, register rules, validate, LOWER, refuse
+     what cannot be lowered) is mandatory semantics, not an analysis. It runs
+     here, before any rewriting, and runs identically under --no-theory (see
+     the driver). Lowered code then flows through rewriting/optimization.
     */
-    tp.dialects.validate_uses(root, 0);
+    root = tp.dialects.elaborate(root);
     tp.effects.register_effects(root, 0);
     t0 = tp.tick("register", t0);
     tp.passes_run = tp.passes_run + 2;
@@ -963,26 +964,8 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     t0 = tp.tick("comptime+peval", t0);
     tp.passes_run = tp.passes_run + 2;
 
-    /*
-     4. Dialect LOWERING, after rewriting so the actions it substitutes
-        are already simplified.
-
-     Validation does NOT happen here. It moved up to just after
-     registration, because by this point the rewriter, comptime folding
-     and partial evaluation have all rebuilt parts of the tree and a
-     dialect call written in the source may no longer be present in the
-     shape validate_uses recognises. On the graph-compiler test that
-     showed as "2 dialects, 6 opcodes, 0 uses validated" for a file whose
-     every dialect call was still there in the AST dump -- arity checking
-     and unknown-opcode diagnosis were simply not reaching them.
-
-     Lowering stays late; diagnosing the user's source stays early.
-    */
-    if (tp.dialects.opcode_count > 0)
-    {
-        root = tp.dialects.lower_tree(root, 0);
-        tp.passes_run = tp.passes_run + 1;
-    }
+    // 4. Dialect lowering already ran in step 1 (elaborate): mandatory, not optional.
+    tp.passes_run = tp.passes_run + 1;
 
     // 5. Continuation-tree normalisation for scoped effects.
     tp.conttree.root = tp.conttree.build(root, tp.effects, 0);
