@@ -74,6 +74,7 @@ const uint NF_INDEPENDENT = 2097152; // statement commutes with its predecessor 
 const uint NF_REDUCTION   = 4194304; // loop is a commutative reduction (theory_crdt)
 const uint NF_RECURSIVE_TY = 8388608; // type decl in a recursive definition cycle (theory_stratified)
 const uint NF_READONLY_PARAM = 1048576; // parameter never written through nor retained (theory_quals)
+const uint NF_QUALS_COMPLETE = 16777216; // conservative qualifier analysis finished on this final AST
 
 // ── AST vocabulary ──────────────────────────────────────────────────────────
 // Grouped so range checks (is_decl / is_expr / is_pattern / is_type) are

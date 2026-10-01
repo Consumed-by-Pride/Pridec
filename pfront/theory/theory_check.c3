@@ -845,7 +845,14 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
     if (tp.nbe != null) { tp.nbe.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.lin != null) { tp.lin.run(root); tp.passes_run = tp.passes_run + 1; }
     if (tp.sym != null) { tp.sym.run_on(root); tp.passes_run = tp.passes_run + 1; }
-    if (tp.qual != null) { tp.qual.walk(root, 0); tp.passes_run = tp.passes_run + 1; }
+    // Early facts feed only auxiliary analyses; diagnostics and AIR export
+    // are refreshed on the final AST after all compiler transformations.
+    if (tp.qual != null)
+    {
+        tp.qual.diags = null;
+        tp.qual.walk(root, 0);
+        tp.passes_run = tp.passes_run + 1;
+    }
     if (tp.crdt != null) { tp.crdt.walk(root, 0); tp.passes_run = tp.passes_run + 1; }   // after quals: uses NF_PURE_FN
     if (tp.sess != null) { tp.sess.scan(root, 0); tp.passes_run = tp.passes_run + 1; }
     if (tp.sct != null) { tp.sct.run(root); tp.passes_run = tp.passes_run + 1; }
@@ -1075,6 +1082,17 @@ fn Node* TheoryPipeline.run(TheoryPipeline* tp, Node* root)
  lowers matches independently as a sequential chain. Building it here
  means those reports describe a real structure rather than an empty one.
 */
+// The driver calls this after its post-theory SCCP/constfold. Reusing the
+// original summary would authorize LLVM facts about a different program.
+fn void TheoryPipeline.finalize_quals(TheoryPipeline* tp, Node* root)
+{
+    if (tp.qual == null || root == null) { return; }
+    tp.qual.destroy();
+    tp.qual.init(tp.arena);
+    tp.qual.attach(tp.diags, tp.interner, tp.file);
+    tp.qual.walk(root, 0);
+}
+
 fn void TheoryPipeline.build_pgen_trees(TheoryPipeline* tp, Node* n, int depth)
 {
     if (n == null || depth > CHECK_MAX_DEPTH) { return; }
