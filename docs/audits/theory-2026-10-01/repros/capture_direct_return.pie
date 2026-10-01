@@ -1,0 +1,2 @@
+fn identity(p: *i64) -> *i64 { return p; }
+fn main(_) -> i64 { return 42; }

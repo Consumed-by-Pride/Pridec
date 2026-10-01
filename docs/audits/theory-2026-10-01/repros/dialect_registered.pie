@@ -1,0 +1,3 @@
+dialect D
+  opcode add : i64
+fn main(_) -> i64 { return D.add(20, 22); }

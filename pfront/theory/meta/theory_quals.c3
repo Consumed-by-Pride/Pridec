@@ -80,6 +80,7 @@ extern fn int   snprintf(char* buf, usz n, char* fmt, ...);
 
 const usz QA_MAX_FNS    = 8192;
 const usz QA_MAX_PARAMS = 32;
+const usz QA_EXPORT_MAX_PARAMS = 16; // current AIR/PEAR value-parameter representation limit
 const usz QA_BUCKETS    = 8192;
 const int QA_MAX_DEPTH  = 200;
 const int QA_MAX_ROUNDS = 24;
@@ -103,7 +104,8 @@ enum Qclass : char
     Q_PURE,
     Q_READONLY,
     Q_ALLOC,
-    Q_IMPURE
+    Q_IMPURE,
+    Q_UNKNOWN
 }
 
 struct FnQ
@@ -122,6 +124,7 @@ struct FnQ
     bool   returns_unit;
     Qclass cls;
     bool   is_extern;
+    bool   complete;                 // unsupported/budget-limited bodies export no positive facts
 }
 
 struct FnSlot
@@ -146,9 +149,10 @@ struct QualAnalysis
     FnQ*   cur;
     bool   changed;
     int    rounds;
+    bool   complete;                 // collection and interprocedural fixpoint completed
 
     // aggregate
-    usz n_pure, n_readonly, n_alloc, n_impure, n_diverge;
+    usz n_pure, n_readonly, n_alloc, n_impure, n_unknown, n_diverge;
     usz n_params_total, n_params_readonly, n_params_written, n_params_escape;
     usz n_w4220, n_w4221, n_n4222, n_n4223;
     usz n_calls_total, n_calls_unknown, n_calls_pure;
@@ -164,8 +168,8 @@ fn void QualAnalysis.init(QualAnalysis* q, Arena* a)
     q.fns = (FnQ*)calloc(QA_MAX_FNS, FnQ::size);
     q.n_fns = 0;
     for (usz i = 0; i < QA_BUCKETS; i++) { q.map[i] = null; }
-    q.cur = null; q.changed = false; q.rounds = 0;
-    q.n_pure = 0; q.n_readonly = 0; q.n_alloc = 0; q.n_impure = 0; q.n_diverge = 0;
+    q.cur = null; q.changed = false; q.rounds = 0; q.complete = q.fns != null;
+    q.n_pure = 0; q.n_readonly = 0; q.n_alloc = 0; q.n_impure = 0; q.n_unknown = 0; q.n_diverge = 0;
     q.n_params_total = 0; q.n_params_readonly = 0; q.n_params_written = 0; q.n_params_escape = 0;
     q.n_w4220 = 0; q.n_w4221 = 0; q.n_n4222 = 0; q.n_n4223 = 0;
     q.n_calls_total = 0; q.n_calls_unknown = 0; q.n_calls_pure = 0; q.n_edges = 0;
@@ -234,10 +238,11 @@ fn Node* fn_return_type(Node* decl)
 
 fn void QualAnalysis.register(QualAnalysis* q, Node* decl)
 {
-    if (q.n_fns >= QA_MAX_FNS || q.lookup(decl) != null) { return; }
+    if (q.fns == null || q.n_fns >= QA_MAX_FNS) { q.complete = false; return; }
+    if (q.lookup(decl) != null) { return; }
     FnQ* f = &q.fns[q.n_fns];
     memset((void*)f, 0, FnQ::size);
-    f.decl = decl; f.name = decl.name_id;
+    f.decl = decl; f.name = decl.name_id; f.complete = true;
     f.is_extern = decl.kind == Nk.N_DECL_EXTERN_FN || (decl.flags & pfront_core::NF_EXTERN) != 0;
     // a declaration without a body (`fn f : T -> U #extern("sym")`) is foreign
     if (!f.is_extern)
@@ -251,6 +256,12 @@ fn void QualAnalysis.register(QualAnalysis* q, Node* decl)
         if (!has_body) { f.is_extern = true; }
     }
     f.returns_unit = type_is_unit(fn_return_type(decl));
+    usz declared_params = 0;
+    for (usz i = 0; i < decl.child_count; i++)
+    {
+        if (decl.children[i] != null && decl.children[i].kind == Nk.N_DECL_PARAM) { declared_params++; }
+    }
+    if (declared_params > QA_EXPORT_MAX_PARAMS) { f.complete = false; }
     // parameters: N_DECL_PARAM children, else the first clause's pattern components
     for (usz i = 0; i < decl.child_count && f.n_params < QA_MAX_PARAMS; i++)
     {
@@ -268,6 +279,7 @@ fn void QualAnalysis.register(QualAnalysis* q, Node* decl)
             if (pat == null) { break; }
             if (pat.kind == Nk.N_PAT_TUPLE)
             {
+                if (pat.child_count > QA_EXPORT_MAX_PARAMS) { f.complete = false; }
                 for (usz j = 0; j < pat.child_count && f.n_params < QA_MAX_PARAMS; j++) { f.params[f.n_params] = pat.children[j]; f.n_params = f.n_params + 1; }
             }
             else { f.params[0] = pat; f.n_params = 1; }
@@ -276,7 +288,7 @@ fn void QualAnalysis.register(QualAnalysis* q, Node* decl)
     }
     if (f.is_extern) { f.reasons = R_UNKNOWN_CALL; f.why[5] = decl; }
     FnSlot* s = (FnSlot*)q.arena.alloc(FnSlot::size, 8);
-    if (s == null) { return; }
+    if (s == null) { q.complete = false; return; }
     usz h = slot_hash(decl);
     s.decl = decl; s.idx = (int)q.n_fns; s.next = q.map[h];
     q.map[h] = s;
@@ -286,7 +298,8 @@ fn void QualAnalysis.register(QualAnalysis* q, Node* decl)
 
 fn void QualAnalysis.collect(QualAnalysis* q, Node* n, int depth)
 {
-    if (n == null || depth > QA_MAX_DEPTH) { return; }
+    if (n == null) { return; }
+    if (depth > QA_MAX_DEPTH) { q.complete = false; return; }
     if (n.kind == Nk.N_DECL_FN || n.kind == Nk.N_DECL_EXTERN_FN) { q.register(n); }
     for (usz i = 0; i < n.child_count; i++) { q.collect(n.children[i], depth + 1); }
 }
@@ -452,14 +465,11 @@ fn void QualAnalysis.on_write(QualAnalysis* q, Node* lhs, Node* at)
     int pi = q.param_index(b);
     if (pi >= 0) { q.mark_written(pi, at); return; }
     if (is_global_binder(b)) { q.add_reason(R_WRITES_GLOBAL, at); return; }
-    // a local: only a write THROUGH it can reach the outside world (it may
-    // hold a pointer that came from a parameter or a global)
-    if (through)
-    {
-        // if the local was initialised from a parameter (`let p = param`) we
-        // cannot tell without alias analysis: be conservative only for derefs
-        if (lhs.kind == Nk.N_EXPR_DEREF || q.local_holds_pointer(b)) { q.add_reason(R_WRITES_GLOBAL, at); }
-    }
+    // Without a proven alias/region model ANY indirect local write may reach
+    // a parameter/global. Conditional/block/unsafe pointer producers are not
+    // frame-only merely because an initializer-kind whitelist misses them.
+    if (through) { q.add_reason(R_WRITES_GLOBAL, at); }
+
 }
 
 // a local whose initialiser is a pointer-producing expression
@@ -499,19 +509,22 @@ fn void QualAnalysis.on_call(QualAnalysis* q, Node* call)
         first_arg = 0;   // receiver is argument 0
     }
     FnQ* callee = q.lookup(callee_decl);
-    if (callee == null)
+    if (callee == null || callee.is_extern)
     {
         // constructors / variants / struct literals are pure; anything else is unknown
         if (callee_decl != null && (callee_decl.kind == Nk.N_DECL_VARIANT || callee_decl.kind == Nk.N_DECL_STRUCT
                                     || callee_decl.kind == Nk.N_DECL_ENUM || callee_decl.kind == Nk.N_DECL_NEWTYPE))
         {
+            for (usz i = first_arg; i < call.child_count; i++) { q.escape_value(call.children[i], 0); }
             return;
         }
+        q.cur.complete = false;
         q.add_reason(R_UNKNOWN_CALL, call);
         q.n_calls_unknown = q.n_calls_unknown + 1;
         // every by-reference argument may be written and every argument escapes
         for (usz i = first_arg; i < call.child_count; i++)
         {
+            q.escape_value(call.children[i], 0);
             Node* a = call.children[i];
             int pi = q.arg_param(a);
             if (pi < 0) { continue; }
@@ -529,6 +542,12 @@ fn void QualAnalysis.on_call(QualAnalysis* q, Node* call)
         if ((callee.reasons & R_READS_GLOBAL) != 0) { q.add_reason(R_READS_GLOBAL, call); }
         if ((callee.reasons & R_ALLOC) != 0) { q.add_reason(R_ALLOC, call); }
         if ((callee.reasons & R_DIVERGE_MASK) != 0) { q.add_reason(R_RECURSIVE, call); }
+    }
+    if (!callee.complete)
+    {
+        q.cur.complete = false;
+        q.add_reason(R_UNKNOWN_CALL, call);
+        for (usz i = first_arg; i < call.child_count; i++) { q.escape_value(call.children[i], 0); }
     }
     // argument ↔ parameter transfer
     usz pos = 0;
@@ -552,6 +571,7 @@ fn void QualAnalysis.on_call(QualAnalysis* q, Node* call)
             }
             if ((callee.escapes & bit) != 0) { q.mark_escape(pi); }
         }
+        if (pos < 32 && (callee.escapes & (1u << (uint)pos)) != 0) { q.escape_value(a, 0); }
         pos = pos + 1;
     }
 }
@@ -568,22 +588,74 @@ fn bool QualAnalysis.param_is_pointer(QualAnalysis* q, FnQ* f, usz pos)
     return ty.kind == Nk.N_TY_PTR || ty.kind == Nk.N_TY_REF || ty.kind == Nk.N_TY_SLICE;
 }
 
+// Conservatively identify parameter-derived values that escape. A memory
+// load returns a new value, not the address used to load it; casts/arithmetic,
+// reference/slice construction and both conditional arms preserve/expose the
+// input address. Unknown operations conservatively recurse through operands.
+fn void QualAnalysis.escape_value(QualAnalysis* q, Node* n, int depth)
+{
+    if (n == null || q.cur == null) { return; }
+    if (depth > QA_MAX_DEPTH)
+    {
+        q.cur.complete = false;
+        q.cur.escapes = 0xffffffffu;
+        q.add_reason(R_UNKNOWN_CALL, n);
+        return;
+    }
+    if (n.kind == Nk.N_EXPR_IDENT || n.kind == Nk.N_EXPR_PATH)
+    {
+        int pi = q.param_index(n.resolved);
+        if (pi >= 0) { q.mark_escape(pi); }
+        return;
+    }
+    if (n.kind == Nk.N_EXPR_INDEX || n.kind == Nk.N_EXPR_DEREF || n.kind == Nk.N_EXPR_FIELD)
+    {
+        // Do not claim that returning p[0] itself retains p. Derived address
+        // information in index operands still propagates conservatively.
+        for (usz i = 1; i < n.child_count; i++) { q.escape_value(n.children[i], depth + 1); }
+        return;
+    }
+    for (usz i = 0; i < n.child_count; i++) { q.escape_value(n.children[i], depth + 1); }
+}
+
+// Clear stale facts before a repeat/final analysis. The module marker gates
+// export; over-budget trees cannot retain an earlier positive certificate.
+fn void QualAnalysis.clear_facts(QualAnalysis* q, Node* n, int depth)
+{
+    if (n == null) { return; }
+    n.flags = n.flags & ~(pfront_core::NF_PURE_FN | pfront_core::NF_READONLY_PARAM | pfront_core::NF_QUALS_COMPLETE);
+    if (depth > QA_MAX_DEPTH) { q.complete = false; return; }
+    for (usz i = 0; i < n.child_count; i++) { q.clear_facts(n.children[i], depth + 1); }
+}
+
 // ── Body walk ───────────────────────────────────────────────────────────
 fn void QualAnalysis.scan(QualAnalysis* q, Node* n, int depth, bool in_return)
 {
-    if (n == null || depth > QA_MAX_DEPTH) { return; }
+    if (n == null) { return; }
+    if (depth > QA_MAX_DEPTH)
+    {
+        if (q.cur != null) { q.cur.complete = false; q.cur.escapes = 0xffffffffu; }
+        q.add_reason(R_UNKNOWN_CALL, n);
+        return;
+    }
     switch (n.kind)
     {
         case Nk.N_STMT_ASSIGN:
         case Nk.N_STMT_COMPOUND_ASSIGN:
         case Nk.N_EXPR_ASSIGN:
             if (n.child_count > 0) { q.on_write(n.children[0], n); }
-            for (usz i = 1; i < n.child_count; i++) { q.scan(n.children[i], depth + 1, false); }
+            // Storing any derived parameter value can expose address/provenance
+            // even when the destination is a different argument or local alias.
+            for (usz i = 1; i < n.child_count; i++)
+            {
+                q.escape_value(n.children[i], depth + 1);
+                q.scan(n.children[i], depth + 1, false);
+            }
             // the lhs sub-expressions (index expressions) are reads
             if (n.child_count > 0 && n.children[0] != null)
             {
                 Node* l = n.children[0];
-                for (usz i = 1; i < l.child_count; i++) { q.scan(l.children[i], depth + 1, false); }
+                for (usz i = 0; i < l.child_count; i++) { q.scan(l.children[i], depth + 1, false); }
             }
             return;
         case Nk.N_EXPR_REF:
@@ -629,7 +701,9 @@ fn void QualAnalysis.scan(QualAnalysis* q, Node* n, int depth, bool in_return)
         case Nk.N_EXPR_SYSCALL: case Nk.N_EXPR_ASM: case Nk.N_EXPR_ATOMIC:
         case Nk.N_EXPR_FENCE: case Nk.N_EXPR_VOLATILE: case Nk.N_EXPR_FREE:
         case Nk.N_EXPR_TRAP: case Nk.N_EXPR_UB: case Nk.N_EXPR_POISON:
+            q.cur.complete = false;
             q.add_reason(R_EFFECT, n);
+            q.cur.escapes = 0xffffffffu;
             break;
         case Nk.N_EXPR_ALLOC:
             q.add_reason(R_ALLOC, n);
@@ -638,10 +712,25 @@ fn void QualAnalysis.scan(QualAnalysis* q, Node* n, int depth, bool in_return)
             q.add_reason(R_LOOP, n);
             break;
         case Nk.N_STMT_RETURN:
-            for (usz i = 0; i < n.child_count; i++) { q.scan(n.children[i], depth + 1, true); }
+            for (usz i = 0; i < n.child_count; i++)
+            {
+                q.escape_value(n.children[i], depth + 1);
+                q.scan(n.children[i], depth + 1, true);
+            }
             return;
+        case Nk.N_DECL_FN:
+        {
+            // Named nested environments are not in this summary model. Even
+            // an escaping reference to the function can retain outer inputs.
+            q.cur.complete = false;
+            q.add_reason(R_UNKNOWN_CALL, n);
+            q.captures_escape(n, n, depth + 1);
+            return;
+        }
         case Nk.N_EXPR_LAMBDA:
         {
+            q.cur.complete = false;
+            q.add_reason(R_UNKNOWN_CALL, n);
             // a closure body runs as part of this function's effects (it
             // may be called here) — and every parameter it captures escapes
             for (usz i = 0; i < n.child_count; i++) { q.scan(n.children[i], depth + 1, false); }
@@ -665,14 +754,37 @@ fn void QualAnalysis.scan(QualAnalysis* q, Node* n, int depth, bool in_return)
             // `let x = param` — the alias escapes our tracking: treat as escape
             Node* init = n.child_count > 0 ? n.children[n.child_count - 1] : null;
             int pi = q.arg_param(init);
-            if (pi >= 0 && init != null && init.kind == Nk.N_EXPR_IDENT) { q.mark_escape(pi); }
+            // Do not lose aliases hidden under casts/conditionals/blocks.
+            q.escape_value(init, depth + 1);
             for (usz i = 0; i < n.child_count; i++) { q.scan(n.children[i], depth + 1, false); }
             return;
         }
         default:
+        {
+            if (pfront_core::is_expr(n.kind))
+            {
+                switch (n.kind)
+                {
+                    case Nk.N_EXPR_INT: case Nk.N_EXPR_FLOAT: case Nk.N_EXPR_BOOL:
+                    case Nk.N_EXPR_CHAR: case Nk.N_EXPR_STRING: case Nk.N_EXPR_BYTES:
+                    case Nk.N_EXPR_NULL: case Nk.N_EXPR_UNIT: case Nk.N_EXPR_PATH:
+                    case Nk.N_EXPR_SELF: case Nk.N_EXPR_BINARY: case Nk.N_EXPR_UNARY:
+                    case Nk.N_EXPR_FIELD: case Nk.N_EXPR_INDEX: case Nk.N_EXPR_DEREF:
+                    case Nk.N_EXPR_CAST: case Nk.N_EXPR_SLICE: case Nk.N_EXPR_RANGE:
+                    case Nk.N_EXPR_IF: case Nk.N_EXPR_MATCH:
+                    case Nk.N_EXPR_SIZEOF: case Nk.N_EXPR_ALIGNOF: case Nk.N_EXPR_OFFSETOF:
+                        break;
+                    default:
+                        q.cur.complete = false;
+                        q.cur.escapes = 0xffffffffu;
+                        q.add_reason(R_UNKNOWN_CALL, n);
+                }
+            }
             break;
+        }
     }
-    // tail-position expressions of a function body are returned
+    // Tail values can expose addresses through casts and either branch.
+    if (in_return) { q.escape_value(n, depth + 1); }
     bool tail = in_return;
     for (usz i = 0; i < n.child_count; i++)
     {
@@ -728,8 +840,10 @@ fn void QualAnalysis.fixpoint(QualAnalysis* q)
         q.n_calls_total = 0; q.n_calls_unknown = 0; q.n_edges = 0;
         for (usz i = 0; i < q.n_fns; i++) { q.analyse_fn(&q.fns[i]); }
         q.rounds = round + 1;
-        if (!q.changed) { break; }
+        if (!q.changed) { return; }
     }
+    // A truncated interprocedural propagation cannot authorize LLVM facts.
+    q.complete = false;
 }
 
 fn Qclass classify(uint r)
@@ -765,12 +879,15 @@ fn void QualAnalysis.verdicts(QualAnalysis* q)
         FnQ* f = &q.fns[i];
         f.cls = classify(f.reasons);
         if (f.is_extern) { f.cls = Qclass.Q_IMPURE; continue; }
+        if (!q.complete || !f.complete) { f.cls = Qclass.Q_UNKNOWN; q.n_unknown++; continue; }
+        f.decl.flags = f.decl.flags | pfront_core::NF_QUALS_COMPLETE;
         switch (f.cls)
         {
             case Qclass.Q_PURE: q.n_pure = q.n_pure + 1; break;
             case Qclass.Q_READONLY: q.n_readonly = q.n_readonly + 1; break;
             case Qclass.Q_ALLOC: q.n_alloc = q.n_alloc + 1; break;
             case Qclass.Q_IMPURE: q.n_impure = q.n_impure + 1; break;
+            case Qclass.Q_UNKNOWN: q.n_unknown++; break;
         }
         if ((f.reasons & R_DIVERGE_MASK) != 0) { q.n_diverge = q.n_diverge + 1; }
         if (f.cls == Qclass.Q_PURE || f.cls == Qclass.Q_READONLY)
@@ -818,7 +935,7 @@ fn void QualAnalysis.verdicts(QualAnalysis* q)
                 if (m != null)
                 {
                     uint pname = pn.name_id != 0 ? pn.name_id : (pn.child_count > 0 && pn.children[0] != null ? pn.children[0].name_id : 0);
-                    snprintf(m, 512, "pointer parameter `%s` is only read and never retained: callers may pass read-only memory (noalias readonly)", q.name(pname));
+                    snprintf(m, 512, "pointer parameter `%s` is not directly written or retained; other aliased arguments may still write the same memory", q.name(pname));
                     q.diags.note(pfront_core::Phase.PH_RESOLVE, 4223, pn.line, pn.col, m, q.file);
                     q.n_n4223 = q.n_n4223 + 1;
                 }
@@ -829,8 +946,8 @@ fn void QualAnalysis.verdicts(QualAnalysis* q)
             char* m = q.msgbuf();
             if (m != null)
             {
-                snprintf(m, 512, "`%s` is pure: its result depends only on its arguments%s", q.name(f.name),
-                         (f.reasons & R_DIVERGE_MASK) != 0 ? " (but it may not terminate)" : " (safe to memoise, reorder or drop when unused)");
+                snprintf(m, 512, "`%s` has no proven external writes; its result may depend on memory read through arguments%s", q.name(f.name),
+                         (f.reasons & R_DIVERGE_MASK) != 0 ? " (but it may not terminate)" : " (this is not a memoization or noalias proof)");
                 q.diags.note(pfront_core::Phase.PH_RESOLVE, 4222, f.decl.line, f.decl.col, m, q.file);
                 q.n_n4222 = q.n_n4222 + 1;
             }
@@ -905,8 +1022,8 @@ fn void QualAnalysis.check_discarded(QualAnalysis* q, Node* call)
     if (q.diags == null) { return; }
     char* m = q.msgbuf();
     if (m == null) { return; }
-    snprintf(m, 512, "the result of `%s` is discarded, and `%s` has no side effects: this call does nothing%s",
-             q.name(f.name), q.name(f.name), (f.reasons & R_DIVERGE_MASK) != 0 ? " (except possibly not terminating)" : "");
+    snprintf(m, 512, "the result of `%s` is discarded; analysis found no external writes in `%s`%s",
+             q.name(f.name), q.name(f.name), (f.reasons & R_DIVERGE_MASK) != 0 ? " (termination is not established)" : "");
     q.diags.warn(pfront_core::Phase.PH_RESOLVE, 4220, call.line, call.col, m, q.file);
     q.n_w4220 = q.n_w4220 + 1;
 }
@@ -916,9 +1033,12 @@ fn void QualAnalysis.walk(QualAnalysis* q, Node* root, int depth)
 {
     (void)depth;
     if (root == null) { return; }
+    q.clear_facts(root, 0);
+    if (q.fns == null) { q.complete = false; return; }
     q.collect(root, 0);
     q.fixpoint();
     q.verdicts();
+    if (q.complete) { root.flags = root.flags | pfront_core::NF_QUALS_COMPLETE; }
     q.unused_results(root, 0);
     for (usz i = 0; i < q.n_fns; i++)
     {
@@ -929,8 +1049,8 @@ fn void QualAnalysis.walk(QualAnalysis* q, Node* root, int depth)
 
 fn void QualAnalysis.report(QualAnalysis* q)
 {
-    printf("  quals            : %d fns in %d rounds: %d pure, %d read-only, %d allocating, %d impure (%d may diverge); %d call edges, %d unknown callees\n",
-           (int)q.n_fns, q.rounds, (int)q.n_pure, (int)q.n_readonly, (int)q.n_alloc, (int)q.n_impure, (int)q.n_diverge,
+    printf("  quals            : %d fns in %d rounds: %d no-write, %d globals-read, %d allocating, %d impure, %d unknown (%d may diverge); %d call edges, %d unknown callees\n",
+           (int)q.n_fns, q.rounds, (int)q.n_pure, (int)q.n_readonly, (int)q.n_alloc, (int)q.n_impure, (int)q.n_unknown, (int)q.n_diverge,
            (int)q.n_edges, (int)q.n_calls_unknown);
     printf("  quals-params     : %d parameters: %d read-only (flagged), %d written, %d escape; %d fns flagged pure\n",
            (int)q.n_params_total, (int)q.n_params_readonly, (int)q.n_params_written, (int)q.n_params_escape, (int)q.n_flag_pure);

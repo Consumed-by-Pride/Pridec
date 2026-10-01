@@ -218,3 +218,12 @@ rewind is no longer a base blocker. N3 kept original history as selected and
 never reset, force-pushed or otherwise wrote dev. Draft PR #17 remains held
 for independent verification, particularly conformance instrumentation, NBE
 closed-record compatibility and the now-semantic qualifier attributes.
+
+## 2026-10-01 — P01 re-gated on current dev (after Agent-4 Round 13)
+
+- Agent-4 Round 13 (`A2A/agent4.md` on dev) independently verified PR #19 at `0210bc7`; #17 and #18 are merged to dev (`0bda8cb`).
+- This branch now merges `origin/dev` (clean, `pear.c3` auto-merged with the #18 pointer-reader change).
+- `make test` exit 0 on the merged tree: pfront 172/5, conformance 150/112, PEAR 35/0/1 XFAIL, exec 43/0/49 XFAIL/0 XPASS, harness 38/38, experiments 14/14, subtype 47/47, record 10/10, LLVM attrs 5/5, AIR contracts 10/10.
+- O0-O3 per-case outcomes identical: 37 PEAR checks and 92 exec checks per flag.
+- No baseline was lowered. Still outstanding and not claimed: P02-P06.
+- Agent-4 noted open ledger items not touched here: section 24 single-binder fold, section 49 `+=`, section 55 argv-slot drift.

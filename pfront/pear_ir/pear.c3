@@ -606,6 +606,8 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
             }
             return r;
         }
+        case APRD_CHAR:
+            return ll_const_int(cg.i64ty, (ulong)p.ival, 0);
         case APRD_BOOL:
         {
             Lvalue bv = p.bval ? ll_const_int(cg.i1ty, 1, 0) : ll_const_int(cg.i1ty, 0, 0);
@@ -775,9 +777,9 @@ fn Lvalue PearCg.prd_i1(PearCg* cg, AirPrd* p)
 // we can lower without losing source semantics: distinct integer/character
 // literals, no guards, and an optional final wildcard or binding pattern. All
 // other patterns keep the existing conservative path.
-fn int PearCg.emit_dense_scalar_switch(PearCg* cg, Lvalue scrutinee, AirCns* k)
+fn int PearCg.emit_scalar_dispatch(PearCg* cg, Lvalue scrutinee, AirCns* k)
 {
-    if (k == null || !k.dense_switch || scrutinee == null
+    if (k == null || scrutinee == null
         || k.branch_count == 0 || k.branch_count > 64) { return -1; }
 
     int wildcard = -1;
@@ -832,14 +834,38 @@ fn int PearCg.emit_dense_scalar_switch(PearCg* cg, Lvalue scrutinee, AirCns* k)
         default_bb = ll_append_bb(cg.ctx, cg.cur_fn, &name[0]);
     }
 
-    Lvalue sw = ll_build_switch(cg.b, scrutinee, default_bb, literal_count);
-    cg.terminated = true;
-    for (uint i = 0; i < (uint)k.branch_count; i++)
+    // The theory hint chooses an implementation, never the semantics.
+    // The same validated scalar fragment has a correct ordered fallback.
+    if (k.dense_switch)
     {
-        if ((int)i == wildcard) { continue; }
-        AirPat* pat = k.branches[i].pat;
-        Lvalue cv = ll_const_int(cg.i64ty, (ulong)pat.ival, 1);
-        ll_add_case(sw, cv, targets[i]);
+        Lvalue sw = ll_build_switch(cg.b, scrutinee, default_bb, literal_count);
+        cg.terminated = true;
+        for (uint i = 0; i < (uint)k.branch_count; i++)
+        {
+            if ((int)i == wildcard) { continue; }
+            AirPat* pat = k.branches[i].pat;
+            ll_add_case(sw, ll_const_int(cg.i64ty, (ulong)pat.ival, 1), targets[i]);
+        }
+    }
+    else
+    {
+        uint remaining = literal_count;
+        for (uint i = 0; i < (uint)k.branch_count; i++)
+        {
+            if ((int)i == wildcard) { continue; }
+            remaining--;
+            Lblock next = default_bb;
+            if (remaining > 0)
+            {
+                char[256] name;
+                (void)snprintf(&name[0], 256, "case.test%u", cg.blk++);
+                next = ll_append_bb(cg.ctx, cg.cur_fn, &name[0]);
+            }
+            Lvalue key = ll_const_int(cg.i64ty, (ulong)k.branches[i].pat.ival, 1);
+            Lvalue equal = ll_build_icmp(cg.b, LLVM_ICMP_EQ, scrutinee, key, cg.mktmp());
+            ll_build_condbr(cg.b, equal, targets[i], next); cg.terminated = true;
+            if (remaining > 0) { ll_pos_builder(cg.b, next); cg.terminated = false; }
+        }
     }
 
     Lblock join_before = cg.cur_k_bb;
@@ -1221,7 +1247,7 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
         }
         case ACNS_CASE:
         {
-            int dense_result = cg.emit_dense_scalar_switch(v, k);
+            int dense_result = cg.emit_scalar_dispatch(v, k);
             if (dense_result >= 0) { return dense_result != 0; }
             // Boolean or pattern-matching dispatch. Bootstrap: handle the
             // 2-arm bool case used by if/while/for (true→…; false→…).
@@ -1836,12 +1862,13 @@ fn void pear_emit_fn(PearCg* cg, AirDecl* d)
     // @malloc didn't carry `allockind(\"alloc,...\")`, which let the
     // optimizer delete the malloc call, fold the store to NULL, and
     // segfault (movb $0x7,0x0). Re-enable once malloc carries the right
-    // allockind string attrs (see pear_setup).
+    // semantic allocation-kind attrs (see pear_setup).
     pear_tag_fn(cg, cg.cur_fn, LLVM_ATTR_NOUNWIND);
     // `memory(read)` means no writes to externally observable memory. This is
     // weaker than memory(none): pointer/global reads and divergence remain
     // legal, so the attribute does not claim termination or purity of values.
-    if (d.memory_readonly) { pear_tag_memory_read(cg, cg.cur_fn); }
+    if (d.fact_state == air_ir::AirFactState.AFACT_AIR_CHECKED && d.memory_readonly)
+    { pear_tag_memory_read(cg, cg.cur_fn); }
     pear_tag_captures_none_params(cg, cg.cur_fn, d);
     // nofree: only if the fn has no Alloc effect (conservative for now: OFF)
     // willreturn / nosync / mustprogress: OFF pending malloc fix.
@@ -1869,8 +1896,35 @@ fn void pear_declare(PearCg* cg, AirDecl* d)
 // ── Entry points ──────────────────────────────────────────────────────
 fn void pear_tag_fn(PearCg* cg, Lvalue fnv, int kind)
 {
-    Lvalue a = ll_create_enum_attr(cg.ctx, (uint)kind, 0);
-    ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, a);
+    char* name = null;
+    switch (kind)
+    {
+        case LLVM_ATTR_ALWAYSINLINE: name = (char*)"alwaysinline";
+        case LLVM_ATTR_COLD: name = (char*)"cold";
+        case LLVM_ATTR_CONVERGENT: name = (char*)"convergent";
+        case LLVM_ATTR_NOUNWIND: name = (char*)"nounwind";
+        case LLVM_ATTR_WILLRETURN: name = (char*)"willreturn";
+        case LLVM_ATTR_NOFREE: name = (char*)"nofree";
+        case LLVM_ATTR_NOSYNC: name = (char*)"nosync";
+        case LLVM_ATTR_NORECURSE: name = (char*)"norecurse";
+        case LLVM_ATTR_NOCALLBACK: name = (char*)"nocallback";
+        case LLVM_ATTR_MUSTPROGRESS: name = (char*)"mustprogress";
+        case LLVM_ATTR_SPECULATABLE: name = (char*)"speculatable";
+        default: return;
+    }
+    uint actual = ll_enum_attr_kind(name, (usz)air_ir::air_cstrlen(name));
+    if (actual == 0) { return; }
+    Lvalue a = ll_create_enum_attr(cg.ctx, actual, 0);
+    if (a != null) { ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, a); }
+}
+
+fn void pear_tag_alloc_kind(PearCg* cg, Lvalue fnv, ulong payload)
+{
+    if (cg == null || fnv == null) { return; }
+    uint kind = ll_enum_attr_kind((char*)"allockind", 9);
+    if (kind == 0) { return; }
+    Lvalue attr = ll_create_enum_attr(cg.ctx, kind, payload);
+    if (attr != null) { ll_add_attr_at_idx(fnv, LLVM_ATTR_FN_INDEX, attr); }
 }
 
 fn void pear_tag_memory_read(PearCg* cg, Lvalue fnv)
@@ -1894,7 +1948,7 @@ fn void pear_tag_memory_read(PearCg* cg, Lvalue fnv)
 // parameter is written. LLVM 23 spells the no-capture fact `captures(none)`.
 fn void pear_tag_captures_none_params(PearCg* cg, Lvalue fnv, AirDecl* d)
 {
-    if (cg == null || fnv == null || d == null) { return; }
+    if (cg == null || fnv == null || d == null || d.fact_state != air_ir::AirFactState.AFACT_AIR_CHECKED) { return; }
     for (usz i = 0; i < d.param_count && i < 64; i++)
     {
         AirBinder* p = d.params[i];
@@ -2008,25 +2062,15 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
         // memory). Without "allockind" the middle-end treats @malloc as
         // a black-box external and infers nofree/memory(none) on callers,
         // which deletes the call and folds stores to NULL → SIGSEGV.
-        // Lengths computed manually: "allockind"=9,
-        // "alloc,uninitialized"=19.
-        {
-            Lvalue sa = ll_create_string_attr(cg.ctx,
-                (char*)"allockind", 9u,
-                (char*)"alloc,uninitialized", 19u);
-            ll_add_attr_at_idx(cg.malloc_fn, LLVM_ATTR_FN_INDEX, sa);
-        }
+        // Semantic LLVM23 allocation kind, parser-verified payload 9:
+        // alloc | uninitialized. A quoted custom string is not this contract.
+        pear_tag_alloc_kind(cg, cg.malloc_fn, 9);
         // free(i8*) -> void: "allockind"="free" (4)
         Ltype[1] fa; fa[0] = i8p;
         Ltype ffty = ll_fn_ty(cg.voidty, &fa[0], 1, 0);
         cg.free_fn = ll_add_fn(m, (char*)"free", ffty);
         pear_tag_fn(cg, cg.free_fn, LLVM_ATTR_NOUNWIND);
-        {
-            Lvalue sa = ll_create_string_attr(cg.ctx,
-                (char*)"allockind", 9u,
-                (char*)"free", 4u);
-            ll_add_attr_at_idx(cg.free_fn, LLVM_ATTR_FN_INDEX, sa);
-        }
+        pear_tag_alloc_kind(cg, cg.free_fn, 4);
     }
 
     for (uint i = 0; i < mod.decl_count; i++)

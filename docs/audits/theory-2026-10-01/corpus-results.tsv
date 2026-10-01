@@ -1,0 +1,665 @@
+case	tier	theory	compiler_rc	errors	warnings	binary	native_shell_rc	status	known_xfail	compile_wall_s
+01_hello	0	True	0	0	0	True	0	XFAIL	True	0.8921697089999725
+01_hello	0	False	0	0	0	True	0	XFAIL	True	0.8797802300000512
+01_hello	1	True	0	0	0	True	0	XFAIL	True	0.8670463440003005
+01_hello	1	False	0	0	0	True	0	XFAIL	True	0.8657345360002182
+01_hello	2	True	0	0	0	True	0	XFAIL	True	0.895097633000205
+01_hello	2	False	0	0	0	True	0	XFAIL	True	0.8674605549999796
+01_hello	3	True	0	0	0	True	0	XFAIL	True	0.9100854089997483
+01_hello	3	False	0	0	0	True	0	XFAIL	True	0.9254637490003006
+02_fibonacci	0	True	0	0	0	True	0	XFAIL	True	0.7897387029997844
+02_fibonacci	0	False	0	0	0	True	0	XFAIL	True	0.7905136139997921
+02_fibonacci	1	True	0	0	0	True	0	XFAIL	True	0.873025102000156
+02_fibonacci	1	False	0	0	0	True	0	XFAIL	True	0.8319349270000203
+02_fibonacci	2	True	0	0	0	True	0	XFAIL	True	0.886646730999928
+02_fibonacci	2	False	0	0	0	True	0	XFAIL	True	0.8341570280003907
+02_fibonacci	3	True	0	0	0	True	0	XFAIL	True	0.9111784770002487
+02_fibonacci	3	False	0	0	0	True	0	XFAIL	True	0.9234023129997695
+03_primes_sieve	0	True	1	0	1	True	0	XFAIL	True	0.8247700310002983
+03_primes_sieve	0	False	0	0	0	True	0	XFAIL	True	0.8031143420002991
+03_primes_sieve	1	True	1	0	1	True	0	XFAIL	True	0.8596637819996431
+03_primes_sieve	1	False	0	0	0	True	0	XFAIL	True	0.8178762659999848
+03_primes_sieve	2	True	1	0	1	True	0	XFAIL	True	0.8117836009996608
+03_primes_sieve	2	False	0	0	0	True	0	XFAIL	True	0.8287281119996806
+03_primes_sieve	3	True	1	0	1	True	0	XFAIL	True	0.9165051540003333
+03_primes_sieve	3	False	0	0	0	True	0	XFAIL	True	0.9197283020002942
+04_dynamic_alloc	0	True	1	0	1	True	124	XFAIL	True	0.7905882390000443
+04_dynamic_alloc	0	False	0	0	0	True	124	XFAIL	True	0.7892966629997318
+04_dynamic_alloc	1	True	1	0	1	True	124	XFAIL	True	0.8669527829997605
+04_dynamic_alloc	1	False	0	0	0	True	124	XFAIL	True	0.8344119580001461
+04_dynamic_alloc	2	True	1	0	1	True	124	XFAIL	True	0.8727911359997051
+04_dynamic_alloc	2	False	0	0	0	True	124	XFAIL	True	0.8367979650001871
+04_dynamic_alloc	3	True	1	0	1	True	124	XFAIL	True	0.917109456000162
+04_dynamic_alloc	3	False	0	0	0	True	124	XFAIL	True	0.906088329999875
+05_mutual_recursion	0	True	0	0	0	True	0	XFAIL	True	0.8478333600000951
+05_mutual_recursion	0	False	0	0	0	True	0	XFAIL	True	0.8056915799998023
+05_mutual_recursion	1	True	0	0	0	True	0	XFAIL	True	0.8554886319998332
+05_mutual_recursion	1	False	0	0	0	True	0	XFAIL	True	0.8678084550001586
+05_mutual_recursion	2	True	0	0	0	True	0	XFAIL	True	0.9404726959996879
+05_mutual_recursion	2	False	0	0	0	True	0	XFAIL	True	0.8006764830001885
+05_mutual_recursion	3	True	0	0	0	True	0	XFAIL	True	0.8734488120003334
+05_mutual_recursion	3	False	0	0	0	True	0	XFAIL	True	0.947907946000214
+06_wrapping_ops	0	True	0	0	0	True	0	XFAIL	True	0.8342528630000743
+06_wrapping_ops	0	False	0	0	0	True	0	XFAIL	True	0.8359256369999457
+06_wrapping_ops	1	True	0	0	0	True	0	XFAIL	True	0.8385001599999669
+06_wrapping_ops	1	False	0	0	0	True	0	XFAIL	True	0.8220740909996493
+06_wrapping_ops	2	True	0	0	0	True	0	XFAIL	True	0.9209835960000419
+06_wrapping_ops	2	False	0	0	0	True	0	XFAIL	True	0.8716020589999971
+06_wrapping_ops	3	True	0	0	0	True	0	XFAIL	True	0.8902853720001076
+06_wrapping_ops	3	False	0	0	0	True	0	XFAIL	True	0.8431844169999749
+07_bitops	0	True	0	0	0	True	0	XFAIL	True	0.8461008119998041
+07_bitops	0	False	0	0	0	True	0	XFAIL	True	0.8261296440000478
+07_bitops	1	True	0	0	0	True	0	XFAIL	True	0.8277638760000627
+07_bitops	1	False	0	0	0	True	0	XFAIL	True	0.8302637920000961
+07_bitops	2	True	0	0	0	True	0	XFAIL	True	0.9245081399999435
+07_bitops	2	False	0	0	0	True	0	XFAIL	True	0.853504828000041
+07_bitops	3	True	0	0	0	True	0	XFAIL	True	0.9436829620003664
+07_bitops	3	False	0	0	0	True	0	XFAIL	True	0.8681546009997874
+08_pattern_match	0	True	0	0	0	True	0	XFAIL	True	0.86257378099981
+08_pattern_match	0	False	0	0	0	True	0	XFAIL	True	0.8048918449999292
+08_pattern_match	1	True	0	0	0	True	0	XFAIL	True	0.8622392430002037
+08_pattern_match	1	False	0	0	0	True	0	XFAIL	True	0.7836520300002121
+08_pattern_match	2	True	0	0	0	True	0	XFAIL	True	0.9106904509999367
+08_pattern_match	2	False	0	0	0	True	0	XFAIL	True	0.8469498330000533
+08_pattern_match	3	True	0	0	0	True	0	XFAIL	True	0.8973398049997741
+08_pattern_match	3	False	0	0	0	True	0	XFAIL	True	0.899378500000239
+09_higher_order	0	True	2	1	0	False		XFAIL	True	0.10125354599995262
+09_higher_order	0	False	2	1	0	False		XFAIL	True	0.05969390600012048
+09_higher_order	1	True	2	1	0	False		XFAIL	True	0.09589742499974818
+09_higher_order	1	False	2	1	0	False		XFAIL	True	0.06336569399991276
+09_higher_order	2	True	2	1	0	False		XFAIL	True	0.10210236600005373
+09_higher_order	2	False	2	1	0	False		XFAIL	True	0.0690779379997366
+09_higher_order	3	True	2	1	0	False		XFAIL	True	0.09940518100029294
+09_higher_order	3	False	2	1	0	False		XFAIL	True	0.06784441000036168
+10_fnv1a	0	True	0	0	0	True	0	XFAIL	True	0.8926707589998841
+10_fnv1a	0	False	0	0	0	True	0	XFAIL	True	0.7756848779999928
+10_fnv1a	1	True	0	0	0	True	0	XFAIL	True	0.8660973999999442
+10_fnv1a	1	False	0	0	0	True	0	XFAIL	True	0.8293857869998646
+10_fnv1a	2	True	0	0	0	True	0	XFAIL	True	0.8949078880000343
+10_fnv1a	2	False	0	0	0	True	0	XFAIL	True	0.8561433919999217
+10_fnv1a	3	True	0	0	0	True	0	XFAIL	True	0.8657338250000066
+10_fnv1a	3	False	0	0	0	True	0	XFAIL	True	0.8297398319996319
+11_step_ranges	0	True	0	0	0	True	124	XFAIL	True	0.8646259529996314
+11_step_ranges	0	False	0	0	0	True	124	XFAIL	True	0.8280409250000957
+11_step_ranges	1	True	0	0	0	True	124	XFAIL	True	0.821754134999992
+11_step_ranges	1	False	0	0	0	True	124	XFAIL	True	0.8266759769999226
+11_step_ranges	2	True	0	0	0	True	124	XFAIL	True	0.8836141779997888
+11_step_ranges	2	False	0	0	0	True	124	XFAIL	True	0.8858999079998284
+11_step_ranges	3	True	0	0	0	True	124	XFAIL	True	0.9787209910000456
+11_step_ranges	3	False	0	0	0	True	124	XFAIL	True	0.8978311559999383
+12_struct_ops	0	True	0	0	0	True	0	XFAIL	True	0.8921566930002882
+12_struct_ops	0	False	0	0	0	True	0	XFAIL	True	0.846373020000101
+12_struct_ops	1	True	0	0	0	True	0	XFAIL	True	0.849548175000109
+12_struct_ops	1	False	0	0	0	True	0	XFAIL	True	0.7826985800002149
+12_struct_ops	2	True	0	0	0	True	0	XFAIL	True	0.92644647599991
+12_struct_ops	2	False	0	0	0	True	0	XFAIL	True	0.8943844020000142
+12_struct_ops	3	True	0	0	0	True	0	XFAIL	True	0.942981884999881
+12_struct_ops	3	False	0	0	0	True	0	XFAIL	True	0.8846301290000156
+13_irdl_lowering	0	True	2	7	0	False		XFAIL	True	0.06531817799987039
+13_irdl_lowering	0	False	2	7	0	False		XFAIL	True	0.06783798300011767
+13_irdl_lowering	1	True	2	7	0	False		XFAIL	True	0.0651826909997908
+13_irdl_lowering	1	False	2	7	0	False		XFAIL	True	0.06626922999976159
+13_irdl_lowering	2	True	2	7	0	False		XFAIL	True	0.08339226099997177
+13_irdl_lowering	2	False	2	7	0	False		XFAIL	True	0.05868252699974619
+13_irdl_lowering	3	True	2	7	0	False		XFAIL	True	0.08495123300008345
+13_irdl_lowering	3	False	2	7	0	False		XFAIL	True	0.06101892999959091
+14_effects	0	True	0	0	0	True	0	XFAIL	True	0.8201208820000829
+14_effects	0	False	0	0	0	True	0	XFAIL	True	0.8314433610003107
+14_effects	1	True	0	0	0	True	0	XFAIL	True	0.8528038639997249
+14_effects	1	False	0	0	0	True	0	XFAIL	True	0.8266613970004073
+14_effects	2	True	0	0	0	True	0	XFAIL	True	0.8594493330001569
+14_effects	2	False	0	0	0	True	0	XFAIL	True	0.8624310700001843
+14_effects	3	True	0	0	0	True	0	XFAIL	True	0.9014412110000194
+14_effects	3	False	0	0	0	True	0	XFAIL	True	0.8618890230000034
+15_ub_explicit	0	True	2	2	2	False		XFAIL	True	0.0762680799998634
+15_ub_explicit	0	False	0	0	0	True	0	XFAIL	True	0.7819033450000461
+15_ub_explicit	1	True	2	2	2	False		XFAIL	True	0.0914833249998992
+15_ub_explicit	1	False	0	0	0	True	0	XFAIL	True	0.7551770569998553
+15_ub_explicit	2	True	2	2	2	False		XFAIL	True	0.08780077900019023
+15_ub_explicit	2	False	0	0	0	True	0	XFAIL	True	0.821934962999876
+15_ub_explicit	3	True	2	2	2	False		XFAIL	True	0.08813114799977484
+15_ub_explicit	3	False	0	0	0	True	0	XFAIL	True	0.8415529089998017
+16_semantic_subtyping	0	True	0	0	0	True	0	XFAIL	True	0.7881109310001193
+16_semantic_subtyping	0	False	0	0	0	True	0	XFAIL	True	0.7745476350000899
+16_semantic_subtyping	1	True	0	0	0	True	0	XFAIL	True	0.8275726749998285
+16_semantic_subtyping	1	False	0	0	0	True	0	XFAIL	True	0.7782300980002219
+16_semantic_subtyping	2	True	0	0	0	True	0	XFAIL	True	0.8545149040000979
+16_semantic_subtyping	2	False	0	0	0	True	0	XFAIL	True	0.8325982979999935
+16_semantic_subtyping	3	True	0	0	0	True	0	XFAIL	True	0.8362756940000509
+16_semantic_subtyping	3	False	0	0	0	True	0	XFAIL	True	0.8499317710002288
+17_pgen_patterns	0	True	0	0	0	True	0	XFAIL	True	0.7977891890000137
+17_pgen_patterns	0	False	0	0	0	True	0	XFAIL	True	0.8021521059999941
+17_pgen_patterns	1	True	0	0	0	True	0	XFAIL	True	0.8741259790003824
+17_pgen_patterns	1	False	0	0	0	True	0	XFAIL	True	0.7843301029997747
+17_pgen_patterns	2	True	0	0	0	True	0	XFAIL	True	0.9813316320000922
+17_pgen_patterns	2	False	0	0	0	True	0	XFAIL	True	0.9018484079997506
+17_pgen_patterns	3	True	0	0	0	True	0	XFAIL	True	0.9327065679999578
+17_pgen_patterns	3	False	0	0	0	True	0	XFAIL	True	0.8755676200003109
+18_sasi_refinement	0	True	0	0	0	True	0	XFAIL	True	0.874351225999817
+18_sasi_refinement	0	False	0	0	0	True	0	XFAIL	True	0.7856276940001408
+18_sasi_refinement	1	True	0	0	0	True	0	XFAIL	True	0.8529596539997328
+18_sasi_refinement	1	False	0	0	0	True	0	XFAIL	True	0.8014043199996195
+18_sasi_refinement	2	True	0	0	0	True	0	XFAIL	True	0.883629929000108
+18_sasi_refinement	2	False	0	0	0	True	0	XFAIL	True	0.8737851020000562
+18_sasi_refinement	3	True	0	0	0	True	0	XFAIL	True	0.9051859569999579
+18_sasi_refinement	3	False	0	0	0	True	0	XFAIL	True	0.886679759999879
+20_struct_array_field_ops	0	True	0	0	0	True	0	XFAIL	True	0.8511911639998289
+20_struct_array_field_ops	0	False	0	0	0	True	0	XFAIL	True	0.8272098430002188
+20_struct_array_field_ops	1	True	0	0	0	True	0	XFAIL	True	0.8420123619998776
+20_struct_array_field_ops	1	False	0	0	0	True	0	XFAIL	True	0.8403635059999033
+20_struct_array_field_ops	2	True	0	0	0	True	0	XFAIL	True	0.8967250910000075
+20_struct_array_field_ops	2	False	0	0	0	True	0	XFAIL	True	0.8837579020000703
+20_struct_array_field_ops	3	True	0	0	0	True	0	XFAIL	True	0.9304966400000012
+20_struct_array_field_ops	3	False	0	0	0	True	0	XFAIL	True	0.8838331189999735
+21_array_of_structs	0	True	0	0	0	True	0	XFAIL	True	0.8701320529999066
+21_array_of_structs	0	False	0	0	0	True	0	XFAIL	True	0.7930749410002136
+21_array_of_structs	1	True	0	0	0	True	0	XFAIL	True	0.8912429599999996
+21_array_of_structs	1	False	0	0	0	True	0	XFAIL	True	0.801615313000184
+21_array_of_structs	2	True	0	0	0	True	0	XFAIL	True	0.9062985299997308
+21_array_of_structs	2	False	0	0	0	True	0	XFAIL	True	0.9415246460002891
+21_array_of_structs	3	True	0	0	0	True	0	XFAIL	True	0.9043002430003071
+21_array_of_structs	3	False	0	0	0	True	0	XFAIL	True	0.8956064049998531
+22_generic_struct_arrays	0	True	0	0	0	True	0	XFAIL	True	0.8690708560002349
+22_generic_struct_arrays	0	False	0	0	0	True	0	XFAIL	True	0.7835278269999435
+22_generic_struct_arrays	1	True	0	0	0	True	0	XFAIL	True	0.8388018939999711
+22_generic_struct_arrays	1	False	0	0	0	True	0	XFAIL	True	0.8356021909999072
+22_generic_struct_arrays	2	True	0	0	0	True	0	XFAIL	True	0.9292523580002126
+22_generic_struct_arrays	2	False	0	0	0	True	0	XFAIL	True	0.8878345960001752
+22_generic_struct_arrays	3	True	0	0	0	True	0	XFAIL	True	0.8818342650001796
+22_generic_struct_arrays	3	False	0	0	0	True	0	XFAIL	True	0.8824202809996677
+23_array_rebind_loop	0	True	0	0	0	True	124	XFAIL	True	0.8442456489997312
+23_array_rebind_loop	0	False	0	0	0	True	124	XFAIL	True	0.8110080070000549
+23_array_rebind_loop	1	True	0	0	0	True	124	XFAIL	True	0.8567378759998974
+23_array_rebind_loop	1	False	0	0	0	True	124	XFAIL	True	0.7845927999997002
+23_array_rebind_loop	2	True	0	0	0	True	124	XFAIL	True	0.9421208800004024
+23_array_rebind_loop	2	False	0	0	0	True	124	XFAIL	True	0.9591120300001421
+23_array_rebind_loop	3	True	0	0	0	True	124	XFAIL	True	0.9010014109999247
+23_array_rebind_loop	3	False	0	0	0	True	124	XFAIL	True	0.9598075409999183
+24_str_fields	0	True	2	1	0	False		XFAIL	True	0.10080603500000507
+24_str_fields	0	False	2	1	0	False		XFAIL	True	0.060387317999811785
+24_str_fields	1	True	2	1	0	False		XFAIL	True	0.08727704599959907
+24_str_fields	1	False	2	1	0	False		XFAIL	True	0.059175508999942394
+24_str_fields	2	True	2	1	0	False		XFAIL	True	0.08848621199967965
+24_str_fields	2	False	2	1	0	False		XFAIL	True	0.05805729200028509
+24_str_fields	3	True	2	1	0	False		XFAIL	True	0.08043695900005332
+24_str_fields	3	False	2	1	0	False		XFAIL	True	0.05944997400001739
+25_effect_resume_value	0	True	2	1	1	False		XFAIL	True	0.08784887299998445
+25_effect_resume_value	0	False	2	1	1	False		XFAIL	True	0.05338537499983431
+25_effect_resume_value	1	True	2	1	1	False		XFAIL	True	0.08210680999991382
+25_effect_resume_value	1	False	2	1	1	False		XFAIL	True	0.05279209099990112
+25_effect_resume_value	2	True	2	1	1	False		XFAIL	True	0.0790043520000836
+25_effect_resume_value	2	False	2	1	1	False		XFAIL	True	0.05336937799984298
+25_effect_resume_value	3	True	2	1	1	False		XFAIL	True	0.07484848300009617
+25_effect_resume_value	3	False	2	1	1	False		XFAIL	True	0.05264878800016959
+26_union_cell_writes	0	True	0	0	0	True	0	XFAIL	True	0.8802664639997602
+26_union_cell_writes	0	False	0	0	0	True	0	XFAIL	True	0.7508486440001434
+26_union_cell_writes	1	True	0	0	0	True	0	XFAIL	True	0.8495366920001288
+26_union_cell_writes	1	False	0	0	0	True	0	XFAIL	True	0.8377803619996484
+26_union_cell_writes	2	True	0	0	0	True	0	XFAIL	True	0.9019678330000716
+26_union_cell_writes	2	False	0	0	0	True	0	XFAIL	True	0.8764636999999311
+26_union_cell_writes	3	True	0	0	0	True	0	XFAIL	True	0.9044640440001785
+26_union_cell_writes	3	False	0	0	0	True	0	XFAIL	True	0.8742933489997995
+27_effect_poly_forward	0	True	2	3	2	False		XFAIL	True	0.0841655310000533
+27_effect_poly_forward	0	False	2	3	2	False		XFAIL	True	0.05760307599985026
+27_effect_poly_forward	1	True	2	3	2	False		XFAIL	True	0.08259011900008772
+27_effect_poly_forward	1	False	2	3	2	False		XFAIL	True	0.05613883799969699
+27_effect_poly_forward	2	True	2	3	2	False		XFAIL	True	0.08769603799964898
+27_effect_poly_forward	2	False	2	3	2	False		XFAIL	True	0.0577382450001096
+27_effect_poly_forward	3	True	2	3	2	False		XFAIL	True	0.08680177699989144
+27_effect_poly_forward	3	False	2	3	2	False		XFAIL	True	0.05251702399982605
+28_tensor_contraction	0	True	2	9	0	False		XFAIL	True	0.0809821920001923
+28_tensor_contraction	0	False	2	9	0	False		XFAIL	True	0.04765755700009322
+28_tensor_contraction	1	True	2	9	0	False		XFAIL	True	0.0779680739997275
+28_tensor_contraction	1	False	2	9	0	False		XFAIL	True	0.05005133600025147
+28_tensor_contraction	2	True	2	9	0	False		XFAIL	True	0.08455903100002615
+28_tensor_contraction	2	False	2	9	0	False		XFAIL	True	0.051008185999762645
+28_tensor_contraction	3	True	2	9	0	False		XFAIL	True	0.08650325700000394
+28_tensor_contraction	3	False	2	9	0	False		XFAIL	True	0.058118772999932844
+29_inline_if	0	True	0	0	0	True	0	XFAIL	True	0.8345186609999473
+29_inline_if	0	False	0	0	0	True	0	XFAIL	True	0.8473651930003143
+29_inline_if	1	True	0	0	0	True	0	XFAIL	True	0.835719440000048
+29_inline_if	1	False	0	0	0	True	0	XFAIL	True	0.8337676979999742
+29_inline_if	2	True	0	0	0	True	0	XFAIL	True	0.9533964649999689
+29_inline_if	2	False	0	0	0	True	0	XFAIL	True	0.9122157680003511
+29_inline_if	3	True	0	0	0	True	0	XFAIL	True	0.9249860260001697
+29_inline_if	3	False	0	0	0	True	0	XFAIL	True	0.8875938850001148
+30_enum_ctor_match	0	True	2	2	18	False		XFAIL	True	0.07780219100004615
+30_enum_ctor_match	0	False	2	2	12	False		XFAIL	True	0.06489078000004156
+30_enum_ctor_match	1	True	2	2	18	False		XFAIL	True	0.0816127719999713
+30_enum_ctor_match	1	False	2	2	12	False		XFAIL	True	0.059275496000282146
+30_enum_ctor_match	2	True	2	2	18	False		XFAIL	True	0.08328721999987465
+30_enum_ctor_match	2	False	2	2	12	False		XFAIL	True	0.06101837799997156
+30_enum_ctor_match	3	True	2	2	18	False		XFAIL	True	0.08333397200021864
+30_enum_ctor_match	3	False	2	2	12	False		XFAIL	True	0.06416588199999751
+31_defer_fn_scope	0	True	0	0	0	True	0	XFAIL	True	0.8863263859998369
+31_defer_fn_scope	0	False	0	0	0	True	0	XFAIL	True	0.8382187269999122
+31_defer_fn_scope	1	True	0	0	0	True	0	XFAIL	True	0.7830555730001834
+31_defer_fn_scope	1	False	0	0	0	True	0	XFAIL	True	0.8757114069999261
+31_defer_fn_scope	2	True	0	0	0	True	0	XFAIL	True	0.9898392439999952
+31_defer_fn_scope	2	False	0	0	0	True	0	XFAIL	True	0.8367928379998375
+31_defer_fn_scope	3	True	0	0	0	True	0	XFAIL	True	0.9662958829999297
+31_defer_fn_scope	3	False	0	0	0	True	0	XFAIL	True	0.9748953500002244
+32_enum_clauses	0	True	1	0	3	True	0	XFAIL	True	0.871135127999878
+32_enum_clauses	0	False	1	0	2	True	0	XFAIL	True	0.8029314329996851
+32_enum_clauses	1	True	1	0	3	True	0	XFAIL	True	0.8828176799997891
+32_enum_clauses	1	False	1	0	2	True	0	XFAIL	True	0.791274458999851
+32_enum_clauses	2	True	1	0	3	True	0	XFAIL	True	0.9804304839999531
+32_enum_clauses	2	False	1	0	2	True	0	XFAIL	True	0.9056847510000807
+32_enum_clauses	3	True	1	0	3	True	0	XFAIL	True	0.8741343380002036
+32_enum_clauses	3	False	1	0	2	True	0	XFAIL	True	0.9204947739999625
+33_slice_fn_param	0	True	0	0	0	True	0	XFAIL	True	0.8632632589997229
+33_slice_fn_param	0	False	0	0	0	True	0	XFAIL	True	0.8234157629999572
+33_slice_fn_param	1	True	0	0	0	True	0	XFAIL	True	0.8139861399999972
+33_slice_fn_param	1	False	0	0	0	True	0	XFAIL	True	0.823952136999651
+33_slice_fn_param	2	True	0	0	0	True	0	XFAIL	True	0.8485775619997185
+33_slice_fn_param	2	False	0	0	0	True	0	XFAIL	True	0.9074575540003025
+33_slice_fn_param	3	True	0	0	0	True	0	XFAIL	True	0.9927637620003225
+33_slice_fn_param	3	False	0	0	0	True	0	XFAIL	True	0.9447122710002986
+34_slice_let_decay	0	True	0	0	0	True	0	XFAIL	True	0.8379458869999326
+34_slice_let_decay	0	False	0	0	0	True	0	XFAIL	True	0.8276172659998338
+34_slice_let_decay	1	True	0	0	0	True	0	XFAIL	True	0.8164055820002432
+34_slice_let_decay	1	False	0	0	0	True	0	XFAIL	True	0.8146959230002722
+34_slice_let_decay	2	True	0	0	0	True	0	XFAIL	True	0.9346049260002474
+34_slice_let_decay	2	False	0	0	0	True	0	XFAIL	True	0.9110723839999082
+34_slice_let_decay	3	True	0	0	0	True	0	XFAIL	True	0.9317401499997686
+34_slice_let_decay	3	False	0	0	0	True	0	XFAIL	True	0.9439399299999423
+35_str_fn_param_len	0	True	2	2	0	False		XFAIL	True	0.08888179099994886
+35_str_fn_param_len	0	False	2	2	0	False		XFAIL	True	0.08218434799982788
+35_str_fn_param_len	1	True	2	2	0	False		XFAIL	True	0.04685331199971188
+35_str_fn_param_len	1	False	2	2	0	False		XFAIL	True	0.058938491999924736
+35_str_fn_param_len	2	True	2	2	0	False		XFAIL	True	0.07202847399958046
+35_str_fn_param_len	2	False	2	2	0	False		XFAIL	True	0.06621930199980852
+35_str_fn_param_len	3	True	2	2	0	False		XFAIL	True	0.08042292999971323
+35_str_fn_param_len	3	False	2	2	0	False		XFAIL	True	0.05302687799985506
+36_slice_elem_store	0	True	0	0	0	True	0	XFAIL	True	0.8071410860002288
+36_slice_elem_store	0	False	0	0	0	True	0	XFAIL	True	0.8471233679997567
+36_slice_elem_store	1	True	0	0	0	True	0	XFAIL	True	0.7923510099999476
+36_slice_elem_store	1	False	0	0	0	True	0	XFAIL	True	0.8064798089999385
+36_slice_elem_store	2	True	0	0	0	True	0	XFAIL	True	0.8927391130000615
+36_slice_elem_store	2	False	0	0	0	True	0	XFAIL	True	0.9898673839998082
+36_slice_elem_store	3	True	0	0	0	True	0	XFAIL	True	1.0831454780000058
+36_slice_elem_store	3	False	0	0	0	True	0	XFAIL	True	0.8716406490002555
+37_slice_multi	0	True	0	0	0	True	0	XFAIL	True	0.8713564489999044
+37_slice_multi	0	False	0	0	0	True	0	XFAIL	True	0.8055788410001696
+37_slice_multi	1	True	0	0	0	True	0	XFAIL	True	0.854974224000216
+37_slice_multi	1	False	0	0	0	True	0	XFAIL	True	0.8654829079996489
+37_slice_multi	2	True	0	0	0	True	0	XFAIL	True	0.9229986930004088
+37_slice_multi	2	False	0	0	0	True	0	XFAIL	True	0.8632041500000014
+37_slice_multi	3	True	0	0	0	True	0	XFAIL	True	0.8870883740000863
+37_slice_multi	3	False	0	0	0	True	0	XFAIL	True	0.9742654599999696
+38_slice_from_struct_field	0	True	0	0	0	True	0	XFAIL	True	0.9060111160001725
+38_slice_from_struct_field	0	False	0	0	0	True	0	XFAIL	True	0.7392772849998437
+38_slice_from_struct_field	1	True	0	0	0	True	0	XFAIL	True	0.8403909150001709
+38_slice_from_struct_field	1	False	0	0	0	True	0	XFAIL	True	0.9556483589999516
+38_slice_from_struct_field	2	True	0	0	0	True	0	XFAIL	True	0.9286850620001132
+38_slice_from_struct_field	2	False	0	0	0	True	0	XFAIL	True	0.9652842000000419
+38_slice_from_struct_field	3	True	0	0	0	True	0	XFAIL	True	0.9226711890000843
+38_slice_from_struct_field	3	False	0	0	0	True	0	XFAIL	True	0.9196943339998143
+39_mutable_globals	0	True	139			False		XFAIL	True	0.9846516960001281
+39_mutable_globals	0	False	-11			False		XFAIL	True	0.17399010799999814
+39_mutable_globals	1	True	139			False		XFAIL	True	0.8065643899999486
+39_mutable_globals	1	False	-11			False		XFAIL	True	0.1502867789999982
+39_mutable_globals	2	True	139			False		XFAIL	True	0.791884134999691
+39_mutable_globals	2	False	-11			False		XFAIL	True	0.15275957200037737
+39_mutable_globals	3	True	139			False		XFAIL	True	0.8234353009997903
+39_mutable_globals	3	False	-11			False		XFAIL	True	0.20374903999982052
+40_vec_algorithms	0	True	1	0	2	True	0	XFAIL	True	0.8969670829997085
+40_vec_algorithms	0	False	0	0	0	True	0	XFAIL	True	0.8728291120000904
+40_vec_algorithms	1	True	1	0	2	True	0	XFAIL	True	0.8180778820001251
+40_vec_algorithms	1	False	0	0	0	True	0	XFAIL	True	0.8319754700000885
+40_vec_algorithms	2	True	1	0	2	True	0	XFAIL	True	0.9653103890000239
+40_vec_algorithms	2	False	0	0	0	True	0	XFAIL	True	0.889772709999761
+40_vec_algorithms	3	True	1	0	2	True	0	XFAIL	True	0.9574126000002252
+40_vec_algorithms	3	False	0	0	0	True	0	XFAIL	True	0.8523927850001201
+41_str_utf8_split	0	True	0	0	0	True	0	XFAIL	True	0.857216286000039
+41_str_utf8_split	0	False	0	0	0	True	0	XFAIL	True	0.8180783630000406
+41_str_utf8_split	1	True	0	0	0	True	0	XFAIL	True	0.8740496360001089
+41_str_utf8_split	1	False	0	0	0	True	0	XFAIL	True	0.8526132289998714
+41_str_utf8_split	2	True	0	0	0	True	0	XFAIL	True	0.8863918010001726
+41_str_utf8_split	2	False	0	0	0	True	0	XFAIL	True	0.9476923900001566
+41_str_utf8_split	3	True	0	0	0	True	0	XFAIL	True	0.951233140000113
+41_str_utf8_split	3	False	0	0	0	True	0	XFAIL	True	0.8862224700001207
+42_math_complex_vecmath	0	True	0	0	0	True	0	XFAIL	True	0.8375568240003304
+42_math_complex_vecmath	0	False	0	0	0	True	0	XFAIL	True	0.7643862690001697
+42_math_complex_vecmath	1	True	0	0	0	True	0	XFAIL	True	0.8556052480003018
+42_math_complex_vecmath	1	False	0	0	0	True	0	XFAIL	True	0.8164526310001747
+42_math_complex_vecmath	2	True	0	0	0	True	0	XFAIL	True	0.9253968369998802
+42_math_complex_vecmath	2	False	0	0	0	True	0	XFAIL	True	0.8471376049997161
+42_math_complex_vecmath	3	True	0	0	0	True	0	XFAIL	True	0.8939590479999424
+42_math_complex_vecmath	3	False	0	0	0	True	0	XFAIL	True	0.8605636739998772
+43_time_calendar_stopwatch	0	True	0	0	0	True	0	XFAIL	True	0.8271428619996186
+43_time_calendar_stopwatch	0	False	0	0	0	True	0	XFAIL	True	0.8117118860000119
+43_time_calendar_stopwatch	1	True	0	0	0	True	0	XFAIL	True	0.8262814019999496
+43_time_calendar_stopwatch	1	False	0	0	0	True	0	XFAIL	True	0.8368636699997296
+43_time_calendar_stopwatch	2	True	0	0	0	True	0	XFAIL	True	1.0495331400002215
+43_time_calendar_stopwatch	2	False	0	0	0	True	0	XFAIL	True	0.9282336880000912
+43_time_calendar_stopwatch	3	True	0	0	0	True	0	XFAIL	True	0.9405893719999767
+43_time_calendar_stopwatch	3	False	0	0	0	True	0	XFAIL	True	0.9885034100002486
+44_hybrid_scoped_effects	0	True	2	1	1	False		XFAIL	True	0.09644971099987742
+44_hybrid_scoped_effects	0	False	2	1	1	False		XFAIL	True	0.08416585099985241
+44_hybrid_scoped_effects	1	True	2	1	1	False		XFAIL	True	0.09959699299997737
+44_hybrid_scoped_effects	1	False	2	1	1	False		XFAIL	True	0.033715403999849514
+44_hybrid_scoped_effects	2	True	2	1	1	False		XFAIL	True	0.0789689820003332
+44_hybrid_scoped_effects	2	False	2	1	1	False		XFAIL	True	0.05352225700016788
+44_hybrid_scoped_effects	3	True	2	1	1	False		XFAIL	True	0.08723717600014425
+44_hybrid_scoped_effects	3	False	2	1	1	False		XFAIL	True	0.06458049399998345
+45_hose_async_concurrency	0	True	2	1	1	False		XFAIL	True	0.08895072800032722
+45_hose_async_concurrency	0	False	2	1	1	False		XFAIL	True	0.06153646399980062
+45_hose_async_concurrency	1	True	2	1	1	False		XFAIL	True	0.0816235450001841
+45_hose_async_concurrency	1	False	2	1	1	False		XFAIL	True	0.06215677999989566
+45_hose_async_concurrency	2	True	2	1	1	False		XFAIL	True	0.0892349569999169
+45_hose_async_concurrency	2	False	2	1	1	False		XFAIL	True	0.06299565400013307
+45_hose_async_concurrency	3	True	2	1	1	False		XFAIL	True	0.10177433000035307
+45_hose_async_concurrency	3	False	2	1	1	False		XFAIL	True	0.055204944999786676
+46_mlcee_contextual_effects	0	True	2	1	0	False		XFAIL	True	0.0957034919997568
+46_mlcee_contextual_effects	0	False	2	1	0	False		XFAIL	True	0.06684849800012671
+46_mlcee_contextual_effects	1	True	2	1	0	False		XFAIL	True	0.09729458999981944
+46_mlcee_contextual_effects	1	False	2	1	0	False		XFAIL	True	0.0673205909997705
+46_mlcee_contextual_effects	2	True	2	1	0	False		XFAIL	True	0.08769503499979692
+46_mlcee_contextual_effects	2	False	2	1	0	False		XFAIL	True	0.058291227999689
+46_mlcee_contextual_effects	3	True	2	1	0	False		XFAIL	True	0.10613166499979343
+46_mlcee_contextual_effects	3	False	2	1	0	False		XFAIL	True	0.06005950799999482
+47_algebraic_identities	0	True	0	0	0	True	0	XFAIL	True	0.8878647790002105
+47_algebraic_identities	0	False	0	0	0	True	0	XFAIL	True	0.9244349799996598
+47_algebraic_identities	1	True	0	0	0	True	0	XFAIL	True	0.9810807779999777
+47_algebraic_identities	1	False	0	0	0	True	0	XFAIL	True	0.8329017870000825
+47_algebraic_identities	2	True	0	0	0	True	0	XFAIL	True	0.9097543039997618
+47_algebraic_identities	2	False	0	0	0	True	0	XFAIL	True	0.8730813580000358
+47_algebraic_identities	3	True	0	0	0	True	0	XFAIL	True	0.8851294990004135
+47_algebraic_identities	3	False	0	0	0	True	0	XFAIL	True	0.8107333719999588
+n3_compound_loop	0	True	0	0	0	True	124	XFAIL	True	0.8307486060002702
+n3_compound_loop	0	False	0	0	0	True	124	XFAIL	True	0.8612922990000698
+n3_compound_loop	1	True	0	0	0	True	124	XFAIL	True	0.8715924879998056
+n3_compound_loop	1	False	0	0	0	True	124	XFAIL	True	0.7903381219998664
+n3_compound_loop	2	True	0	0	0	True	124	XFAIL	True	0.9467281299998831
+n3_compound_loop	2	False	0	0	0	True	124	XFAIL	True	0.8773275300000023
+n3_compound_loop	3	True	0	0	0	True	124	XFAIL	True	0.9360680760000832
+n3_compound_loop	3	False	0	0	0	True	124	XFAIL	True	0.896362321000197
+pear/p01_return_42	0	True	0	0	0	True	42	PASS	False	0.8648151229999712
+pear/p01_return_42	0	False	0	0	0	True	42	PASS	False	0.8262481040001148
+pear/p01_return_42	1	True	0	0	0	True	42	PASS	False	0.9126564130001498
+pear/p01_return_42	1	False	0	0	0	True	42	PASS	False	0.873657170000115
+pear/p01_return_42	2	True	0	0	0	True	42	PASS	False	0.8735648719998608
+pear/p01_return_42	2	False	0	0	0	True	42	PASS	False	0.9001193280000734
+pear/p01_return_42	3	True	0	0	0	True	42	PASS	False	0.9433487390001574
+pear/p01_return_42	3	False	0	0	0	True	42	PASS	False	0.9231811960003142
+pear/p02_arith	0	True	0	0	0	True	42	PASS	False	0.8116532359999837
+pear/p02_arith	0	False	0	0	0	True	42	PASS	False	0.8438065870000173
+pear/p02_arith	1	True	0	0	0	True	42	PASS	False	0.8263638580001498
+pear/p02_arith	1	False	0	0	0	True	42	PASS	False	0.7904233920003207
+pear/p02_arith	2	True	0	0	0	True	42	PASS	False	0.9574604240001463
+pear/p02_arith	2	False	0	0	0	True	42	PASS	False	0.9103516980003405
+pear/p02_arith	3	True	0	0	0	True	42	PASS	False	0.9206874260003133
+pear/p02_arith	3	False	0	0	0	True	42	PASS	False	0.9086820880002051
+pear/p03_fib	0	True	0	0	0	True	55	PASS	False	0.8430178759999762
+pear/p03_fib	0	False	0	0	0	True	55	PASS	False	0.8197592380001879
+pear/p03_fib	1	True	0	0	0	True	55	PASS	False	0.8173361129997829
+pear/p03_fib	1	False	0	0	0	True	55	PASS	False	0.85323308299985
+pear/p03_fib	2	True	0	0	0	True	55	PASS	False	0.9211906870000348
+pear/p03_fib	2	False	0	0	0	True	55	PASS	False	0.9220126479999635
+pear/p03_fib	3	True	0	0	0	True	55	PASS	False	0.9478454919999422
+pear/p03_fib	3	False	0	0	0	True	55	PASS	False	0.8774328669996976
+pear/p04_loop_sum	0	True	0	0	0	True	186	PASS	False	0.8734565469999325
+pear/p04_loop_sum	0	False	0	0	0	True	186	PASS	False	0.8095342000001438
+pear/p04_loop_sum	1	True	0	0	0	True	186	PASS	False	0.8516673589997481
+pear/p04_loop_sum	1	False	0	0	0	True	186	PASS	False	0.8502832049998688
+pear/p04_loop_sum	2	True	0	0	0	True	186	PASS	False	0.973397076999845
+pear/p04_loop_sum	2	False	0	0	0	True	186	PASS	False	0.8705014440001833
+pear/p04_loop_sum	3	True	0	0	0	True	186	PASS	False	0.893005371000072
+pear/p04_loop_sum	3	False	0	0	0	True	186	PASS	False	0.9235751050000545
+pear/p05_call_chain	0	True	0	0	0	True	42	PASS	False	0.8763159179998183
+pear/p05_call_chain	0	False	0	0	0	True	42	PASS	False	0.8442725529998825
+pear/p05_call_chain	1	True	0	0	0	True	42	PASS	False	0.8486078619998807
+pear/p05_call_chain	1	False	0	0	0	True	42	PASS	False	0.8454852510003548
+pear/p05_call_chain	2	True	0	0	0	True	42	PASS	False	1.1308924650002155
+pear/p05_call_chain	2	False	0	0	0	True	42	PASS	False	1.185537788000147
+pear/p05_call_chain	3	True	0	0	0	True	42	PASS	False	1.1002000559997214
+pear/p05_call_chain	3	False	0	0	0	True	42	PASS	False	1.111239573000148
+pear/p06_tak	0	True	0	0	0	True	100	PASS	False	0.870089931000166
+pear/p06_tak	0	False	0	0	0	True	100	PASS	False	0.8747242549998191
+pear/p06_tak	1	True	0	0	0	True	100	PASS	False	0.9131314859996564
+pear/p06_tak	1	False	0	0	0	True	100	PASS	False	0.8328521019998334
+pear/p06_tak	2	True	0	0	0	True	100	PASS	False	0.9086668390000341
+pear/p06_tak	2	False	0	0	0	True	100	PASS	False	0.9227717690000645
+pear/p06_tak	3	True	0	0	0	True	100	PASS	False	0.9601654640000561
+pear/p06_tak	3	False	0	0	0	True	100	PASS	False	0.9269204619999982
+pear/p07_mut_reassign	0	True	0	0	0	True	21	PASS	False	0.8367116099998384
+pear/p07_mut_reassign	0	False	0	0	0	True	21	PASS	False	0.8689236539999001
+pear/p07_mut_reassign	1	True	0	0	0	True	21	PASS	False	0.9265073100000336
+pear/p07_mut_reassign	1	False	0	0	0	True	21	PASS	False	0.9104888190004203
+pear/p07_mut_reassign	2	True	0	0	0	True	21	PASS	False	0.9774667599999702
+pear/p07_mut_reassign	2	False	0	0	0	True	21	PASS	False	0.9401052130001517
+pear/p07_mut_reassign	3	True	0	0	0	True	21	PASS	False	0.9573923550001382
+pear/p07_mut_reassign	3	False	0	0	0	True	21	PASS	False	0.919985959999849
+pear/p08_if_else	0	True	0	0	0	True	7	PASS	False	0.9334948410000834
+pear/p08_if_else	0	False	0	0	0	True	7	PASS	False	0.8823237029996562
+pear/p08_if_else	1	True	0	0	0	True	7	PASS	False	0.8842302459997882
+pear/p08_if_else	1	False	0	0	0	True	7	PASS	False	0.92730650600015
+pear/p08_if_else	2	True	0	0	0	True	7	PASS	False	0.9377288740001859
+pear/p08_if_else	2	False	0	0	0	True	7	PASS	False	0.9341740680001749
+pear/p08_if_else	3	True	0	0	0	True	7	PASS	False	1.0394180100001904
+pear/p08_if_else	3	False	0	0	0	True	7	PASS	False	0.875661152000248
+pear/p100_nested_fn	0	True	0	0	0	True	3	PASS	False	0.860184352000033
+pear/p100_nested_fn	0	False	0	0	0	True	3	PASS	False	0.7906723900000543
+pear/p100_nested_fn	1	True	0	0	0	True	3	PASS	False	0.834860381999988
+pear/p100_nested_fn	1	False	0	0	0	True	3	PASS	False	0.8324248879998777
+pear/p100_nested_fn	2	True	0	0	0	True	3	PASS	False	0.9508502290000251
+pear/p100_nested_fn	2	False	0	0	0	True	3	PASS	False	0.9473792039998443
+pear/p100_nested_fn	3	True	0	0	0	True	3	PASS	False	0.8352624399999513
+pear/p100_nested_fn	3	False	0	0	0	True	3	PASS	False	0.9776890960001765
+pear/p101_nested_fn_shadow	0	True	0	0	0	True	12	PASS	False	0.9368726259999676
+pear/p101_nested_fn_shadow	0	False	0	0	0	True	12	PASS	False	0.9255280019997372
+pear/p101_nested_fn_shadow	1	True	0	0	0	True	12	PASS	False	0.8345511259999512
+pear/p101_nested_fn_shadow	1	False	0	0	0	True	12	PASS	False	0.8181825250003385
+pear/p101_nested_fn_shadow	2	True	0	0	0	True	12	PASS	False	0.9742966449998676
+pear/p101_nested_fn_shadow	2	False	0	0	0	True	12	PASS	False	0.9512853090000135
+pear/p101_nested_fn_shadow	3	True	0	0	0	True	12	PASS	False	0.9553339670001151
+pear/p101_nested_fn_shadow	3	False	0	0	0	True	12	PASS	False	0.9656453870002224
+pear/p102_nested_fn_same_name	0	True	0	0	0	True	31	PASS	False	0.8250225050001063
+pear/p102_nested_fn_same_name	0	False	0	0	0	True	31	PASS	False	0.7811890250000033
+pear/p102_nested_fn_same_name	1	True	0	0	0	True	31	PASS	False	0.8586043700001937
+pear/p102_nested_fn_same_name	1	False	0	0	0	True	31	PASS	False	0.8687509549999959
+pear/p102_nested_fn_same_name	2	True	0	0	0	True	31	PASS	False	1.0188358890000018
+pear/p102_nested_fn_same_name	2	False	0	0	0	True	31	PASS	False	0.9461380900002041
+pear/p102_nested_fn_same_name	3	True	0	0	0	True	31	PASS	False	0.9507973380000294
+pear/p102_nested_fn_same_name	3	False	0	0	0	True	31	PASS	False	0.9154797490000419
+pear/p103_struct_field_sum	0	True	0	0	0	True	42	PASS	False	0.8444868359997599
+pear/p103_struct_field_sum	0	False	0	0	0	True	42	PASS	False	0.8181089570002769
+pear/p103_struct_field_sum	1	True	0	0	0	True	42	PASS	False	0.8315886740001588
+pear/p103_struct_field_sum	1	False	0	0	0	True	42	PASS	False	0.8250286819998109
+pear/p103_struct_field_sum	2	True	0	0	0	True	42	PASS	False	0.9581147269996109
+pear/p103_struct_field_sum	2	False	0	0	0	True	42	PASS	False	0.9513246209999124
+pear/p103_struct_field_sum	3	True	0	0	0	True	42	PASS	False	0.8742317510000248
+pear/p103_struct_field_sum	3	False	0	0	0	True	42	PASS	False	0.8272628929998973
+pear/p104_struct_init_order	0	True	0	0	0	True	42	PASS	False	0.8447569029999613
+pear/p104_struct_init_order	0	False	0	0	0	True	42	PASS	False	0.8439858090000598
+pear/p104_struct_init_order	1	True	0	0	0	True	42	PASS	False	0.8391487669996422
+pear/p104_struct_init_order	1	False	0	0	0	True	42	PASS	False	0.8113298980001673
+pear/p104_struct_init_order	2	True	0	0	0	True	42	PASS	False	0.8446657069998764
+pear/p104_struct_init_order	2	False	0	0	0	True	42	PASS	False	0.9480194930001744
+pear/p104_struct_init_order	3	True	0	0	0	True	42	PASS	False	0.9495674560002954
+pear/p104_struct_init_order	3	False	0	0	0	True	42	PASS	False	0.8589404549998108
+pear/p105_struct_nested_and_arg	0	True	0	0	0	True	44	PASS	False	0.9244601379996311
+pear/p105_struct_nested_and_arg	0	False	0	0	0	True	44	PASS	False	0.8269404450002185
+pear/p105_struct_nested_and_arg	1	True	0	0	0	True	44	PASS	False	0.8333269049999217
+pear/p105_struct_nested_and_arg	1	False	0	0	0	True	44	PASS	False	0.9243420429997968
+pear/p105_struct_nested_and_arg	2	True	0	0	0	True	44	PASS	False	0.9455619199998182
+pear/p105_struct_nested_and_arg	2	False	0	0	0	True	44	PASS	False	0.8841686949999712
+pear/p105_struct_nested_and_arg	3	True	0	0	0	True	44	PASS	False	0.8735486629998377
+pear/p105_struct_nested_and_arg	3	False	0	0	0	True	44	PASS	False	0.9395706640002572
+pear/p106_nested_loop	0	True	0	0	0	True	6	PASS	False	0.8297210030000315
+pear/p106_nested_loop	0	False	0	0	0	True	6	PASS	False	0.8189598909998494
+pear/p106_nested_loop	1	True	0	0	0	True	6	PASS	False	0.8333177920003436
+pear/p106_nested_loop	1	False	0	0	0	True	6	PASS	False	0.8647639900000286
+pear/p106_nested_loop	2	True	0	0	0	True	6	PASS	False	1.035316689999945
+pear/p106_nested_loop	2	False	0	0	0	True	6	PASS	False	0.9036524829998598
+pear/p106_nested_loop	3	True	0	0	0	True	6	PASS	False	0.9365480059996116
+pear/p106_nested_loop	3	False	0	0	0	True	6	PASS	False	0.9092267280002488
+pear/p107_nested_loop_deep	0	True	0	0	0	True	24	PASS	False	0.8970797130000392
+pear/p107_nested_loop_deep	0	False	0	0	0	True	24	PASS	False	0.8538482039998598
+pear/p107_nested_loop_deep	1	True	0	0	0	True	24	PASS	False	0.8902589730000727
+pear/p107_nested_loop_deep	1	False	0	0	0	True	24	PASS	False	0.8830272909999621
+pear/p107_nested_loop_deep	2	True	0	0	0	True	24	PASS	False	0.9060474200000499
+pear/p107_nested_loop_deep	2	False	0	0	0	True	24	PASS	False	0.8495910689998709
+pear/p107_nested_loop_deep	3	True	0	0	0	True	24	PASS	False	0.9215769170000385
+pear/p107_nested_loop_deep	3	False	0	0	0	True	24	PASS	False	0.8460285390001445
+pear/p108_nested_loop_record	0	True	0	0	0	True	252	PASS	False	0.8095988959998976
+pear/p108_nested_loop_record	0	False	0	0	0	True	252	PASS	False	0.8073376629999984
+pear/p108_nested_loop_record	1	True	0	0	0	True	252	PASS	False	0.784715347999736
+pear/p108_nested_loop_record	1	False	0	0	0	True	252	PASS	False	0.8022210069998437
+pear/p108_nested_loop_record	2	True	0	0	0	True	252	PASS	False	0.9201025000002119
+pear/p108_nested_loop_record	2	False	0	0	0	True	252	PASS	False	0.8787508650002565
+pear/p108_nested_loop_record	3	True	0	0	0	True	252	PASS	False	0.9440688529998624
+pear/p108_nested_loop_record	3	False	0	0	0	True	252	PASS	False	0.8423999619999449
+pear/p110_dense_switch	0	True	0	0	0	True	190	PASS	False	0.8137587619999067
+pear/p110_dense_switch	0	False	0	0	0	True	0	FAIL	False	0.8182264399997621
+pear/p110_dense_switch	1	True	0	0	0	True	190	PASS	False	0.8225466760000018
+pear/p110_dense_switch	1	False	0	0	0	True	0	FAIL	False	0.8394508299998051
+pear/p110_dense_switch	2	True	0	0	0	True	190	PASS	False	0.9126552400002765
+pear/p110_dense_switch	2	False	0	0	0	True	0	FAIL	False	0.8980756629998723
+pear/p110_dense_switch	3	True	0	0	0	True	190	PASS	False	0.9462415490002059
+pear/p110_dense_switch	3	False	0	0	0	True	0	FAIL	False	0.9054423690004114
+pear/p111_quals_memory_read	0	True	0	0	0	True	35	PASS	False	0.8584398170000895
+pear/p111_quals_memory_read	0	False	0	0	0	True	35	PASS	False	0.8577591929997652
+pear/p111_quals_memory_read	1	True	0	0	0	True	35	PASS	False	0.8973051839998334
+pear/p111_quals_memory_read	1	False	0	0	0	True	35	PASS	False	0.8262547300000733
+pear/p111_quals_memory_read	2	True	0	0	0	True	35	PASS	False	0.9264884570002323
+pear/p111_quals_memory_read	2	False	0	0	0	True	35	PASS	False	0.899737832000028
+pear/p111_quals_memory_read	3	True	0	0	0	True	35	PASS	False	0.9442624929997692
+pear/p111_quals_memory_read	3	False	0	0	0	True	35	PASS	False	0.9058295310001085
+pear/p112_tuple_clause_expr	0	True	0	0	0	True	42	PASS	False	0.888738672999807
+pear/p112_tuple_clause_expr	0	False	0	0	0	True	42	PASS	False	0.8538409940001657
+pear/p112_tuple_clause_expr	1	True	0	0	0	True	42	PASS	False	0.8195477750000464
+pear/p112_tuple_clause_expr	1	False	0	0	0	True	42	PASS	False	0.8501693349999186
+pear/p112_tuple_clause_expr	2	True	0	0	0	True	42	PASS	False	0.8783747259999473
+pear/p112_tuple_clause_expr	2	False	0	0	0	True	42	PASS	False	0.8239301019998493
+pear/p112_tuple_clause_expr	3	True	0	0	0	True	42	PASS	False	0.9809176439998737
+pear/p112_tuple_clause_expr	3	False	0	0	0	True	42	PASS	False	0.9916265730003033
+pear/p113_tuple_clause_wildcard	0	True	0	0	0	True	42	PASS	False	0.845964752999862
+pear/p113_tuple_clause_wildcard	0	False	0	0	0	True	42	PASS	False	0.8205546179997327
+pear/p113_tuple_clause_wildcard	1	True	0	0	0	True	42	PASS	False	0.8329457470003945
+pear/p113_tuple_clause_wildcard	1	False	0	0	0	True	42	PASS	False	0.8087401970001338
+pear/p113_tuple_clause_wildcard	2	True	0	0	0	True	42	PASS	False	0.8865254170000298
+pear/p113_tuple_clause_wildcard	2	False	0	0	0	True	42	PASS	False	0.8658509980000417
+pear/p113_tuple_clause_wildcard	3	True	0	0	0	True	42	PASS	False	0.8936505820001912
+pear/p113_tuple_clause_wildcard	3	False	0	0	0	True	42	PASS	False	0.8726383200000782
+pear/p114_unit_clause_call	0	True	0	0	0	True	42	PASS	False	0.8477132650000385
+pear/p114_unit_clause_call	0	False	0	0	0	True	42	PASS	False	0.8095661970000947
+pear/p114_unit_clause_call	1	True	0	0	0	True	42	PASS	False	0.8394813049999357
+pear/p114_unit_clause_call	1	False	0	0	0	True	42	PASS	False	0.8002651259998856
+pear/p114_unit_clause_call	2	True	0	0	0	True	42	PASS	False	0.9006339500001559
+pear/p114_unit_clause_call	2	False	0	0	0	True	42	PASS	False	0.8707537929999489
+pear/p114_unit_clause_call	3	True	0	0	0	True	42	PASS	False	0.9208880400001362
+pear/p114_unit_clause_call	3	False	0	0	0	True	42	PASS	False	0.9027394330000789
+pear/p115_tuple_clause_block	0	True	0	0	0	True	0	XFAIL	True	0.8447572700001729
+pear/p115_tuple_clause_block	0	False	0	0	0	True	0	XFAIL	True	0.885421542000131
+pear/p115_tuple_clause_block	1	True	0	0	0	True	0	XFAIL	True	0.8235290889997486
+pear/p115_tuple_clause_block	1	False	0	0	0	True	0	XFAIL	True	0.8483820900000865
+pear/p115_tuple_clause_block	2	True	0	0	0	True	0	XFAIL	True	0.9127831709997736
+pear/p115_tuple_clause_block	2	False	0	0	0	True	0	XFAIL	True	0.9088495759997386
+pear/p115_tuple_clause_block	3	True	0	0	0	True	0	XFAIL	True	1.0123004469996886
+pear/p115_tuple_clause_block	3	False	0	0	0	True	0	XFAIL	True	0.8680697630002214
+pear/p90_indexed_store_load	0	True	1	0	1	True	7	PASS	False	0.9132044560001304
+pear/p90_indexed_store_load	0	False	0	0	0	True	7	PASS	False	0.7455445169998711
+pear/p90_indexed_store_load	1	True	1	0	1	True	7	PASS	False	0.884402141999999
+pear/p90_indexed_store_load	1	False	0	0	0	True	7	PASS	False	0.7848969360002229
+pear/p90_indexed_store_load	2	True	1	0	1	True	7	PASS	False	0.8963263829996322
+pear/p90_indexed_store_load	2	False	0	0	0	True	7	PASS	False	0.8925122179998652
+pear/p90_indexed_store_load	3	True	1	0	1	True	7	PASS	False	0.920211241999823
+pear/p90_indexed_store_load	3	False	0	0	0	True	7	PASS	False	0.8646473470003002
+pear/p91_indexed_loop_write	0	True	1	0	1	True	3	PASS	False	0.8024227340001744
+pear/p91_indexed_loop_write	0	False	0	0	0	True	3	PASS	False	0.8293995640001413
+pear/p91_indexed_loop_write	1	True	1	0	1	True	3	PASS	False	0.8563888600001519
+pear/p91_indexed_loop_write	1	False	0	0	0	True	3	PASS	False	0.7823883599999135
+pear/p91_indexed_loop_write	2	True	1	0	1	True	3	PASS	False	0.8964303380003003
+pear/p91_indexed_loop_write	2	False	0	0	0	True	3	PASS	False	0.8861229229996752
+pear/p91_indexed_loop_write	3	True	1	0	1	True	3	PASS	False	0.8758748819996072
+pear/p91_indexed_loop_write	3	False	0	0	0	True	3	PASS	False	0.8841390600000523
+pear/p92_clause_style	0	True	0	0	0	True	42	PASS	False	0.8095320500001435
+pear/p92_clause_style	0	False	0	0	0	True	42	PASS	False	0.7786425500003133
+pear/p92_clause_style	1	True	0	0	0	True	42	PASS	False	0.8689077489998454
+pear/p92_clause_style	1	False	0	0	0	True	42	PASS	False	0.8463057960002516
+pear/p92_clause_style	2	True	0	0	0	True	42	PASS	False	1.2132327610001994
+pear/p92_clause_style	2	False	0	0	0	True	42	PASS	False	1.078202720000263
+pear/p92_clause_style	3	True	0	0	0	True	42	PASS	False	0.9197813659998246
+pear/p92_clause_style	3	False	0	0	0	True	42	PASS	False	0.8699214369999027
+pear/p93_block_scope_bindings	0	True	1	0	1	True	1	PASS	False	0.8661907470000187
+pear/p93_block_scope_bindings	0	False	1	0	1	True	1	PASS	False	0.8518264190001901
+pear/p93_block_scope_bindings	1	True	1	0	1	True	1	PASS	False	0.8090460379999058
+pear/p93_block_scope_bindings	1	False	1	0	1	True	1	PASS	False	0.8165659530000084
+pear/p93_block_scope_bindings	2	True	1	0	1	True	1	PASS	False	0.9441064019997611
+pear/p93_block_scope_bindings	2	False	1	0	1	True	1	PASS	False	0.9017239660001906
+pear/p93_block_scope_bindings	3	True	1	0	1	True	1	PASS	False	0.8847746330002337
+pear/p93_block_scope_bindings	3	False	1	0	1	True	1	PASS	False	0.9265804719998414
+pear/p94_shadow_scope	0	True	1	0	2	True	12	PASS	False	0.8606116139999358
+pear/p94_shadow_scope	0	False	1	0	2	True	12	PASS	False	0.8408860469999127
+pear/p94_shadow_scope	1	True	1	0	2	True	12	PASS	False	0.7960806589999265
+pear/p94_shadow_scope	1	False	1	0	2	True	12	PASS	False	0.800964964999821
+pear/p94_shadow_scope	2	True	1	0	2	True	12	PASS	False	0.9132178119998571
+pear/p94_shadow_scope	2	False	1	0	2	True	12	PASS	False	0.8920105699999112
+pear/p94_shadow_scope	3	True	1	0	2	True	12	PASS	False	0.9142843600002379
+pear/p94_shadow_scope	3	False	1	0	2	True	12	PASS	False	0.9003641200001766
+pear/p95_block_then_tail	0	True	1	0	1	True	7	PASS	False	0.8446215959997971
+pear/p95_block_then_tail	0	False	1	0	1	True	7	PASS	False	0.8287012830001004
+pear/p95_block_then_tail	1	True	1	0	1	True	7	PASS	False	0.8537409119999211
+pear/p95_block_then_tail	1	False	1	0	1	True	7	PASS	False	0.8016162469998562
+pear/p95_block_then_tail	2	True	1	0	1	True	7	PASS	False	0.8642371989999447
+pear/p95_block_then_tail	2	False	1	0	1	True	7	PASS	False	0.8824243930002922
+pear/p95_block_then_tail	3	True	1	0	1	True	7	PASS	False	0.91061962699996
+pear/p95_block_then_tail	3	False	1	0	1	True	7	PASS	False	0.888418030000139
+pear/p96_while_return	0	True	0	0	0	True	5	PASS	False	0.8033603280000534
+pear/p96_while_return	0	False	0	0	0	True	5	PASS	False	0.7963921639998262
+pear/p96_while_return	1	True	0	0	0	True	5	PASS	False	0.8438687830002891
+pear/p96_while_return	1	False	0	0	0	True	5	PASS	False	0.8423748369996247
+pear/p96_while_return	2	True	0	0	0	True	5	PASS	False	0.8887384780000502
+pear/p96_while_return	2	False	0	0	0	True	5	PASS	False	0.8504326370002673
+pear/p96_while_return	3	True	0	0	0	True	5	PASS	False	0.8886106979998658
+pear/p96_while_return	3	False	0	0	0	True	5	PASS	False	0.8962091349999355
+pear/p97_while_break	0	True	0	0	0	True	5	PASS	False	0.8338841679997131
+pear/p97_while_break	0	False	0	0	0	True	5	PASS	False	0.807108610999876
+pear/p97_while_break	1	True	0	0	0	True	5	PASS	False	0.870172053999795
+pear/p97_while_break	1	False	0	0	0	True	5	PASS	False	0.8092410669996752
+pear/p97_while_break	2	True	0	0	0	True	5	PASS	False	0.9519426560000284
+pear/p97_while_break	2	False	0	0	0	True	5	PASS	False	0.8830742459999783
+pear/p97_while_break	3	True	0	0	0	True	5	PASS	False	0.8961558999999397
+pear/p97_while_break	3	False	0	0	0	True	5	PASS	False	0.877101997000409
+pear/p98_many_bindings	0	True	1	0	119	True	119	PASS	False	0.8451565820000724
+pear/p98_many_bindings	0	False	1	0	119	True	119	PASS	False	0.8102204279998659
+pear/p98_many_bindings	1	True	1	0	119	True	119	PASS	False	0.820431231999919
+pear/p98_many_bindings	1	False	1	0	119	True	119	PASS	False	0.874974204999944
+pear/p98_many_bindings	2	True	1	0	119	True	119	PASS	False	0.8752170450002268
+pear/p98_many_bindings	2	False	1	0	119	True	119	PASS	False	0.8823495840001669
+pear/p98_many_bindings	3	True	1	0	119	True	119	PASS	False	0.9388125340001352
+pear/p98_many_bindings	3	False	1	0	119	True	119	PASS	False	0.8786360180001793
+pear/p99_forward_call	0	True	0	0	0	True	42	PASS	False	0.8324923019999915
+pear/p99_forward_call	0	False	0	0	0	True	42	PASS	False	0.7963050190001013
+pear/p99_forward_call	1	True	0	0	0	True	42	PASS	False	0.8265707940004177
+pear/p99_forward_call	1	False	0	0	0	True	42	PASS	False	0.7980899899998803
+pear/p99_forward_call	2	True	0	0	0	True	42	PASS	False	0.9282400339998276
+pear/p99_forward_call	2	False	0	0	0	True	42	PASS	False	0.8849286539998502
+pear/p99_forward_call	3	True	0	0	0	True	42	PASS	False	0.9044249520002268
+pear/p99_forward_call	3	False	0	0	0	True	42	PASS	False	0.9243327330000284
+pear/p99_i64_index	0	True	1	0	1	True	77	PASS	False	0.8511296369997581
+pear/p99_i64_index	0	False	0	0	0	True	77	PASS	False	0.8134390800000801
+pear/p99_i64_index	1	True	1	0	1	True	77	PASS	False	0.8246974349999618
+pear/p99_i64_index	1	False	0	0	0	True	77	PASS	False	0.8329084580000199
+pear/p99_i64_index	2	True	1	0	1	True	77	PASS	False	0.9300632250001399
+pear/p99_i64_index	2	False	0	0	0	True	77	PASS	False	0.8439581359998556
+pear/p99_i64_index	3	True	1	0	1	True	77	PASS	False	0.877165648999835
+pear/p99_i64_index	3	False	0	0	0	True	77	PASS	False	0.8910516549999556
+pear/p99b_i32_index	0	True	1	0	1	True	120	PASS	False	0.8457914769996933
+pear/p99b_i32_index	0	False	0	0	0	True	120	PASS	False	0.7905351220001648
+pear/p99b_i32_index	1	True	1	0	1	True	120	PASS	False	0.8372005329997592
+pear/p99b_i32_index	1	False	0	0	0	True	120	PASS	False	0.8094731129999673
+pear/p99b_i32_index	2	True	1	0	1	True	120	PASS	False	0.8973281439998573
+pear/p99b_i32_index	2	False	0	0	0	True	120	PASS	False	0.8624991010001395
+pear/p99b_i32_index	3	True	1	0	1	True	120	PASS	False	0.8643179850000706
+pear/p99b_i32_index	3	False	0	0	0	True	120	PASS	False	0.852058611999837
+test_stage_passthrough	0	True	2	1	0	False		XFAIL	True	0.0986835799999426
+test_stage_passthrough	0	False	2	1	0	False		XFAIL	True	0.05724924199967063
+test_stage_passthrough	1	True	2	1	0	False		XFAIL	True	0.07052613099995142
+test_stage_passthrough	1	False	2	1	0	False		XFAIL	True	0.06063063900000998
+test_stage_passthrough	2	True	2	1	0	False		XFAIL	True	0.06766880699979083
+test_stage_passthrough	2	False	2	1	0	False		XFAIL	True	0.060053758999856655
+test_stage_passthrough	3	True	2	1	0	False		XFAIL	True	0.06476558599979398
+test_stage_passthrough	3	False	2	1	0	False		XFAIL	True	0.04524153300008038

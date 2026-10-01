@@ -1790,10 +1790,10 @@ ql=$("$BIN" tests/pfront/92_quals.pie -I stdlib -I . --lint --emit-ast 2>&1)
 ql_ok=1; ql_why=""
 qneed() { echo "$ql" | grep -q "$1" || { ql_ok=0; ql_why="$ql_why missing[$2]"; }; }
 qdeny() { echo "$ql" | grep -q "$1" && { ql_ok=0; ql_why="$ql_why noise[$2]"; }; }
-qneed '92_quals.pie:45:13: warning\[W4220\]: the result of `square` is discarded, and `square` has no side effects'   "discarded pure result"
-qneed '92_quals.pie:46:10: warning\[W4220\]: the result of `tri` is discarded.*except possibly not terminating'      "discarded recursive pure result"
-qneed '92_quals.pie:25:5: note\[N4223\]: pointer parameter `c` is only read and never retained'                    "read-only pointer param"
-qneed '92_quals.pie:11:1: note\[N4222\]: `tri` is pure: its result depends only on its arguments (but it may not terminate)' "recursive fn pure"
+qneed '92_quals.pie:45:13: warning\[W4220\]: the result of `square` is discarded; analysis found no external writes in `square`'   "discarded pure result"
+qneed '92_quals.pie:46:10: warning\[W4220\]: the result of `tri` is discarded.*termination is not established'      "discarded recursive pure result"
+qneed '92_quals.pie:25:5: note\[N4223\]: pointer parameter `c` is not directly written or retained'                    "read-only pointer param"
+qneed '92_quals.pie:11:1: note\[N4222\]: `tri` has no proven external writes; its result may depend on memory read through arguments (but it may not terminate)' "recursive fn pure"
 qneed "^  fn 'square' pure"                                                                                          "NF_PURE_FN on square"
 qneed "^  fn 'peek' pure"                                                                                            "NF_PURE_FN on peek"
 qneed "pat-ident 'c' readonly"                                                                                       "NF_READONLY_PARAM"
@@ -1801,8 +1801,8 @@ qdeny "^  fn 'bump' pure"                                                       
 qdeny "^  fn 'bump_twice' pure"                                                                                      "bump_twice (calls bump) marked pure"
 qdeny "^  fn 'shout' pure"                                                                                           "shout (calls extern) marked pure"
 qdeny "^  fn 'fresh' pure"                                                                                           "fresh (allocates) marked pure"
-qdeny 'note\[N4222\]: `emit` is pure'                                                                                "extern marked pure"
-qneed 'quals            : 10 fns in 2 rounds: 4 pure, 0 read-only, 1 allocating, 4 impure (3 may diverge)'          "census"
+qdeny 'note\[N4222\]: `emit` has no proven external writes'                                                                                "extern marked pure"
+qneed 'quals            : 10 fns in 2 rounds: 4 no-write, 0 globals-read, 1 allocating, 2 impure, 2 unknown (2 may diverge)'          "census"
 if [ $ql_ok = 1 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (interprocedural purity, recursion stays pure, read-only params flagged, W4220 discarded results, externs impure)\n' "quals"
 else

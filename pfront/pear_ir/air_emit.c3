@@ -333,6 +333,27 @@ fn void emit_typ(AirEmitter* e, AirTyp* t)
     }
 }
 
+// Preserve a character codepoint in AIR text; never silently truncate to
+// the first UTF-8 byte. The lexer accepts a Unicode scalar literal.
+fn void emit_char_literal(AirEmitter* e, long code)
+{
+    e.wr("'");
+    if (code == 10) { e.wr("\\n"); }
+    else if (code == 13) { e.wr("\\r"); }
+    else if (code == 9) { e.wr("\\t"); }
+    else if (code == 0) { e.wr("\\x00"); }
+    else if (code == 39) { e.wr("\\'"); }
+    else if (code == 92) { e.wr("\\\\"); }
+    else if (code >= 0 && code < 128) { fputc((int)code, e.out); }
+    else if (code < 2048)
+    { fputc((int)(192 | (code >> 6)), e.out); fputc((int)(128 | (code & 63)), e.out); }
+    else if (code < 65536)
+    { fputc((int)(224 | (code >> 12)), e.out); fputc((int)(128 | ((code >> 6) & 63)), e.out); fputc((int)(128 | (code & 63)), e.out); }
+    else
+    { fputc((int)(240 | (code >> 18)), e.out); fputc((int)(128 | ((code >> 12) & 63)), e.out); fputc((int)(128 | ((code >> 6) & 63)), e.out); fputc((int)(128 | (code & 63)), e.out); }
+    e.wr("'");
+}
+
 // ── Patterns ─────────────────────────────────────────────────────────────
 fn void emit_pat(AirEmitter* e, AirPat* p)
 {
@@ -356,10 +377,7 @@ fn void emit_pat(AirEmitter* e, AirPat* p)
         }
         case APAT_CHAR:
         {
-            e.wr("'");
-            char cc = p.name != null ? p.name[0] : p.ival!=0 ? (char)p.ival : '?';
-            fputc((int)cc, e.out);
-            e.wr("'");
+            emit_char_literal(e, p.ival);
             return;
         }
         case APAT_STRING:
@@ -498,7 +516,7 @@ fn void emit_prd(AirEmitter* e, AirPrd* p)
         case APRD_BOOL:  e.wr(p.bval ? "true" : "false"); return;
         case APRD_CHAR:
         {
-            e.wr("'"); fputc((int)p.cval, e.out); e.wr("'"); return;
+            emit_char_literal(e, p.ival); return;
         }
         case APRD_STRING:
         {
@@ -1410,6 +1428,19 @@ fn void emit_decl(AirEmitter* e, AirDecl* d)
         }
         case ADECL_DEF:
         {
+            if (d.fact_state == air_ir::AirFactState.AFACT_AIR_CHECKED)
+            {
+                // Diagnostic projection of in-memory AIR contracts. Comments
+                // do not add an unimplemented text-to-PEAR parser contract.
+                e.wr("; air facts: checked");
+                if (d.memory_readonly) { e.wr(" memory(read)"); }
+                for (usz i = 0; i < d.param_count && i < 16; i++)
+                {
+                    if (d.params[i] != null && d.params[i].no_capture)
+                    { e.wr(" captures(none):"); e.wr(d.params[i].name); }
+                }
+                e.nl(); e.ind();
+            }
             if (d.is_extern) e.wr("extern ");
             if (d.is_pub) e.wr("pub ");
             if (d.param_count > 0) { e.wr("fn "); } else { e.wr("def "); }

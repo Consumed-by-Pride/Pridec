@@ -1,0 +1,13 @@
+diff --git a/pfront/pear_ir/pear.c3 b/pfront/pear_ir/pear.c3
+index a0cf24e..ee2dece 100644
+--- a/pfront/pear_ir/pear.c3
++++ b/pfront/pear_ir/pear.c3
+@@ -1908,7 +1908,7 @@ fn void pear_tag_captures_none_params(PearCg* cg, Lvalue fnv, AirDecl* d)
+ // versions ("early-cse-memssa" → "early-cse" in 23; LICM needs the
+ // "loop-mssa(licm)" wrapper; "function-attrs" is a module pass not a
+ // function pass when called mid-pipeline, etc.)
+-const char* PEAR_PIPE_O0 = (char*)"default<O1>";  // no true -O0: FastISel chokes on our GEPs
++const char* PEAR_PIPE_O0 = (char*)"verify";  // no true -O0: FastISel chokes on our GEPs
+ const char* PEAR_PIPE_O1 = (char*)"default<O1>";
+ const char* PEAR_PIPE_O2 = (char*)"default<O2>";
+ const char* PEAR_PIPE_O3 = (char*)"default<O3>";

@@ -1,0 +1,2 @@
+type T = T
+fn main(_) -> i64 { return 42; }

@@ -1,0 +1,2 @@
+type Empty = i32 ∩ bool
+fn main(_) -> i64 { let impossible: Empty = 7; return 42; }

@@ -1,0 +1,134 @@
+{
+  "dense_dispatch": {
+    "on": {
+      "compiler_rc": 0,
+      "bitcode": true,
+      "definitions": [
+        "define i64 @choose(i64 %0) #2 {",
+        "define i64 @choose_char(i64 %0) #2 {",
+        "define i64 @choose_clause(i64 %0) #2 {",
+        "define i64 @main(i64 %0) #2 {"
+      ],
+      "attribute_groups": [
+        "attributes #0 = { nosanitize_coverage \"allockind\"=\"alloc,uninitialized\" }",
+        "attributes #1 = { nosanitize_coverage \"allockind\"=\"free\" }",
+        "attributes #2 = { nosanitize_coverage memory(read) }"
+      ],
+      "switch_instruction_count": 3
+    },
+    "off": {
+      "compiler_rc": 0,
+      "bitcode": true,
+      "definitions": [
+        "define i64 @choose(i64 %0) #2 {",
+        "define i64 @choose_char(i64 %0) #2 {",
+        "define i64 @choose_clause(i64 %0) #2 {",
+        "define i64 @main(i64 %0) #2 {"
+      ],
+      "attribute_groups": [
+        "attributes #0 = { nosanitize_coverage \"allockind\"=\"alloc,uninitialized\" }",
+        "attributes #1 = { nosanitize_coverage \"allockind\"=\"free\" }",
+        "attributes #2 = { nosanitize_coverage }"
+      ],
+      "switch_instruction_count": 0
+    }
+  },
+  "qualifier_read": {
+    "on": {
+      "compiler_rc": 0,
+      "bitcode": true,
+      "definitions": [
+        "define i64 @add_one(i64 %0) #2 {",
+        "define i64 @read_first(ptr captures(none) %0) #2 {",
+        "define i64 @store_first(ptr %0) #3 {",
+        "define i64 @write_via_q(ptr captures(none) %0, ptr %1) #3 {",
+        "define i64 @main(i64 %0) #3 {"
+      ],
+      "attribute_groups": [
+        "attributes #0 = { nosanitize_coverage \"allockind\"=\"alloc,uninitialized\" }",
+        "attributes #1 = { nosanitize_coverage \"allockind\"=\"free\" }",
+        "attributes #2 = { nosanitize_coverage memory(read) }",
+        "attributes #3 = { nosanitize_coverage }"
+      ],
+      "switch_instruction_count": 0
+    },
+    "off": {
+      "compiler_rc": 0,
+      "bitcode": true,
+      "definitions": [
+        "define i64 @add_one(i64 %0) #2 {",
+        "define i64 @read_first(ptr %0) #2 {",
+        "define i64 @store_first(ptr %0) #2 {",
+        "define i64 @write_via_q(ptr %0, ptr %1) #2 {",
+        "define i64 @main(i64 %0) #2 {"
+      ],
+      "attribute_groups": [
+        "attributes #0 = { nosanitize_coverage \"allockind\"=\"alloc,uninitialized\" }",
+        "attributes #1 = { nosanitize_coverage \"allockind\"=\"free\" }",
+        "attributes #2 = { nosanitize_coverage }"
+      ],
+      "switch_instruction_count": 0
+    }
+  },
+  "capture_store": {
+    "on": {
+      "compiler_rc": 0,
+      "bitcode": true,
+      "definitions": [
+        "define i64 @retain(ptr %0, ptr captures(none) %1) #2 {",
+        "define i64 @main(i64 %0) #3 {"
+      ],
+      "attribute_groups": [
+        "attributes #0 = { nosanitize_coverage \"allockind\"=\"alloc,uninitialized\" }",
+        "attributes #1 = { nosanitize_coverage \"allockind\"=\"free\" }",
+        "attributes #2 = { nosanitize_coverage }",
+        "attributes #3 = { nosanitize_coverage memory(read) }"
+      ],
+      "switch_instruction_count": 0
+    },
+    "off": {
+      "compiler_rc": 0,
+      "bitcode": true,
+      "definitions": [
+        "define i64 @retain(ptr %0, ptr %1) #2 {",
+        "define i64 @main(i64 %0) #2 {"
+      ],
+      "attribute_groups": [
+        "attributes #0 = { nosanitize_coverage \"allockind\"=\"alloc,uninitialized\" }",
+        "attributes #1 = { nosanitize_coverage \"allockind\"=\"free\" }",
+        "attributes #2 = { nosanitize_coverage }"
+      ],
+      "switch_instruction_count": 0
+    }
+  },
+  "capture_address": {
+    "on": {
+      "compiler_rc": 0,
+      "bitcode": true,
+      "definitions": [
+        "define i64 @address(ptr captures(none) %0) #2 {",
+        "define i64 @main(i64 %0) #2 {"
+      ],
+      "attribute_groups": [
+        "attributes #0 = { nosanitize_coverage \"allockind\"=\"alloc,uninitialized\" }",
+        "attributes #1 = { nosanitize_coverage \"allockind\"=\"free\" }",
+        "attributes #2 = { nosanitize_coverage memory(read) }"
+      ],
+      "switch_instruction_count": 0
+    },
+    "off": {
+      "compiler_rc": 0,
+      "bitcode": true,
+      "definitions": [
+        "define i64 @address(ptr %0) #2 {",
+        "define i64 @main(i64 %0) #2 {"
+      ],
+      "attribute_groups": [
+        "attributes #0 = { nosanitize_coverage \"allockind\"=\"alloc,uninitialized\" }",
+        "attributes #1 = { nosanitize_coverage \"allockind\"=\"free\" }",
+        "attributes #2 = { nosanitize_coverage }"
+      ],
+      "switch_instruction_count": 0
+    }
+  }
+}

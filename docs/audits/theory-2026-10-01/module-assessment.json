@@ -1,0 +1,425 @@
+[
+  {
+    "path": "pfront/theory/analysis/theory_absint.c3",
+    "namespace": "theory_absint",
+    "class": "A",
+    "does": "Interval/sign/null abstract interpretation, widening and bounds diagnostics.",
+    "consumer": "NF_BOUNDS_PROVEN is written but not read by AIR/PEAR. No bounds-elision or LLVM range-attribute consumer.",
+    "limits": "Analysis works; the backend-effect comment overstates integration.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/analysis/theory_absint.c3"
+  },
+  {
+    "path": "pfront/theory/analysis/theory_bridge.c3",
+    "namespace": "theory_bridge",
+    "class": "S/A",
+    "does": "Feature census and convention audit over the AST.",
+    "consumer": "Reporting/convention diagnostics; feature presence does not actually gate all pipeline allocations/walks.",
+    "limits": "Not a compiler or backend for the advertised constructs.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/analysis/theory_bridge.c3"
+  },
+  {
+    "path": "pfront/theory/analysis/theory_symexe.c3",
+    "namespace": "theory_symexe",
+    "class": "A",
+    "does": "Bounded symbolic path simulation and contradiction diagnostics.",
+    "consumer": "Reports/warnings; no production LLVM symbolic execution, proof-guided rewrite or emitted path constraints.",
+    "limits": "Bounded syntactic model, not an SMT-backed universal verifier.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/analysis/theory_symexe.c3"
+  },
+  {
+    "path": "pfront/theory/analysis/theory_verify.c3",
+    "namespace": "theory_verify",
+    "class": "A",
+    "does": "Structural tree checks and before/after aggregate snapshots.",
+    "consumer": "Can reject malformed transformed trees with E3270; snapshot reports counts.",
+    "limits": "Eight structural invariants do not establish semantics/effect/type-metadata preservation; one snapshot pair does not identify a particular pass.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/analysis/theory_verify.c3"
+  },
+  {
+    "path": "pfront/theory/effects/theory_cps.c3",
+    "namespace": "theory_cps",
+    "class": "A/F(aux)",
+    "does": "Builds/contracts a separate CPS term representation and identifies tail calls.",
+    "consumer": "CPS dump and tail diagnostics; NF_TAIL feeds auxiliary continuation analysis, not LLVM tail-call lowering.",
+    "limits": "The native emitter does not consume this CPS IR.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/effects/theory_cps.c3"
+  },
+  {
+    "path": "pfront/theory/effects/theory_effcont.c3",
+    "namespace": "theory_effcont",
+    "class": "A",
+    "does": "Tracks handlers, performed operations, resume positions and continuation leaks.",
+    "consumer": "Diagnostics and NF_TAIL on arms.",
+    "limits": "No runtime prompt/capture/resume machinery is generated from its representation.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/effects/theory_effcont.c3"
+  },
+  {
+    "path": "pfront/theory/effects/theory_effects.c3",
+    "namespace": "theory_effects",
+    "class": "A",
+    "does": "Handler coverage, effect rows, row discharge and generic-instantiation census.",
+    "consumer": "Checks/reports; contributes theory-only models.",
+    "limits": "The Monomorphiser census is not body specialization or a runtime handler implementation.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/effects/theory_effects.c3"
+  },
+  {
+    "path": "pfront/theory/effects/theory_linearity.c3",
+    "namespace": "theory_linearity",
+    "class": "A",
+    "does": "Ownership/use/move and borrowing-oriented AST/path checks.",
+    "consumer": "Source diagnostics, not automatic allocation/free or general linear-runtime enforcement.",
+    "limits": "Heuristic/budgeted analysis; do not equate its checks with a borrow-checker proof for all programs.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/effects/theory_linearity.c3"
+  },
+  {
+    "path": "pfront/theory/effects/theory_ub.c3",
+    "namespace": "theory_ub",
+    "class": "A",
+    "does": "Poison/UB/frozen/taint-oriented source analysis.",
+    "consumer": "Diagnostics/census; native freeze/safety semantics do not follow from the counters.",
+    "limits": "Separate from PEAR trap lowering and LLVM poison semantics.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/effects/theory_ub.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_dataflow.c3",
+    "namespace": "theory_dataflow",
+    "class": "A",
+    "does": "Real module CFG plus reaching defs, available expressions, very-busy expressions and live-variable solvers.",
+    "consumer": "Internal fact tables, certificates and report only.",
+    "limits": "No AIR/PEAR input or optimizer consumer of DfBundle results found. The algorithms are not merely fake counters, but their solved facts are disconnected.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_dataflow.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_defun.c3",
+    "namespace": "theory_defun",
+    "class": "A/F(aux)",
+    "does": "Closure free-variable/escape analysis and capture hazards.",
+    "consumer": "NF_ADDR_TAKEN affects later NbE/CRDT; NF_NOESCAPE has no operational reader outside its writers/dump.",
+    "limits": "No emitted closure tags, dispatch or mutable-capture boxing. Backend-consumer comments are too broad.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_defun.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_irdl.c3",
+    "namespace": "theory_irdl",
+    "class": "A/D",
+    "does": "Registers opcode names and rejects unknown names; also implements a lowering-table algorithm and PGL matrix builder.",
+    "consumer": "Validation is live. add_lowering has no call site; all registered op.rule_count stay zero, making lower_tree a production no-op.",
+    "limits": "Arity remains unknown too: opcode registration sets arity_known=false and only the unused add_lowering can set it. A registry is not a working MLIR-style lowering pipeline.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_irdl.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_irdlssa.c3",
+    "namespace": "theory_irdlssa",
+    "class": "A",
+    "does": "IRDL constraint-variable operations and union-find verification model.",
+    "consumer": "Auxiliary dialect constraint reports.",
+    "limits": "Neither this SSA-like constraint graph nor a full IRDL type schema becomes native compiler IR.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_irdlssa.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_irdlverify.c3",
+    "namespace": "theory_irdlverify",
+    "class": "A",
+    "does": "Checks declared dialect traits against source AST structures.",
+    "consumer": "Diagnostics, some strict-mode enforcement.",
+    "limits": "Trait verification is not opcode implementation or backend instruction selection.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_irdlverify.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_live.c3",
+    "namespace": "theory_live",
+    "class": "F(aux)/A",
+    "does": "Builds a per-function CFG and solves liveness/nonlocal classifications.",
+    "consumer": "theory_opt reads its vars table for a conservative dead-local check.",
+    "limits": "Not the LLVM SSA representation; retained state/dump is last-function oriented, and the consumer uses uses/address/nonlocal conditions rather than a general interprocedural analysis.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_live.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_matching.c3",
+    "namespace": "theory_matching",
+    "class": "A/F",
+    "does": "Builds an auxiliary decision DAG and identifies a validated dense scalar dispatch subset.",
+    "consumer": "In PR: NF_DENSE_SWITCH reaches AIR and actual LLVM switch creation; raw-IR probe has 3 switches on versus 0 off.",
+    "limits": "Current dev has no such backend wiring. Full decision DAG is not consumed by PEAR; enum payload/guard/general matching remain partial.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_matching.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_pglcert.c3",
+    "namespace": "theory_pglcert",
+    "class": "A/F(limited)",
+    "does": "Checks pattern reachability/exhaustiveness and counterexamples; writes NF_EXHAUSTIVE.",
+    "consumer": "Diagnostics; flow code reads NF_EXHAUSTIVE but runs before this theory write.",
+    "limits": "Do not treat that earlier flow reader as evidence the later theory flag is consumed in this run. Full pattern certificates do not implement runtime destructuring.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_pglcert.c3"
+  },
+  {
+    "path": "pfront/theory/lower/theory_ssa.c3",
+    "namespace": "theory_ssa",
+    "class": "A",
+    "does": "Real CFG, dominance/frontier and SSA/phi construction in its own graph.",
+    "consumer": "Dump/report only.",
+    "limits": "No AIR/PEAR consumer. Native SSA largely comes from LLVM over separately emitted allocas, not this graph.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/lower/theory_ssa.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_cmtt.c3",
+    "namespace": "theory_cmtt",
+    "class": "A",
+    "does": "Contextual modal/staging judgments and quote/context consistency.",
+    "consumer": "Source checks/reports.",
+    "limits": "Not a full elaborating dependent/contextual type system or native code quotation runtime.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_cmtt.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_cmtt_meta.c3",
+    "namespace": "theory_cmtt_meta",
+    "class": "D/S",
+    "does": "Provides context/substitution storage APIs; production scan only recursively walks children and absorb copies hereditary counters.",
+    "consumer": "Report via HeredState metadata/counters.",
+    "limits": "Source explicitly states it does not solve meta-variables or run contextual occurs-checks; those counts remain zero.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_cmtt_meta.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_hered.c3",
+    "namespace": "theory_hered",
+    "class": "A",
+    "does": "Translates source to auxiliary typed terms, normalizes by hereditary substitution and issues judgments/notes.",
+    "consumer": "Feeds MetaCtx and diagnostics.",
+    "limits": "Normalized units are not reified onto the production AST for native compilation. Do not confuse this with the separate mutating theory_nbe.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_hered.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_modal.c3",
+    "namespace": "theory_modal",
+    "class": "A/S",
+    "does": "Scoped-effect registry, normalized continuation-tree model, UB tracker and structural subtype cache.",
+    "consumer": "Bidi/checks use the cache; continuation tree is retained/reported.",
+    "limits": "No continuation-tree consumer in AIR/PEAR or generated HOSE runtime. Models can run without implementing native effects.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_modal.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_msp.c3",
+    "namespace": "theory_msp",
+    "class": "A/M",
+    "does": "Checks quote/splice stage levels, variable escapes and quote interning.",
+    "consumer": "Real hard errors E3201/E3202, plus stage metadata.",
+    "limits": "Checks stage soundness; does not by itself execute code generators or emit quoted code at runtime.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_msp.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_nbe.c3",
+    "namespace": "theory_nbe",
+    "class": "T",
+    "does": "Mutates source AST for a restricted lambda fragment: beta/delta/eta, immutable values, evaluation-order guards and capture avoidance.",
+    "consumer": "Returned/updated AST reaches AIR.",
+    "limits": "Real runtime enabler: simple and higher-order lambda probes return 42 on, segfault off. Bounded subset, not all higher-order functions/escaping closures.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_nbe.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_poly.c3",
+    "namespace": "theory_poly",
+    "class": "A/M(limited)",
+    "does": "Unifies generic signatures, solves substitutions and makes monomorphic signatures.",
+    "consumer": "Only fallback write is call.type_slot when the primary inferencer left it null.",
+    "limits": "No specialized source bodies or emitted monomorphized LLVM functions. Mostly signatures/checks/reports, not full code specialization.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_poly.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_quals.c3",
+    "namespace": "theory_quals",
+    "class": "A/F; UNSOUND GAP",
+    "does": "Approximates function side effects and parameter write/escape sets.",
+    "consumer": "CRDT consumes NF_PURE_FN; PR maps it to memory(read) and maps NF_READONLY_PARAM to captures(none).",
+    "limits": "The consumer is real, but producer escape analysis misses assignment-RHS storage, demonstrated by address bits stored under captures(none). Heap reads are called mathematically pure in diagnostics; noalias/read-only advice also overreaches.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_quals.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_stage.c3",
+    "namespace": "theory_stage",
+    "class": "T",
+    "does": "Partial evaluation/residualization, forced comptime evaluation and bounded static-loop unrolling.",
+    "consumer": "Production AST replacement.",
+    "limits": "Comptime probe returns 42 on versus 0 off. Scalar evaluator and supported constructs are bounded; metadata transfer is not covered by the clone/egraph selftest.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_stage.c3"
+  },
+  {
+    "path": "pfront/theory/meta/theory_term.c3",
+    "namespace": "theory_term",
+    "class": "S/T utility",
+    "does": "Structural equality/hash-consing, clone and pattern substitution helpers.",
+    "consumer": "Used by rewriting/other theory models; cloned nodes reach production transforms.",
+    "limits": "Hash-consing alone is not optimization. Metadata preservation differs between clone and other fresh-node/substitution paths.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/meta/theory_term.c3"
+  },
+  {
+    "path": "pfront/theory/rewrite/theory_crdt.c3",
+    "namespace": "theory_crdt",
+    "class": "A; dormant facts",
+    "does": "Effect footprints, commutativity, independence and reduction classification.",
+    "consumer": "Uses qualifier facts; writes NF_INDEPENDENT/NF_REDUCTION.",
+    "limits": "No operational readers for those output flags; no statement scheduling, parallelization or reduction-code generation.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/rewrite/theory_crdt.c3"
+  },
+  {
+    "path": "pfront/theory/rewrite/theory_eclass.c3",
+    "namespace": "theory_eclass",
+    "class": "S/T at sites",
+    "does": "E-class constant/lattice analysis attached to equality saturation.",
+    "consumer": "Can inject/evaluate constants within the saturator at explicit rewrite sites.",
+    "limits": "Not a general runtime abstract interpreter or arbitrary-source optimization pass.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/rewrite/theory_eclass.c3"
+  },
+  {
+    "path": "pfront/theory/rewrite/theory_egraph.c3",
+    "namespace": "theory_egraph",
+    "class": "T at sites",
+    "does": "Equality saturation and cost extraction with source metadata preservation.",
+    "consumer": "Used by RwSites for explicit fixpoint rewrites, then replaces the AST subject.",
+    "limits": "Not globally applied to all arithmetic; axioms are supplied rules, not a proof that each rule preserves arbitrary effects or language semantics.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/rewrite/theory_egraph.c3"
+  },
+  {
+    "path": "pfront/theory/rewrite/theory_opt.c3",
+    "namespace": "theory_opt",
+    "class": "T/F(aux)",
+    "does": "AST constant/algebra/branch folding, DCE/copy propagation and block flattening.",
+    "consumer": "Mutated AST reaches AIR; limited liveness consumer.",
+    "limits": "CSE is a census plus NF_USED mark, not expression substitution. Much simple optimization overlaps primary constfold/SCCP and LLVM. Calls are conservatively not considered pure here.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/rewrite/theory_opt.c3"
+  },
+  {
+    "path": "pfront/theory/rewrite/theory_rwsite.c3",
+    "namespace": "theory_rwsite",
+    "class": "T",
+    "does": "Evaluates scoped rewrite values/composition and replaces explicit pipeline/fixpoint sites.",
+    "consumer": "Actual source AST replacement with TRS/egraph results.",
+    "limits": "Corrected explicit rewrite probe changes native result to 42. Rules do not apply everywhere just because they were declared.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/rewrite/theory_rwsite.c3"
+  },
+  {
+    "path": "pfront/theory/rewrite/theory_trs.c3",
+    "namespace": "theory_trs",
+    "class": "T/S",
+    "does": "Pattern/guard substitution, ordered rewriting and fuel-bounded fixpoint evaluation.",
+    "consumer": "RwSites invokes it on the requested subject.",
+    "limits": "Supported patterns/guards and finite fuel; termination/confluence are separate analyses, not a universal semantic-preservation proof.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/rewrite/theory_trs.c3"
+  },
+  {
+    "path": "pfront/theory/rewrite/theory_trs_proof.c3",
+    "namespace": "theory_trs",
+    "class": "A/S",
+    "does": "LPO termination/critical-pair/confluence analysis of a rule set.",
+    "consumer": "RwSites invokes RuleSet.analyse; same C3 namespace as theory_trs.",
+    "limits": "Real proof-model work on used rule sets; conclusions are bounded/syntax-specific, not validation of arbitrary optimization equations.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/rewrite/theory_trs_proof.c3"
+  },
+  {
+    "path": "pfront/theory/theory_check.c3",
+    "namespace": "theory_check",
+    "class": "S/T/A",
+    "does": "Allocates, initializes and sequences theory passes and a gradual-sort checker.",
+    "consumer": "Root AST is returned to driver; checks can change acceptance, transforms/facts reach later stages.",
+    "limits": "Runs only entry AST and under the driver verify guard. Pass count counts invocations, not useful work or proven program properties. CPU clock is labeled wall timing.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/theory_check.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_bidi.c3",
+    "namespace": "theory_bidi",
+    "class": "A",
+    "does": "Bidirectional modal-type synthesis/checking over a separate type store.",
+    "consumer": "Diagnostics, strict settings, type-model reports.",
+    "limits": "Not the production TypeTable checker or a replacement for its universal typing/ABI rules.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_bidi.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_mu.c3",
+    "namespace": "theory_mu",
+    "class": "A/S",
+    "does": "Recursive-type translation, contractivity/inhabitation/coinductive shape checks.",
+    "consumer": "Uses shared theoretical TypeStore and emits diagnostics.",
+    "limits": "No recursive-layout/native-type codegen from MuState. Separate from primary type mapping.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_mu.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_records.c3",
+    "namespace": "theory_records",
+    "class": "A/S",
+    "does": "Typed record rows, width/depth/formula relations and TypeStore materialization.",
+    "consumer": "Internal relation/formula checks and large built-in semantic-law audit.",
+    "limits": "No backend record-layout consumer; 70+ field analysis succeeding does not fix PEAR 16-field runtime limitations. Built-in laws run even with zero source structs.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_records.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_rowinfer.c3",
+    "namespace": "theory_rowinfer",
+    "class": "A",
+    "does": "Principal-row/effect constraints and inference in a separate model.",
+    "consumer": "Checks/reports.",
+    "limits": "No native handler specialization or universal compiler effect enforcement from those rows.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_rowinfer.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_sct.c3",
+    "namespace": "theory_sct",
+    "class": "A",
+    "does": "Size-change matrices/closure and termination classification with budgets.",
+    "consumer": "Notes/warnings; no LLVM willreturn/mustprogress consumer from SCT.",
+    "limits": "Cannot promote its reported termination proof to a native attribute without a specified supported fragment and soundness checks.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_sct.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_session.c3",
+    "namespace": "theory_session",
+    "class": "A",
+    "does": "Session-store/coinductive duality plus source-name/operation matching and endpoint-use checks.",
+    "consumer": "Diagnostics/reporting for recognized channel APIs.",
+    "limits": "No session/channel runtime codegen or universal deadlock-freedom guarantee for the compiled program.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_session.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_setops.c3",
+    "namespace": "theory_setops",
+    "class": "S",
+    "does": "TypeStore, primitive/Boolean constructors, owned record entries and algebra operations.",
+    "consumer": "Shared by mu/record/subtype theory models and engine.",
+    "limits": "A type-model store, not LLVM types or runtime value representation; bounded capacities.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_setops.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_stratified.c3",
+    "namespace": "theory_stratified",
+    "class": "A; dormant flag",
+    "does": "Type-dependency SCC/alias-cycle/guardedness/regularity checks.",
+    "consumer": "Alias cycles really reject with E4240; NF_RECURSIVE_TY only analysis/dump.",
+    "limits": "The flag does not drive recursive native layout; nominal/type-policy coverage is limited.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_stratified.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_subtype.c3",
+    "namespace": "theory_subtype",
+    "class": "A",
+    "does": "Bounded DNF/semantic subtype model and production match/alias/binding advice bridge.",
+    "consumer": "In PR attaches the real engine to supported set-algebra emptiness checks; W3291/W3292 are lint-only.",
+    "limits": "Not the universal primary subtype rule. Syntactic has_set_operator filter skips direct named-alias bindings even when the alias itself is proven empty.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_subtype.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_subtype_engine.c3",
+    "namespace": "theory_subtype_engine",
+    "class": "S/A, live narrow bridge",
+    "does": "Three-valued, budgeted structural/set-theoretic subtype/emptiness procedure.",
+    "consumer": "47-case standalone selftest; PR MatchRefiner queries for narrow emptiness advice.",
+    "limits": "Current dev only standalone selftest path, not the new production bridge. A passing selftest is not a program-wide type-safety proof.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_subtype_engine.c3"
+  },
+  {
+    "path": "pfront/theory/types/theory_subtype_full.c3",
+    "namespace": "theory_subtype_full",
+    "class": "S/A",
+    "does": "A separate recursive semantic-type/emptiness engine plus extensive law audits.",
+    "consumer": "Record model uses it for relation checks and built-in audit examples.",
+    "limits": "Distinct semantics/stores from the primary checker and 47-case engine; not a universal native compiler checker.",
+    "source": "https://github.com/Consumed-by-Pride/Pridec/blob/7e25543b94582caab76e77af91f7673690a10b51/pfront/theory/types/theory_subtype_full.c3"
+  }
+]

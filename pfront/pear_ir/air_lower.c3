@@ -287,6 +287,7 @@ struct AirLower
     Node*[64]    hoist_nodes;
     char*[64]    hoist_names;
     usz          hoist_count;
+    bool qualifier_module_final; // root finalization marker, never inferred from an old fn flag
 }
 
 fn void AirLower.init(AirLower* lr, AirModule* m, AirScope* sc, pfront_core::Interner* it)
@@ -301,6 +302,7 @@ fn void AirLower.init(AirLower* lr, AirModule* m, AirScope* sc, pfront_core::Int
     lr.total_prd = 0; lr.total_cns = 0; lr.total_cmd = 0; lr.total_decl = 0;
     lr.errors = 0;
     lr.hoist_count = 0;
+    lr.qualifier_module_final = false;
 }
 
 // ── Small helpers ──────────────────────────────────────────────────────────
@@ -613,7 +615,7 @@ fn AirPrd* AirLower.prd(AirLower* lr, Node* n)
         case Nk.N_EXPR_CHAR:
         {
             lr.total_prd++;
-            return air_ir::air_mk_char(lr.arena, (char)(n.p.ival & 0xff));
+            return air_ir::air_mk_char(lr.arena, (long)n.p.ival);
         }
         case Nk.N_EXPR_STRING:
         {
@@ -1480,7 +1482,7 @@ fn AirCmd* AirLower.expr_to_cns(AirLower* lr, Node* n, AirCns* k)
         case Nk.N_EXPR_CHAR:
         {
             lr.total_prd++;
-            return lr.cut(air_ir::air_mk_char(lr.arena, (char)(n.p.ival & 0xff)), k);
+            return lr.cut(air_ir::air_mk_char(lr.arena, (long)n.p.ival), k);
         }
         case Nk.N_EXPR_STRING:
         {
@@ -3368,7 +3370,9 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
     // `NF_PURE_FN` means the qualifier pass proved no externally visible
     // writes. It may still read memory or diverge, so do not infer `memory(none)`
     // or termination attributes from this fact.
-    d.memory_readonly = (n.flags & pfront_core::NF_PURE_FN) != 0;
+    bool final_qualifiers = lr.qualifier_module_final && (n.flags & pfront_core::NF_QUALS_COMPLETE) != 0;
+    d.fact_state = final_qualifiers ? air_ir::AirFactState.AFACT_AST_FINAL : air_ir::AirFactState.AFACT_UNKNOWN;
+    d.memory_readonly = final_qualifiers && (n.flags & pfront_core::NF_PURE_FN) != 0;
     // Return type: if the fn uses clause syntax (has N_CLAUSE children) the
     // parser attaches an N_TY_FN covering the entire clause as type_ann, so we
     // force t_infer and let PEAR infer the real arrow type. Otherwise trust
@@ -3424,7 +3428,7 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
             AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
             bool is_llvm_ptr = pty != null && (pty.tag == air_ir::AirTypTag.ATYP_PTR
                 || pty.tag == air_ir::AirTypTag.ATYP_REF || pty.tag == air_ir::AirTypTag.ATYP_REF_MUT);
-            pb.no_capture = (c.flags & pfront_core::NF_READONLY_PARAM) != 0 && is_llvm_ptr;
+            pb.no_capture = final_qualifiers && (c.flags & pfront_core::NF_READONLY_PARAM) != 0 && is_llvm_ptr;
             d.add_param(pb);
         }
         else if (c.kind == Nk.N_CLAUSE)
@@ -3966,6 +3970,7 @@ fn void AirLower.walk_decls(AirLower* lr, Node* n)
 // lr.mod. Call this once per AirModule you want populated.
 fn void AirLower.module_body(AirLower* lr, Node* root)
 {
+    lr.qualifier_module_final = root != null && (root.flags & pfront_core::NF_QUALS_COMPLETE) != 0;
     // Whole-program emission calls this once per loaded module; the hoist list
     // belongs to the module being lowered NOW, so it must start empty each time
     // (otherwise module N's nested functions are emitted again for module N+1).

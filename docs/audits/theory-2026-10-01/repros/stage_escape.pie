@@ -1,0 +1,5 @@
+fn f : i64 -> i64
+  | n ->
+      let q = quote n
+      0i64
+fn main(_) -> i64 { return 42; }

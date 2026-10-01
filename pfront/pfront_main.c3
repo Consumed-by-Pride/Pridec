@@ -553,6 +553,9 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                    sccp_consts, sccp_subs, sccp_ifs, sccp_loops);
         }
 
+        // Recompute effect/capture facts after the LAST AST mutation.
+        if (theory_ok && tp != null) { tp.finalize_quals(entry.ast); }
+
         // The FINAL tree: after rewriting, partial evaluation, e-graph
         // extraction and the optimizer. This is what the middle end will
         // consume, so it is the tree worth looking at.
