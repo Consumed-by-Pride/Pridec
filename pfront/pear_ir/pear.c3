@@ -533,6 +533,39 @@ fn bool is_ret_name(char* nm)
     return c == '_';
 }
 
+fn bool pear_same_name(char* a, char* b)
+{
+    if (a == null || b == null) return false;
+    uint i = 0;
+    while (a[i] != 0 && b[i] != 0)
+    {
+        if (a[i] != b[i]) return false;
+        i++;
+    }
+    return a[i] == 0 && b[i] == 0;
+}
+
+// Deliberately narrow recovery for the one-clause pointer-reader shape that
+// the generic boolean/wildcard dispatcher cannot represent. Do not generalize
+// this to arbitrary APAT_BIND bodies: those require real typed pattern and CFG
+// lowering. Accept only `binder[literal]` delivered directly to `%ret`.
+fn bool pear_is_direct_bind_index_return(AirBranch* br)
+{
+    if (br == null || br.guard != null || br.pat == null
+        || br.pat.tag != APAT_BIND || br.pat.name == null
+        || br.body == null || br.body.tag != ACMD_CUT
+        || br.body.prd == null || br.body.prd.tag != APRD_VAR
+        || !pear_same_name(br.body.prd.name, br.pat.name)
+        || br.body.cns == null || br.body.cns.tag != ACNS_INDEX
+        || br.body.cns.prd == null || br.body.cns.prd.tag != APRD_INT
+        || br.body.cns.tail == null || br.body.cns.tail.tag != ACNS_COVAR
+        || !is_ret_name(br.body.cns.tail.name))
+    {
+        return false;
+    }
+    return true;
+}
+
 fn bool is_hole_name(char* nm)
 {
     if (nm == null) return false;
@@ -1205,11 +1238,13 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 cv = ll_build_icmp(cg.b, LLVM_ICMP_NE, v, z, cg.mktmp());
             }
             else { cv = ll_const_int(cg.i1ty, 0, 0); }
-            // Single-arm irrefutable match (e.g. clause-style `| () -> 42`
-            // or `match x { _ -> body }`): run the body directly without a
-            // condbr. Limit to wildcards and 0-field tuples/records; bool
-            // arms must go through condbr even when n_arms==1.
+            // Single-arm irrefutable matches (e.g. `| () -> 42` or
+            // `match x { _ -> body }`) run directly without a condbr. Keep
+            // bool arms on the conditional path. APAT_BIND is accepted only
+            // for the separately validated direct `binder[literal] -> %ret`
+            // shape; general binder bodies still need proper typed CFG lowering.
             AirCmd* single_cmd = null;
+            AirBranch* direct_bind_branch = null;
             uint n_arms = 0;
             bool has_bool_arm = false;
             bool has_irrefutable = false;
@@ -1230,9 +1265,23 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                         single_cmd = br.body;
                     }
                 }
+                if (pear_is_direct_bind_index_return(br))
+                {
+                    direct_bind_branch = br;
+                    single_cmd = br.body;
+                }
             }
             if (!has_bool_arm && n_arms == 1 && has_irrefutable && single_cmd != null)
             {
+                return cg.cmd(single_cmd);
+            }
+            if (!has_bool_arm && n_arms == 1 && direct_bind_branch != null
+                && single_cmd != null && v != null)
+            {
+                // The one irrefutable binding names exactly the scrutinee.
+                // Bind it as the existing raw SSA value so prd_i64 loads it
+                // without inventing an alloca or changing pointer aliasing.
+                cg.bind_direct(direct_bind_branch.pat.name, v, false);
                 return cg.cmd(single_cmd);
             }
             // Find true/false arms.
