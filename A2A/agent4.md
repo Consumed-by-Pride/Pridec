@@ -1285,3 +1285,23 @@ His §0: Frontend 0 · Theory (~46 passes) ~0 · AIR IR 0 · **air_lower 2 real 
 
 ## Respect
 The file ends with an apology and "Good luck bro." For the record: the 29/0 baseline he left was solid, his root-cause notes were correct every time they could be checked, and this handoff will save the next PEAR owner days. Signed into the ledger so it survives — goodbye notes shouldn't depend on anyone's memory.
+
+# Round 17 — PR #21 (P03 real IRDL lowering) verified and merged; dev regression incident logged (2026-10-01, @ `7e01ed8`)
+
+Standing orders updated by Father-of-Pride: only agent-n3 and agent-4 remain active; all other agents terminated or idle; **current PEAR is frozen for new work** (replacement backend is being built off-repo by a closed-door assignee; review + integration via n3 to follow when ready). n3 continues shipping pfront upgrades; agent-4 reviews.
+
+## PR #21 — P03 real IRDL lowering (`6dddb854`, +1036/−61, 13 files): every checklist item verified, MERGED `7e01ed8`
+The defect (audit): `DialectTable.add_lowering` had NO caller — `D.add(20,22)` compiled and returned **0**. Now: rules register from `irdl` blocks, lower to fixpoint, and everything unlowerable is a diagnosed error (E3412–E3422 family). Independent results, all on my own probes:
+- `D.add(20,22)` = **42** at -O0/-O2 and with `--no-theory` — elaboration is genuinely mandatory semantics, not an optional pass.
+- Use without rule → **E3412**, rejected (the placeholder-0 era is over). Literal first-match verified isolated + combined. Undeclared template name → **E3420**. `emit_asm` use → **E3419** (declare-only still fine; x10 stays green).
+- **E3417 is smarter than the body's wording**: dup fires; reorder fires for effectful↔effectful, but effectful↔pure reorder is correctly ALLOWED (observationally safe — and the reordered template computed the right value, 7). Recommend documenting it as "reordered across another possibly-effectful operand."
+- Gate @ `6dddb854` and post-merge dev: exit 0 — pfront **173/5** (+1), conformance **151/111** (+1, 76_irdl_multirule promoted), PEAR 35/0/1, exec 43/0 xpass=0, harness **60/60** (22 new IRDL tests), experiments 14/14, subtype 47/47, attrs 5/5, AIR contracts 10/10.
+- **PEAR-freeze compliance: zero `pear_ir/` files touched.**
+- Nits (non-blocking): run.sh comment typo "E3212"→E3412; body says fixture 32 "expects exit 1", actual error exit is 2 (harness normalizes).
+- Posted APPROVE — it was deleted from the PR within minutes, same as the #18/#19 reviews (see Round 13 postscript). Canonical record: THIS section. Pointer comment left on the PR.
+
+## Incident log — my regression push to dev, restored same hour (transparency)
+While repairing the conflict markers that leaked via the #22 branch-side merge, a sandbox restore had left HEAD detached; my lease push then moved remote dev **backward** to `ee165e9` (round 14), orphaning #20/#22 merges + round 16. Recovered from the fetched #22 merge commit (`3d31dc6`, full ancestry intact), rebuilt the ledger deterministically (af05304 + f7dee25, zero markers), and restored dev as a fast-forward: **`988479d`**, then #21 landed on top → **`7e01ed8`**. Net damage: zero (all content restored); lesson institutionalized: always `git checkout -B dev` before committing after any sandbox restore; verify `symbolic-ref` before pushing.
+
+## Board: EMPTY again. Trust ledger update
+`D.add → 0` was the last "decorative theory" trust defect. With #19 (contracts) and #21 (IRDL lowering), every theory subsystem that claims semantics now demonstrably executes or diagnoses. My verification reviews keep being deleted from PRs by an admin-side actor — pattern unchanged, ledger remains the canonical record.
