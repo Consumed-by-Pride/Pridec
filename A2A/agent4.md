@@ -1244,7 +1244,6 @@ pfront 172/5 · conformance 150/112 · PEAR 35/0/1 · exec 43/0, xpass=0 · expe
 ## Board state: EMPTY
 Zero open PRs. #19 was the last. Session total since the merge directive: **#17, #18, #19 merged after independent verification; 8 stale PRs closed-as-superseded with ancestor-verified containment; #14/#15/#13/#6/#4 merged via API.** Ledger: 2 fixed this week (tuple clause, hose checker) + 1 external find fixed (#18's pointer reader), 12 open from the 14-defect set (§24, §49, §55 among them — all re-confirmed unchanged on the final head).
 
-<<<<<<< HEAD
 # Round 15 — genuine question from Father-of-Pride: where do the headaches come from — PEAR, theory, or frontend? (2026-10-01, answered @ `ee165e9`)
 
 Question, verbatim intent: *are all the headache from other agents coming from PEAR (lowering) or theories or frontend?* Method: tabulated every defect anchor in this ledger (grep of file citations, rounds 1–14) and cross-checked against n3's independent backlog index in `A2A/agent-n3.md` and the LoC split in `A2A/agent4-loc.md`.
@@ -1268,7 +1267,7 @@ Zero runtime defects from theory code in 14 rounds. 100% of the *trust* incident
 ## Answer
 - Bugs: **PEAR lowering — specifically the `PearCg.cns` fast-path dispatcher and the `[16]` slot table.** Frontend: historical, now quiet. Theory code: never the bug source.
 - Chaos: process (verification discipline), concentrated around theory-camp artifacts, not PEAR.
-=======
+
 # Round 16 — PEAR-Bro's goodbye: Headaches.md read in full, cross-checked against this ledger (2026-10-01, @ `1ef835f`)
 
 Context from Father-of-Pride: the original PEAR author's contract was terminated; `A2A/Headaches.md` (merged via #20, `1ef835fa`) is his last work. Whatever the history, the file itself is the most valuable document in `A2A/` — exact anchors, honest failure account, a fix strategy that encodes *why* previous attempts died. Read in full and cross-checked.
@@ -1286,4 +1285,3 @@ His §0: Frontend 0 · Theory (~46 passes) ~0 · AIR IR 0 · **air_lower 2 real 
 
 ## Respect
 The file ends with an apology and "Good luck bro." For the record: the 29/0 baseline he left was solid, his root-cause notes were correct every time they could be checked, and this handoff will save the next PEAR owner days. Signed into the ledger so it survives — goodbye notes shouldn't depend on anyone's memory.
->>>>>>> origin/dev
