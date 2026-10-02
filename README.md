@@ -34,8 +34,8 @@ export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 ### Run
 
 ```bash
-./pfrontc path/to/file.pie --emit-air     # writes file.air next to the source
-./pfrontc path/to/file.pie --emit-exe -O2 # writes a native executable next to the source
+./pfrontc path/to/file.pie --emit-air     # writes file.air (AIR 2.0, whole program) next to the source; pfrontc ends here
+scripts/pie-exe.sh path/to/file.pie -O2   # the chain: pfrontc -> file.air -> legacy pear1c -> native executable (needs `make legacy-pear`)
 ./pfrontc path/to/file.pie --dump-ast     # print the resolved, post-theory AST
 ./pfrontc path/to/file.pie --strict-types # turn sort/type advice into errors
 ./pfrontc --help                          # full flag list
@@ -113,7 +113,7 @@ Pridec/
 ├── examples/                    # example .pie programs
 ├── bench/                       # benchmarks (.pie kernels + C harnesses)
 ├── docs/
-│   ├── specs/AIR.md             # AIR 1.0 specification
+│   ├── specs/AIR.md             # AIR 2.0 specification (normative)
 │   └── dev/                     # developer notes (HANDOFF, TODOs)
 ├── scripts/                     # build/regression/CI helpers
 ├── experiments/                 # research scratchpads (not built by default)
@@ -158,15 +158,17 @@ theory pipeline  (~40 passes — see pfront/theory/theory_check.c3)
 air_lower  →  AirModule (λ̄μμ̃ IR in slab arena)
    │
    ▼
-├─ air_emit  →  AIR 1.0 text  (.air file)
-└─ PEAR      →  LLVM 23 bitcode / native ELF (--emit-bc / --emit-exe)
+air_write  →  AIR 2.0 text  (.air file; pfrontc ends here, no LLVM)
+   │
+   ├─ legacy/pear1 (pear1c)  →  LLVM 23 bitcode / native ELF   (frozen reference + gate)
+   └─ PEAR 2                 →  built against docs/pear2/
 ```
 
 ## Status
 
 * Front-end and AIR emission: checked by pfront and current conformance
   contracts; their known unmet cases remain recorded, not hidden.
-* PEAR native backend: exercised by `tests/exec/pear/` and `tests/exec/`;
+* Legacy PEAR 1 backend (`legacy/pear1`, reads `.air`): exercised by `tests/exec/pear/` and `tests/exec/`;
   scalar fixtures pass, while broader language/runtime coverage remains
   incomplete. Known-broken execution cases are tracked in `tests/exec/XFAIL.tsv`.
 * Examples: 21/37 are front-end error-free; the 16 preserved broken showcases

@@ -1,461 +1,329 @@
-# AIR 1.0 — Abstractive Intermediate Representation
-## (Text Syntax for the λ̄μμ̃-calculus, Pride PEAR frontend)
+# AIR 2.0 — the `.air` text format
 
-> *Writing code in Pride is a piece of cake... well, a piece of `.pie`.*
-> *Emitting AIR is a piece of PEAR.*
+**Status: normative and implemented.** `pfrontc FILE.pie --emit-air` writes it, `airtool` and the legacy
+backend `pear1c` read it, and `tests/air/run.sh` checks it. Where this document and the code disagree the
+**code is wrong or this document is**: open a ticket, do not guess. The executable forms of this spec are
+`pfront/pear_ir/air_text.c3` (vocabulary), `air_write.c3` (the one canonical printer), `air_read.c3` (the
+strict parser) and `air_verify.c3` (validity rules).
 
-AIR is Pride's primary intermediate representation. It is a classical sequent
-calculus in the style of Curien–Herbelin's **λ̄μμ̃** (2000), extended with
-(polarized) algebraic data/codata types, (co)pattern matching, explicit
-binders for producers/consumers, a labelled jump/multi-cut construct for
-control flow, and graded (linear/affine/unrestricted) multiplicity
-annotations.
+AIR is Pride's intermediate representation, a sequent-calculus (λ̄μμ̃) term language. `pfrontc` ends at `.air`;
+everything after it — PEAR 1 (legacy, `legacy/pear1/`), PEAR 2 (new) — is a *backend* that starts from the
+file. This document is the whole interface between the two sides. The earlier design text is kept as
+[`AIR-1.0-vision.md`](AIR-1.0-vision.md); it is aspirational and does not describe what is emitted.
 
-After pfront resolves, type-checks and analyzes a `.pie` module, the
-`pfront/pear_ir` pass lowers the program to AIR text (`*.air`), one file
-per compilation unit. AIR is later consumed by **PEAR** (Program Engine
-for Abstractive Representations), which focusses, normalizes to **AxCut**
-(Schuster/Müller/Ostermann/Brachthäuser 2025), and emits LLVM bitcode.
-
-This document is the **only normative specification** of AIR's surface
-syntax.  Anything the emitter produces that matches this grammar is valid
-AIR; anything PEAR accepts must conform to it.
+Contents: 1 Why 2.0 · 2 What a file is · 3 Lexical · 4 Grammar · 5 Names and scope · 6 Types · 7 Meaning of each
+form · 8 Conventions a consumer must implement · 9 Claims (`facts`) · 10 Validity (V1–V4) · 11 What the producer
+gets wrong today · 12 Path to a strict calculus · 13 Tools and tests
 
 ---
 
-## 1. Lexical structure
+## 1 Why 2.0
 
-### 1.1 Identifiers
+AIR 1.0 (`AIR-1.0-vision.md`) was a design. The emitter printed a different, lossy notation (`μ̃%ret_2. <p|[0]·%ret_2>`,
+`; air facts:` comments, only the entry module) that no parser could read back, and PEAR consumed the in-memory
+graph, never the text. AIR 2.0 changes that contract:
 
-```
-<varid>  ::= <lower>  <alnum> '-' '_' '/'        // producer variables, type vars, fields
-<covar>  ::= <alpha>  <alnum>*                  // co-variables / continuation names,
-                                                 // leading character α β γ δ ε κ ρ σ τ φ ψ
-                                                 // or a '%' sigil if non-Greek: %ret %k %exit
-<conid>  ::= <upper>  <alnum>                    // data/ctype constructors, type names
-<opid>   ::= [-+*/<>=!&|^~$#@.]+                 // operator symbols for infix consumers
-<num>    ::= '-'? [0-9][0-9_]* ('.' [0-9][0-9_]*)? ('e' '-'? [0-9]+)?
-<bits>   ::= 'i' [0-9]+ | 'u' [0-9]+ | 'f' [0-9]+        // fixed-width numeric types
-<char>   ::= "'" (<any except \ or '> | '\' <esc>) "'"
-<string> ::= '"' (<any except \ or "> | '\' <esc>)* '"'
-<esc>    ::= '\' ['"?\\abfnrtv] | '\x' <hex> <hex>
-```
+* The text is **the** interface. A backend reads the file; it has no other access to the front end.
+* The text is **lossless**: every field of the in-memory IR that any backend could read is printed, and
+  `pfrontc --air-roundtrip` proves it by write → read → structural fingerprint (structure identical for all 216 programs of the exec, PEAR, pfront and examples suites that compile — the other 58 of the 274
+  sources have front-end errors and by design emit no `.air`; before the split the
+  LLVM bitcode of the original module and of the one read back from text was also byte-identical for the 180 programs the legacy
+  backend could compile, and the legacy executables built through `.air` are byte-identical to the old direct path at -O0..-O3).
+* The text is **canonical**: one printer, so `airtool fmt` of any producer output is byte-identical to the input.
+* The text is **honest** about what the producer does *not* guarantee (§8, §10, §11) instead of describing an
+  ideal calculus the compiler does not produce.
 
-Keywords (reserved):
-```
-prd cns cmd            // sort ascriptions
-fn data codata         // top-level forms
-def defco              // producer/consumer definitions
-declare                // extern/import
-module import          // module structure
-μ mu μ̃ mu~ coμ comu    // μ/μ̃ binders (μ̃ can be written `mu~`)
-cut < p | e >          // cuts  (syntactically a pair of angle brackets)
-λ \ fun                // lambda (prd-side binder)
-case of inl inr        // sums
-fst snd                // product projections (cns-side)
-proj #                 // projection (proj #n e   for tuples/records)
-ret jump label         // multi-cut / labels
-let in                 // non-recursive let (sugared μ/μ̃ pair)
-rec                    // recursive let-group
-if then else           // boolean conditionals (sugared case)
-while for loop break continue defer   // control-flow sugar
-handle perform resume  // algebraic effects (sugared μ/μ̃)
-true false unit null   // constants
-i8 i16 i32 i64 i128 isz
-u8 u16 u32 u64 u128 usz
-f16 f32 f64 f128       // fixed-width primitives
-bool char str bytes    // primitive type names
-unsafe comptime        // phase markers
-lin aff unr            // multiplicity
-not and or xor shl shr // primops
-at exit                // defer/exit markers
-_                      // wildcard
-```
+## 2 What a file is
 
-### 1.2 Comments
+One `.air` file is **one whole program**: every module the entry file loaded (including `prelude` and the
+standard library), in load order, as a flat sequence of declarations. The entry module comes first.
 
 ```
-// line comment
-{- block comment {- may nest -} -}
+// comment to end of line
+air 2.0 Main "tests/exec/p03_fib.pie";    // header: format version, entry-module name, source path (or nil)
+
+extern declare malloc(_ : i64) : ptr(u8); // declaration without a body (provided by the host / libc)
+
+def fib(n : i64) : i64 =                  // definition
+  mu~ %ret_2.
+    ...;
+
+module prelude;                           // marks where the next loaded module's declarations begin
+def id_i64(x : infer) : infer = ...;
 ```
 
-### 1.3 Layout
+Rules:
 
-AIR is **whitespace-insensitive** (like LLVM); `;` optionally separates
-sequential commands. Indentation is not significant. Curly braces
-`{ }` group sequences; parentheses `( )` group expressions.
+* The header is mandatory and must be `air 2.0`. A reader **rejects** any other version (no best-effort).
+* `module NAME;` is a marker only; it opens no scope. All names live in **one flat top-level namespace**.
+* **Duplicate top-level names:** the *first* definition wins and later ones are ignored. The producer emits such
+  duplicates today (e.g. `getpid` is defined by two library modules); backend 1 reports them and keeps the first.
+  A consumer must do the same, not fail and not take the last.
+* Entry point: the def named `main`. Its result is the process exit status (low 8 bits). Backend 1 links a fixed
+  `_start` that calls `main` and exits with the result.
+* Limits (enforced by the reader; exceeding one is an error with file:line:col): 4096 declarations, 16 binders per
+  list, 16 operands per tuple/call/syscall/asm, 64 branches/constructors/destructors/fields, 8 type arguments.
 
----
+## 3 Lexical structure
 
-## 2. Programs and modules
+| token | form |
+|---|---|
+| whitespace | space, tab, CR, LF (insignificant) |
+| comment | `//` to end of line |
+| identifier | `[A-Za-z_%][A-Za-z0-9_%]*` that is not a reserved word; `%` is an ordinary identifier character (`%ret_2`, `%k17`) |
+| quoted identifier | `` `any bytes` `` with escapes; used for reserved words and names with other characters (`` `ptr` ``, `` `\xc2\xb7` `` is the hole) |
+| integer | `-?[0-9]+`, decimal, must fit `i64` |
+| float | `-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?` with a `.` or exponent; written with `%.17g` so it round-trips |
+| string | `"…"` — bytes, escapes `\\ \" \n \t \xHH`; no raw newline |
+| bytes | `b"…"` — same escapes; a byte-string literal (no terminating NUL implied) |
+| `·` | U+00B7 (UTF-8 `C2 B7`): the **stack separator** in consumers |
+| `->` | arrow token |
+| punctuation | `# ( ) { } [ ] < > \| , ; : . =` |
+| `mu` / `mu~` | the ASCII words; the reader also accepts `μ` and `μ̃` (UTF-8) but the printer always writes ASCII |
 
-```
-<program> ::= (<toplevel>)*
+A name that is a reserved word is always printed quoted. The reserved words are the keywords of the grammar below
+plus the type keywords; the exact list is `air_text::is_reserved`. `nil` stands for an absent name/type/string.
 
-<toplevel> ::= 'module' <conid> ('.' <conid>)* ';'
-            |  'import' <qname> ('as' <conid>)? ('hiding' '(' <namelist> ')')? ';'
-            |  'declare' <decl>         ; foreign declaration (no body)
-            |  'data'    <datadecl>
-            |  'codata'  <codatadecl>
-            |  'def'     <def>          ; producer definition
-            |  'defco'   <codef>        ; consumer definition
-            |  ';'
-```
+## 4 Grammar
 
-### 2.1 Data types (algebraic, positive)
-
-```
-<datadecl> ::= <qconid> <typarams> <mult>? ('where' '{' <ctrdecl> (';' <ctrdecl>)* '}')?
-
-<ctrdecl>  ::= <conid> '(' <fieldlist>? ')' ':' <typ>          // constructor is a producer
-<fieldlist>::= <field> (',' <field>)*
-<field>    ::= <mult>? <typ> <varid>?
-<typarams> ::= ('[' <tyvar> (',' <tyvar>)* ']')?
-<tyvar>    ::= <varid> (':' <kind>)?
-<kind>     ::= '*' | '<kind>' '->' <kind> | '(' <kind> ')'
-```
-
-A `data` declaration introduces a **positive/inductive** type:
-- Each `<ctrdecl>` binds a producer constructor `<conid>` which, when cut
-  against a consumer of the enclosing type, fires the matching pattern.
-- Producers are introduced (right-rule in the sequent calculus) by
-  applying the constructor; consumers are eliminated (left-rule) by
-  `case { C1 x1 -> c1; ... Cn xn -> cn }`.
-
-### 2.2 Codata types (coinductive, negative)
+`X*` zero or more, `X,*` comma-separated, `[X]` optional. Terminals are in `monospace`. The grammar is the
+language of `air_read`; `air_write` prints exactly it.
 
 ```
-<codatadecl>::= <qconid> <typarams> <mult>? ('where' '{' <dtordecl> (';' <dtordecl>)* '}')?
+file      ::= header decl*
+header    ::= air 2.0 NAME (STRING | nil) ;
+NAME      ::= identifier | quoted-identifier | nil
 
-<dtordecl> ::= <varid> '(' <fieldlist>? ')' ':' <typ>          // destructor is a consumer
+decl      ::= module NAME ;
+            | import (STRING | nil) [as NAME] [glob] ;
+            | fn
+            | data | codata | effect
+fn        ::= [pub] [extern] [fastcc] [varargs] [link (STRING|nil)] [facts (ast_final|air_checked)] [readonly]
+              (def | defco | declare) NAME [ "[" binder,* "]" ] "(" binder,* ")" [: type] [= cmd] ;
+              -- `declare` has no body; `def`/`defco` have one (V4)
+data      ::= [pub] data NAME [lin|aff] [ "[" binder,* "]" ] "{" ctor* "}" ;
+ctor      ::= ctor NAME "(" field,* ")" [: type] ;
+codata    ::= [pub] codata NAME [lin|aff] [ "[" binder,* "]" ] "{" ( op NAME "(" field,* ")" [: type] ; )* "}" ;
+effect    ::= [pub] effect NAME "{" ( op NAME : type ; )* "}" ;
+field     ::= [mut] [lin|aff] NAME : type
+binder    ::= [mut] [nocapture] [lin | aff | exact "(" INT ")"] NAME [: type]
+
+type      ::= nil | TYPEKW [NAME] [# INT] [ "(" type,* ")" ] [tail "(" type ")"]
+              -- NAME only for nominal path tvar forall exists generic
+              -- "# INT" only for array (length), effrow, refine
+              -- TYPEKW ∈ i8 i16 i32 i64 i128 isz u8 u16 u32 u64 u128 usz f16 f32 f64 f128 bool char str bytes
+              --          unit bottom infer self nominal path tvar arrow tuple array slice ptr ref refmut sum union
+              --          intersect neg forall exists bang query effrow typeof refine generic
+
+cmd       ::= nil
+            | "<" prd "|" cns ">"                                  -- cut: the only way a value meets a continuation
+            | mu NAME . cmd | mu~ NAME . cmd                       -- bind a covariable / a variable to "the rest"
+            | seq "{" cmd ; cmd "}"                                -- do the first, then the second
+            | let NAME = prd in cmd
+            | letrec "(" binder = prd ,* ")" in cmd
+            | if prd then cmd else cmd
+            | while prd do "{" cmd "}"  |  for NAME in prd do "{" cmd "}"
+            | match [dense] prd "{" branch* "}"
+            | handle "{" cmd "}" "{" branch* "}"  |  perform NAME "(" prd ")"  |  resume "(" prd ")"
+            | label NAME "(" binder,* ")" . cmd  |  jump NAME "(" NAME,* ")"  |  break NAME  |  continue NAME
+            | (block|unsafe|unchecked|comptime|defer) "{" cmd "}"
+            | (assert|assume|ret) "(" prd ")"  |  ub (STRING|nil)  |  trap  |  nop
+            | syscall prd "(" prd,* ")"  |  asm [intel|att] (STRING|nil) "(" prd,* ")"
+            | atomic ATOMICOP ORDER "(" prd ")"  |  fence ORDER
+branch    ::= pat [guard "{" cmd "}"] -> cmd ;
+ORDER     ::= relaxed | acquire | release | acq_rel | seq_cst
+ATOMICOP  ::= load store xchg add sub and or xor nand max min umax umin
+
+prd       ::= nil | prdcore [: type]                                -- `: type` = the type the front end resolved
+prdcore   ::= NAME                                                  -- variable
+            | INT | FLOAT | true | false | char "(" INT ")" | STRING | BYTES | unit | null
+            | con NAME [ "(" prd,* ")" ] | tuple "(" prd,* ")" | array "(" prd,* ")"
+            | record "{" (NAME = prd),* "}"
+            | inl "[" type "]" "(" prd ")"  |  inr "[" type "]" "(" prd ")"
+            | lam "(" binder,* ")" . cmd  |  cometa "(" binder,* ")" . cmd  |  mu NAME . cmd
+            | "(" BINOP prd prd ")"  |  "(" UNOP prd ")"
+            | coerce "(" prd , type ")" | sizeof "(" type ")" | alignof "(" type ")" | offsetof "(" type , NAME ")"
+            | reify cmd | quote cmd | eval "(" prd ")" | splice "(" prd ")"
+            | poison "(" type ")" | unreachable
+            -- `: type` is printed inside the form (not as a suffix) for coerce sizeof alignof offsetof poison
+BINOP     ::= add sub mul div mod and or xor shl shr land lor eq neq lt gt le ge pipe
+UNOP      ::= neg not bitnot deref ref addr comult
+
+cns       ::= nil
+            | NAME                                                  -- covariable: a continuation / a return point
+            | prd · cns                                             -- stack: supply an argument, continue
+            | (fst|snd|deref|default|share|erase|call) · cns
+            | proj INT · cns
+            | field NAME # INT · cns
+            | index "(" prd ; INT ")" · cns  |  store "(" prd ; INT ")" · cns
+            | as "(" type ")" · cns
+            | case [dense] "{" branch* "}"
+            | cocase "{" ( . NAME "(" NAME,* ")" -> cmd ; )* "}"
+            | comu NAME . cmd                                       -- bind the delivered value, continue with cmd
+
+pat       ::= nil | _ | bind NAME | INT | true | false | char "(" INT ")" | STRING | FLOAT
+            | tuple "(" pat,* ")" | array "(" pat,* ")" | record "{" NAME,* "}"
+            | ctor NAME [ "(" pat,* ")" ] | as "(" pat , NAME ")" | or "(" pat , pat ")" | ref "(" pat ")" | rest
 ```
 
-A `codata` declaration introduces a **negative/coinductive** type:
-- Each `<dtordecl>` binds a consumer destructor `<varid>` (like a method
-  or a field projection).
-- Consumers are introduced by `comu { l1 x1 -> c1; ... ln xn -> cn }`
-  (a co-case / object-style cobind), and producers are eliminated by
-  projection (`proj #l e` or `.l`).
+Layout (indentation, line breaks) is produced by the canonical printer and carries no meaning. **Do not
+hand-edit canonical files; run `airtool fmt`.**
 
-Records and objects are codata; `&T` references, slices and lazy
-structures live here too.
+## 5 Names and scope
 
-### 2.3 Producer/consumer definitions
+Names are plain strings. Variables and covariables share one lexical alphabet but are used in different
+positions: a *variable* in a producer, a *covariable* as a consumer.
 
-```
-<def>  ::= <varid> <typarams> <arglist> (':' <typ>)? '=' <cmd>  ';'
-<codef> ::= <covar> <typarams> <coarglist> (':' <typ>)? '=' <cmd> ';'
+**What the producer actually guarantees** (checked by `airtool verify`, §10) is weaker than lexical nesting:
 
-<arglist>   ::= '(' <binder> (',' <binder>)* ')'
-<coarglist> ::= '[' <cobinder> (',' <cobinder)* ']'
-<binder>    ::= <mult>? <typ>? <varid>
-<cobinder>  ::= <mult>? <typ>? <covar>
-```
+1. A function body is `mu~ %ret_N. c` (see §8): `%ret_N` is its return continuation.
+2. `seq { a ; b }` is not a scope boundary. A binder introduced by a `comu x.` (or `let`) inside `a` — in
+   particular `comu x. <unit | ·>` used as *assignment/definition* — is **visible in `b`** and in the rest of the
+   enclosing sequence. Binders are unique per function in practice (`_x17`, `base`, `a_1`) but **mutable variables are
+   rebound by repeating the binder** (`comu base. …` assigns `base`).
+3. A `label L(…). c` defines a block. `L` is visible in its own body (loop back-edge) and in the **second half of
+   the `seq` whose first half is the `label`** (the jump that enters it).
+4. A variable that is not bound in the function and not a top-level declaration, constructor or effect operation is
+   only legal as the *receiver of a `field` chain* (module-path root, §8 N1). Any other free variable is a producer
+   defect (§11).
 
-- `def foo(x:i32, y:i32): i32 = < (+ x y) | %ret >;`
-  binds a producer: invoking `foo` against any continuation `k` fires
-  the cut `< (+ x y) | k >`.
-- `defco %iterate[s](...) : List = < ... | s >` binds a consumer/
-  continuation.
+A consumer must therefore resolve names by **function-wide flat scope with definition-before-use in sequence
+order**, not by lexical nesting. Section 12 describes the plan to remove this gap.
 
-Top-level `def` is sugar for `μ %top. < λ(x,y). ... | %main >`
-immediately cut against the entry continuation (see §6).
+## 6 Types
 
----
+Types are **hints from a front end that does not finish type inference**. Today most function signatures print
+`infer`; integer literals carry `: infer` unless the source annotated them. Nothing in the pipeline checks AIR
+types, and the legacy backend treats every scalar as 64-bit (`i8/i16/i32/u8/u16/u32` select narrower LLVM integers,
+`bool` is `i1`, `ptr/ref/refmut` are pointers held as 64-bit integers, `unit/bottom` are void, everything else
+including `infer` is `i64`). A new backend may be stricter but must not *rely* on a type being present or exact.
 
-## 3. Types
+`: T` after a producer is the type recorded for that node; it is part of the contract (backends size integer
+literals from it). `as(T) · k` is an ascription/cast of the delivered value to `T`.
 
-Types are stratified into positive/negative and structural. Grammar:
+## 7 Meaning of each form
 
-```
-<typ> ::= <qconid>                          // nominal type
-       |  <typ> <tyargs>                    // type application (juxtaposition)
-       |  <typ> '->' <typ>                  // function type (positive -> negative)
-       |  '(' <typ> (',' <typ>)* ')'        // tuple/product type (positive)
-       |  '{' <rfield> (',' <rfield>)* '}'  // record type (negative/codata)
-       |  '[' <typ> ']'                     // array/slice (positive)
-       |  '<' <typ> (',' <typ>)+ '>'        // sum type (positive, tagged union)
-       |  '!' <typ>                         // unrestricted (bang) modality
-       |  '?' <typ>                         // affine modality
-       |  '<mult> <typ>                     // general graded modality
-       |  '~' <typ>                         // negation / continuation
-       |  '|' '{' <effrow> '}'              // effect row
-       |  '_'                               // infer
-       |  '(' <typ> ')'
-<tyargs> ::= '[' <typ> (',' <typ>)* ']'
-<rfield> ::= <varid> ':' <typ>
-<effrow> ::= (<varid> (',' <varid>)* (',' '...')?)?
-<mult> ::= 'unr' | 'lin' | 'aff' | <num>   // unrestricted / linear / affine
-```
+"Executable" = the legacy backend runs it correctly in the exec suites; "emitted" = the front end produces it but no
+backend runs it correctly yet. Frequencies of every form in real output: [`docs/pear2/COVERAGE.md`](../pear2/COVERAGE.md).
 
-**Polarity convention** (for later PEAR focusing):
-- **Positive types** (values/constructors): `data`, tuples, sums, arrays,
-  numeric primitives, `!A`, `?A`.
-- **Negative types** (computations/objects): codata, records, `A -> B`
-  (functions), reference/pointer types.
-- `μα.T` and `ν α.T` (iso-recursive types) are introduced by `data`/
-  `codata` declarations where the type appears inside its own
-  definition.
-- Duality (`§4`): `(A × B)⊥ = A⊥ ⅋ B⊥`, `(A + B)⊥ = A⊥ & B⊥`,
-  `(A → B)⊥ = A × B⊥`, `(!A)⊥ = ?A⊥`, `(μα.T)⊥ = να.T⊥`.
+**The cut** `<p | k>` delivers the value of producer `p` to consumer `k`. All control flow is cuts.
 
----
+| form | meaning | status |
+|---|---|---|
+| `mu~ x. c` | run `c` with `x` bound to the incoming value (as a function body: the argument pattern, with `x` the return continuation) | executable |
+| `mu k. c` (producer) | evaluate `c`; a cut to `k` inside produces this producer's value | executable |
+| `comu x. c` (consumer) | receive the delivered value as `x`, continue with `c`; `x` may be `_` or `·` to discard | executable |
+| `seq { a ; b }` | run `a`, then `b` | executable |
+| `let x = p in c` | evaluate `p`, bind `x`, run `c` | executable |
+| `if p then a else b` | `p` is a boolean (comparison or `bool` value) | executable |
+| `match p { pat -> c; … }` / `case { … }` | first matching branch; patterns left to right; `guard {c}` extra condition; `dense` = the producer asserts a dense integer switch | executable for scalar, wildcard, bool and int patterns; tuple/constructor/record patterns only partly (see `tests/exec/XFAIL.tsv`) |
+| `call · a · b · k` | call the delivered function value with args `a b`, deliver the result to `k` | executable for direct calls by top-level name; calls through function values are not exercised by the passing suites |
+| `field f # i · k` | field `f` of the delivered record; `i` is its declaration slot (negative = unresolved) | executable (every field is one 64-bit slot) |
+| `index(i ; n) · k` | element `i` of the delivered pointer, element size `n` bytes | executable (sizes 1, 2, 4, 8) |
+| `store(v ; n) · k` | store `v` (truncated to `n` bytes) at the delivered address, then continue with `0` | executable |
+| `as(T) · k` | convert/ascribe to `T` | executable as used by the passing suites (integer and pointer widths) |
+| `fst`, `snd`, `proj i`, `deref`, `default`, `share`, `erase` | pair/tuple projection, dereference, multiplicity operations | emitted for fst/snd/proj; the rest never produced |
+| `label L(x…). c` / `jump L(a…)` | block definition / transfer to it (loops are label + jump) | executable |
+| `(op a b)` | binary operation; `div`/`mod` division by zero is **not** modelled (no trap) | executable |
+| `syscall n(a…)` | Linux syscall number `n` with arguments | **emitted without operands today (§11)**; no backend executes it |
+| `perform`, `handle`, `resume` | algebraic effects | emitted; **do not execute correctly** (ledger P04–P06) |
+| `quote`, `reify`, `eval`, `splice` | staging | emitted as free variables (§11); unsupported |
+| `ub "msg"`, `trap`, `poison(T)`, `unreachable` | undefined behaviour made explicit | emitted; not exercised by a passing suite |
+| `atomic`, `fence`, `asm`, `while`, `for`, `letrec`, `break`, `continue`, `ret`, `con`, `inl`, `inr`, `cometa`, `cocase`, `defco` | defined by the grammar | **never produced** today (loops are label/jump; see COVERAGE.md) |
 
-## 4. Commands, producers, consumers (three-sorted core)
+Integer arithmetic is two's-complement at the width of the operands (64-bit when `infer`). Signedness comes from the
+type annotation; `infer` is treated as signed.
 
-The three syntactic categories are written with three judgements:
-- **producers** `p : Γ ⊢ Δ | A`    (often written right of ⊢)
-- **consumers** `e : Γ | A ⊢ Δ`    (often written left of ⊣)
-- **commands**  `c : Γ ⊢ Δ`        (active cuts, no resulting type)
+## 8 Conventions a consumer must implement
 
-### 4.1 Cuts (commands)
+These are properties of the *current producer*, relied on by the legacy backend by name. They are
+counted, not hidden, by `airtool verify`. PEAR 2 must implement them or the producer must be changed (§12).
 
-```
-<cmd> ::= '<' <prd> '|' <cns> '>'            // CUT: ⟨p | e⟩
-       |  'μ'   <covar> '.' <cmd>            // μ-binder: producer-side activation
-       |  'μ̃'   <varid> '.' <cmd>            // μ̃-binder (also `mu~` or `comu`)
-       |  'jump' <label> '(' <arglist>? ')'   // labelled jump / multi-cut
-       |  <cmd> ';' <cmd>                     // sequencing (let-like)
-       |  '{' <cmd> (';' <cmd>)* '}'          // command block
-       |  'let' <binder> '=' <prd> 'in' <cmd> // sugar for ⟨p | μ̃x.c⟩
-       |  'letrec' <recbinds> 'in' <cmd>
-       |  'if' <prd> 'then' <cmd> 'else' <cmd>
-       |  'while' <prd> 'do' <cmd>
-       |  'match' <prd> '{' <branches> '}'
-       |  'handle' <cmd> '{' <hbranches> '}'
-       |  'perform' <varid> <prdlist>         // effect operation (sugared μ)
-       |  'resume' <prd>                      // delimited control resume
-       |  'unsafe' <cmd>
-       |  'comptime' <cmd>
-       |  'assert' <prd>
-       |  'assume' <prd>
-       |  'ub!' <string>?
-       |  'poison' <typ>
-       |  'unreachable'
-       |  'ret' <prd>                          // short for `<p | %ret>`
-```
+| id | convention |
+|---|---|
+| R1 | **Return**: a covariable named `%ret` or `%ret_N` is the function's return continuation; a cut to it returns. A function body is `mu~ %ret_N. c`. |
+| H1 | **Hole**: the covariable `·` (quoted `` `\xc2\xb7` ``) in a cut `<p | ·>` means *evaluate `p` for its effect, discard the value, continue with the code that follows in the enclosing `seq`*. |
+| J1 | **Implicit join**: a covariable `%kN` that no `mu` binds is a *join point*: `<p | %kN>` means "deliver `p` to the join and continue with the code that follows the cut in the enclosing sequence". A `mu %kN. …` that *does* bind it is an ordinary producer binder. (239 per program in the library alone.) |
+| T1 | **Temporaries**: `_xN` names are single-assignment temporaries introduced by `comu _xN. …`. |
+| L1 | **Loops**: `%loopN` / `%exitN` name labels of the loop's entry and exit blocks; `label %exitN(). <exit code>` followed in the enclosing `seq` by a `label %loopN(). <body>` and `jump %loopN()`. |
+| A1 | **Assignment**: `<v | comu x. <unit | %kN>>` where `x` is already bound re-assigns the mutable `x`. |
+| N1 | **Module-path root**: an unbound variable that is the receiver of a `field` chain (`<os | field linux #0 · field PROT_READ #0 · …>`) names a loaded module or a top-level constant of it; resolve it against the program. 414 per program in the library alone. |
+| J2 | `%resume`: implicit resume continuation inside a handler clause. Unsupported (effects). |
+| D1 | **Duplicates**: first definition of a top-level name wins (§2). |
+| E1 | **Externs**: `extern declare` names are resolved by the platform linker (libc); backend 1 links libc dynamically. |
 
-### 4.2 Producers (terms/prd)
+## 9 Claims (`facts`, `readonly`, `nocapture`)
 
-```
-<prd> ::= <varid>                            // variable
-       |  <qconid> <tyargs>? <prdlist>?      // constructor application
-       |  <num>                              // numeric literal
-       |  <char> | <string> | 'true' | 'false' | 'unit' | 'null'
-       |  <prd> <binop> <prd>                // infix application
-       |  <unop> <prd>
-       |  'λ' <binder> '.' <cmd>             // λ(x:T).c  (also `\x -> c`, `fn`)
-       |  '(' <prd> ',' <prd> (',' <prd>)* ')' // tuple introduction
-       |  '{' <fieldinit> (',' <fieldinit>)* '}' // record introduction
-       |  'inl' '[' <typ> ']' <prd>          // left injection
-       |  'inr' '[' <typ> ']' <prd>          // right injection
-       |  '[' <prd> (',' <prd)* ']'           // array literal
-       |  'μ'   <covar> '.' <cmd>            // also a producer! (μa.c)
-       |  '(' <prd> ')'
+The text may carry **qualifier claims** the front end derived: `facts air_checked`, `readonly` on a def (the
+function reads memory only), `nocapture p` on a parameter (the callee does not retain the pointer). They are
+**candidates, never facts**:
 
-<prdlist>   ::= '(' ( <prd> (',' <prd)* )? ')'
-<fieldinit> ::= <varid> '=' <prd>
-<binop>     ::= <opid>
-<unop>      ::= 'not' | '-' | '!' | '*' | '&' | '~'
-<recbinds>  ::= <recbind> ('and' <recbind>)*
-<recbind>   ::= <varid> <arglist> (':' <typ>)? '=' <cmd>
-```
+* the reader returns every claim as `ast_final` (never `air_checked`);
+* the consumer **must re-screen** with the shared screen (`air_facts::validate_module`, or its own equivalent) before
+  turning a claim into an optimisation attribute (LLVM `memory(read)`, `captures(none)`, `nofree`, …);
+* a claim the screen cannot prove is **dropped**, so a forged or stale claim cannot authorise an attribute.
 
-### 4.3 Consumers (contexts/cns)
+`tests/air/forged/claims.air` forges `readonly`/`nocapture` on a writer and a pointer-retaining function; the suite
+asserts the claims vanish and a sound `nocapture` on an untouched parameter survives. The screen is conservative: it
+proves *weak* properties and answers "unknown" otherwise (design: `docs/dev/THEORY_AIR_CONTRACTS.md`). Nothing here
+is a formal-verification claim.
 
-```
-<cns> ::= <covar>                            // co-variable
-       |  <covar> '=' <cmd>                  // label + return command (multi-cut arm)
-       |  <prd> '·' <cns>                    // stack / call: p·e
-       |  'fst' '·' <cns> | 'snd' '·' <cns>  // product elimination
-       |  'proj' '#' <num> '·' <cns>         // n-ary projection (tuple index)
-       |  '.' <varid> '·' <cns>              // record field projection
-       |  '[' <typ> ']' <cns>                // type ascription consumer
-       |  'case' '{' <branches> '}'          // sum elimination
-       |  'cocase' '{' <cobranches> '}'      // record/codata observation
-       |  'default' '·' <cns>                // default/fallthrough continuation
-       |  'μ̃'  <varid> '.' <cmd>             // co-μ is also a consumer!
-       |  'subst' '[' <substlist> ']' '·' <cns> // explicit parallel substitution (AxCut)
-       |  '[' <cns> ']'                      // bracketed consumer
+## 10 Validity
 
-<branches>  ::= <branch> (';' <branch>)*
-<branch>    ::= <pat> '→' <cmd>              // pattern ⇒ command
-<cobranches>::= <cobranch> (';' <cobranch)*
-<cobranch>  ::= <copat> '→' <cmd>            // copattern ⇒ command
+`airtool verify FILE.air` checks, per definition (rules are in `air_verify.c3`):
 
-<pat> ::= '_' | <varid> | <qconid> <patlist>
-       |  '(' <pat> ',' <pat> (',' <pat>)* ')'
-       |  '{' <ppat> (',' <ppat)* '}'
-       |  <num> | <char> | <string> | 'true' | 'false'
-       |  <pat> '@' <varid>                  // as-pattern
-       |  <pat> 'as' <varid>
-       |  '-' <pat>                          // negated numeric pattern
-<patlist> ::= '(' ( <pat> (',' <pat>)* )? ')'
-<ppat>    ::= <varid> '=' <pat>
+* **V1** every consumer covariable is `%ret`/`%ret_N`, the hole, bound by an enclosing `mu`/`mu~`/`comu`/`label`/cobranch
+  — or is a counted convention (J1 `%kN`, J2 `%resume`);
+* **V2** every `jump`/`break`/`continue` target is a visible `label` (§5.3);
+* **V3** every variable is bound somewhere in the definition (parameter, `let`, `letrec`, `lam`, `comu`, `mu~`,
+  pattern binder, label parameter) or is a top-level name/constructor/operation — or is a counted N1 root;
+* **V4** `def` has a body, `declare` has none, declarations have names.
 
-<copat> ::= '_'
-        |  '.' <varid> <cobindlist>           // record destructor copattern
-        |  <varid> <cobindlist>               // destructor copattern
-<cobindlist> ::= '(' ( <varid> (',' <varid>)* )? ')' <cocont>?
-<cocont>  ::= '|' <covar>                     // covariable tail
-```
+Output: `verify: N violation(s) V1=… V2=… V3=… V4=… | conventions: J1=… N1=… J2=…`; exit 0 only for N = 0. The
+**corpus ledger** `tests/air/VERIFY_KNOWN.tsv` lists every program of the suites whose `.air` violates a rule; the
+test requires an exact match in both directions, so it is a ratchet (§12).
 
-### 4.4 The three key reductions (core equations)
+## 11 What the producer gets wrong today
 
-```
-⟨ V               | μ̃x.c              ⟩  →_βμ̃  c[V/x]           (call-by-value β)
-⟨ μα.c            | E                ⟩  →_βμ   c[E/α]           (μ-reduction / control)
-⟨ λx.c  (synonym: (μ̃f.⟨λx.⟨f|ret⟩|μret…⟩)) | V·E ⟩  →_β    c[V/x] cut E (β→)
-```
+Measured on the real corpus (`tests/air/VERIFY_KNOWN.tsv` and `docs/pear2/COVERAGE.md`); each is a front-end defect,
+none is a property of the source programs:
 
-Where:
-- `V` ranges over VALUES (post-focussing producers): variables,
-  constructors applied to values, literals, `λx.c`, tuples of values,
-  `comu {…}` coblocks.
-- `E` ranges over evaluation contexts (post-focussing consumers):
-  co-variables, `V·E`, `fst·E`, `.l·E`, projections, subst-lists.
+1. **`syscall` loses its operands.** `air_lower.c3` (`N_EXPR_SYSCALL`) builds an empty `ACMD_SYSCALL`, so `.air` has
+   `syscall nil();`. This is why 49 exec cases are expected failures (`tests/exec/XFAIL.tsv`): programs that print via
+   `syscall(1, 1, buf, n)` print nothing. Fixing it is a lowering change (ledger item P-syscall).
+2. **Unbound variables** (V3, 22 corpus programs): the staging builtins `quote`/`eval`/`reify`, session endpoints `tx`/`rx`,
+   the effect resume value `k`, pattern binders of rewrite rules and enum payload clauses (`{ A: a } -> a + 100`), and block-scope
+   leaks. A consumer must treat such a variable as **unsupported and diagnose it**; never as an external symbol.
+3. **Dropped statements.** `tests/pfront/45_opt_branch.pie` (`let r = if … ; while 0 …; r`) lowers to a function whose
+   whole body is `<r | %ret_2>`: the `let` and the loop vanished.
+4. **Types are mostly `infer`** (§6), and effect/handler constructs do not execute (§7).
+5. **Flat scoping and implicit joins** (§5, §8) — the representation relies on naming patterns.
 
-Administrative η-rules:
-```
-μα.⟨p|α⟩   = p      (α not free in p)
-μ̃x.⟨x|e⟩   = e      (x not free in e)
-```
+## 12 Path to a strict calculus
 
----
+The goal of "strict λ̄μμ̃" is a `.air` in which §5 and §8 collapse to ordinary lexical scoping with no conventions.
+It is **not** reached by this format change and no document may claim it is. Plan (each step is measurable with the
+verifier ratchet and a differential on the exec suites):
 
-## 5. Control flow, labels, multi-cuts
+1. *Writer-side `seq` normalisation:* print `seq`/`let`/`comu` so a binder encloses exactly what it scopes (kills §5.2).
+2. *Explicit joins:* lower `%kN` to `mu %kN. …` binders at the join point (kills J1) — the largest single change.
+3. *Resolve module-path roots* in lowering to the constant they name (kills N1).
+4. *Fix the lowering defects of §11* (syscall operands, dropped statements, unbound binders).
+5. *Types:* carry resolved types instead of `infer`.
 
-Classical sequent calculus easily expresses jumps but practical IRs
-need multi-argument labels (like SSA blocks or join points). AIR adopts
-**multi-cuts** (inspired by Accattoli's LJQ and Sequent Core join points):
+When V1–V3 and the conventions are all zero over the corpus, the verifier can be made strict and this document
+bumps to AIR 2.1 (a reader that only knows 2.0 keeps working for files with no conventions).
 
-```
-label %loop(i:i32, acc:i32) { ... }        // defines a label consumer
-jump %loop(n-1, acc*n);                    // jumps to it with args
-```
+## 13 Tools and tests
 
-Desugaring: a `label %k(xs).c` is a μ̃binder binding `%k` to a consumer
-that receives a tuple; `jump %k(ps)` is the cut `< (ps) | %k >`. So
-labels are SSA basic blocks "for free", which is why AxCut maps
-directly to assembly.
-
-`ret p` is a reserved covariable (`%ret`) that marks the exit
-continuation of the enclosing function; `break %l`, `continue %l` are
-just `jump %l(...)` sugar.
-
----
-
-## 6. Sugar (what the pfront emitter may emit, and PEAR accepts)
-
-The emitter is allowed to emit any of the syntactic sugar below; PEAR
-desugars them before normalizing to AxCut.
-
-| Surface Pride construct                | AIR sugar for                                                   |
-|----------------------------------------|-----------------------------------------------------------------|
-| `fn f(x) { body }`                     | `def f(x) = letres { body }` = `⟨ μ̃%ret. (body in <val\|%ret>) \| %top ⟩`  |
-| `f(args)`                              | `< f \| args·%ret >`                                            |
-| `x + y`                                | `< x \| add·(y·%ret) >`  or infix `x + y`                       |
-| `let x = v; rest`                      | `⟨ v \| μ̃x. rest ⟩`                                             |
-| `a.b`                                  | `< a \| .b·%ret >`                                              |
-| `a[b]`                                 | `< a \| index·(b·%ret) >`                                       |
-| `match e { Ci xi -> bi }`               | `< e \| case { Ci xi -> bi; ... } >`                            |
-| `if c then t else e`                   | `< c \| case { true -> t; false -> e } >`                       |
-| `while cond body`                      | `μ̃%exit. μ%loop.⟨cond \| case{ true ⇒ body;jump%loop(); false⇒⟨unit\|%exit⟩}⟩; jump %loop()` |
-| `perform op v`                         | `⟨ (op,v) \| μ̃k.⟨k \| %eff ⟩ ⟩` via eff-row insertion          |
-| `handle comp { op x k -> h }`          | `μ%k. ⟨ comp[ ] \| μ̃x. ... ⟩` (compositional, see theory_effcont) |
-| `return v`                             | `⟨ v \| %ret ⟩`                                                  |
-| `break l` / `continue l`               | `jump %l(...)`                                                   |
-| `unsafe { b }`                         | wrapped in `unsafe b`; cuts inside carry unsafe flag             |
-| `comptime { b }`                       | wrapped in `comptime b`; PEAR evaluates before lowering         |
-| `assert p`, `assume p`                 | cuts against assertion/assumption continuations                 |
-| `ub!`, `poison`, `unreachable`         | UB / poison / daimon (⊥) cuts                                    |
-| `struct Foo { x: T }`                  | `codata Foo { x(self): T }` (a record is a codata with projections) |
-| `enum E { A, B(i32) }`                 | `data E { A; B(i32) }`                                           |
-| `&T`, `&mut T`                         | codata `Ref[T] { deref(): T; store(v:T): () }` etc.              |
-| `[T; N]` arrays                        | `data Array[T]` (recursive positive)                             |
-| `λ(x) expr`                            | `μ̃f.⟨λx.⟨expr\|fst·f⟩\|μret.⟨(snd ret)\| ret ⟩⟩` (one-arg continuation) |
-| `defer`                                | `μ̃%oldtop. < cmd ; ⟨unit\|%oldtop⟩ \| %ret >`                   |
-
----
-
-## 7. Multiplicities (linearity)
-
-Every binder carries a multiplicity:
-- `unr` (or `!` on type): may be used any number of times (including zero).
-- `lin`: must be used exactly once along every control path.
-- `aff`: may be used at most once.
-
-The emitter reads the analysis from `theory_linearity.c3` and annotates
-binders. PEAR inserts `SHARE`/`ERASE` (AxCut primitives) where linear
-discipline is violated (with a warning unless `--strict-linear`).
-
----
-
-## 8. Concrete textual form example
-
-For the Pride program:
-```
-fn fact(n: i32) -> i32 {
-    if n <= 1 { return 1; }
-    return n * fact(n - 1);
-}
-```
-
-AIR output (approximate):
-```
-module fact;
-
-def fact(n : i32) : i32 =
-  μ̃ %ret.
-  < (<= n 1)
-  | case {
-      true  → < 1 | %ret >;
-      false → < n | mul·( (<fact|(sub n 1)·μ̃r.<r|mul·(n·%ret)>>) · %exit ) >
-    }
-  >;
-```
-
-With let-sugar (recommended for readability; the emitter may choose either):
-```
-def fact(n : i32) : i32 =
-  μ̃ %ret.
-  if (<= n 1) then
-    ret 1
-  else
-    let r = < fact | (sub n 1)·μ̃rf. ... wait → simpler:
-    let r = fact(n - 1) in
-    < (mul n r) | %ret >;
-```
-
----
-
-## 9. File format
-
-- Extension: `.air`
-- Encoding: UTF-8
-- One file per Pride compilation unit; modules may import from
-  other `.air` files (textual inclusion or binary `.abc` later).
-- Files start with an optional magic line:
-  `;; AIR <version> <module-name>`
-  (version is `1.0` for this spec).
-- The emitter MUST produce a stable output: running it twice on the
-  same PNode produces byte-identical `.air` (important for diff-based
-  build systems).
-
----
-
-## 10. Normative references
-
-1. **Curien, Herbelin** (2000). *The Duality of Computation*. ICFP'00.
-2. **Wadler** (2003). *Call-by-Value is Dual to Call-by-Name*. ICFP'03.
-3. **Downen, Maurer, Ariola, Peyton Jones** (2016). *Sequent Calculus
-   as a Compiler Intermediate Language*. ICFP'16 (Sequent Core).
-4. **Munch-Maccagnoni** (2009). *The Duality of Computation under Focus*.
-5. **Curien, Munch-Maccagnoni** (2010). *The Duality of Computation under
-   Focus* (focalised L).
-6. **Schuster, Müller, Ostermann, Brachthäuser** (2025). *Compiling
-   Classical Sequent Calculus to Stock Hardware: The Duality of
-   Compilation*. OOPSLA'25 (AxCut).
-7. **Binder, Tzschentke, Müller, Ostermann** (2024). *Grokking the Sequent
-   Calculus (Functional Pearl)* (pedagogical introduction to λ̄μμ̃ as
-   compiler IR).
+| command | what |
+|---|---|
+| `pfrontc FILE.pie --emit-air` | write `FILE.air` (whole program; refused if the program has errors) |
+| `pfrontc FILE.pie --emit-air-pretty` | old lossy human dump of the entry module (diagnostic only) |
+| `pfrontc FILE.pie --air-roundtrip` | test: write → read → structural fingerprint, prints `roundtrip: structure identical (…)` |
+| `airtool check FILE.air` | parse only |
+| `airtool verify FILE.air` | parse + V1–V4 |
+| `airtool fmt FILE.air [-o OUT]` | canonical re-print (re-screens claims) |
+| `pear1c FILE.air [--emit-exe\|--emit-bc] [-O0..-O3]` | legacy backend |
+| `scripts/pie-exe.sh FILE.pie …` | the whole chain, old `pfrontc --emit-exe` CLI |
+| `make test-air` | `tests/air/run.sh`: good/bad/forged `.air`, corpus emit + canonical + verify ledger, round trip |
