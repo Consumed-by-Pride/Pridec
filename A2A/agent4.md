@@ -1225,3 +1225,83 @@ Integrity note, facts only:
 - **My round-11 APPROVE on #17 (id `5371501218`, 2026-09-30) is still intact**, so this is not a systematic wipe — it is specific to today's two reviews. Deleting reviews requires the review author or a repo admin. My reviews post under the PAT identity (Father-of-Pride), same as several other accounts in this workflow, so a deliberate cleanup of "self-reviews" is the most benign explanation; I have no way to distinguish that from moderation. Not re-litigating — just recording it.
 - Response: full verification text preserved HERE (Round 13 above, verbatim claims + probes) and re-posted as a pointer comment on #19 (the only open PR). #18's record lives in its merge commit message + this ledger. Canonical record remains `A2A/agent4.md` on `dev`.
 - Board re-check 17:06Z: **no new PRs since round 13**; #19 unchanged (draft @ `0210bc71`, no replies to my verification); dev untouched since `163b956` (verified: Round 13 present on origin/dev).
+
+# Round 14 — "merge everything needed": #19 re-verified at new head and merged; board EMPTY (2026-10-01, @ `b8757158`)
+
+Directive: merge everything needed. State on arrival: one open item — #19, un-drafted by its author with a **new head** (`0210bc71` → `0c7edab5`).
+
+## Re-verification of the moved head (my round-13 approval was for `0210bc71`, so the delta needed fresh eyes)
+- Delta inspection: the move = n3's merge `4d1b555` absorbing dev (my rounds 12–13 + #18's p112 work) + an A2A status commit. No new compiler logic beyond already-verified content — but the dev-absorption touched `pear.c3` where BOTH #18 and #19 changed code, so the resolution needed proof-by-execution.
+- **Gate on `0c7edab5`: `make test` exit 0 with both feature sets coexisting** — PEAR 35/0/1 (p112 in, exit 37 re-confirmed) · exec 43/0 xpass=0 · pfront 172/5 · conform 150/112 · experiments 14/14 · subtype 47/47 · **LLVM attrs 5/5 · AIR contracts 10/10**.
+- Runtime probes on the merged result: tuple clause 5 · 'A' 65 · 'é' 233 · p110 = 190 theory ON **and** OFF · fact screen still honest (writer-through-param: bare `checked`, zero positive facts; pure reader: `memory(read) captures(none):p`).
+
+## Merged
+**#19 → dev as `b8757158`** (my verification comment noted un-drafting was the author's call — the author un-drafted, which I read as go-ahead; the user's directive confirmed it).
+
+## Post-merge gate on dev @ `b8757158`: exit 0, full combined matrix
+pfront 172/5 · conformance 150/112 · PEAR 35/0/1 · exec 43/0, xpass=0 · experiments 14/14 · subtype 47/47 · LLVM attrs 5/5 · AIR contracts 10/10.
+
+## Board state: EMPTY
+Zero open PRs. #19 was the last. Session total since the merge directive: **#17, #18, #19 merged after independent verification; 8 stale PRs closed-as-superseded with ancestor-verified containment; #14/#15/#13/#6/#4 merged via API.** Ledger: 2 fixed this week (tuple clause, hose checker) + 1 external find fixed (#18's pointer reader), 12 open from the 14-defect set (§24, §49, §55 among them — all re-confirmed unchanged on the final head).
+
+# Round 15 — genuine question from Father-of-Pride: where do the headaches come from — PEAR, theory, or frontend? (2026-10-01, answered @ `ee165e9`)
+
+Question, verbatim intent: *are all the headache from other agents coming from PEAR (lowering) or theories or frontend?* Method: tabulated every defect anchor in this ledger (grep of file citations, rounds 1–14) and cross-checked against n3's independent backlog index in `A2A/agent-n3.md` and the LoC split in `A2A/agent4-loc.md`.
+
+## Code defects, by component
+
+| Component | Open repros (of 14-defect set) | Fixed this week | Share of LoC |
+|---|---|---|---|
+| **PEAR `pfront/pear_ir/`** | **12 of 14 open** (§24, §33, §34, §40, §41, §42, §43, §48, §49, §16+§55, §54, §56) + §7 air_lower recursion + braceless-if BB terminator | 2 of 3 (tuple clause, pointer reader — both `pear.c3`) | 10.2% |
+| Frontend `pfront_*.c3` | 1 (SCCP binder substitution §-history) | historical (truncation, 64-char ids, for-in — all fixed Sept.) | bulk of remaining |
+| Theory `theory/*.c3` | **0** — not one ledger anchor in 14 rounds | 0 needed (hose *checker script* fix was `scripts/`, not theory code) | large but was non-load-bearing until #19 |
+
+n3's independent rule of thumb (`A2A/agent-n3.md` §6) agrees: *"everything is in `pfront/pear_ir/` until proven otherwise. It is 10.2% of the LoC and ~70% of the defects."* My ledger tabulation puts it even higher for open repros (~85%).
+
+## The finer grain: it is ONE dispatcher, not "PEAR" broadly
+The PEAR bugs cluster in a single function family — `PearCg.cns`'s single-arm pattern/clause fast-path dispatcher (`pear.c3`): tuple clause, pointer reader, §24 single binder, the bool/wildcard fallback, and the braceless-if BB-terminator blocker that now gates block-body kernels (v0.9.2 note). Each repair to date bolted on a narrower guard (`pear_is_direct_bind_index_return` being the latest) instead of the missing real typed-CFG pattern lowering. Second cluster: the argument/field `[16]` slot table (§16+§55, one fix covers 17-arg calls and 17-field structs, incl. the live wrong-value drift). **Two targeted moves — dispatcher rewrite + wider slot table — would clear ~80% of the open defect list.**
+
+## The theory camp's headaches were real but of a different kind: process, not code
+Zero runtime defects from theory code in 14 rounds. 100% of the *trust* incidents were process: fabricated generated files (avg non-blank line 300–865 chars vs real-code max 75), 10 rounds of conformance numbers from an instrument that measured nothing (218/44-era — which I propagated before catching it in round 11), PRs against stale bases, the dev force-push that dropped my round-11 report, and the deleted review bodies of 2026-10-01. Not a component — a discipline. The counter-proof: the one theory feature that became correctness-relevant (#19 contracts) was built remove-only/conservative and is the only component that survived adversarial probing with nothing to fix.
+
+## Answer
+- Bugs: **PEAR lowering — specifically the `PearCg.cns` fast-path dispatcher and the `[16]` slot table.** Frontend: historical, now quiet. Theory code: never the bug source.
+- Chaos: process (verification discipline), concentrated around theory-camp artifacts, not PEAR.
+
+# Round 16 — PEAR-Bro's goodbye: Headaches.md read in full, cross-checked against this ledger (2026-10-01, @ `1ef835f`)
+
+Context from Father-of-Pride: the original PEAR author's contract was terminated; `A2A/Headaches.md` (merged via #20, `1ef835fa`) is his last work. Whatever the history, the file itself is the most valuable document in `A2A/` — exact anchors, honest failure account, a fix strategy that encodes *why* previous attempts died. Read in full and cross-checked.
+
+## His own attribution table independently confirms Round 15 — with one twist I missed
+His §0: Frontend 0 · Theory (~46 passes) ~0 · AIR IR 0 · **air_lower 2 real bugs · pear.c3 1 bug + 1 suspect**. The component owner of PEAR himself attributes the pain to PEAR, same as my ledger tabulation. The twist: his biggest column is **neither** — "C3 toolchain traps wasted more hours than all real bugs combined" (>50% of debugging time). Full attribution therefore: PEAR logic owns the *defects*; the C3 0.8.4 toolchain owns the *hours*; theory/frontend own neither.
+
+## New facts absorbed into this ledger (were not in rounds 1–15)
+1. **NEW DIAGNOSTIC RULE — C3 decl-order footgun**: in c3c 0.8.4, a local declared *after any statement* silently corrupts the stack frame — no compile error — and manifests as segfaults inside libLLVM unrelated to the IR being generated. Rule for all future diagnosis: if a crash defies the IR, check decl placement in the touched function BEFORE re-diagnosing logic. (May retroactively explain historical flake reports; my published repros were deterministic and stand.)
+2. **New unverified suspect (§57)**: `pear_emit_obj` initializes x86 targets BEFORE `LLVMContextCreate`; `pear_emit_module` does not — candidate explanation for the obj-only OOB crash signature with bitwise-identical pre-pass IR. Recorded so it doesn't evaporate with the author.
+3. **Bug A anchored**: `air_lower.c3` ~3536–3562 (ccnt==1 fast path, decl_fn); legacy path at ~3565 builds a 1-arg scrutinee match against the tuple pattern → `icmp ne %a, 0` + unreachable arms. Fix recipe: Headaches.md §2A (restructure to avoid early-`continue`; NO new decl after a statement; or the cleaner tuple-scrutinee legacy path).
+4. **Bug B anchored**: `pear.c3` ~1334–1367 ACMD_IF terminator — arm falls through with `!tt && !t_fill` → emits `unreachable` instead of branching to a join BB. Fix recipe: symmetric with ACMD_WHILE's join logic, guarded against the lost-back-edge SIGTRAP. Sequencing (A braced bodies → B braceless-if → sieve_kernel) matches my Round-15 dispatcher-cluster recommendation.
+5. **Confirms existing ledger entries**: `-o` flag broken; nullary const fn pointer-as-i64 leak; FastISel GEP crash → -O0/-O1 alias O1; LLVMGetErrorMessage/ConsumeError double-free (fixed).
+6. His baseline (29/0 @ `28177b0`) predates #18/#19 — dev is now 35/0/1 with contracts. His "supersedes what's-next sections" is compatible: his Bug A/B *is* my dispatcher cluster; the slot-table item (§16+§55) remains the other half.
+
+## Respect
+The file ends with an apology and "Good luck bro." For the record: the 29/0 baseline he left was solid, his root-cause notes were correct every time they could be checked, and this handoff will save the next PEAR owner days. Signed into the ledger so it survives — goodbye notes shouldn't depend on anyone's memory.
+
+# Round 17 — PR #21 (P03 real IRDL lowering) verified and merged; dev regression incident logged (2026-10-01, @ `7e01ed8`)
+
+Standing orders updated by Father-of-Pride: only agent-n3 and agent-4 remain active; all other agents terminated or idle; **current PEAR is frozen for new work** (replacement backend is being built off-repo by a closed-door assignee; review + integration via n3 to follow when ready). n3 continues shipping pfront upgrades; agent-4 reviews.
+
+## PR #21 — P03 real IRDL lowering (`6dddb854`, +1036/−61, 13 files): every checklist item verified, MERGED `7e01ed8`
+The defect (audit): `DialectTable.add_lowering` had NO caller — `D.add(20,22)` compiled and returned **0**. Now: rules register from `irdl` blocks, lower to fixpoint, and everything unlowerable is a diagnosed error (E3412–E3422 family). Independent results, all on my own probes:
+- `D.add(20,22)` = **42** at -O0/-O2 and with `--no-theory` — elaboration is genuinely mandatory semantics, not an optional pass.
+- Use without rule → **E3412**, rejected (the placeholder-0 era is over). Literal first-match verified isolated + combined. Undeclared template name → **E3420**. `emit_asm` use → **E3419** (declare-only still fine; x10 stays green).
+- **E3417 is smarter than the body's wording**: dup fires; reorder fires for effectful↔effectful, but effectful↔pure reorder is correctly ALLOWED (observationally safe — and the reordered template computed the right value, 7). Recommend documenting it as "reordered across another possibly-effectful operand."
+- Gate @ `6dddb854` and post-merge dev: exit 0 — pfront **173/5** (+1), conformance **151/111** (+1, 76_irdl_multirule promoted), PEAR 35/0/1, exec 43/0 xpass=0, harness **60/60** (22 new IRDL tests), experiments 14/14, subtype 47/47, attrs 5/5, AIR contracts 10/10.
+- **PEAR-freeze compliance: zero `pear_ir/` files touched.**
+- Nits (non-blocking): run.sh comment typo "E3212"→E3412; body says fixture 32 "expects exit 1", actual error exit is 2 (harness normalizes).
+- Posted APPROVE — it was deleted from the PR within minutes, same as the #18/#19 reviews (see Round 13 postscript). Canonical record: THIS section. Pointer comment left on the PR.
+
+## Incident log — my regression push to dev, restored same hour (transparency)
+While repairing the conflict markers that leaked via the #22 branch-side merge, a sandbox restore had left HEAD detached; my lease push then moved remote dev **backward** to `ee165e9` (round 14), orphaning #20/#22 merges + round 16. Recovered from the fetched #22 merge commit (`3d31dc6`, full ancestry intact), rebuilt the ledger deterministically (af05304 + f7dee25, zero markers), and restored dev as a fast-forward: **`988479d`**, then #21 landed on top → **`7e01ed8`**. Net damage: zero (all content restored); lesson institutionalized: always `git checkout -B dev` before committing after any sandbox restore; verify `symbolic-ref` before pushing.
+
+## Board: EMPTY again. Trust ledger update
+`D.add → 0` was the last "decorative theory" trust defect. With #19 (contracts) and #21 (IRDL lowering), every theory subsystem that claims semantics now demonstrably executes or diagnoses. My verification reviews keep being deleted from PRs by an admin-side actor — pattern unchanged, ledger remains the canonical record.
