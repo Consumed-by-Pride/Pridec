@@ -227,3 +227,20 @@ closed-record compatibility and the now-semantic qualifier attributes.
 - O0-O3 per-case outcomes identical: 37 PEAR checks and 92 exec checks per flag.
 - No baseline was lowered. Still outstanding and not claimed: P02-P06.
 - Agent-4 noted open ledger items not touched here: section 24 single-binder fold, section 49 `+=`, section 55 argv-slot drift.
+
+## 2026-10-02 — PEAR → legacy split, AIR 2.0 text contract (branch `n3/air-text-contract`)
+
+What changed
+- `pfrontc` now ends at `.air` and links no LLVM. PEAR 1 lives in `legacy/pear1/` (`pear1c FILE.air --emit-bc|--emit-exe -Ox`), built by `make legacy-pear`. `scripts/pie-exe.sh` is the chain pfrontc → `.air` → backend (`BACKEND=` selects another backend).
+- `.air` is AIR 2.0: whole program, canonical, lossless, strictly parsed (`docs/specs/AIR.md`, normative). The old AIR 1.0 text is kept as `docs/specs/AIR-1.0-vision.md`. `tools/air/airtool` = check / fmt / verify. `pfrontc --air-roundtrip` proves write→read structural identity.
+- PEAR 2 start-here pack: `docs/pear2/{README,CONTRACT,COVERAGE}.md`.
+
+Evidence (measured, not estimated)
+- Executables via `.air` + pear1c are byte-identical to the pre-split `pfrontc --emit-exe` for all 99 exe-producing programs of the 226-source corpus at each of -O0..-O3; 127 produce none either way; 0 differences.
+- Round-trip: structure identical for 216 of 274 sources; the other 58 have front-end errors and emit no `.air` by design.
+- Gate numbers equal the pre-split baselines (see the gate line below).
+
+What is NOT achieved
+- Strict λ̄μμ̃ is NOT fully achieved. Conventions J1/J2/N1 and flat scoping remain (counted by the verifier, plan in AIR.md §12). Verifier-found lowering defects remain: `syscall` operands dropped (49 exec XFAILs), dropped statements (`tests/pfront/45_opt_branch`), unbound variables in 22 corpus programs (`tests/air/VERIFY_KNOWN.tsv`).
+- Never emitted by the lowering (so a backend cannot be tested on them yet): see `docs/pear2/COVERAGE.md`.
+- Still outstanding and not claimed: P02, P04–P06; ledger items §24, §49, §55 untouched.

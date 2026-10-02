@@ -59,14 +59,19 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
              $(wildcard pfront/theory/analysis/*.c3)
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
+# The slice of pfront that reads AIR text: what a backend (pear1c, airtool) links.
+AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/air_text.c3 \
+             pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
+
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air airtool legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
 
+# pfrontc ends at .air: no LLVM, no backend. Native code is pear1c (legacy/pear1) or PEAR 2.
 $(BINARY): $(SOURCES) | c3c
-	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) --max-stack-object-size 262144 $(LDFLAGS) -o $(BINARY)
+	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) --max-stack-object-size 262144 -o $(BINARY)
 
 # ── Bootstrap c3c if missing ────────────────────────────────────────────
 c3c:
@@ -85,11 +90,11 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts
+test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
-test-harness:
+test-harness: $(BINARY) $(PEAR1)
 	python3 -m unittest discover -s tests/harness -p 'test_*.py'
 
 test-pfront: $(BINARY)
@@ -100,18 +105,18 @@ test-conform: $(BINARY)
 	@echo "==> conformance"
 	bash conformance/run.sh
 
-# PEAR backend (pfrontc --emit-exe) smoke tests: scalar recursion, loops,
+# PEAR backend (pfrontc -> .air -> legacy pear1c) smoke tests: scalar recursion, loops,
 # if/else, mutable rebinding, indexed byte stores/loads.
-test-pear: $(BINARY)
-	@echo "==> PEAR exec (pfrontc --emit-exe)"
+test-pear: $(BINARY) $(PEAR1)
+	@echo "==> PEAR exec (pfrontc -> .air -> legacy pear1c)"
 	bash tests/exec/pear/run.sh
 
 # Execution suite: the only target that runs a COMPILED binary and checks its
 # result. Covers the emit configuration matrix (-O0/-O1/-O2/-O3) plus per-case
 # stdout/exit-code assertions; known-broken cases are tracked in
 # tests/exec/XFAIL.tsv. Override the tier with PEAR_OPT=-O0.
-test-exec: $(BINARY)
-	@echo "==> exec suite (--emit-exe -> native -> run)"
+test-exec: $(BINARY) $(PEAR1)
+	@echo "==> exec suite (pfrontc -> .air -> pear1c -> native -> run)"
 	bash tests/exec/run.sh
 
 # Cross-cutting probes for theory contracts, diagnostics, and module loading.
@@ -127,20 +132,47 @@ test-subtype: $(BINARY)
 # Exercise record ownership/index/budget safety at the nbe merge boundary.
 test-type-store: c3c
 	mkdir -p tmp/n3
-	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/type_store_records.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/type-store-records
+	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/type_store_records.c3 --max-stack-object-size 262144 -o tmp/n3/type-store-records
 	./tmp/n3/type-store-records
 
 # Check actual LLVM semantic attributes before any optimizer can infer them.
 test-llvm-attrs: c3c
 	mkdir -p tmp/n3
-	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/llvm_attributes.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/llvm-attributes
+	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) legacy/pear1/pear.c3 legacy/pear1/pear_link.c3 tests/harness/llvm_attributes.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/llvm-attributes
 	./tmp/n3/llvm-attributes
 
 # Reject stale/forged contracts at the actual AIR boundary.
 test-air-contracts: c3c
 	mkdir -p tmp/n3
-	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/air_contracts.c3 --max-stack-object-size 262144 $(LDFLAGS) -o tmp/n3/air-contracts
+	$(C3C) compile --stdlib $(C3C_LIB) $(filter-out pfront/pfront_main.c3,$(SOURCES)) tests/harness/air_contracts.c3 --max-stack-object-size 262144 -o tmp/n3/air-contracts
 	./tmp/n3/air-contracts
+
+# ── Legacy PEAR 1 (AIR text -> LLVM 23 -> native) ───────────────────────
+# The old backend, frozen, as its own program reading `.air`. It reads the
+# files pfrontc writes; PEAR 2 reads the same files. Links LLVM; pfrontc does not.
+PEAR1_SRC := legacy/pear1/pear.c3 legacy/pear1/pear_link.c3 legacy/pear1/pear1c_main.c3
+PEAR1     := legacy/pear1/pear1c
+legacy-pear: $(PEAR1)
+$(PEAR1): $(PEAR1_SRC) $(AIR_READ_CORE) | c3c
+	mkdir -p legacy/pear1
+	$(C3C) compile --stdlib $(C3C_LIB) $(PEAR1_SRC) $(AIR_READ_CORE) --max-stack-object-size 262144 $(LDFLAGS) -o $(PEAR1)
+
+# AIR 2.0 text tools: `airtool check|fmt|verify FILE.air`. No LLVM, no theory layer:
+# only the IR, the text reader/writer and the validity rules.
+AIR_CORE  := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/air_text.c3 \
+             pfront/pear_ir/air_write.c3 pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3 \
+             pfront/pear_ir/air_verify.c3 tools/air/airtool.c3
+AIRTOOL   := tmp/airtool
+airtool: $(AIRTOOL)
+$(AIRTOOL): $(AIR_CORE) | c3c
+	mkdir -p tmp
+	$(C3C) compile --stdlib $(C3C_LIB) $(AIR_CORE) --max-stack-object-size 262144 -o $(AIRTOOL)
+
+# AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
+# (canonical re-print, validity ledger) and the write->read round trip.
+test-air: $(BINARY) $(AIRTOOL)
+	@echo "==> AIR 2.0 text contract"
+	bash tests/air/run.sh ./$(BINARY) $(AIRTOOL)
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)

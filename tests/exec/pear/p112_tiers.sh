@@ -2,7 +2,7 @@
 # Verify the single-clause pointer-binding regression across every PEAR tier.
 set -u
 cd "$(dirname "$0")/../../.."
-PF="${1:-./pfrontc}"
+PF="${1:-scripts/pie-exe.sh}"   # chain: pfrontc -> .air -> legacy pear1c
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 SRC="tests/exec/pear/p112_clause_binding_pointer.pie"
 BIN="${SRC%.pie}"

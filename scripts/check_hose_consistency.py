@@ -87,8 +87,8 @@ def check_runtime_symbols():
         if symbol not in exports:
             errors.append(f"Symbol {symbol} missing from compiled C runtime exports")
 
-    backend = read_source("pfront/pear_ir/pear.c3", errors)
-    linker = read_source("pfront/pear_ir/pear_link.c3", errors)
+    backend = read_source("legacy/pear1/pear.c3", errors)
+    linker = read_source("legacy/pear1/pear_link.c3", errors)
     # v0.9 PEAR uses real libc allocation, not the old HOSE/stack-buffer ABI.
     for symbol in ("malloc", "free", "write"):
         if not re.search(r'll_add_fn\(m,\s*\(char\*\)"' + symbol + r'"\s*,', backend):

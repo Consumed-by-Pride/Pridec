@@ -38,6 +38,11 @@ import pfront_constfold;
 import pfront_sccp;
 import air;
 
+// --emit-air-pretty selects the legacy human-oriented AIR dump (diagnostic only).
+bool g_air_pretty = false;
+// --air-roundtrip: test-only differential check of the .air text format (see air.c3).
+bool g_air_roundtrip = false;
+
 extern fn void* malloc(usz size);
 extern fn void  free(void* ptr);
 extern fn int   printf(char* fmt, ...);
@@ -315,7 +320,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                          bool report_dead, bool strict_vis, bool run_theory,
                          bool lint, bool optimize, int opt_level,
                          bool emit_ast, bool emit_sexp, bool time_passes,
-                         bool dump_cfg, bool emit_air, bool emit_bc, bool emit_exe, bool emit_cps, bool emit_dtree)
+                         bool dump_cfg, bool emit_air, bool emit_cps, bool emit_dtree)
 {
     RunResult rr;
     rr.errors = 0; rr.warnings = 0; rr.modules = 0;
@@ -580,9 +585,10 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
             pfront_dump::emit_ast(entry.ast, it, path, emit_sexp);
         }
 
-        if (emit_air)
+        if (emit_air && g_air_pretty)
         {
-            // emit_air derives the .air sibling path from `path` itself.
+            // `--emit-air-pretty`: the old human-oriented, lossy dump of the entry
+            // module. A diagnostic, not a contract, so it stays unconditional.
             air::emit_air(entry.ast, it, path);
         }
         // Artifacts that are meant to be run or linked are written only when the
@@ -592,37 +598,43 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
         // dumps below stay unconditional: they are diagnostics, and they are
         // most useful on input that failed.
         bool emit_ok = (diags.error_count == 0);
-        if (emit_bc || emit_exe)
+        if (emit_air && !g_air_pretty)
         {
+            // The canonical `.air` is a contract artifact like an executable: it
+            // is written only for a program that compiled, and it covers the WHOLE
+            // program (every loaded module, load order) so a backend sees exactly
+            // what the native path used to compile.
             if (emit_ok)
             {
-                if (emit_bc) { air::emit_bc(entry.ast, it, path, opt_level); }
-                if (emit_exe)
+                pfront_core::PNode*[256] air_roots;
+                usz an = 0;
+                usz amc = ld.module_total();
+                for (usz i = 0; i < amc && an < 256; i++)
                 {
-                    // Whole-program emission: a call into another module has to
-                    // find that module's definition, so every loaded module's
-                    // AST goes into one AirModule (load order; the first
-                    // definition of a name wins). Emitting only the entry file
-                    // made cross-module calls resolve to nothing, which used to
-                    // turn into a call to address 0 and a segfault.
-                    pfront_core::PNode*[256] prog_roots;
-                    usz rn = 0;
-                    usz mc = ld.module_total();
-                    for (usz i = 0; i < mc && rn < 256; i++)
-                    {
-                        pfront_core::PNode* a = ld.module_ast_at(i);
-                        if (a != null) { prog_roots[rn] = a; rn = rn + 1; }
-                    }
-                    if (rn > 1) { air::emit_exe_program(&prog_roots[0], rn, it, path, opt_level); }
-                    else if (rn == 1) { air::emit_exe(prog_roots[0], it, path, opt_level); }
-                    else { air::emit_exe(entry.ast, it, path, opt_level); }
+                    pfront_core::PNode* aa = ld.module_ast_at(i);
+                    if (aa != null) { air_roots[an] = aa; an = an + 1; }
                 }
+                if (an == 0) { air_roots[0] = entry.ast; an = 1; }
+                int werrs = air::emit_air_program(&air_roots[0], an, it, path);
+                if (werrs != 0) { printf("air: %d writer error(s) -- the .air is unusable\n", werrs); }
             }
             else
             {
-                printf("pear: %d error(s) — refusing to emit %s\n",
-                       (int)diags.error_count, emit_exe ? "an executable" : "bitcode");
+                printf("air: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count);
             }
+        }
+        if (g_air_roundtrip && emit_ok)
+        {
+            pfront_core::PNode*[256] rt_roots;
+            usz rtn = 0;
+            usz rtm = ld.module_total();
+            for (usz i = 0; i < rtm && rtn < 256; i++)
+            {
+                pfront_core::PNode* ra = ld.module_ast_at(i);
+                if (ra != null) { rt_roots[rtn] = ra; rtn = rtn + 1; }
+            }
+            if (rtn == 0) { rt_roots[0] = entry.ast; rtn = 1; }
+            (void)air::roundtrip_program(&rt_roots[0], rtn, it, path);
         }
 
         pfront_ext::Stats st;
@@ -720,11 +732,10 @@ fn void print_usage()
     printf("  input must be a file; directory module roots are supplied with -I <dir>\n");
     printf("  -I <dir>          add a module search root (repeatable; defaults are . and stdlib)\n");
     printf("  modules resolve by file name: use mm searches for mm.pie or mm/mm.pie\n");
-    printf("  -O0 | -O1 | -O2 | -O3   optimisation level for emitted code (default -O2)\n");
+    printf("  -O0 | -O1 | -O2 | -O3   optimisation level for the middle end (default -O2)\n");
     printf("  --no-opt          disable the optimiser (same as -O0 for the middle end)\n");
-    printf("  --emit-exe        emit a native executable next to the source\n");
-    printf("  --emit-bc         emit LLVM bitcode next to the source\n");
-    printf("  --emit-air        write AIR text next to the source\n");
+    printf("  --emit-air        write the whole program as AIR 2.0 text next to the source (FILE.air)\n");
+    printf("  --emit-air-pretty print the entry module in the old human-oriented, lossy AIR notation\n");
     printf("  --emit-ast        print the annotated AST with pass flags (pure, readonly, reduction, indep, ...)\n");
     printf("  --emit-sexp       print the AST as s-expressions\n");
     printf("  --emit-cps        print every function's CPS term after eta/beta contraction\n");
@@ -751,7 +762,7 @@ fn void print_usage()
 fn void print_version()
 {
     printf("pfront (Pridec) — PEAR: Pride's Engine for Abstractive Representations\n");
-    printf("front end + AIR mid-end + native backend; LLVM toolchain 23\n");
+    printf("front end + theory layer + AIR lowering (ends at .air; the native backends are separate programs)\n");
 }
 
 fn int main(String[] args)
@@ -792,8 +803,6 @@ fn int main(String[] args)
     bool emit_ast = false;
     bool emit_sexp = false;
     bool emit_air = false;
-    bool emit_bc = false;
-    bool emit_exe = false;
     bool time_passes = false;
     bool subtype_selftest = false;
     bool theory_metadata_selftest = false;
@@ -840,8 +849,17 @@ fn int main(String[] args)
         else if (streq(a, "--emit-ast"))     { emit_ast = true; }
         else if (streq(a, "--emit-sexp"))    { emit_ast = true; emit_sexp = true; }
         else if (streq(a, "--emit-air"))     { emit_air = true; }
-        else if (streq(a, "--emit-bc"))      { emit_bc = true; }
-        else if (streq(a, "--emit-exe"))     { emit_exe = true; }
+        else if (streq(a, "--air-roundtrip")) { g_air_roundtrip = true; }
+        else if (streq(a, "--emit-air-pretty")) { emit_air = true; g_air_pretty = true; }
+        else if (streq(a, "--emit-bc") || streq(a, "--emit-exe"))
+        {
+            // The hard split: this binary ends at `.air` and links no LLVM. The
+            // old flags fail loudly instead of being ignored, so a stale script
+            // cannot believe it built something.
+            printf("error: '%s' was removed: pfrontc stops at .air (see docs/specs/AIR.md).\n", a);
+            printf("       native code: scripts/pie-exe.sh FILE.pie [-O2]   or   pear1c FILE.air --emit-exe\n");
+            return 2;
+        }
         else if (streq(a, "--time-passes"))  { time_passes = true; }
         else if (streq(a, "--dump-cfg"))     { dump_cfg = true; }
         else if (streq(a, "--emit-cps"))     { emit_cps = true; }
@@ -925,7 +943,7 @@ fn int main(String[] args)
     RunResult rr = compile_one(input, roots[..], root_count, exe_dir,
                                dump_ast, dump_mods, verify, quiet,
                                rich, context_lines, strict_types, report_dead, strict_vis, run_theory,
-                               lint, optimize, opt_level, emit_ast, emit_sexp, time_passes, dump_cfg, emit_air, emit_bc, emit_exe, emit_cps, emit_dtree);
+                               lint, optimize, opt_level, emit_ast, emit_sexp, time_passes, dump_cfg, emit_air, emit_cps, emit_dtree);
 
     if (!quiet)
     {

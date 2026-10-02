@@ -4,7 +4,7 @@
 set -uo pipefail
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
-PFRONTC=./pfrontc
+PFRONTC=scripts/pie-exe.sh   # chain: pfrontc -> .air -> legacy pear1c
 BD=bench
 
 time_min() {

@@ -1,0 +1,15 @@
+// CLAIMS: honest_reader keeps readonly+nocapture; forged_writer loses facts/readonly/nocapture
+air 2.0 Main "claims.pie";
+
+facts air_checked readonly def honest_reader(nocapture p : ptr(i64)) : i64 =
+  mu~ %ret_2.
+    <p | index(0 : infer; 1) · %ret_2>;
+
+facts air_checked readonly def forged_writer(nocapture out : ptr(ptr(i64)), nocapture p : ptr(i64)) : i64 =
+  mu~ %ret_2.
+    seq {
+      <p | comu _x1.
+        <out | index(0 : infer; 1) · store(_x1; 1) · comu _.
+          <unit | %k1>>>;
+      <0 : infer | %ret_2>
+    };

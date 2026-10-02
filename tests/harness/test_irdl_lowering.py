@@ -10,12 +10,13 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / 'pfrontc'
+BIN = ROOT / 'scripts' / 'pie-exe.sh'   # chain: pfrontc -> .air -> legacy pear1c; same CLI as the old pfrontc --emit-exe
+BACKENDS = (ROOT / 'pfrontc', ROOT / 'legacy' / 'pear1' / 'pear1c')
 ENV = {**os.environ, 'LD_LIBRARY_PATH': str(Path.home()/'.cache/llvm23') + ':/usr/lib/x86_64-linux-gnu'}
 MODES = [(tier, theory) for tier in ('-O0', '-O1', '-O2', '-O3') for theory in (True, False)]
 
 
-@unittest.skipUnless(BIN.is_file(), 'build pfrontc first')
+@unittest.skipUnless(all(b.is_file() for b in BACKENDS), 'build pfrontc and the legacy backend first (make; make legacy-pear)')
 class IrdlLoweringTests(unittest.TestCase):
     def build(self, text, tier='-O2', theory=True):
         folder = tempfile.TemporaryDirectory(prefix='n3-irdl-')

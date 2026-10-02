@@ -109,16 +109,20 @@ air_lower.c3        AirLower walks the tree and builds AirModule in AirArena:
                       N_USE→import, N_MODULE→module_decl, clause-syntax params
   │
   ▼
-air_emit.c3         Emitter walks AirModule and prints AIR 1.0 text:
-                    • ACMD_CUT: <()|μ̃x.c> → c (admin-nop elimination)
-                    • ACMD_SEQ: drops nop/terminal rest
-                    • ACNS_CALL: args collected top-of-stack first so they
-                      print in source order as call(arg1,…,argN; k)
-                    • param/return types elided when ATYP_INFER (no ': _')
-                    • indentation, pub/extern flags, typaram lists, codata/data
+air_write.c3        THE `.air` printer (AIR 2.0, docs/specs/AIR.md): whole program,
+                    canonical, lossless; air_text.c3 holds the shared vocabulary.
+                    air_read.c3 is its strict parser (used by airtool, by
+                    `--air-roundtrip`, and by every backend); air_verify.c3
+                    checks the validity rules V1-V4. air_emit.c3 is the old
+                    lossy pretty-printer kept as `--emit-air-pretty` (diagnostic).
   │
   ▼
-  file.air  (stable text format; see docs/specs/AIR.md)
+  file.air  (AIR 2.0 text; THE interface; pfrontc ends here and links no LLVM)
+  │
+  ▼  a backend starts from the file and nowhere else
+  ├─ legacy/pear1/pear1c   PEAR 1: .air → LLVM 23 → bitcode / native ELF (frozen;
+  │                         the regression gate for the front end)
+  └─ PEAR 2                 new backend, built against docs/pear2/ (contract, coverage)
 ```
 
 ## PNode, the universal tree
@@ -181,7 +185,8 @@ Roughly where to hook in:
      form. Use `bind_x_then`/right-to-left μ̃ wrapping, not `lr.nop()`.
   3. If it introduces a binder, push/pop the scope and ret-stack as
      appropriate (see `decl_fn`/`lambda_prd`/`decl_letconst` for models).
-  4. Add an emitter case in `air_emit.c3` (`emit_cmd`/`emit_prd`/`emit_cns`).
+  4. Add the printer case in `air_write.c3`, the parser case in `air_read.c3` (the round-trip test
+     `pfrontc --air-roundtrip` fails until both carry every field), a row in `docs/specs/AIR.md`.
 * **New analysis pass** → drop a new file under `pfront/` (pattern-match
   the NodeKind you care about; use `walk(n.children[i])` to recurse) and
   call it from `pfront_main.c3::compile_one` in the right spot, or, if it
@@ -191,7 +196,8 @@ Roughly where to hook in:
   transformations go after the TRS).
 * **New AIR syntactic form** → add a tag to `AirPrdTag`/`AirCnsTag`/
   `AirCmdTag`, a smart constructor in `air_ir.c3`, cases in lower +
-  emit, and document the form in `docs/specs/AIR.md`.
+  write + read, and document the form in `docs/specs/AIR.md`; a backend must refuse it until implemented
+  (`docs/pear2/CONTRACT.md` §2).
 
 ## Invariants worth not breaking
 
