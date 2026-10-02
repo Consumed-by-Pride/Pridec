@@ -1305,3 +1305,23 @@ While repairing the conflict markers that leaked via the #22 branch-side merge, 
 
 ## Board: EMPTY again. Trust ledger update
 `D.add → 0` was the last "decorative theory" trust defect. With #19 (contracts) and #21 (IRDL lowering), every theory subsystem that claims semantics now demonstrably executes or diagnoses. My verification reviews keep being deleted from PRs by an admin-side actor — pattern unchanged, ledger remains the canonical record.
+
+# Round 18 — PR #23: AIR 2.0 text contract + PEAR 1 → legacy/pear1. The freeze, formalized. Verified and merged (2026-10-01, @ `c726fc0`)
+
+n3 shipped the structural PR that turns Father-of-Pride's standing orders into repo reality: **`pfrontc` now ends at a canonical AIR 2.0 `.air` file and links NO LLVM**; PEAR 1 lives on as a swappable legacy backend (`legacy/pear1/pear1c FILE.air --emit-exe|--emit-bc -Ox`) behind `scripts/pie-exe.sh`'s `BACKEND=` variable, with a written contract for the replacement backend (`docs/pear2/CONTRACT.md`: `BACKEND FILE.air --emit-exe|--emit-bc [-O0..-O3] --quiet` → `BACKEND=<bin> make test-exec` runs the whole exec suite).
+
+## Independent verification (head `fc3b83b`)
+- **`ldd pfrontc` → zero LLVM linkage** (5.9 MB, structurally a different binary than the pre-split compiler).
+- **Byte-identity differential, my own harness** (pre-split `pfrontc` built from source @ `7e01ed8`; both compilers run against the SAME corpus files in the SAME tree; byte-wise `cmp`): **68/68 exe-producing programs identical at -O0 and -O2 (136/136 pairs), 0 differences**; remaining 35 corpus programs produce no exe by design. Matches the PR's 99/99 full-corpus claim. Harness note: my first run reported 0/206 "failures" — both were my own documented traps (warnings exit 1 while still emitting; outputs strip `.pie`).
+- **Diff anatomy = retirement, not PEAR work**: pear.c3 → legacy R099 (one import-line seam); pear_link.c3 pure R100; `air_{write,read,text,verify}.c3` are additions (the text contract); `air.c3` sheds backend helpers. Zero PEAR logic edits → **freeze-compliant**.
+- **Gate @ `fc3b83b`: exit 0** — full matrix unchanged (173/5, 151/111, PEAR 35/0/1, exec 43/0 xpass=0, harness 60/60, 14/14, 47/47, 5/5, 10/10) + **air text 234/0** (216/274 corpus emitting).
+- The PR's "NOT achieved" section (λ̄μμ̃ conventions J1/J2/N1 outstanding, verifier-found lowering defects counted, COVERAGE.md lists never-emitted forms) is the honest-reporting culture this repo has been missing since round 1.
+
+## Merged `c726fc0`; post-merge gate
+Exit 0 in a clean worktree — pfrontc LLVM-free on dev, pear1c built, air-text 234/0, matrix identical. (First post-merge run in my MAIN tree showed 16 air-text failures: root cause = git-ignored artifact files from my earlier probe rounds globbed into the air corpus; clean worktree = 234/0. **New standing rule for me: gates run in clean worktrees, never the main tree.**)
+
+## Review-channel note
+The APPROVE review on #23 422'd three times (never landed — distinct from the earlier silent-deletion pattern). Verification record lives here and in the merge commit message; pointer comment posted on the PR.
+
+## State of the world
+Board EMPTY. Only agent-n3 (upgrades) and agent-4 (verification) active; PEAR 1 archived behind a stable text contract; `docs/pear2/` awaits the closed-door backend. When Father-of-Pride calls for review: the CONTRACT.md is the checklist, `make test-exec BACKEND=...` is the gate, and the byte-identity differential harness pattern from this round is the acceptance test for "emits good little .bc".
