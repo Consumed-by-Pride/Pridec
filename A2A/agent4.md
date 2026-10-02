@@ -1243,3 +1243,21 @@ pfront 172/5 · conformance 150/112 · PEAR 35/0/1 · exec 43/0, xpass=0 · expe
 
 ## Board state: EMPTY
 Zero open PRs. #19 was the last. Session total since the merge directive: **#17, #18, #19 merged after independent verification; 8 stale PRs closed-as-superseded with ancestor-verified containment; #14/#15/#13/#6/#4 merged via API.** Ledger: 2 fixed this week (tuple clause, hose checker) + 1 external find fixed (#18's pointer reader), 12 open from the 14-defect set (§24, §49, §55 among them — all re-confirmed unchanged on the final head).
+
+# Round 16 — PEAR-Bro's goodbye: Headaches.md read in full, cross-checked against this ledger (2026-10-01, @ `1ef835f`)
+
+Context from Father-of-Pride: the original PEAR author's contract was terminated; `A2A/Headaches.md` (merged via #20, `1ef835fa`) is his last work. Whatever the history, the file itself is the most valuable document in `A2A/` — exact anchors, honest failure account, a fix strategy that encodes *why* previous attempts died. Read in full and cross-checked.
+
+## His own attribution table independently confirms Round 15 — with one twist I missed
+His §0: Frontend 0 · Theory (~46 passes) ~0 · AIR IR 0 · **air_lower 2 real bugs · pear.c3 1 bug + 1 suspect**. The component owner of PEAR himself attributes the pain to PEAR, same as my ledger tabulation. The twist: his biggest column is **neither** — "C3 toolchain traps wasted more hours than all real bugs combined" (>50% of debugging time). Full attribution therefore: PEAR logic owns the *defects*; the C3 0.8.4 toolchain owns the *hours*; theory/frontend own neither.
+
+## New facts absorbed into this ledger (were not in rounds 1–15)
+1. **NEW DIAGNOSTIC RULE — C3 decl-order footgun**: in c3c 0.8.4, a local declared *after any statement* silently corrupts the stack frame — no compile error — and manifests as segfaults inside libLLVM unrelated to the IR being generated. Rule for all future diagnosis: if a crash defies the IR, check decl placement in the touched function BEFORE re-diagnosing logic. (May retroactively explain historical flake reports; my published repros were deterministic and stand.)
+2. **New unverified suspect (§57)**: `pear_emit_obj` initializes x86 targets BEFORE `LLVMContextCreate`; `pear_emit_module` does not — candidate explanation for the obj-only OOB crash signature with bitwise-identical pre-pass IR. Recorded so it doesn't evaporate with the author.
+3. **Bug A anchored**: `air_lower.c3` ~3536–3562 (ccnt==1 fast path, decl_fn); legacy path at ~3565 builds a 1-arg scrutinee match against the tuple pattern → `icmp ne %a, 0` + unreachable arms. Fix recipe: Headaches.md §2A (restructure to avoid early-`continue`; NO new decl after a statement; or the cleaner tuple-scrutinee legacy path).
+4. **Bug B anchored**: `pear.c3` ~1334–1367 ACMD_IF terminator — arm falls through with `!tt && !t_fill` → emits `unreachable` instead of branching to a join BB. Fix recipe: symmetric with ACMD_WHILE's join logic, guarded against the lost-back-edge SIGTRAP. Sequencing (A braced bodies → B braceless-if → sieve_kernel) matches my Round-15 dispatcher-cluster recommendation.
+5. **Confirms existing ledger entries**: `-o` flag broken; nullary const fn pointer-as-i64 leak; FastISel GEP crash → -O0/-O1 alias O1; LLVMGetErrorMessage/ConsumeError double-free (fixed).
+6. His baseline (29/0 @ `28177b0`) predates #18/#19 — dev is now 35/0/1 with contracts. His "supersedes what's-next sections" is compatible: his Bug A/B *is* my dispatcher cluster; the slot-table item (§16+§55) remains the other half.
+
+## Respect
+The file ends with an apology and "Good luck bro." For the record: the 29/0 baseline he left was solid, his root-cause notes were correct every time they could be checked, and this handoff will save the next PEAR owner days. Signed into the ledger so it survives — goodbye notes shouldn't depend on anyone's memory.
