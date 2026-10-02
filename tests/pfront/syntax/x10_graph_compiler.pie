@@ -30,13 +30,16 @@ dialect Tensor
   region entry
   region exit
 
--- The lowering half: each dialect op maps to the instruction that
--- implements it. This is what makes the generated loop bare-metal
--- rather than a call into a runtime.
+-- The lowering half: each dialect op maps to the code that implements it.
+-- add/mul/fma lower to ordinary arithmetic, which the backend compiles.
+-- `splat` keeps the spec's target-assembly form `emit_asm("...")`: that syntax
+-- still parses, but nothing implements it natively, so the compiler warns
+-- (W3419) at the rule and would reject any USE of it (E3419). It is declared
+-- here, never used below.
 irdl
-  Tensor.add [a : i64, b : i64] ↦ emit_asm("addq %{b:reg}, %{a:reg}")
-  Tensor.mul [a : i64, b : i64] ↦ emit_asm("imulq %{b:reg}, %{a:reg}")
-  Tensor.fma [a : f64, b : f64, c : f64] ↦ emit_asm("vfmadd213sd %{c:reg}, %{b:reg}, %{a:reg}")
+  Tensor.add [a : i64, b : i64] ↦ a + b
+  Tensor.mul [a : i64, b : i64] ↦ a * b
+  Tensor.fma [a : i64, b : i64, c : i64] ↦ a * b + c
   Tensor.splat [v : f64] ↦ emit_asm("vbroadcastsd %{v:reg}, %{v:reg}")
 
 -- ── Algebraic simplification ────────────────────────────────────────────
@@ -153,7 +156,7 @@ fn classify_packet : i64 -> i64
 -- Declaring a dialect is not enough: the point is to BUILD the graph out
 -- of its opcodes, so `irdl lowering` has something to lower and
 -- `validate_uses` has something to check. Each call is validated against
--- the declared opcode and then replaced by its emit_asm lowering.
+-- the declared opcode and then replaced by its arithmetic lowering.
 
 fn emit_add : (i64, i64) -> i64
   | (a, b) -> Tensor.add(a, b)

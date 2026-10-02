@@ -46,7 +46,7 @@ Unsupported native forms must diagnose, not become zero/unreachable artifacts
 that look like successful compilation. Existing --no-verify driver coupling
 also needs correction.
 
-## P03 — real dialect lowering
+## P03 — real dialect lowering  (IMPLEMENTED on `n3/theory-irdl-lowering`; see docs/dev/IRDL_LOWERING.md)
 
 Specify/reuse source grammar for opcode arity and lowering actions, register
 those rules, check supported templates, and lower through AIR. Name registration

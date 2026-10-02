@@ -26,6 +26,7 @@ import pfront_sema;
 import pfront_flow;
 import theory_subtype_engine;
 import theory_check;
+import theory_irdl;
 import theory_egraph;
 import pfront_source;
 import pfront_types;
@@ -510,6 +511,21 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 tp.optimize = optimize;
                 tp.opt_level = opt_level;
                 entry.ast = tp.run(entry.ast);
+            }
+        }
+        // Dialect elaboration is semantics, not an optional analysis: without the
+        // theory layer a dialect use would reach AIR as an unresolved method
+        // call that compiles to a placeholder value. Run it here when the
+        // pipeline above did not.
+        if (!theory_ok && entry.ast != null)
+        {
+            theory_irdl::DialectTable* dtab =
+                (theory_irdl::DialectTable*)malloc(theory_irdl::DialectTable::size);
+            if (dtab != null)
+            {
+                dtab.init(arena, diags, it, path);
+                entry.ast = dtab.elaborate(entry.ast);
+                free((void*)dtab);
             }
         }
         // ---- SCCP (sparse conditional constant propagation) — real rewrites ----

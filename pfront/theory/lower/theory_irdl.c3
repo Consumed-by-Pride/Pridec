@@ -59,6 +59,11 @@ const usz MAX_LOWERINGS  = 4096;
 const usz MAX_RULES_PER_OP = 8;
 const int LOWER_FUEL     = 100000;
 const int LOWER_MAX_DEPTH = 400;
+const int IRDL_VARIADIC_AUX_T = 7; // must equal pfront_ext::IRDL_VARIADIC_AUX
+const int IRDL_BLOCK_AUX  = 3;     // parse_irdl_decl marks `irdl` lowering blocks with aux 3
+const usz TPL_EVENTS_MAX  = 64;
+const usz MAX_GLOBALS     = 8192;
+const usz MAX_LOCALS      = 1024;
 
 // ════════════════════════════════════════════════════════════════════════════
 // PART A — IRDL
@@ -69,6 +74,7 @@ struct LowerRule
     Node* action;         // template     a + b
     usz   arity;
     usz   fire_count;
+    bool  asm_only;       // template is `emit_asm(..)`: registered, but no native lowering exists
 }
 
 struct Opcode
@@ -108,6 +114,16 @@ struct DialectTable
     usz unknown_opcode;
     usz arity_mismatch;
     usz lowered;
+    usz rules_registered;
+    usz rules_rejected;
+    usz unlowered;
+    usz guard_blocked;
+    usz asm_templates;
+    uint[MAX_GLOBALS] globals;      // names declared at module top level
+    usz  global_count;
+    uint[MAX_LOCALS]  locals;       // binders (params/patterns) inside the item being lowered
+    usz  local_count;
+    bool locals_unknown;
     int fuel;
 }
 
@@ -125,6 +141,14 @@ fn void DialectTable.init(DialectTable* dt, Arena* a, pfront_core::DiagBag* d,
     dt.unknown_opcode = 0;
     dt.arity_mismatch = 0;
     dt.lowered = 0;
+    dt.rules_registered = 0;
+    dt.rules_rejected = 0;
+    dt.unlowered = 0;
+    dt.guard_blocked = 0;
+    dt.asm_templates = 0;
+    dt.global_count = 0;
+    dt.local_count = 0;
+    dt.locals_unknown = false;
     dt.fuel = LOWER_FUEL;
 }
 
@@ -189,7 +213,8 @@ fn void DialectTable.register_dialects(DialectTable* dt, Node* n, int depth)
     if (n == null || depth > 200) { return; }
     // The parser lowers `dialect X { opcode a ... }` to N_DECL_INTERFACE with
     // NF_SYNTHETIC, whose N_DECL_FIELD children are the opcodes.
-    if (n.kind == Nk.N_DECL_INTERFACE && (n.flags & pfront_core::NF_SYNTHETIC) != 0)
+    if (n.kind == Nk.N_DECL_INTERFACE && (n.flags & pfront_core::NF_SYNTHETIC) != 0
+        && n.p.aux != IRDL_BLOCK_AUX)
     {
         int did = dt.add_dialect(n.name_id, n);
         for (usz i = 0; i < n.child_count; i++)
@@ -225,6 +250,7 @@ fn bool DialectTable.add_lowering(DialectTable* dt, uint dialect_name,
     r.action = action;
     r.arity = args == null ? 0 : args.child_count;
     r.fire_count = 0;
+    r.asm_only = false;
     op.rule_count = op.rule_count + 1;
     // The first rule fixes the opcode's arity.
     if (!op.arity_known) { op.arity = r.arity; op.arity_known = true; }
@@ -279,6 +305,476 @@ fn bool split_dialect_call(Node* call, uint* out_dialect, uint* out_opcode)
     return true;
 }
 
+
+
+// ── Name hygiene ───────────────────────────────────────────────────────────
+// A template's FREE names (anything that is not an operand binder) are resolved
+// where the opcode is USED, after substitution. They are therefore accepted
+// only if (1) they name a top-level declaration of this module and (2) no
+// binder inside the using item shadows them. Otherwise lowering could silently
+// call a different function, or an undefined one.
+fn bool DialectTable.is_global(DialectTable* dt, uint name)
+{
+    for (usz i = 0; i < dt.global_count; i++) { if (dt.globals[i] == name) { return true; } }
+    return false;
+}
+
+fn void DialectTable.collect_globals(DialectTable* dt, Node* root, int depth)
+{
+    if (depth == 0) { dt.global_count = 0; }
+    if (root == null || depth > 8) { return; }
+    for (usz i = 0; i < root.child_count; i++)
+    {
+        Node* c = root.children[i];
+        if (c == null) { continue; }
+        if (c.kind == Nk.N_MODULE) { dt.collect_globals(c, depth + 1); continue; }
+        if (c.name_id == 0 || c.kind == Nk.N_DECL_INTERFACE) { continue; }
+        if (dt.global_count < MAX_GLOBALS)
+        {
+            dt.globals[dt.global_count] = c.name_id;
+            dt.global_count = dt.global_count + 1;
+        }
+    }
+}
+
+fn void DialectTable.collect_locals(DialectTable* dt, Node* n, int depth)
+{
+    if (n == null) { return; }
+    if (depth > 400) { dt.locals_unknown = true; return; }
+    if ((n.kind == Nk.N_PAT_IDENT || n.kind == Nk.N_DECL_PARAM) && n.name_id != 0)
+    {
+        if (dt.local_count >= MAX_LOCALS) { dt.locals_unknown = true; return; }
+        dt.locals[dt.local_count] = n.name_id;
+        dt.local_count = dt.local_count + 1;
+    }
+    for (usz i = 0; i < n.child_count; i++) { dt.collect_locals(n.children[i], depth + 1); }
+}
+
+fn bool DialectTable.is_local(DialectTable* dt, uint name)
+{
+    if (dt.locals_unknown) { return true; }
+    for (usz i = 0; i < dt.local_count; i++) { if (dt.locals[i] == name) { return true; } }
+    return false;
+}
+
+fn bool DialectTable.free_names_declared(DialectTable* dt, Node* tmpl, Node* binds, int depth)
+{
+    if (tmpl == null) { return true; }
+    if (depth > LOWER_MAX_DEPTH) { return false; }
+    if (tmpl.kind == Nk.N_EXPR_IDENT && tmpl.name_id != 0)
+    {
+        bool is_binder = false;
+        for (usz i = 0; i < binds.child_count; i++)
+        {
+            Node* b = binds.children[i];
+            if (binder_is_name(b) && b.name_id == tmpl.name_id) { is_binder = true; }
+        }
+        if (!is_binder && !dt.is_global(tmpl.name_id)) { return false; }
+    }
+    uint tdn = 0;
+    uint ton = 0;
+    // `Dialect.op(..)` inside a template: the receiver names a dialect, not a value.
+    bool dialect_use = tmpl.kind == Nk.N_EXPR_METHOD && split_dialect_call(tmpl, &tdn, &ton)
+                       && dt.find_dialect(tdn) >= 0;
+    for (usz i = dialect_use ? 1 : 0; i < tmpl.child_count; i++)
+    {
+        if (!dt.free_names_declared(tmpl.children[i], binds, depth + 1)) { return false; }
+    }
+    return true;
+}
+
+fn bool DialectTable.free_names_unshadowed(DialectTable* dt, Node* tmpl, Node* binds, int depth)
+{
+    if (tmpl == null) { return true; }
+    if (depth > LOWER_MAX_DEPTH) { return false; }
+    if (tmpl.kind == Nk.N_EXPR_IDENT && tmpl.name_id != 0)
+    {
+        bool is_binder = false;
+        for (usz i = 0; i < binds.child_count; i++)
+        {
+            Node* b = binds.children[i];
+            if (binder_is_name(b) && b.name_id == tmpl.name_id) { is_binder = true; }
+        }
+        if (!is_binder && dt.is_local(tmpl.name_id)) { return false; }
+    }
+    uint tdn = 0;
+    uint ton = 0;
+    // `Dialect.op(..)` inside a template: the receiver names a dialect, not a value.
+    bool dialect_use = tmpl.kind == Nk.N_EXPR_METHOD && split_dialect_call(tmpl, &tdn, &ton)
+                       && dt.find_dialect(tdn) >= 0;
+    for (usz i = dialect_use ? 1 : 0; i < tmpl.child_count; i++)
+    {
+        if (!dt.free_names_unshadowed(tmpl.children[i], binds, depth + 1)) { return false; }
+    }
+    return true;
+}
+
+fn bool is_emit_asm_call(Node* action)
+{
+    if (action == null || action.kind != Nk.N_EXPR_CALL || action.child_count == 0) { return false; }
+    Node* f = action.children[0];
+    if (f == null || f.kind != Nk.N_EXPR_IDENT || f.p.slen != 8 || f.p.sptr == null) { return false; }
+    char* t = f.p.sptr;
+    return t[0] == 'e' && t[1] == 'm' && t[2] == 'i' && t[3] == 't' && t[4] == '_'
+        && t[5] == 'a' && t[6] == 's' && t[7] == 'm';
+}
+
+// ── Rule validation and the operand-effect guard ────────────────────────────
+// An irdl template is substituted TEXTUALLY, so it must stay inside a fragment
+// where substitution is meaning-preserving: no binders (a `let`/lambda could
+// capture an operand), no control flow, no allocation/IO/assignment forms.
+// Anything else is rejected with a diagnostic instead of being lowered.
+fn bool template_construct_ok(Node* n, int depth)
+{
+    if (n == null) { return true; }
+    if (depth > LOWER_MAX_DEPTH) { return false; }
+    switch (n.kind)
+    {
+        case N_EXPR_INT:
+        case N_EXPR_FLOAT:
+        case N_EXPR_BOOL:
+        case N_EXPR_CHAR:
+        case N_EXPR_STRING:
+        case N_EXPR_UNIT:
+        case N_EXPR_IDENT:
+        case N_EXPR_BINARY:
+        case N_EXPR_UNARY:
+        case N_EXPR_CALL:
+        case N_EXPR_METHOD:
+        case N_EXPR_FIELD:
+        case N_EXPR_INDEX:
+        case N_EXPR_TUPLE:
+        case N_EXPR_CAST:
+            break;
+        default:
+            return false;
+    }
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        if (!template_construct_ok(n.children[i], depth + 1)) { return false; }
+    }
+    return true;
+}
+
+// Operands that can be evaluated zero, one or many times without changing
+// behaviour: names, literals and arithmetic over them. Calls are NOT pure.
+fn bool operand_is_pure(Node* n, int depth)
+{
+    if (n == null) { return true; }
+    if (depth > LOWER_MAX_DEPTH) { return false; }
+    switch (n.kind)
+    {
+        case N_EXPR_INT:
+        case N_EXPR_FLOAT:
+        case N_EXPR_BOOL:
+        case N_EXPR_CHAR:
+        case N_EXPR_UNIT:
+        case N_EXPR_IDENT:
+        case N_EXPR_BINARY:
+        case N_EXPR_UNARY:
+        case N_EXPR_CAST:
+        case N_EXPR_TUPLE:
+        case N_EXPR_FIELD:
+            break;
+        default:
+            return false;
+    }
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        if (!operand_is_pure(n.children[i], depth + 1)) { return false; }
+    }
+    return true;
+}
+
+fn bool binder_is_wild(Node* b)
+{
+    return b != null && b.kind == Nk.N_EXPR_IDENT && b.p.slen == 1 && b.p.sptr != null
+        && b.p.sptr[0] == '_';
+}
+
+fn bool binder_is_literal(Node* b)
+{
+    if (b == null) { return false; }
+    return b.kind == Nk.N_EXPR_INT || b.kind == Nk.N_EXPR_BOOL || b.kind == Nk.N_EXPR_CHAR;
+}
+
+fn bool binder_is_name(Node* b)
+{
+    return b != null && b.kind == Nk.N_EXPR_IDENT && b.name_id != 0 && !binder_is_wild(b);
+}
+
+// Records the evaluation-order skeleton of a template: which binder (by index)
+// is read, and where a call completes. Operands are evaluated left to right
+// BEFORE the dialect op, so an operand with effects may only be moved if no
+// call (possible effect) sits ahead of it in the template.
+struct TplEvents
+{
+    int[TPL_EVENTS_MAX] ev;    // >=0: binder index read; -1: a call completed
+    usz count;
+    bool overflow;
+}
+
+fn void tpl_events(Node* tmpl, Node* binds, TplEvents* out, int depth)
+{
+    if (tmpl == null) { return; }
+    if (depth > LOWER_MAX_DEPTH) { out.overflow = true; return; }
+    if (tmpl.kind == Nk.N_EXPR_IDENT && tmpl.name_id != 0)
+    {
+        for (usz i = 0; i < binds.child_count; i++)
+        {
+            Node* b = binds.children[i];
+            if (binder_is_name(b) && b.name_id == tmpl.name_id)
+            {
+                if (out.count >= TPL_EVENTS_MAX) { out.overflow = true; return; }
+                out.ev[out.count] = (int)i;
+                out.count = out.count + 1;
+                return;
+            }
+        }
+    }
+    for (usz i = 0; i < tmpl.child_count; i++) { tpl_events(tmpl.children[i], binds, out, depth + 1); }
+    if (tmpl.kind == Nk.N_EXPR_CALL || tmpl.kind == Nk.N_EXPR_METHOD)
+    {
+        if (out.count >= TPL_EVENTS_MAX) { out.overflow = true; return; }
+        out.ev[out.count] = -1;
+        out.count = out.count + 1;
+    }
+}
+
+// Does substituting these operands into this rule preserve evaluation of any
+// operand that may have effects? (Each such operand: evaluated exactly once,
+// in source order, with no template call completing before it.)
+fn bool rule_guard_ok(LowerRule* r, Node* call)
+{
+    usz n = r.arity;
+    bool any_impure = false;
+    for (usz i = 0; i < n; i++)
+    {
+        if (!operand_is_pure(call.children[i + 1], 0)) { any_impure = true; }
+    }
+    if (!any_impure) { return true; }
+    TplEvents te;
+    te.count = 0;
+    te.overflow = false;
+    tpl_events(r.action, r.pattern_args, &te, 0);
+    if (te.overflow) { return false; }
+    int last = -1;
+    bool seen_call = false;
+    usz[32] reads;
+    for (usz i = 0; i < 32; i++) { reads[i] = 0; }
+    if (n > 32) { return false; }
+    for (usz k = 0; k < te.count; k++)
+    {
+        int e = te.ev[k];
+        if (e < 0) { seen_call = true; continue; }
+        reads[(usz)e] = reads[(usz)e] + 1;
+        if (!operand_is_pure(call.children[(usz)e + 1], 0))
+        {
+            if (seen_call) { return false; }            // a call runs before this operand
+            if (e <= last) { return false; }            // reordered relative to another impure operand
+            last = e;
+        }
+    }
+    for (usz i = 0; i < n; i++)
+    {
+        if (!operand_is_pure(call.children[i + 1], 0) && reads[i] != 1) { return false; }  // dropped or duplicated
+    }
+    return true;
+}
+
+// 0 = no rule matches, 1 = rule matches and is safe, 2 = matches but the
+// operand-effect guard forbids substituting these operands, 3 = the rule is
+// an `emit_asm` template (no native lowering), 4 = a template name would be
+// captured by a binder of the using item.
+fn int DialectTable.try_rule(DialectTable* dt, Opcode* op, Node* call, Subst* s, LowerRule** out)
+{
+    usz argc = call.child_count > 0 ? call.child_count - 1 : 0;
+    for (usz ri = 0; ri < op.rule_count; ri++)
+    {
+        LowerRule* r = &op.rules[ri];
+        if (r.arity != argc) { continue; }
+        s.clear();
+        bool ok = true;
+        for (usz i = 0; i < argc && ok; i++)
+        {
+            Node* binder = r.pattern_args.children[i];
+            Node* arg = call.children[i + 1];
+            if (binder_is_wild(binder)) { continue; }
+            if (binder_is_literal(binder))
+            {
+                // literal pattern: matches only an operand that IS that literal
+                ok = arg != null && arg.kind == binder.kind && arg.p.ival == binder.p.ival;
+                continue;
+            }
+            if (!binder_is_name(binder)) { ok = false; break; }
+            ok = s.bind(binder.name_id, arg);
+        }
+        if (!ok) { continue; }
+        *out = r;
+        if (r.asm_only) { return 3; }
+        if (!dt.free_names_unshadowed(r.action, r.pattern_args, 0)) { return 4; }
+        if (!rule_guard_ok(r, call)) { return 2; }
+        return 1;
+    }
+    return 0;
+}
+
+// Register every `irdl` lowering rule in the tree against its opcode.
+fn void DialectTable.register_lowerings(DialectTable* dt, Node* n, int depth)
+{
+    if (n == null || depth > 200) { return; }
+    if (n.kind == Nk.N_DECL_INTERFACE && (n.flags & pfront_core::NF_SYNTHETIC) != 0
+        && n.p.aux == IRDL_BLOCK_AUX)
+    {
+        for (usz i = 0; i < n.child_count; i++)
+        {
+            Node* rule = n.children[i];
+            if (rule == null || rule.kind != Nk.N_CLAUSE) { continue; }
+            dt.register_one_lowering(rule);
+        }
+        return;
+    }
+    for (usz i = 0; i < n.child_count; i++) { dt.register_lowerings(n.children[i], depth + 1); }
+}
+
+fn void DialectTable.register_one_lowering(DialectTable* dt, Node* rule)
+{
+    Node* head = rule.child_count > 0 ? rule.children[0] : null;
+    if (head == null || head.kind != Nk.N_MODULE_PATH || head.child_count != 2)
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3413, rule.line, rule.col,
+                       "irdl rule head must be `Dialect.opcode`", dt.file);
+        return;
+    }
+    uint dn = head.children[0].name_id;
+    uint on = head.children[1].name_id;
+    int did = dt.find_dialect(dn);
+    if (did < 0)
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3413, rule.line, rule.col,
+                       "unknown dialect in irdl rule: this dialect is not declared", dt.file);
+        return;
+    }
+    int oid = dt.find_opcode(did, on);
+    if (oid < 0)
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3413, rule.line, rule.col,
+                       "unknown opcode in irdl rule: this opcode is not declared in its dialect", dt.file);
+        return;
+    }
+    Node* binds = null;
+    Node* action = null;
+    if (rule.child_count == 4)
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3422, rule.line, rule.col,
+                       "guarded irdl rules are not supported: a guard needs a statically decidable condition, and silently ignoring it would change which rule fires",
+                       dt.file);
+        return;
+    }
+    if (rule.child_count == 3 && rule.children[1] != null
+        && rule.children[1].kind == Nk.N_EXPR_ARRAY)
+    {
+        binds = rule.children[1];
+        action = rule.children[2];
+    }
+    else if (rule.child_count == 2)
+    {
+        action = rule.children[1];      // nullary opcode: `D.op ↦ action`
+    }
+    if (action == null)
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3415, rule.line, rule.col,
+                       "irdl rule has no `↦ action` template", dt.file);
+        return;
+    }
+    usz arity = binds == null ? 0 : binds.child_count;
+    for (usz i = 0; i < arity; i++)
+    {
+        Node* b = binds.children[i];
+        if (b != null && b.kind == Nk.N_EXPR_IDENT && b.p.aux == IRDL_VARIADIC_AUX_T)
+        {
+            dt.rules_rejected = dt.rules_rejected + 1;
+            dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3422, rule.line, rule.col,
+                           "variadic irdl operands (`..rest`) are not supported", dt.file);
+            return;
+        }
+        if (!binder_is_name(b) && !binder_is_wild(b) && !binder_is_literal(b))
+        {
+            dt.rules_rejected = dt.rules_rejected + 1;
+            dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3414, rule.line, rule.col,
+                           "irdl operand must be a name, `_`, or an integer/bool/char literal", dt.file);
+            return;
+        }
+        for (usz j = 0; j < i; j++)
+        {
+            Node* c = binds.children[j];
+            if (binder_is_name(b) && binder_is_name(c) && b.name_id == c.name_id)
+            {
+                dt.rules_rejected = dt.rules_rejected + 1;
+                dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3414, rule.line, rule.col,
+                               "irdl rule binds the same operand name twice", dt.file);
+                return;
+            }
+        }
+    }
+    if (!template_construct_ok(action, 0))
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3415, rule.line, rule.col,
+                       "irdl template uses a construct outside the substitutable fragment (names, literals, arithmetic, calls)",
+                       dt.file);
+        return;
+    }
+    // `emit_asm("...")` is the spec's target-assembly template, but the
+    // frontend defines no such function and AIR/PEAR have no inline-asm
+    // lowering for it. Declaring such a rule is allowed (warning); USING it is
+    // an error (E3219) instead of a placeholder or a crashing binary.
+    // (a program that DEFINES a function named emit_asm gets an ordinary call)
+    bool asm_rule = is_emit_asm_call(action) && !dt.is_global(action.children[0].name_id);
+    if (asm_rule)
+    {
+        dt.asm_templates = dt.asm_templates + 1;
+        dt.diags.warn(pfront_core::Phase.PH_RESOLVE, 3419, rule.line, rule.col,
+                      "irdl template calls `emit_asm`, which has no native implementation here: uses of this opcode will be rejected",
+                      dt.file);
+    }
+    else if (!dt.free_names_declared(action, binds == null ? dt.empty_binds() : binds, 0))
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3420, rule.line, rule.col,
+                       "irdl template names something that is neither an operand nor a top-level declaration of this module",
+                       dt.file);
+        return;
+    }
+    Opcode* op = &dt.opcodes[oid];
+    if (op.arity_known && op.arity != arity)
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3416, rule.line, rule.col,
+                       "irdl rule operand count differs from this opcode's earlier rules", dt.file);
+        return;
+    }
+    if (!dt.add_lowering(dn, on, binds == null ? dt.empty_binds() : binds, action))
+    {
+        dt.rules_rejected = dt.rules_rejected + 1;
+        dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3416, rule.line, rule.col,
+                       "too many irdl rules for this opcode", dt.file);
+        return;
+    }
+    op.rules[op.rule_count - 1].asm_only = asm_rule;
+    dt.rules_registered = dt.rules_registered + 1;
+}
+
+fn Node* DialectTable.empty_binds(DialectTable* dt)
+{
+    return dt.arena.node(Nk.N_EXPR_ARRAY, 0, 0);
+}
+
 // Validate every dialect-op use against the registry.
 fn void DialectTable.validate_uses(DialectTable* dt, Node* n, int depth)
 {
@@ -330,27 +826,106 @@ fn Node* DialectTable.lower_call(DialectTable* dt, Node* call)
     if (op.rule_count == 0) { return null; }
     if (dt.fuel <= 0) { return null; }
 
-    usz argc = call.child_count > 0 ? call.child_count - 1 : 0;
-    for (usz ri = 0; ri < op.rule_count; ri++)
+    Subst s;
+    LowerRule* r = null;
+    if (dt.try_rule(op, call, &s, &r) != 1) { return null; }
+    dt.fuel = dt.fuel - 1;
+    r.fire_count = r.fire_count + 1;
+    dt.lowered = dt.lowered + 1;
+    return s.instantiate(dt.arena, r.action, 0);
+}
+
+// After lowering, a surviving use of a declared opcode has NO executable
+// meaning: refuse it rather than let it compile to a placeholder value.
+fn void DialectTable.diagnose_unlowered(DialectTable* dt, Node* n, int depth)
+{
+    if (n == null || depth > 200) { return; }
+    if (n.kind == Nk.N_DECL_INTERFACE && (n.flags & pfront_core::NF_SYNTHETIC) != 0) { return; }
+    uint dn = 0;
+    uint on = 0;
+    if (split_dialect_call(n, &dn, &on))
     {
-        LowerRule* r = &op.rules[ri];
-        if (r.arity != argc) { continue; }
-        Subst s;
-        s.clear();
-        bool ok = true;
-        for (usz i = 0; i < argc && ok; i++)
+        int did = dt.find_dialect(dn);
+        int oid = did < 0 ? -1 : dt.find_opcode(did, on);
+        if (oid >= 0)
         {
-            Node* binder = r.pattern_args.children[i];
-            if (binder == null || binder.name_id == 0) { ok = false; break; }
-            ok = s.bind(binder.name_id, call.children[i + 1]);
+            Subst s;
+            LowerRule* r = null;
+            int st = dt.try_rule(&dt.opcodes[oid], n, &s, &r);
+            dt.unlowered = dt.unlowered + 1;
+            if (st == 0)
+            {
+                dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3412, n.line, n.col,
+                               "dialect opcode has no lowering rule for these operands, so it has no executable meaning",
+                               dt.file);
+            }
+            else if (st == 3)
+            {
+                dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3419, n.line, n.col,
+                               "this dialect opcode lowers to `emit_asm`, which has no native implementation here",
+                               dt.file);
+            }
+            else if (st == 4)
+            {
+                dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3421, n.line, n.col,
+                               "a name in the lowering template is shadowed by a local binder at this use",
+                               dt.file);
+            }
+            else if (st == 2)
+            {
+                dt.guard_blocked = dt.guard_blocked + 1;
+                dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3417, n.line, n.col,
+                               "dialect lowering would duplicate, drop or reorder an operand with effects; bind it to a name first",
+                               dt.file);
+            }
+            else
+            {
+                dt.diags.error(pfront_core::Phase.PH_RESOLVE, 3418, n.line, n.col,
+                               "dialect lowering did not reach a fixpoint within its fuel/depth limit",
+                               dt.file);
+            }
         }
-        if (!ok) { continue; }
-        dt.fuel = dt.fuel - 1;
-        r.fire_count = r.fire_count + 1;
-        dt.lowered = dt.lowered + 1;
-        return s.instantiate(dt.arena, r.action, 0);
     }
-    return null;
+    for (usz i = 0; i < n.child_count; i++) { dt.diagnose_unlowered(n.children[i], depth + 1); }
+}
+
+// Dialect ELABORATION is semantics, not an optional analysis: it runs with or
+// without the theory layer so a dialect use never reaches AIR unlowered.
+// Lower one module container item by item so name hygiene can see the binders
+// of the item being lowered.
+fn void DialectTable.lower_items(DialectTable* dt, Node* container, int depth)
+{
+    if (container == null || depth > 8) { return; }
+    for (usz i = 0; i < container.child_count; i++)
+    {
+        Node* item = container.children[i];
+        if (item == null) { continue; }
+        if (item.kind == Nk.N_MODULE) { dt.lower_items(item, depth + 1); continue; }
+        dt.local_count = 0;
+        dt.locals_unknown = false;
+        dt.collect_locals(item, 0);
+        Node* out = dt.lower_tree(item, 0);
+        container.set_child(i, out);
+        dt.diagnose_unlowered(out, 0);
+    }
+}
+
+fn Node* DialectTable.elaborate(DialectTable* dt, Node* root)
+{
+    dt.register_dialects(root, 0);
+    dt.collect_globals(root, 0);
+    dt.register_lowerings(root, 0);
+    dt.validate_uses(root, 0);
+    if (dt.opcode_count == 0 || root == null) { return root; }
+    if (root.kind != Nk.N_PROGRAM && root.kind != Nk.N_MODULE)
+    {
+        dt.locals_unknown = true;     // unknown shape: assume every template name may be shadowed
+        Node* whole = dt.lower_tree(root, 0);
+        dt.diagnose_unlowered(whole, 0);
+        return whole;
+    }
+    dt.lower_items(root, 0);
+    return root;
 }
 
 // Lower to a fixpoint: a lowered action may itself use dialect opcodes.
@@ -376,8 +951,9 @@ fn void DialectTable.report(DialectTable* dt)
         printf("  irdl unknown-dia : %d reference(s) to a dialect that is not declared\n",
                (int)dt.unknown_dialect);
     }
-    printf("  irdl lowering    : %d lowered, %d unknown-op, %d arity errors\n",
-           (int)dt.lowered, (int)dt.unknown_opcode, (int)dt.arity_mismatch);
+    printf("  irdl lowering    : %d rules registered (%d rejected), %d uses lowered, %d unlowered, %d unknown-op, %d arity errors\n",
+           (int)dt.rules_registered, (int)dt.rules_rejected, (int)dt.lowered,
+           (int)dt.unlowered, (int)dt.unknown_opcode, (int)dt.arity_mismatch);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

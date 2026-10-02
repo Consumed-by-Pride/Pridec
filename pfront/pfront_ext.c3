@@ -499,6 +499,8 @@ fn Node* Parser.parse_pgen_decl(Parser* p)
     return n;
 }
 
+const int IRDL_VARIADIC_AUX = 7;   // marks a `..rest` operand in an irdl rule
+
 // `irdl` block: lowering rules of the form `Dialect.op [a, b] ↦ action`.
 fn Node* Parser.parse_irdl_decl(Parser* p)
 {
@@ -566,7 +568,38 @@ fn Node* Parser.parse_irdl_decl(Parser* p)
             while (!p.check(Tk.TOKEN_RBRACK) && !p.at_end())
             {
                 Tok b = p.cur();
-                if (!pfront_parse::tok_is_member_name(b.type)) { break; }
+                /*
+                 A LITERAL operand pattern (`Arith.oadd [a, 0] ↦ a`) selects a
+                 rule only when the use site passes that exact literal. The
+                 tests/exec/13_irdl_lowering fixture is written this way; a
+                 literal here used to end the operand list at the digit.
+                */
+                if (b.type == Tk.TOKEN_LIT_INT || b.type == Tk.TOKEN_LIT_BOOL
+                    || b.type == Tk.TOKEN_LIT_CHAR)
+                {
+                    Node* lit = p.parse_literal();
+                    if (lit != null) { p.add(binds, lit); }
+                    if (!p.accept(Tk.TOKEN_COMMA)) { break; }
+                    continue;
+                }
+                // `_` ignores an operand (its evaluation is still checked by the
+                // lowering's operand-effect guard).
+                // `..rest` (variadic operand): parsed so it can be diagnosed as
+                // unsupported (E3222) rather than derailing the whole block.
+                if (b.type == Tk.TOKEN_DOTDOT && pfront_parse::tok_is_member_name(p.peek(1).type))
+                {
+                    p.advance();
+                    Tok vt = p.advance();
+                    Node* vn = p.mk_at(Nk.N_EXPR_IDENT, vt);
+                    vn.name_id = p.interner.intern(vt.start, vt.len);
+                    vn.p.sptr = vt.start;
+                    vn.p.slen = vt.len;
+                    vn.p.aux = IRDL_VARIADIC_AUX;
+                    p.add(binds, vn);
+                    if (!p.accept(Tk.TOKEN_COMMA)) { break; }
+                    continue;
+                }
+                if (!pfront_parse::tok_is_member_name(b.type) && b.type != Tk.TOKEN_WILDCARD) { break; }
                 p.advance();
                 Node* bn = p.mk_at(Nk.N_EXPR_IDENT, b);
                 bn.name_id = p.interner.intern(b.start, b.len);
@@ -589,6 +622,17 @@ fn Node* Parser.parse_irdl_decl(Parser* p)
             }
             p.expect(Tk.TOKEN_RBRACK, 1261, "expected ']' after IRDL operand list");
             p.add(rule, binds);
+            // `Dialect.op [a, b], b < 0 ↦ action`: a GUARD. Parsed so the rule
+            // is diagnosed as unsupported (E3222) instead of derailing the block;
+            // the guard becomes a third child, before the action.
+            if (p.accept(Tk.TOKEN_COMMA))
+            {
+                bool sv_g = p.in_fn_sig;
+                p.in_fn_sig = true;
+                Node* g = p.parse_expr();
+                p.in_fn_sig = sv_g;
+                if (g != null) { p.add(rule, g); }
+            }
         }
         if (p.accept(Tk.TOKEN_MAPSTO) || p.accept(Tk.TOKEN_ARROW)
          || p.accept(Tk.TOKEN_ARROW_ASCII))

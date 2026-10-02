@@ -102,13 +102,12 @@
 69_tensor_elemwise_mismatch.pie	missing type-warn at 4:11; 2 unexpected compile errors
 70_if_assign_hint.pie	missing type-warn at 4:12; 2 unexpected compile errors
 71_irdl_dialect_clean.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
-72_irdl_unknown_opcode.pie	missing irdl-err at 7:3; 2 unexpected compile errors
+72_irdl_unknown_opcode.pie	2 unexpected compile errors (unknown type name Str in the fixture); the irdl unknown-opcode diagnostic itself is now produced at 7:3
 74_handler_resume.pie	expected CLEAN, got 1 errors/warnings
 75_with_binding.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
-76_irdl_multirule.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 78_standalone_graph.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
-79_irdl_guarded.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
-80_irdl_variadic.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
+79_irdl_guarded.pie	expected CLEAN, got 1 errors/warnings; irdl guards are diagnosed as unsupported (E3422), not ignored
+80_irdl_variadic.pie	expected CLEAN, got 2 errors/warnings; variadic irdl operands are diagnosed as unsupported (E3422), and the use then has no lowering (E3412)
 81_clause_guard_typed.pie	missing type-warn at 3:10
 82_xmod_arg_check.pie	missing type-warn at 8:20; 2 unexpected compile errors
 83_xmod_field_check.pie	missing type-warn at 9:12
