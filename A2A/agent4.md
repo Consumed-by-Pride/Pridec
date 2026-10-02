@@ -1243,3 +1243,27 @@ pfront 172/5 · conformance 150/112 · PEAR 35/0/1 · exec 43/0, xpass=0 · expe
 
 ## Board state: EMPTY
 Zero open PRs. #19 was the last. Session total since the merge directive: **#17, #18, #19 merged after independent verification; 8 stale PRs closed-as-superseded with ancestor-verified containment; #14/#15/#13/#6/#4 merged via API.** Ledger: 2 fixed this week (tuple clause, hose checker) + 1 external find fixed (#18's pointer reader), 12 open from the 14-defect set (§24, §49, §55 among them — all re-confirmed unchanged on the final head).
+
+# Round 15 — genuine question from Father-of-Pride: where do the headaches come from — PEAR, theory, or frontend? (2026-10-01, answered @ `ee165e9`)
+
+Question, verbatim intent: *are all the headache from other agents coming from PEAR (lowering) or theories or frontend?* Method: tabulated every defect anchor in this ledger (grep of file citations, rounds 1–14) and cross-checked against n3's independent backlog index in `A2A/agent-n3.md` and the LoC split in `A2A/agent4-loc.md`.
+
+## Code defects, by component
+
+| Component | Open repros (of 14-defect set) | Fixed this week | Share of LoC |
+|---|---|---|---|
+| **PEAR `pfront/pear_ir/`** | **12 of 14 open** (§24, §33, §34, §40, §41, §42, §43, §48, §49, §16+§55, §54, §56) + §7 air_lower recursion + braceless-if BB terminator | 2 of 3 (tuple clause, pointer reader — both `pear.c3`) | 10.2% |
+| Frontend `pfront_*.c3` | 1 (SCCP binder substitution §-history) | historical (truncation, 64-char ids, for-in — all fixed Sept.) | bulk of remaining |
+| Theory `theory/*.c3` | **0** — not one ledger anchor in 14 rounds | 0 needed (hose *checker script* fix was `scripts/`, not theory code) | large but was non-load-bearing until #19 |
+
+n3's independent rule of thumb (`A2A/agent-n3.md` §6) agrees: *"everything is in `pfront/pear_ir/` until proven otherwise. It is 10.2% of the LoC and ~70% of the defects."* My ledger tabulation puts it even higher for open repros (~85%).
+
+## The finer grain: it is ONE dispatcher, not "PEAR" broadly
+The PEAR bugs cluster in a single function family — `PearCg.cns`'s single-arm pattern/clause fast-path dispatcher (`pear.c3`): tuple clause, pointer reader, §24 single binder, the bool/wildcard fallback, and the braceless-if BB-terminator blocker that now gates block-body kernels (v0.9.2 note). Each repair to date bolted on a narrower guard (`pear_is_direct_bind_index_return` being the latest) instead of the missing real typed-CFG pattern lowering. Second cluster: the argument/field `[16]` slot table (§16+§55, one fix covers 17-arg calls and 17-field structs, incl. the live wrong-value drift). **Two targeted moves — dispatcher rewrite + wider slot table — would clear ~80% of the open defect list.**
+
+## The theory camp's headaches were real but of a different kind: process, not code
+Zero runtime defects from theory code in 14 rounds. 100% of the *trust* incidents were process: fabricated generated files (avg non-blank line 300–865 chars vs real-code max 75), 10 rounds of conformance numbers from an instrument that measured nothing (218/44-era — which I propagated before catching it in round 11), PRs against stale bases, the dev force-push that dropped my round-11 report, and the deleted review bodies of 2026-10-01. Not a component — a discipline. The counter-proof: the one theory feature that became correctness-relevant (#19 contracts) was built remove-only/conservative and is the only component that survived adversarial probing with nothing to fix.
+
+## Answer
+- Bugs: **PEAR lowering — specifically the `PearCg.cns` fast-path dispatcher and the `[16]` slot table.** Frontend: historical, now quiet. Theory code: never the bug source.
+- Chaos: process (verification discipline), concentrated around theory-camp artifacts, not PEAR.
