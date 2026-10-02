@@ -1,0 +1,19 @@
+// EXPECT: check
+air 2.0 Main "min.pie";
+
+extern declare write(_ : i32, _ : ptr(u8), _ : i64) : i64;
+
+def add1(x : i64) : i64 =
+  mu~ %ret_2.
+    match x {
+      bind x_1 ->
+        <(add x_1 1 : i64) | %ret_2>
+    };
+
+def main() : i64 =
+  mu~ %ret_2.
+    match unit {
+      tuple() ->
+        <add1 | call · 41 : i64 · %ret_2>;
+    };
+

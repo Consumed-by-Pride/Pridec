@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================================
-# tests/exec/run.sh — execution suite for the CURRENT pipeline (pfrontc → PEAR).
+# tests/exec/run.sh — execution suite for the CURRENT pipeline (pfrontc → .air → legacy PEAR 1).
 #
 # The older tests/run_exec.sh drives the legacy `./pride` compiler through
 # llvm-as/opt/llc/ld.lld and cannot run at all without those tools. This suite
 # covers the pipeline that actually ships:
 #
-#     .pie ──pfrontc──► AIR ──PEAR──► native ELF ──► run it ──► check result
+#     .pie ──pfrontc──► .air ──pear1c──► native ELF ──► run it ──► check result
 #
 # Every case is a .pie file carrying its own expectation:
 #
@@ -28,32 +28,30 @@
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 
-BIN=./pfrontc
+BIN=scripts/pie-exe.sh      # the chain: pfrontc -> FILE.air -> legacy pear1c (same CLI as the old pfrontc --emit-exe)
+FRONT=./pfrontc
+BACK=${BACKEND:-legacy/pear1/pear1c}   # any backend with the CLI contract in docs/pear2/CONTRACT.md
 PEAR_OPT=${PEAR_OPT:--O2}
 TIMEOUT=${TIMEOUT:-5}
 VERBOSE=0
 [ "${1:-}" = "-v" ] && VERBOSE=1
 
-[ -x "$BIN" ] || { echo "build ./pfrontc first (make)"; exit 2; }
+[ -x "$FRONT" ] || { echo "build ./pfrontc first (make)"; exit 2; }
+[ -x "$BACK" ]  || { echo "build the legacy backend first (make legacy-pear)"; exit 2; }
 
-# Preflight: pfrontc links against a versioned libLLVM. If that library is not
-# on the loader path every single case reports "no binary", which looks exactly
-# like a compiler bug. Fail loudly and say what to do instead.
-if ! "$BIN" /dev/null --quiet >/dev/null 2>&1; then
-    lerr=$("$BIN" /dev/null --quiet 2>&1 | head -1)
-    case "$lerr" in
-        *"cannot open shared object"*|*"error while loading"*)
-            echo "FATAL: $lerr"
-            echo "pfrontc is linked against a libLLVM that is not on the loader path."
-            echo "Build per A2A/todo.md, e.g.:"
-            echo "  c3c compile --stdlib ~/c3lib pfront/*.c3 pfront/pear_ir/*.c3 pfront/theory/*.c3 \\"
-            echo "    pfront/theory/*/*.c3 -L ~/.cache/llvm23 -l LLVM-23 -o pfrontc"
-            echo "  export LD_LIBRARY_PATH=\$HOME/.cache/llvm23:\$LD_LIBRARY_PATH"
-            exit 2 ;;
-    esac
-fi
+# Preflight: pear1c links against a versioned libLLVM. If that library is not on
+# the loader path every single case reports "no binary", which looks exactly like
+# a compiler bug. Fail loudly and say what to do instead.
+lerr=$("$BACK" 2>&1 | head -1)
+case "$lerr" in
+    *"cannot open shared object"*|*"error while loading"*)
+        echo "FATAL: $lerr"
+        echo "pear1c is linked against a libLLVM that is not on the loader path:"
+        echo "  export LD_LIBRARY_PATH=\$HOME/.cache/llvm23:\$LD_LIBRARY_PATH"
+        exit 2 ;;
+esac
 
-XFAIL=tests/exec/XFAIL.tsv
+XFAIL=${XFAIL_FILE:-tests/exec/XFAIL.tsv}   # a different backend has a different set of known failures
 pass=0; fail=0; xfail=0; xpass=0
 declare -a fail_list=() xpass_list=()
 

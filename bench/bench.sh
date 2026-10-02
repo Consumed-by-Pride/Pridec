@@ -2,7 +2,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-PRIDEC="./pfrontc"
+PRIDEC="scripts/pie-exe.sh"   # chain: pfrontc -> .air -> legacy pear1c
 GCC="gcc"
 RUNS=5
 # pfrontc links against libLLVM-23, which lives in ~/.cache/llvm23 in the agent

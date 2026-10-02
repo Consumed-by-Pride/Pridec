@@ -8,7 +8,7 @@
 set -u
 cd "$(dirname "$0")/../.."
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
-BIN=./pfrontc
+BIN=scripts/pie-exe.sh   # chain: pfrontc -> .air -> legacy pear1c
 OPT="${1:--O2}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

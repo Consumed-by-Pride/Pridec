@@ -8,10 +8,11 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 BIN = ROOT / 'pfrontc'
+CHAIN = ROOT / 'scripts' / 'pie-exe.sh'   # pfrontc -> .air -> legacy pear1c, for tests that run native code
 ENV = {**os.environ, 'LD_LIBRARY_PATH': str(Path.home()/'.cache/llvm23') + ':/usr/lib/x86_64-linux-gnu'}
 
 
-@unittest.skipUnless(BIN.is_file(), 'build pfrontc first')
+@unittest.skipUnless(BIN.is_file() and CHAIN.is_file() and (ROOT / 'legacy' / 'pear1' / 'pear1c').is_file(), 'build pfrontc and the legacy backend first (make; make legacy-pear)')
 class TheoryAirProducerTests(unittest.TestCase):
     def compile_air(self, text, options=()):
         with tempfile.TemporaryDirectory(prefix='n3-theory-air-') as folder:
@@ -23,10 +24,21 @@ class TheoryAirProducerTests(unittest.TestCase):
             return source.with_suffix('.air').read_text(), run.stdout+run.stderr
 
     def facts(self, air, function):
-        lines=air.splitlines()
-        for index,line in enumerate(lines):
-            if re.match(r'(?:pub )?(?:fn|def) '+re.escape(function)+r'(?:\W|$)',line):
-                return lines[index-1] if index and lines[index-1].startswith('; air facts:') else ''
+        """Qualifier facts of one def, from the canonical AIR 2.0 text, in the old
+        `checked memory(read) captures(none):p` vocabulary the assertions use.
+        The text form is `facts air_checked readonly def NAME(nocapture p : T, ...)`;
+        no `facts` prefix means the screen found nothing it could vouch for."""
+        for line in air.splitlines():
+            m = re.match(r'(?:facts (\w+) )?(readonly )?(?:def|defco) '+re.escape(function)+r'\b[^(]*\((.*)', line)
+            if not m:
+                continue
+            if not m.group(1):
+                return ''
+            out = ['checked' if m.group(1) == 'air_checked' else 'ast_final']
+            if m.group(2):
+                out.append('memory(read)')
+            out += ['captures(none):' + n for n in re.findall(r'nocapture (\w+)', m.group(3))]
+            return ' '.join(out)
         self.fail('function not emitted: '+function)
 
     def test_external_storage_does_not_claim_no_retention(self):
@@ -94,7 +106,7 @@ fn transformed(x: i64) -> i64 { return (x * 3i64) |> call_foreign; }
             source=Path(folder)/'dispatch.pie';source.write_text(text)
             for theory in (True,False):
                 options=[] if theory else ['--no-theory']
-                run=subprocess.run([str(BIN),str(source),'--emit-exe','-O2','--quiet',*options],
+                run=subprocess.run([str(CHAIN),str(source),'--emit-exe','-O2','--quiet',*options],
                                    cwd=ROOT,env=ENV,capture_output=True,text=True,timeout=20)
                 self.assertEqual(0,run.returncode,run.stdout+run.stderr)
                 value=subprocess.run([str(source.with_suffix(''))],env=ENV,capture_output=True,timeout=2)
@@ -105,13 +117,13 @@ fn transformed(x: i64) -> i64 { return (x * 3i64) |> call_foreign; }
         with tempfile.TemporaryDirectory(prefix='n3-char-') as folder:
             source=Path(folder)/'character.pie';source.write_text(text)
             for theory in (True,False):
-                run=subprocess.run([str(BIN),str(source),'--emit-air','--emit-exe','-O2','--quiet',
+                run=subprocess.run([str(CHAIN),str(source),'--emit-air','--emit-exe','-O2','--quiet',
                                     * ([] if theory else ['--no-theory'])],cwd=ROOT,env=ENV,
                                    capture_output=True,text=True,timeout=20)
                 self.assertIn(run.returncode,(0,1),run.stdout+run.stderr)
                 native=subprocess.run([str(source.with_suffix(''))],env=ENV,capture_output=True,timeout=2)
                 self.assertEqual(955%256,native.returncode)
-                if not theory:self.assertIn("'λ'",source.with_suffix('.air').read_text())
+                if not theory:self.assertIn('char(955)',source.with_suffix('.air').read_text())
 
 
     def test_character_escapes_and_ambiguous_literals(self):
@@ -120,14 +132,14 @@ fn transformed(x: i64) -> i64 { return (x * 3i64) |> call_foreign; }
             for literal,value in ((r"'\n'",10),(r"'\x41'",65),("'λ'",955),("'😀'",128512)):
                 with self.subTest(literal=literal):
                     source.write_text("fn main(_) -> i64 { return "+literal+"; }\n")
-                    run=subprocess.run([str(BIN),str(source),'--emit-exe','--no-theory','--quiet'],
+                    run=subprocess.run([str(CHAIN),str(source),'--emit-exe','--no-theory','--quiet'],
                         cwd=ROOT,env=ENV,capture_output=True,text=True,timeout=20)
                     self.assertIn(run.returncode,(0,1),run.stdout+run.stderr)
                     native=subprocess.run([str(source.with_suffix(''))],env=ENV,capture_output=True,timeout=2)
                     self.assertEqual(value%256,native.returncode)
             source.write_text("fn main(_) -> i64 { return 'λx'; }\n")
             source.with_suffix('').unlink(missing_ok=True)
-            run=subprocess.run([str(BIN),str(source),'--emit-exe','--plain'],cwd=ROOT,env=ENV,
+            run=subprocess.run([str(CHAIN),str(source),'--emit-exe','--plain'],cwd=ROOT,env=ENV,
                                capture_output=True,text=True,timeout=20)
             self.assertEqual(2,run.returncode)
             self.assertIn('exactly one Unicode scalar',run.stdout)

@@ -4,20 +4,20 @@
 # For each tests/exec/pear/p*.pie:
 #   - reads -- EXIT: N  as the expected exit code
 #   - reads -- BLOCKER (XFAIL): ... markers; XFAIL cases that pass are UNXPASS
-#   - compiles with pfrontc --emit-exe at PEAR_OPT (default -O2), runs, checks exit code
+#   - compiles with the chain (pfrontc -> .air -> pear1c) --emit-exe at PEAR_OPT (default -O2), runs, checks exit code
 #
 # Usage (from repo root): bash tests/exec/pear/run.sh [pfrontc path]
 set -u
 cd "$(dirname "$0")/../../.."
 ROOT="$PWD"
-PF="${1:-./pfrontc}"
+PF="${1:-scripts/pie-exe.sh}"   # chain: pfrontc -> .air -> legacy pear1c
 PEAR_OPT=${PEAR_OPT:--O2}
 TIMEOUT=${TIMEOUT:-5}
 case "$PEAR_OPT" in -O0|-O1|-O2|-O3) ;; *) echo "invalid PEAR_OPT: $PEAR_OPT"; exit 2 ;; esac
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 
 if [ ! -x "$PF" ]; then
-    echo "pfrontc not found at $PF (build with 'make' first)"
+    echo "chain driver not found at $PF"
     exit 1
 fi
 

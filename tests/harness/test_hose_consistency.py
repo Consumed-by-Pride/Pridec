@@ -27,7 +27,7 @@ class HoseInventoryTests(unittest.TestCase):
             with patch.object(checker, "REPO_ROOT", Path(directory)), \
                  patch.object(checker, "build_runtime_exports", return_value=(set(checker.HOSE_SYMBOLS), [])):
                 errors = checker.check_runtime_symbols()
-        self.assertTrue(any("Cannot read pfront/pear_ir/pear.c3" in error for error in errors))
+        self.assertTrue(any("Cannot read legacy/pear1/pear.c3" in error for error in errors))
         self.assertTrue(any("Cannot read stdlib/pride/effects.pie" in error for error in errors))
 
     def test_comment_only_externs_are_not_bindings(self):

@@ -8,7 +8,6 @@
 
 module pear;
 import air_ir;
-import air_types;
 
 // ── LLVM-C API (subset we need) ───────────────────────────────────────
 

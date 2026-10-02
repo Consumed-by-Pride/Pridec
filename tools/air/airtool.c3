@@ -1,0 +1,62 @@
+// ============================================================================
+// airtool — read, check and re-print AIR 2.0 text. No LLVM, no front end.
+//
+//   airtool check FILE.air          parse; exit 0 if well-formed, 1 otherwise
+//   airtool verify FILE.air         parse + validity rules V1..V4 (docs/specs/AIR.md)
+//   airtool fmt   FILE.air [-o OUT] parse and re-print canonically
+//
+// The canonical printer is the same one pfrontc uses, so `fmt` of a pfrontc
+// output must be byte-identical (the round-trip test relies on exactly that).
+// ============================================================================
+module airtool;
+import air_ir;
+import air_read;
+import air_write;
+import air_facts;
+import air_verify;
+
+extern fn int printf(char* fmt, ...);
+
+fn bool eq(char* a, char* b)
+{
+    usz i = 0;
+    while (a[i] != 0 && b[i] != 0) { if (a[i] != b[i]) { return false; } i++; }
+    return a[i] == b[i];
+}
+
+fn int main(String[] args)
+{
+    if (args.len < 3)
+    {
+        printf("usage: airtool check|fmt FILE.air [-o OUT]\n");
+        return 2;
+    }
+    char* cmd = (char*)args[1].ptr;
+    char* path = (char*)args[2].ptr;
+    char* out = null;
+    if (args.len >= 5 && eq((char*)args[3].ptr, "-o")) { out = (char*)args[4].ptr; }
+    AirArena arena;
+    if (!arena.init()) { return 3; }
+    AirModule mod;
+    if (!air_read::read_file(path, &arena, &mod, false)) { arena.destroy(); return 1; }
+    if (eq(cmd, "check")) { arena.destroy(); return 0; }
+    if (eq(cmd, "verify"))
+    {
+        int[8] cnt;
+        int n = air_verify::verify_module(&mod, &cnt[0], false, 1000000);
+        printf("verify: %d violation(s)  V1=%d V2=%d V3=%d V4=%d  | conventions: J1(implicit %%kN joins)=%d N1(module-path roots)=%d J2(%%resume)=%d\n", n, cnt[0], cnt[1], cnt[2], cnt[3], cnt[4], cnt[5], cnt[6]);
+        arena.destroy();
+        return n == 0 ? 0 : 1;
+    }
+    if (eq(cmd, "fmt"))
+    {
+        // facts are claims: re-screen before printing so `fmt` is a fixed point
+        air_facts::validate_module(&mod);
+        int errs = air_write::write_module(&mod, out);
+        arena.destroy();
+        return errs == 0 ? 0 : 1;
+    }
+    printf("unknown command\n");
+    arena.destroy();
+    return 2;
+}

@@ -7,6 +7,7 @@
 
 # ── Compiler binaries ───────────────────────────────────────────────────
 /pfrontc
+/legacy/pear1/pear1c
 /pride
 /pride_new
 /pear_a1_test
@@ -20,6 +21,7 @@
 *.sexp
 !/docs/**/*.air
 !/legacy/**/*.air
+!/tests/air/**/*.air
 # ── Editor / tool detritus ──────────────────────────────────────────────
 .understand-anything/
 .vscode/
