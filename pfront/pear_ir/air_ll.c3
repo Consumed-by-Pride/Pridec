@@ -385,7 +385,7 @@ fn Val Ll.prd(Ll* l, AirPrd* p)
             AirTyp* et = a.ty.args[0];
             if (p.ty != null && !ty_eq(p.ty, et)) { l.err("load annotation differs from the pointee type", null); }
             char* t = l.fresh();
-            Sb* o = l.out(); o.put("  "); o.put(t); o.put(" = load "); l.ty(o, et); o.put(", ptr "); o.put(a.op); o.putc('\n');
+            Sb* o = l.out(); o.put("  "); o.put(t); o.put(" = load "); if (p.bval) { o.put("volatile "); } l.ty(o, et); o.put(", ptr "); o.put(a.op); o.putc('\n');
             v.op = t; v.ty = et; return v;
         }
         case APRD_GEP: return l.gep(p);
@@ -765,7 +765,13 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
                 if (p.ty == null || p.ty.tag != ATYP_PTR) { l.err("store to a non-pointer", null); return; }
                 if (v.ty != null && !ty_eq(p.ty.args[0], v.ty)) { l.err("stored value type differs from the pointee type", null); }
                 if (ty_is_unit(v.ty)) { return; }
-                Sb* o = l.out(); o.put("  store "); l.ty(o, v.ty); o.putc(' '); o.put(v.op); o.put(", ptr "); o.put(p.op); o.putc('\n');
+                Sb* o = l.out(); o.put("  store "); if (c.vol) { o.put("volatile "); } l.ty(o, v.ty); o.putc(' '); o.put(v.op); o.put(", ptr "); o.put(p.op); o.putc('\n');
+                return;
+            }
+            case ACMD_FENCE:
+            {
+                if (c.atomic_order < 1 || c.atomic_order > 4) { l.err("a fence needs acquire, release, acq_rel or seq_cst ordering", null); return; }
+                l.out().put("  fence "); l.out().put(llvm_order(c.atomic_order, 0)); l.out().putc('\n');
                 return;
             }
             case ACMD_RET: l.emit_ret(c.prd); return;
@@ -857,10 +863,86 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
                 if (c.cns == null || c.cns.tag != ACNS_COMU) { l.err("syscall result must be bound with `comu`", null); return; }
                 l.bind(c.cns.bind, r, l.m.t_i64); c = c.cns.body; continue;
             }
+            case ACMD_ATOMIC:
+            {
+                Val p = l.prd(c.prd);
+                if (p.ty == null || p.ty.tag != ATYP_PTR || p.ty.args[0] == null || !ty_is_int(p.ty.args[0]) || ty_bits(p.ty.args[0]) > 64) { l.err("atomic operand 0 must be a pointer to an integer of at most 64 bits", null); return; }
+                AirTyp* et = p.ty.args[0]; long bytes = (long)(ty_bits(et) / 8); if (bytes < 1) { bytes = 1; }
+                Val[2] a; usz na = 0;
+                for (usz i = 0; i < c.prd_count && na < 2; i++) { a[na] = l.prd(c.prds[i]); na++; }
+                int op = c.atomic_op; int ord = c.atomic_order;
+                usz want = op == 0 ? 0 : (op == 13 ? 2 : 1);
+                if (na != want) { l.err("atomic operation with the wrong number of operands", air_text::atomic_op_name(op)); return; }
+                for (usz i = 0; i < na; i++) { if (a[i].ty == null || !ty_eq(a[i].ty, et)) { l.err("atomic operand type differs from the pointee type", null); return; } }
+                if (op == 0 && (ord == 2 || ord == 3)) { l.err("an atomic load cannot be release or acq_rel", null); return; }
+                if (op == 1 && (ord == 1 || ord == 3)) { l.err("an atomic store cannot be acquire or acq_rel", null); return; }
+                Sb* o = l.out(); char* r = null; AirTyp* rt = et;
+                if (op == 0)
+                {
+                    r = l.fresh();
+                    o.put("  "); o.put(r); o.put(" = load atomic "); l.ty(o, et); o.put(", ptr "); o.put(p.op); o.putc(' '); o.put(llvm_order(ord, 0));
+                    o.put(", align "); o.int_(bytes); o.putc('\n');
+                }
+                else if (op == 1)
+                {
+                    o.put("  store atomic "); l.ty(o, et); o.putc(' '); o.put(a[0].op); o.put(", ptr "); o.put(p.op); o.putc(' '); o.put(llvm_order(ord, 0));
+                    o.put(", align "); o.int_(bytes); o.putc('\n');
+                    r = "zeroinitializer"; rt = l.m.t_unit;
+                }
+                else if (op == 13)
+                {
+                    char* t = l.fresh(); r = l.fresh();
+                    o.put("  "); o.put(t); o.put(" = cmpxchg ptr "); o.put(p.op); o.put(", "); l.ty(o, et); o.putc(' '); o.put(a[0].op); o.put(", "); l.ty(o, et); o.putc(' '); o.put(a[1].op);
+                    o.putc(' '); o.put(llvm_order(ord, 0)); o.putc(' '); o.put(llvm_order(ord, 1)); o.putc('\n');
+                    o.put("  "); o.put(r); o.put(" = extractvalue { "); l.ty(o, et); o.put(", i1 } "); o.put(t); o.put(", 0\n");
+                }
+                else
+                {
+                    static char*[13] rmw = { "", "", "xchg", "add", "sub", "and", "or", "xor", "nand", "max", "min", "umax", "umin" };
+                    r = l.fresh();
+                    o.put("  "); o.put(r); o.put(" = atomicrmw "); o.put(rmw[op]); o.put(" ptr "); o.put(p.op); o.put(", "); l.ty(o, et); o.putc(' '); o.put(a[0].op);
+                    o.putc(' '); o.put(llvm_order(ord, 0)); o.putc('\n');
+                }
+                if (c.cns == null || c.cns.tag != ACNS_COMU) { l.err("atomic result must be bound with `comu`", null); return; }
+                l.bind(c.cns.bind, r, rt); c = c.cns.body; continue;
+            }
+            case ACMD_ASM:
+            {
+                if (c.asm_cons == null || c.asm_ret == null) { l.err("asm in the low profile needs LLVM constraints and a result type", null); return; }
+                Val[16] a; usz na = 0;
+                for (usz i = 0; i < c.prd_count && na < 16; i++) { a[na] = l.prd(c.prds[i]); na++; }
+                bool isvoid = ty_is_unit(c.asm_ret);
+                char* r = isvoid ? "zeroinitializer" : l.fresh();
+                Sb* o = l.out(); o.put("  ");
+                if (!isvoid) { o.put(r); o.put(" = "); }
+                o.put("call "); l.ret_ty(o, c.asm_ret); o.put(" asm sideeffect ");
+                if (c.asm_dialect == 1) { o.put("inteldialect "); }
+                l.llstr(o, c.asm_text); o.put(", "); l.llstr(o, c.asm_cons); o.putc('(');
+                for (usz i = 0; i < na; i++) { if (i > 0) { o.put(", "); } l.ty(o, a[i].ty); o.putc(' '); o.put(a[i].op); }
+                o.put(")\n");
+                if (c.cns == null || c.cns.tag != ACNS_COMU) { l.err("asm result must be bound with `comu`", null); return; }
+                l.bind(c.cns.bind, r, c.asm_ret); c = c.cns.body; continue;
+            }
             default:
                 l.err("command is not part of the low profile", cmd_tag_name(c.tag)); return;
         }
     }
+}
+// LLVM memory ordering keyword; `failure` = 1 gives the cmpxchg failure ordering (never release/acq_rel)
+fn char* llvm_order(int o, int failure)
+{
+    if (failure == 1) { switch (o) { case 0: return "monotonic"; case 1: return "acquire"; case 2: return "monotonic"; case 3: return "acquire"; default: return "seq_cst"; } }
+    switch (o) { case 0: return "monotonic"; case 1: return "acquire"; case 2: return "release"; case 3: return "acq_rel"; default: return "seq_cst"; }
+}
+fn void Ll.llstr(Ll* l, Sb* o, char* t)
+{
+    o.putc('"');
+    for (usz i = 0; t != null && t[i] != 0; i++)
+    {
+        int ch = (int)(t[i]) & 255;
+        if (ch >= 32 && ch < 127 && ch != '"' && ch != '\\') { o.putc((char)ch); } else { o.putc('\\'); o.hex((ulong)ch, 2); }
+    }
+    o.putc('"');
 }
 
 fn void Ll.emit_switch(Ll* l, AirCmd* c)

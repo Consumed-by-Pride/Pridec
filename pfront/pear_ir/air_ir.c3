@@ -162,6 +162,7 @@ struct AirCmd {
     char*[16] jump_args; usz jump_arg_count;
     char* ub_msg; int asm_dialect; char* asm_text; AirTyp* poison_ty;
     int atomic_op, atomic_order;
+    bool vol; char* asm_cons; AirTyp* asm_ret;   // AIR 3.0: volatile store; asm constraints (LLVM syntax) and result type
 }
 struct AirDecl {
     uint id; AirDeclTag tag; char* name;

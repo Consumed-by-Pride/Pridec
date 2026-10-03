@@ -46,10 +46,11 @@ const usz MAXVAR = 8192;
 const usz MAXNM  = 32768;
 const usz NOBLK  = 0xFFFFFFFF;
 
-enum InsK : int { I_LET, I_STORE, I_CALL, I_FIELD, I_PROJ, I_SYS }
+enum InsK : int { I_LET, I_STORE, I_CALL, I_FIELD, I_PROJ, I_SYS, I_ATOMIC, I_FENCE, I_ASM }
 struct Ins
 {
     InsK k; char* name; AirPrd* a; AirPrd* b; AirPrd*[16] args; usz nargs; char* fld; long idx;
+    int aop; int aord; bool vol; AirTyp* rty; char* text; char* cons; int dialect;   // atomic / fence / asm / volatile store
 }
 enum TermK : int { T_NONE, T_RET, T_JUMP, T_COND, T_TRAP, T_UNREACH }
 struct Blk
@@ -623,6 +624,16 @@ fn Vx Low.load(Low* lw, AirPrd* ptr, AirTyp* t)
     AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_LOAD; p.add_sub(ptr);
     return lw.let_(p, t, "_l");
 }
+fn Vx Low.load_v(Low* lw, AirPrd* ptr, AirTyp* t)   // `volatile` read: the access can be neither removed nor merged
+{
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_LOAD; p.add_sub(ptr); p.bval = true;
+    return lw.let_(p, t, "_l");
+}
+fn void Low.store_v(Low* lw, AirPrd* ptr, Vx v)
+{
+    Ins* i = lw.push(I_STORE); if (i == null) { return; }
+    i.a = ptr; i.b = v.p; i.vol = true;
+}
 fn void Low.store(Low* lw, AirPrd* ptr, Vx v)
 {
     Ins* i = lw.push(I_STORE); if (i == null) { return; }
@@ -766,6 +777,20 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
             }
             long hv = -1; Enm* he = n.child_count > 0 ? lw.enum_ctor_base(n.children[0], lw.dname(n), &hv) : null;
             return he == null ? null : he.ty;
+        }
+        case Nk.N_EXPR_VOLATILE: return n.child_count > 0 ? lw.hint(n.children[0]) : null;
+        case Nk.N_EXPR_FENCE: return lw.m.t_unit;
+        case Nk.N_EXPR_ATOMIC:
+        {
+            if (n.p.op == 1) { return lw.m.t_unit; }
+            AirTyp* ap = n.child_count > 0 ? lw.hint(n.children[0]) : null;
+            return ap == null ? null : lw.pointee(ap);
+        }
+        case Nk.N_EXPR_ASM:
+        {
+            for (usz i = 0; i + 1 < n.child_count; i++)
+            { Node* cn = n.children[i]; if (cn != null && cn.kind == Nk.N_EXPR_STRING && cn.p.aux == 1 && n.children[i + 1] != null) { AirTyp* ot = lw.hint(n.children[i + 1]); if (ot != null) { return ot; } } }
+            return lw.m.t_unit;
         }
         case Nk.N_EXPR_QUOTE:
         {
@@ -1658,6 +1683,7 @@ fn bool Low.place(Low* lw, Node* n, Pl* out)
 {
     switch (n.kind)
     {
+        case Nk.N_EXPR_VOLATILE: return n.child_count > 0 && lw.place(n.children[0], out);
         case Nk.N_EXPR_IDENT:
         {
             Node* r = n.resolved;
@@ -2213,6 +2239,21 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_EXPR_POISON:   // an arbitrary value (a use of it is the program's undefined behaviour, which the optimiser may exploit)
             return lw.zero_of(want != null ? want : lw.m.t_i64);
         case Nk.N_EXPR_RESUME: return lw.resume_do(n.child_count > 0 ? n.children[0] : null, n);
+        case Nk.N_EXPR_VOLATILE:
+        {
+            if (n.child_count == 0) { return lw.unit(); }
+            Pl vp;
+            if (lw.place(n.children[0], &vp)) { return lw.load_v(vp.ptr, vp.t); }
+            return lw.expr(n.children[0], want);
+        }
+        case Nk.N_EXPR_ATOMIC: return lw.atomic_(n);
+        case Nk.N_EXPR_FENCE:
+        {
+            if (n.p.ival < 1 || n.p.ival > 4) { lw.err(n, "a fence needs at least acquire ordering", null); return lw.unit(); }
+            Ins* fi = lw.push(I_FENCE); if (fi != null) { fi.aord = (int)n.p.ival; }
+            return lw.unit();
+        }
+        case Nk.N_EXPR_ASM: return lw.asm_(n);
         case Nk.N_EXPR_METHOD:
         {
             if (n.child_count > 0 && n.children[0] != null && n.children[0].resolved != null && n.children[0].resolved.kind == Nk.N_DECL_EFFECT)
@@ -2635,6 +2676,7 @@ fn void Low.assign(Low* lw, Node* n)
 {
     if (n.child_count < 2) { return; }
     Pl p;
+    bool vol = n.children[0].kind == Nk.N_EXPR_VOLATILE;
     if (!lw.place(n.children[0], &p))
     {
         if (lw.fn_errors == 0) { lw.unsup(n.children[0], "assignment target that is not a mutable place"); }
@@ -2643,20 +2685,20 @@ fn void Low.assign(Low* lw, Node* n)
     if (n.kind == Nk.N_STMT_COMPOUND_ASSIGN)
     {
         AirBinop b = air_lower::compound_binop((long)n.p.op);
-        Vx cur = lw.load(p.ptr, p.t);
+        Vx cur = vol ? lw.load_v(p.ptr, p.t) : lw.load(p.ptr, p.t);
         bool shift = b == ABIN_SHL || b == ABIN_SHR;
         Vx r = lw.expr(n.children[1], p.t);
         if (shift) { r = lw.coerce(r, p.t); }
         else { r = lw.coerce_arg(n.children[1], r, p.t); }
         if (!lw.live()) { return; }
         Vx res = lw.binop(b, cur, r);
-        lw.store(p.ptr, res);
+        if (vol) { lw.store_v(p.ptr, res); } else { lw.store(p.ptr, res); }
         return;
     }
     Vx v = lw.expr(n.children[1], p.t);
     v = lw.coerce_arg(n.children[1], v, p.t);
     if (!lw.live()) { return; }
-    lw.store(p.ptr, v);
+    if (vol) { lw.store_v(p.ptr, v); } else { lw.store(p.ptr, v); }
 }
 
 // a value flowing out of if/match arms: unit/bottom arms carry nothing
@@ -2760,6 +2802,108 @@ fn Vx Low.loop_(Low* lw, Node* n)
     return lw.unit();
 }
 
+// ── systems primitives ──
+// `atomic_add(p, v)` & co: p is a typed pointer to an integer of 8..64 bits; the result is the OLD value (the new value for
+// nothing), `atomic_load(p)` the value, `atomic_store(p, v)` unit, `atomic_cmpxchg(p, expected, new)` the old value.
+// A trailing "acquire"/"release"/"acq_rel"/"relaxed"/"seq_cst" string picks the memory order (default seq_cst).
+fn Vx Low.atomic_(Low* lw, Node* n)
+{
+    long op = (long)n.p.op; long ord = (long)n.p.ival;
+    usz want_ops = (op == 0) ? 1 : (op == 13 ? 3 : 2);
+    if (n.child_count != want_ops) { lw.err(n, "wrong number of operands for an atomic operation", null); return lw.unit(); }
+    Vx pv = lw.expr(n.children[0], null); if (!lw.live()) { return lw.unit(); }
+    AirTyp* el = pv.t != null && pv.t.tag == ATYP_PTR ? pv.t.args[0] : null;
+    if (el == null || !air_ll::ty_is_int(el) || air_ll::ty_bits(el) > 64) { lw.err(n, "an atomic operation needs a pointer to an integer of at most 64 bits", null); return lw.unit(); }
+    if (op == 0 && (ord == 2 || ord == 3)) { lw.err(n, "an atomic load cannot be release or acq_rel", null); return lw.unit(); }
+    if (op == 1 && (ord == 1 || ord == 3)) { lw.err(n, "an atomic store cannot be acquire or acq_rel", null); return lw.unit(); }
+    // (operands are evaluated after the pointer; literals take the element type)
+    Vx[2] ov; usz no = 0;
+    for (usz i = 1; i < n.child_count; i++)
+    {
+        Vx v = lw.expr(n.children[i], el); v = lw.coerce_arg(n.children[i], v, el);
+        if (!lw.live()) { return lw.unit(); }
+        ov[no] = v; no++;
+    }
+    Ins* ins = lw.push(I_ATOMIC); if (ins == null) { return lw.unit(); }
+    ins.nargs = 1 + no; ins.args[0] = pv.p;
+    for (usz i = 0; i < no; i++) { ins.args[i + 1] = ov[i].p; }
+    ins.aop = (int)op; ins.aord = (int)ord;
+    ins.name = lw.fresh("_at");
+    return lw.vref(ins.name, op == 1 ? lw.m.t_unit : el);
+}
+// GCC-style `asm { "template" : "=r"(out) : "r"(in) : "memory" }` becomes one LLVM inline-asm call. `%N` is the Nth operand
+// (outputs first), `%%` a percent. At most one output (its value is the value of the asm expression).
+fn Vx Low.asm_(Low* lw, Node* n)
+{
+    air_ll::Sb tmpl; tmpl.init(); air_ll::Sb cons; cons.init();
+    Pl outp; bool has_out = false; AirTyp* ot = null; bool inputs_seen = false;
+    Vx[16] iv; usz ni = 0; usz nt = 0;
+    char[320] clob; clob[0] = 0; usz cl = 0;
+    // pass 1: the template strings (no group) and the single output
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        Node* cn = n.children[i]; if (cn == null) { continue; }
+        if (cn.kind == Nk.N_EXPR_STRING && cn.p.aux == 0 && cn.p.sptr != null)
+        {
+            char* raw = lw.a.dup(cn.p.sptr, (usz)cn.p.slen); usz dl = air_lower::lit_decode(cn.p.sptr, (usz)cn.p.slen, raw);
+            if (nt > 0) { tmpl.putc('\n'); }
+            for (usz j = 0; j < dl; j++)
+            {
+                char ch = raw[j];
+                if (ch == '%' && j + 1 < dl && raw[j + 1] == '%') { tmpl.putc('%'); j++; }
+                else if (ch == '%' && j + 1 < dl && raw[j + 1] >= '0' && raw[j + 1] <= '9') { tmpl.putc('$'); }
+                else if (ch == '$') { tmpl.put("$$"); }
+                else { tmpl.putc(ch); }
+            }
+            nt++;
+        }
+    }
+    // pass 2: outputs (group 1), inputs (group 2), clobbers (group 3), in source order
+    for (int grp = 1; grp <= 3; grp++)
+    {
+        for (usz i = 0; i < n.child_count; i++)
+        {
+            Node* cn = n.children[i];
+            if (cn == null || cn.kind != Nk.N_EXPR_STRING || cn.p.aux != grp || cn.p.sptr == null) { continue; }
+            char* raw = lw.a.dup(cn.p.sptr, (usz)cn.p.slen); usz dl = air_lower::lit_decode(cn.p.sptr, (usz)cn.p.slen, raw);
+            raw[dl] = 0;
+            Node* operand = (i + 1 < n.child_count && n.children[i + 1] != null && !(n.children[i + 1].kind == Nk.N_EXPR_STRING && n.children[i + 1].p.aux != 0)) ? n.children[i + 1] : null;
+            if (grp == 3)
+            {
+                if (cons.n > 0) { cons.putc(','); }
+                cons.put("~{"); cons.put(raw); cons.putc('}');
+            }
+            else if (grp == 1)
+            {
+                if (has_out) { lw.unsup(n, "asm with more than one output"); return lw.unit(); }
+                if (operand == null || !lw.place(operand, &outp)) { lw.unsup(n, "asm output that is not a place"); return lw.unit(); }
+                if (raw[0] == '+') { lw.unsup(n, "asm in/out operand (`+r`): use a separate input"); return lw.unit(); }
+                has_out = true; ot = outp.t;
+                if (cons.n > 0) { cons.putc(','); }
+                cons.put(raw);
+            }
+            else
+            {
+                if (operand == null) { lw.err(n, "asm input without an operand", null); return lw.unit(); }
+                Vx v = lw.expr(operand, null); if (!lw.live()) { return lw.unit(); }
+                if (ni >= 16) { lw.unsup(n, "asm with more than 16 inputs"); return lw.unit(); }
+                iv[ni] = v; ni++; inputs_seen = true;
+                if (cons.n > 0) { cons.putc(','); }
+                cons.put(raw);
+            }
+        }
+    }
+    (void)inputs_seen; (void)cl; (void)clob;
+    Ins* ins = lw.push(I_ASM); if (ins == null) { return lw.unit(); }
+    ins.nargs = ni; for (usz i = 0; i < ni; i++) { ins.args[i] = iv[i].p; }
+    ins.text = lw.dup(tmpl.d == null ? (char*)"" : tmpl.d); ins.cons = lw.dup(cons.d == null ? (char*)"" : cons.d);
+    ins.rty = has_out ? ot : lw.m.t_unit;
+    ins.dialect = (n.p.aux & 2) != 0 ? 1 : 0;
+    ins.name = lw.fresh("_asm");
+    Vx r = lw.vref(ins.name, ins.rty);
+    if (has_out) { lw.store(outp.ptr, r); }
+    return has_out ? r : lw.unit();
+}
 // `x[lo..hi]` / `x[lo..=hi]` over an array (aliases it), a slice or `str`, or a pointer (unchecked)
 fn Vx Low.slicing(Low* lw, Node* n)
 {
@@ -4170,8 +4314,27 @@ fn AirCmd* Low.blk_cmd(Low* lw, Blk* b)
             case I_LET: c = air_ir::air_mk_let(lw.a, i.name, i.a, c); break;
             case I_STORE:
             {
-                AirCmd* s = air_ir::air_new_AirCmd(lw.a); s.tag = ACMD_STORE; s.add_prd(i.a); s.add_prd(i.b);
+                AirCmd* s = air_ir::air_new_AirCmd(lw.a); s.tag = ACMD_STORE; s.add_prd(i.a); s.add_prd(i.b); s.vol = i.vol;
                 c = air_ir::air_mk_seq(lw.a, s, c); break;
+            }
+            case I_ATOMIC:
+            {
+                AirCmd* s = air_ir::air_new_AirCmd(lw.a); s.tag = ACMD_ATOMIC; s.prd = i.args[0];
+                for (usz j = 1; j < i.nargs; j++) { s.add_prd(i.args[j]); }
+                s.atomic_op = i.aop; s.atomic_order = i.aord;
+                s.cns = air_ir::air_mk_comu_cns(lw.a, i.name, c); c = s; break;
+            }
+            case I_FENCE:
+            {
+                AirCmd* s = air_ir::air_new_AirCmd(lw.a); s.tag = ACMD_FENCE; s.atomic_order = i.aord;
+                c = air_ir::air_mk_seq(lw.a, s, c); break;
+            }
+            case I_ASM:
+            {
+                AirCmd* s = air_ir::air_new_AirCmd(lw.a); s.tag = ACMD_ASM;
+                for (usz j = 0; j < i.nargs; j++) { s.add_prd(i.args[j]); }
+                s.asm_text = i.text; s.asm_cons = i.cons; s.asm_ret = i.rty; s.asm_dialect = i.dialect;
+                s.cns = air_ir::air_mk_comu_cns(lw.a, i.name, c); c = s; break;
             }
             case I_CALL:
                 c = air_ir::air_mk_cut(lw.a, i.a, air_ir::air_mk_call(lw.a, &i.args[0], i.nargs, air_ir::air_mk_comu_cns(lw.a, i.name, c))); break;

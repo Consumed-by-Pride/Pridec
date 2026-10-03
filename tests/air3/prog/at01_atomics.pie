@@ -1,0 +1,21 @@
+-- EXIT: 196
+-- atomics, fences and volatile accesses lower to LLVM atomicrmw / cmpxchg / fence / volatile load+store
+fn main : () -> i64
+  | () ->
+      let cell : *i64 = alloc [i64; 1]
+      atomic_store(cell, 10)
+      let a = atomic_add(cell, 5)
+      let b = atomic_sub(cell, 3, "acq_rel")
+      let c = atomic_xchg(cell, 40)
+      let d = atomic_cmpxchg(cell, 40, 41)
+      let e = atomic_cmpxchg(cell, 99, 7, "acquire")
+      fence("release")
+      fence()
+      let f = atomic_load(cell, "acquire")
+      let g = atomic_or(cell, 2)
+      let h = atomic_max(cell, 50)
+      let vp : *i64 = alloc [i64; 1]
+      volatile *vp = 3
+      let v = volatile *vp
+      let w = atomic_and(cell, 255)
+      a + b + c + d + e + f + g + h + v + w - 100 + (atomic_load(cell) - 50)

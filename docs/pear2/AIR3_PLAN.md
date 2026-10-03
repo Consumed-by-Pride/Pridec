@@ -47,5 +47,6 @@ Gate (`make test-air3`, part of `make test`; `tests/air3/gate.sh`, floors in `te
 ## 4 Order of work
 
 1. (done) static interface methods `obj.method()`, heap environments for escaping closures, `for x in slice/array`, `x[lo..hi]` / `x[lo..=hi]` sub-slices (bounds-checked, alias the source; `fe01`, `sl01`, `if01`, `cl01`);
+3. (done) volatile accesses, atomics (`atomic_*`, 14 ops, orders), fences, GCC-style inline asm with one output (`at01`, `asm01`; AIR3.md "Systems primitives"). Still missing for an OS: `#packed`/`#align`/section/`naked`/interrupt-callconv attributes on definitions, `thread_local`, inline asm with several outputs and `+` operands, a freestanding mode (no libc: `malloc/free/write/syscall` are always declared and `main` needs an entry shim), per-target `usz`;
 4. multi-shot/non-tail effects (one-shot continuations via stack copying, or CPS in the producer);
 5. `air_verify` V5 and spec text in `docs/specs/AIR.md`; 6. WASM: `air_ll` output already goes through LLVM's wasm32 backend (objects, gated). Still to do: link with `wasm-ld`, supply a libc/WASI shim for `malloc`/`write`/`syscall`, run under node/wasmtime and compare exit codes. Note `usz`/`isz` are `i64` in AIR 3 (legal on wasm32, just wider than native index math); `sizeof` is computed by LLVM for the target.

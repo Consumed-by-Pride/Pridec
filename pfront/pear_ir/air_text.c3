@@ -25,7 +25,7 @@ fn bool streq(char* a, char* b)
 // written quoted (`mu`) so the reader never has to guess.
 fn bool is_reserved(char* s)
 {
-    static char*[157] kws = {
+    static char*[158] kws = {
         // header / declarations
         "air", "import", "module", "declare", "def", "defco", "data", "codata", "effect",
         "pub", "extern", "fastcc", "varargs", "link", "facts", "readonly", "nocapture",
@@ -53,9 +53,9 @@ fn bool is_reserved(char* s)
         "intersect", "neg", "forall", "exists", "bang", "query", "mult", "effrow", "typeof",
         "refine", "generic", "tail", "invalid",
         // AIR 3.0
-        "alloca", "load", "gep", "global"
+        "alloca", "load", "gep", "global", "volatile"
     };
-    for (usz i = 0; i < 157; i++)
+    for (usz i = 0; i < 158; i++)
     {
         if (kws[i] == null) { break; }
         if (streq(kws[i], s)) { return true; }
@@ -241,6 +241,7 @@ fn char* atomic_op_name(int o)
         case 10: return "min";
         case 11: return "umax";
         case 12: return "umin";
+        case 13: return "cmpxchg";
     }
     return null;
 }

@@ -675,6 +675,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
         if (r.ver_major < 3) { r.fail("alloca/load/gep need `air 3.0`"); return null; }
         bool is_al = r.is_kw("alloca"); bool is_ld = r.is_kw("load"); r.next();
         AirPrd* p = r.new_prd(is_al ? APRD_ALLOCA : (is_ld ? APRD_LOAD : APRD_GEP)); if (p == null) { return null; }
+        if (is_ld && r.eat_kw("volatile")) { p.bval = true; }
         if (!is_al && !is_ld) { r.expect_p('['); p.ty_arg = r.typ(); r.expect_p(']'); }
         r.expect_p('(');
         if (is_al) { p.ty_arg = r.typ(); }
@@ -1066,6 +1067,7 @@ fn AirCmd* Rd.cmd(Rd* r)
         if (r.kind == T_STR) { c.asm_text = r.dup_tok(); r.next(); }
         else if (r.is_kw("nil")) { r.next(); }
         else { r.fail("expected asm text"); return null; }
+        if (r.kind == T_STR) { c.asm_cons = r.dup_tok(); r.next(); r.expect_p(':'); r.expect_p('['); c.asm_ret = r.typ(); r.expect_p(']'); }   // AIR 3.0
         r.expect_p('(');
         if (!r.is_p(')'))
         {
@@ -1103,7 +1105,7 @@ fn AirCmd* Rd.cmd(Rd* r)
         int op = -1;
         if (r.kind == T_ID)
         {
-            for (int i = 0; i < 13; i++) { if (air_text::streq(r.tb, air_text::atomic_op_name(i))) { op = i; } }
+            for (int i = 0; i < 14; i++) { if (air_text::streq(r.tb, air_text::atomic_op_name(i))) { op = i; } }
         }
         if (op < 0) { r.fail("expected an atomic operation name"); return null; }
         r.next();
@@ -1121,8 +1123,11 @@ fn AirCmd* Rd.cmd(Rd* r)
     if (r.is_kw("store"))
     {
         if (r.ver_major < 3) { r.fail("store(p, v) needs `air 3.0`"); return null; }
-        r.next(); r.expect_p('(');
+        r.next();
+        bool svol = r.eat_kw("volatile");
+        r.expect_p('(');
         AirCmd* c = r.new_cmd(ACMD_STORE); if (c == null) { return null; }
+        c.vol = svol;
         c.prds[0] = r.prd(); r.expect_p(','); c.prds[1] = r.prd(); c.prd_count = 2;
         r.expect_p(')'); return c;
     }

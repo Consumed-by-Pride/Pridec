@@ -1994,6 +1994,48 @@ fn Node* Parser.parse_expr_prec(Parser* p, int min_prec)
     return left;
 }
 
+// the AIR atomic operation number (air_text::atomic_op_name) of an `atomic_*` keyword
+fn int atomic_op_index(Tk t)
+{
+    switch (t)
+    {
+        case TOKEN_KW_ATOMIC_LOAD:    return 0;
+        case TOKEN_KW_ATOMIC_STORE:   return 1;
+        case TOKEN_KW_ATOMIC_XCHG:    return 2;
+        case TOKEN_KW_ATOMIC_ADD:     return 3;
+        case TOKEN_KW_ATOMIC_SUB:     return 4;
+        case TOKEN_KW_ATOMIC_AND:     return 5;
+        case TOKEN_KW_ATOMIC_OR:      return 6;
+        case TOKEN_KW_ATOMIC_XOR:     return 7;
+        case TOKEN_KW_ATOMIC_NAND:    return 8;
+        case TOKEN_KW_ATOMIC_MAX:     return 9;
+        case TOKEN_KW_ATOMIC_MIN:     return 10;
+        case TOKEN_KW_ATOMIC_UMAX:    return 11;
+        case TOKEN_KW_ATOMIC_UMIN:    return 12;
+        case TOKEN_KW_ATOMIC_CMPXCHG: return 13;
+        default: return 3;
+    }
+}
+// `atomic_add(p, v, "acquire")` / `fence("release")`: a trailing string literal naming a memory order is the order,
+// not an operand (the default is seq_cst = 4)
+fn void take_order(pfront_core::PNode* n)
+{
+    if (n.child_count == 0) { return; }
+    pfront_core::PNode* last = n.children[n.child_count - 1];
+    if (last == null || last.kind != pfront_core::NodeKind.N_EXPR_STRING || last.p.sptr == null) { return; }
+    char* q = last.p.sptr; usz ql = (usz)last.p.slen;
+    if (ql >= 2 && q[0] == '"') { q = q + 1; ql = ql - 2; }
+    char*[5] names = { "relaxed", "acquire", "release", "acq_rel", "seq_cst" };
+    for (int i = 0; i < 5; i++)
+    {
+        char* nm = names[i]; usz k = 0; while (nm[k] != 0) { k++; }
+        if (k != ql) { continue; }
+        bool same = true;
+        for (usz j = 0; j < k; j++) { if (q[j] != nm[j]) { same = false; } }
+        if (same) { n.p.ival = (ulong)i; n.child_count--; return; }
+    }
+}
+
 fn bool tok_starts_expr(Tk t)
 {
     switch (t)
@@ -2053,6 +2095,13 @@ fn bool tok_starts_expr(Tk t)
         case TOKEN_KW_ATOMIC_XOR:
         case TOKEN_KW_ATOMIC_XCHG:
         case TOKEN_KW_ATOMIC_CMPXCHG:
+        case TOKEN_KW_ATOMIC_LOAD:
+        case TOKEN_KW_ATOMIC_STORE:
+        case TOKEN_KW_ATOMIC_NAND:
+        case TOKEN_KW_ATOMIC_MAX:
+        case TOKEN_KW_ATOMIC_MIN:
+        case TOKEN_KW_ATOMIC_UMAX:
+        case TOKEN_KW_ATOMIC_UMIN:
         case TOKEN_KW_TAIL:
             return true;
         default:
@@ -3016,6 +3065,8 @@ fn Node* Parser.parse_primary(Parser* p)
                 if (!p.check(Tk.TOKEN_RPAREN)) { p.add(n, p.parse_expr()); }
                 p.expect(Tk.TOKEN_RPAREN, 1048, "expected ')' after fence");
             }
+            n.p.ival = 4;
+            pfront_parse::take_order(n);
             return n;
         }
 
@@ -3026,10 +3077,18 @@ fn Node* Parser.parse_primary(Parser* p)
         case TOKEN_KW_ATOMIC_XOR:
         case TOKEN_KW_ATOMIC_XCHG:
         case TOKEN_KW_ATOMIC_CMPXCHG:
+        case TOKEN_KW_ATOMIC_LOAD:
+        case TOKEN_KW_ATOMIC_STORE:
+        case TOKEN_KW_ATOMIC_NAND:
+        case TOKEN_KW_ATOMIC_MAX:
+        case TOKEN_KW_ATOMIC_MIN:
+        case TOKEN_KW_ATOMIC_UMAX:
+        case TOKEN_KW_ATOMIC_UMIN:
         {
             p.advance();
             Node* n = p.mk_at(Nk.N_EXPR_ATOMIC, t);
-            n.p.op = (int)t.type;
+            n.p.op = pfront_parse::atomic_op_index(t.type);   // the AIR atomic-op number (air_text::atomic_op_name), not the token
+            n.p.ival = 4;                                      // seq_cst unless a trailing order string says otherwise
             n.effects = n.effects | pfront_core::EFF_IO;
             p.expect(Tk.TOKEN_LPAREN, 1049, "expected '(' after atomic operation");
             while (!p.check(Tk.TOKEN_RPAREN) && !p.at_end())
@@ -3038,6 +3097,7 @@ fn Node* Parser.parse_primary(Parser* p)
                 if (!p.accept(Tk.TOKEN_COMMA)) { break; }
             }
             p.expect(Tk.TOKEN_RPAREN, 1049, "expected ')' to close atomic operation");
+            pfront_parse::take_order(n);
             return n;
         }
 

@@ -392,7 +392,7 @@ fn void AirW.prd_core(AirW* w, AirPrd* p, int d)
         case APRD_ALLOCA: w.s("alloca("); w.typ(p.ty_arg); w.c(')'); return;
         case APRD_LOAD:
             if (p.sub_count != 1) { w.err("load needs one operand"); }
-            w.s("load("); w.prd(p.sub_count > 0 ? p.subs[0] : null, d); w.c(')'); return;
+            w.s(p.bval ? "load volatile(" : "load("); w.prd(p.sub_count > 0 ? p.subs[0] : null, d); w.c(')'); return;
         case APRD_GEP:
         {
             if (p.sub_count < 1) { w.err("gep needs a base pointer"); }
@@ -620,7 +620,9 @@ fn void AirW.cmd(AirW* w, AirCmd* c, int d)
             if (c.asm_dialect == 1) { w.s(" intel"); }
             else if (c.asm_dialect == 2) { w.s(" att"); }
             else if (c.asm_dialect != 0) { w.err("unknown asm dialect"); }
-            w.c(' '); w.opt_str(c.asm_text); w.prds(&c.prds[0], c.prd_count, d);
+            w.c(' '); w.opt_str(c.asm_text);
+            if (c.asm_cons != null) { w.c(' '); w.opt_str(c.asm_cons); w.s(" : ["); w.typ(c.asm_ret); w.c(']'); }   // AIR 3.0: LLVM constraints and the result type
+            w.prds(&c.prds[0], c.prd_count, d);
             w.result(c.cns, d);
             return;
         }
@@ -645,7 +647,7 @@ fn void AirW.cmd(AirW* w, AirCmd* c, int d)
         }
         case ACMD_STORE:
             if (c.prd_count != 2) { w.err("store needs a pointer and a value"); }
-            w.s("store("); w.prd(c.prd_count > 0 ? c.prds[0] : null, d); w.s(", "); w.prd(c.prd_count > 1 ? c.prds[1] : null, d); w.c(')'); return;
+            w.s(c.vol ? "store volatile(" : "store("); w.prd(c.prd_count > 0 ? c.prds[0] : null, d); w.s(", "); w.prd(c.prd_count > 1 ? c.prds[1] : null, d); w.c(')'); return;
         case ACMD_FENCE:
         {
             char* ord = air_text::atomic_order_name(c.atomic_order);

@@ -38,6 +38,18 @@ Header: `air 3.0 Main "src";`. A file is a list of declarations; the syntax is t
   aborting arms);
 * variadic C calls: `declare … varargs`; `syscall` is the `syscall` command (≤ 7 operands).
 
+## Systems primitives (OS / concurrency)
+
+| AIR 3 text | LLVM | notes |
+|---|---|---|
+| `load volatile(p)`, `store volatile(p, v)` | `load volatile`, `store volatile` | Pride: `volatile *p`, `volatile *p = v` (also `+=`) |
+| `atomic OP ORDER(p, v…) · comu r.` with OP ∈ `load store xchg add sub and or xor nand max min umax umin cmpxchg` and ORDER ∈ `relaxed acquire release acq_rel seq_cst` | `load atomic`, `store atomic`, `atomicrmw`, `cmpxchg` | `p : ptr(iN)`, N ≤ 64, operands have the pointee type; the result is the OLD value (`store`: unit); `cmpxchg(p, expected, new)` returns the old value; a load may not be release/acq_rel, a store not acquire/acq_rel. Pride: `atomic_add(p, v)`, …, optional trailing order string: `atomic_add(p, 1, "acq_rel")`, default `seq_cst` |
+| `fence ORDER` | `fence` | acquire … seq_cst; Pride: `fence("release")`, `fence()` = seq_cst |
+| `asm [intel] "template" "constraints" : [T] (operands) · comu r.` | `call T asm sideeffect [inteldialect] "template", "constraints"(operands)` | the template and constraints are LLVM's (`$0`, `=r,r,~{memory}`); the Pride front end takes GCC-style `asm { "leaq 2(%1), %0" : "=r"(out) : "r"(in) : "memory" }` (`%N` → `$N`, `%%` → `%`, literal `$` escaped), at most one output (an lvalue, which receives the result), no `+` operands yet. `T` is the output type or `unit`. Always `sideeffect` |
+
+Everything above is gated by `tests/air3/prog/at01_atomics.pie` (native and wasm32) and `tests/air3/prog_x86/asm01_inline.pie`
+(x86-64 hosts only).
+
 ## Consumer limits (air_ll)
 
 16384 names, 4096 blocks, 16384 phi edges and 8192 strings per function/module; aggregates ≤ 64 parts;
