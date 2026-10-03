@@ -2872,11 +2872,12 @@ fn Vx Low.atomic_(Low* lw, Node* n)
     return lw.vref(ins.name, op == 1 ? lw.m.t_unit : el);
 }
 // GCC-style `asm { "template" : "=r"(out) : "r"(in) : "memory" }` becomes one LLVM inline-asm call. `%N` is the Nth operand
-// (outputs first), `%%` a percent. At most one output (its value is the value of the asm expression).
+// (outputs first), `%%` a percent. Up to 8 outputs (one: its value is the value of the asm expression; several: a tuple, each
+// output also stored to its place). `+r` is an in/out operand: an output tied to an input that is the place's current value.
 fn Vx Low.asm_(Low* lw, Node* n)
 {
     air_ll::Sb tmpl; tmpl.init(); air_ll::Sb cons; cons.init();
-    Pl outp; bool has_out = false; AirTyp* ot = null; bool inputs_seen = false;
+    Pl[8] outps; AirTyp*[8] ots; bool[8] plus; usz no = 0; bool inputs_seen = false;
     Vx[16] iv; usz ni = 0; usz nt = 0;
     char[320] clob; clob[0] = 0; usz cl = 0;
     // pass 1: the template strings (no group) and the single output
@@ -2915,12 +2916,12 @@ fn Vx Low.asm_(Low* lw, Node* n)
             }
             else if (grp == 1)
             {
-                if (has_out) { lw.unsup(n, "asm with more than one output"); return lw.unit(); }
-                if (operand == null || !lw.place(operand, &outp)) { lw.unsup(n, "asm output that is not a place"); return lw.unit(); }
-                if (raw[0] == '+') { lw.unsup(n, "asm in/out operand (`+r`): use a separate input"); return lw.unit(); }
-                has_out = true; ot = outp.t;
+                if (no >= 8) { lw.unsup(n, "asm with more than 8 outputs"); return lw.unit(); }
+                Pl op1;
+                if (operand == null || !lw.place(operand, &op1)) { lw.unsup(n, "asm output that is not a place"); return lw.unit(); }
+                outps[no] = op1; ots[no] = op1.t; plus[no] = raw[0] == '+'; no++;
                 if (cons.n > 0) { cons.putc(','); }
-                cons.put(raw);
+                if (raw[0] == '+') { cons.putc('='); cons.put(raw + 1); } else { cons.put(raw); }
             }
             else
             {
@@ -2934,15 +2935,30 @@ fn Vx Low.asm_(Low* lw, Node* n)
         }
     }
     (void)inputs_seen; (void)cl; (void)clob;
+    for (usz k = 0; k < no; k++)   // the hidden inputs of `+` operands come after the explicit ones: each is tied to its output by number
+    {
+        if (!plus[k]) { continue; }
+        if (ni >= 16) { lw.unsup(n, "asm with more than 16 inputs"); return lw.unit(); }
+        iv[ni] = lw.load(outps[k].ptr, outps[k].t); ni++;
+        cons.putc(','); cons.putc((char)('0' + k));
+    }
+    if (!lw.live()) { return lw.unit(); }
     Ins* ins = lw.push(I_ASM); if (ins == null) { return lw.unit(); }
     ins.nargs = ni; for (usz i = 0; i < ni; i++) { ins.args[i] = iv[i].p; }
     ins.text = lw.dup(tmpl.d == null ? (char*)"" : tmpl.d); ins.cons = lw.dup(cons.d == null ? (char*)"" : cons.d);
-    ins.rty = has_out ? ot : lw.m.t_unit;
+    ins.rty = no == 0 ? lw.m.t_unit : (no == 1 ? ots[0] : air_ir::air_mk_typ_tuple(lw.a, &ots[0], no));
     ins.dialect = (n.p.aux & 2) != 0 ? 1 : 0;
     ins.name = lw.fresh("_asm");
     Vx r = lw.vref(ins.name, ins.rty);
-    if (has_out) { lw.store(outp.ptr, r); }
-    return has_out ? r : lw.unit();
+    if (no == 0) { return lw.unit(); }
+    if (no == 1) { lw.store(outps[0].ptr, r); return r; }
+    for (usz k = 0; k < no; k++)
+    {
+        Ins* pi = lw.push(I_PROJ); if (pi == null) { return lw.unit(); }
+        pi.name = lw.fresh("_p"); pi.a = r.p; pi.idx = (long)k;
+        lw.store(outps[k].ptr, lw.vref(pi.name, ots[k]));
+    }
+    return r;
 }
 // `x[lo..hi]` / `x[lo..=hi]` over an array (aliases it), a slice or `str`, or a pointer (unchecked)
 fn Vx Low.slicing(Low* lw, Node* n)
