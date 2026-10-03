@@ -1,0 +1,22 @@
+-- EXIT: 19
+-- declaration attributes: #packed (sizeof 10, not 24), #section + #align on a global, #noinline, #[cold, section(..)] on functions
+#packed
+struct H
+  a: u8
+  b: i64
+  c: u8
+
+#align(64)
+#section(".mydata")
+let mut BUF : [i64; 4] = [1i64, 2i64, 3i64, 4i64]
+
+#noinline
+fn f : (i64) -> i64
+  | (x) -> x + 1i64
+
+#[cold, section(".text.cold")]
+fn g : (i64) -> i64
+  | (x) -> x + 2i64
+
+fn main : () -> i64
+  | () -> f(1i64) + g(1i64) + sizeof(H) as i64 + BUF[3i64]

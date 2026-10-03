@@ -229,6 +229,33 @@ fn AirDecl* Ll.find(Ll* l, char* nm)
     }
     return null;
 }
+// declaration attributes (docs/specs/AIR3.md "Declaration attributes")
+fn bool decl_has_attr(AirDecl* d, char* nm)
+{
+    if (d == null) { return false; }
+    for (usz i = 0; i < d.attr_count; i++) { if (air_text::streq(d.attr_name[i], nm)) { return true; } }
+    return false;
+}
+fn char* decl_attr_str(AirDecl* d, char* nm)
+{
+    if (d == null) { return null; }
+    for (usz i = 0; i < d.attr_count; i++) { if (air_text::streq(d.attr_name[i], nm)) { return d.attr_str[i]; } }
+    return null;
+}
+fn long decl_attr_int(AirDecl* d, char* nm)
+{
+    if (d == null) { return 0; }
+    for (usz i = 0; i < d.attr_count; i++) { if (air_text::streq(d.attr_name[i], nm) && d.attr_has_int[i]) { return d.attr_int[i]; } }
+    return 0;
+}
+// ` section "x", align N` suffix for a global (LLVM wants the commas for globals)
+fn void Ll.global_attrs(Ll* l, Sb* o, AirDecl* d)
+{
+    char* sec = decl_attr_str(d, "section");
+    if (sec != null) { o.put(", section \""); o.put(sec); o.putc('"'); }
+    long al = decl_attr_int(d, "align");
+    if (al > 0) { o.put(", align "); o.int_(al); }
+}
 fn AirDecl* Ll.find_data(Ll* l, char* nm)
 {
     for (usz i = 0; i < l.m.decl_count; i++)
@@ -437,14 +464,15 @@ fn void Ll.const_init(Ll* l, Sb* o, AirPrd* g, AirTyp* t, char* gname)
             AirDecl* dd = l.find_data(t.name);
             if (dd == null || dd.ctor_count != 1 || dd.ctors[0].field_count != g.rec_init_count) { l.err("record initialiser does not match its declaration", gname); return; }
             AirCtorDecl* c = dd.ctors[0];
-            o.put("{ ");
+            bool pk = decl_has_attr(dd, "packed");
+            o.put(pk ? "<{ " : "{ ");
             for (usz i = 0; i < c.field_count; i++)
             {
                 if (i > 0) { o.put(", "); }
                 if (!air_text::streq(c.fields[i].name, g.rec_inits[i].name)) { l.err("record initialiser fields out of declaration order", gname); return; }
                 l.ty(o, c.fields[i].ty); o.putc(' '); l.const_init(o, g.rec_inits[i].value, c.fields[i].ty, gname);
             }
-            o.put(" }");
+            o.put(pk ? " }>" : " }");
             return;
         }
         default: break;
@@ -857,9 +885,22 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
                 for (usz i = 0; i < c.prd_count && na < 8; i++) { a[na] = l.prd(c.prds[i]); na++; }
                 for (usz i = 0; i < na; i++) { if (a[i].ty == null || a[i].ty.tag != ATYP_I64) { l.err("syscall operands must be i64", null); break; } }
                 char* r = l.fresh(); Sb* o = l.out();
+                if (g_syscall_mode == 1)   // x86-64 Linux: the instruction itself (rax = number, rdi rsi rdx r10 r8 r9 = arguments), no libc
+                {
+                    if (na > 7) { l.err("x86-64 syscall takes a number and at most 6 arguments", null); return; }
+                    static char*[7] regs = { "{rax}", "{rdi}", "{rsi}", "{rdx}", "{r10}", "{r8}", "{r9}" };
+                    o.put("  "); o.put(r); o.put(" = call i64 asm sideeffect \"syscall\", \"={rax}");
+                    for (usz i = 0; i < na; i++) { o.putc(','); o.put(regs[i]); }
+                    o.put(",~{rcx},~{r11},~{memory}\"(");
+                    for (usz i = 0; i < na; i++) { if (i > 0) { o.put(", "); } o.put("i64 "); o.put(a[i].op); }
+                    o.put(")\n");
+                }
+                else
+                {
                 o.put("  "); o.put(r); o.put(" = call i64 (i64, ...) @syscall(");
                 for (usz i = 0; i < na; i++) { if (i > 0) { o.put(", "); } o.put("i64 "); o.put(a[i].op); }
                 o.put(")\n");
+                }
                 if (c.cns == null || c.cns.tag != ACNS_COMU) { l.err("syscall result must be bound with `comu`", null); return; }
                 l.bind(c.cns.bind, r, l.m.t_i64); c = c.cns.body; continue;
             }
@@ -929,6 +970,7 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
     }
 }
 // LLVM memory ordering keyword; `failure` = 1 gives the cmpxchg failure ordering (never release/acq_rel)
+int g_syscall_mode = 0;   // 0: call libc `syscall`; 1: x86-64 Linux inline `syscall` instruction
 fn char* llvm_order(int o, int failure)
 {
     if (failure == 1) { switch (o) { case 0: return "monotonic"; case 1: return "acquire"; case 2: return "monotonic"; case 3: return "acquire"; default: return "seq_cst"; } }
@@ -1006,7 +1048,15 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
         hdr.put(ps);
         l.bind(b.name, ps, b.ty);
     }
-    hdr.put(") {\n");
+    hdr.put(")");
+    if (decl_has_attr(d, "naked"))    { hdr.put(" naked"); }
+    if (decl_has_attr(d, "noinline")) { hdr.put(" noinline"); }
+    if (decl_has_attr(d, "inline") && !decl_has_attr(d, "noinline")) { hdr.put(" alwaysinline"); }
+    if (decl_has_attr(d, "cold"))     { hdr.put(" cold"); }
+    if (decl_has_attr(d, "packed"))   { l.err("packed applies to data types", d.name); }
+    { char* sec = decl_attr_str(d, "section"); if (sec != null) { hdr.put(" section \""); hdr.put(sec); hdr.putc('"'); } }
+    { long al = decl_attr_int(d, "align"); if (al > 0) { hdr.put(" align "); hdr.int_(al); } }
+    hdr.put(" {\n");
     // labels live on the spine of the body: seq { label A. c ; seq { label B. c ; entry } }
     AirCmd* c = d.def_body;
     while (c != null && c.tag == ACMD_SEQ && c.body != null && c.body.tag == ACMD_LABEL)
@@ -1117,7 +1167,9 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
         l.fn_name = d.name;
         if (d.ctor_count != 1) { l.err("data with several constructors (enum layout) is not part of this profile yet", d.name); continue; }
         if (d.typaram_count > 0) { l.err("generic data is not part of the low profile", d.name); continue; }
-        l.types_out.putc('%'); l.types_out.putc('"'); l.types_out.put(d.name); l.types_out.put("\" = type { ");
+        if (decl_has_attr(d, "section") || decl_has_attr(d, "align")) { l.err("section/align apply to functions and globals, not to a data type", d.name); }
+        bool packed = decl_has_attr(d, "packed");
+        l.types_out.putc('%'); l.types_out.putc('"'); l.types_out.put(d.name); l.types_out.put(packed ? "\" = type <{ " : "\" = type { ");
         AirCtorDecl* c = d.ctors[0];
         for (usz j = 0; j < c.field_count; j++)
         {
@@ -1125,7 +1177,7 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
             if (!ty_low(c.fields[j].ty, 0)) { l.err("field type is not part of the low profile", c.fields[j].name); }
             l.ty(&l.types_out, c.fields[j].ty);
         }
-        l.types_out.put(" }\n");
+        l.types_out.put(packed ? " }>\n" : " }\n");
         l.fn_name = null;
     }
     bool have_syscall = false;
@@ -1140,7 +1192,7 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
                 l.fn_name = d.name;
                 if (!ty_low(d.ret_ty, 0)) { l.err("global type is not part of the low profile", d.name); }
                 body.name('@', d.name);
-                if (d.is_extern && d.g_init == null) { body.put(" = external "); body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); body.putc('\n'); }
+                if (d.is_extern && d.g_init == null) { body.put(" = external "); body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); l.global_attrs(&body, d); body.putc('\n'); }
                 else
                 {
                     body.put(" = "); body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); body.putc(' ');
@@ -1149,6 +1201,7 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
                     {
                         l.const_init(&body, d.g_init, d.ret_ty, d.name);
                     }
+                    l.global_attrs(&body, d);
                     body.putc('\n');
                 }
                 l.fn_name = null;

@@ -74,7 +74,9 @@ L.LLVMTargetMachineEmitToFile.argtypes = [vp, vp, cp, ctypes.c_int, ctypes.POINT
 if L.LLVMTargetMachineEmitToFile(tm, mod, obj.encode(), 1, ctypes.byref(err)):
     sys.exit("ll-exe: codegen: " + (err.value or b"?").decode())
 if "--emit-obj" in args: sys.exit(0)
-r = subprocess.run(["gcc", obj, "-o", out, "-no-pie"], capture_output=True, text=True,
+link = ["gcc", obj, "-o", out, "-no-pie"]
+if "--freestanding" in args: link += ["-nostdlib", "-static", "-Wl,-e,_start"]   # no libc, no crt: the program's own `_start` is the entry
+r = subprocess.run(link, capture_output=True, text=True,
                    env=dict(os.environ, LD_LIBRARY_PATH=""))
 os.unlink(obj)
 if r.returncode: sys.exit("ll-exe: link: " + r.stderr)

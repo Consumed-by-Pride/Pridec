@@ -5494,6 +5494,33 @@ fn int Parser.parse_stage_offset(Parser* p)
 // ── Attributes ──────────────────────────────────────────────────────────────
 // #[attr] / #[attr(args)] and #attr forms. Attributes are attached to the
 // following declaration as trailing metadata children.
+// records `name` or `name(arg)` (the argument's first token: a string or an integer) as a pending attribute of the next declaration;
+// consumes through the closing parenthesis. The cursor is on the name token.
+fn void Parser.grab_attr(Parser* p)
+{
+    Tok nm = p.cur();
+    if (p.check(Tk.TOKEN_NEWLINE) || p.at_end() || p.check(Tk.TOKEN_RBRACK)) { return; }
+    p.advance();
+    char* ap = null; usz al = 0; bool isstr = false;
+    if (p.check(Tk.TOKEN_LPAREN))
+    {
+        p.advance();
+        if (p.check(Tk.TOKEN_LIT_STRING))
+        {
+            Tok st = p.cur(); ap = st.start; al = st.len; isstr = true;
+            if (al >= 2 && ap[0] == '"') { ap = ap + 1; al = al - 2; }
+        }
+        else if (p.check(Tk.TOKEN_LIT_INT)) { Tok it = p.cur(); ap = it.start; al = it.len; }
+        int depth = 1;
+        while (depth > 0 && !p.at_end())
+        {
+            if (p.check(Tk.TOKEN_LPAREN)) { depth = depth + 1; }
+            if (p.check(Tk.TOKEN_RPAREN)) { depth = depth - 1; }
+            p.advance();
+        }
+    }
+    if (nm.type != Tk.TOKEN_KW_EXTERN) { pfront_core::pend_attr(nm.start, nm.len, ap, al, isstr); }
+}
 fn void Parser.skip_attributes(Parser* p)
 {
     while (p.check(Tk.TOKEN_HASH) || p.check(Tk.TOKEN_AT))
@@ -5501,28 +5528,20 @@ fn void Parser.skip_attributes(Parser* p)
         p.advance();
         if (p.accept(Tk.TOKEN_LBRACK))
         {
-            int depth = 1;
-            while (depth > 0 && !p.at_end())
+            while (!p.check(Tk.TOKEN_RBRACK) && !p.at_end())
+            {
+                p.grab_attr();
+                if (!p.accept(Tk.TOKEN_COMMA)) { break; }
+            }
+            int depth = 1;   // anything unexpected up to the closing bracket is skipped
+            while (!p.at_end())
             {
                 if (p.check(Tk.TOKEN_LBRACK)) { depth = depth + 1; }
-                if (p.check(Tk.TOKEN_RBRACK)) { depth = depth - 1; }
+                if (p.check(Tk.TOKEN_RBRACK)) { depth = depth - 1; if (depth == 0) { p.advance(); break; } }
                 p.advance();
             }
         }
-        else
-        {
-            if (p.check(Tk.TOKEN_IDENT) || p.check(Tk.TOKEN_TYPEVAR)) { p.advance(); }
-            if (p.accept(Tk.TOKEN_LPAREN))
-            {
-                int depth = 1;
-                while (depth > 0 && !p.at_end())
-                {
-                    if (p.check(Tk.TOKEN_LPAREN)) { depth = depth + 1; }
-                    if (p.check(Tk.TOKEN_RPAREN)) { depth = depth - 1; }
-                    p.advance();
-                }
-            }
-        }
+        else { p.grab_attr(); }
         p.skip_newlines();
     }
 }
@@ -5556,6 +5575,7 @@ fn void Parser.skip_trailing_attrs(Parser* p)
         // #name or #name(args) — also accept keyword-valued attribute names
         // such as #extern / #inline / #packed, which the lexer keywordises.
         bool is_ext_attr = p.check(Tk.TOKEN_KW_EXTERN);
+        if (!is_ext_attr) { p.grab_attr(); continue; }
         if (!p.check(Tk.TOKEN_NEWLINE) && !p.at_end()) { p.advance(); }
         if (p.check(Tk.TOKEN_LPAREN))
         {
@@ -5581,7 +5601,9 @@ fn void Parser.skip_trailing_attrs(Parser* p)
 fn Node* Parser.parse_decl(Parser* p)
 {
     p.skip_newlines();
+    pfront_core::g_pa_n = 0;
     p.skip_attributes();
+    pfront_core::PendAttrs lead_attrs = pfront_core::pa_take();   // (nested declarations reset the pending list)
     p.skip_newlines();
     if (p.at_end()) { return null; }
 
@@ -5656,6 +5678,8 @@ fn Node* Parser.parse_decl(Parser* p)
     {
         if (is_pub) { d.flags = d.flags | pfront_core::NF_PUB; }
         if (doc != null) { d.type_slot = null; p.add(d, doc); }
+        pfront_core::attach_attrs(d);                      // trailing attributes of this declaration
+        pfront_core::attach_saved(d, &lead_attrs);         // leading ones
     }
     return d;
 }

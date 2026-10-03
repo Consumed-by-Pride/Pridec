@@ -213,6 +213,38 @@ fn AirTyp* Low.struct_ty(Low* lw, Node* decl)
     if (lw.typarams(decl, &tps[0]) > 0) { lw.unsup(decl, "generic struct used without type arguments"); return null; }
     return lw.struct_inst(decl, null, 0);
 }
+// Declaration attributes the low profile carries: section("x"), align(N), packed, naked, noinline, inline, cold.
+// Anything else (and a malformed argument) is dropped, never invented.
+fn void Low.copy_attrs(Low* lw, AirDecl* ad, Node* src)
+{
+    if (src == null) { return; }
+    char* nm; usz nl; char* arg; usz al; bool isstr;
+    for (usz k = 0; pfront_core::attr_at(src, k, &nm, &nl, &arg, &al, &isstr); k++)
+    {
+        char[32] nb; if (nl >= 31) { continue; }
+        for (usz i = 0; i < nl; i++) { nb[i] = nm[i]; } nb[nl] = 0;
+        char* nn = &nb[0];
+        if (seq(nn, "section"))
+        {
+            if (!isstr || arg == null || al == 0) { continue; }
+            char[256] sb; if (al >= 255) { continue; }
+            for (usz i = 0; i < al; i++) { sb[i] = arg[i]; } sb[al] = 0;
+            air_ir::air_add_attr(ad, lw.dup("section"), lw.dup(&sb[0]), 0, false);
+        }
+        else if (seq(nn, "align"))
+        {
+            if (isstr || arg == null || al == 0 || al > 9) { continue; }
+            long v = 0; bool ok = true;
+            for (usz i = 0; i < al; i++) { if (arg[i] < '0' || arg[i] > '9') { ok = false; break; } v = v * 10 + (long)(arg[i] - '0'); }
+            if (!ok || v <= 0 || (v & (v - 1)) != 0) { continue; }
+            air_ir::air_add_attr(ad, lw.dup("align"), null, v, true);
+        }
+        else if (seq(nn, "packed") || seq(nn, "naked") || seq(nn, "noinline") || seq(nn, "inline") || seq(nn, "cold"))
+        {
+            air_ir::air_add_attr(ad, lw.dup(nn), null, 0, false);
+        }
+    }
+}
 fn AirTyp* Low.struct_inst(Low* lw, Node* decl, AirTyp** targs, usz nt)
 {
     for (usz i = 0; i < lw.nst; i++)
@@ -244,6 +276,7 @@ fn AirTyp* Low.struct_inst(Low* lw, Node* decl, AirTyp** targs, usz nt)
     for (usz j = 0; j < nt; j++) { lw.sts[lw.nst].targs[j] = targs[j]; }
     lw.nst++;
     AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, nm);
+    lw.copy_attrs(d, decl);
     AirCtorDecl* c = air_ir::air_mk_ctor_decl(lw.a, nm);
     c.result_ty = t;
     d.add_ctor(c);
@@ -946,6 +979,7 @@ fn GlInfo* Low.global_for(Low* lw, Node* d)
     }
     GlInfo* g = &lw.gls[lw.ngl]; g.decl = d; g.name = nm; g.ty = t; lw.ngl++;
     AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_GLOBAL, nm);
+    lw.copy_attrs(ad, d);
     ad.ret_ty = t; ad.g_mut = (d.flags & pfront_core::NF_MUT) != 0;
     // constant initialiser: a literal (anything else needs a run-time initialiser, not lowered yet)
     Node* init = null;
@@ -4287,6 +4321,7 @@ fn void Low.lower_fn(Low* lw, FnInfo* f)
     if (lw.fn_errors > 0) { lw.fail_fn++; return; }
     AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
     ad.is_pub = true;
+    lw.copy_attrs(ad, d);
     for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
     ad.ret_ty = f.ret;
     ad.def_body = lw.assemble();

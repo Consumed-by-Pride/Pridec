@@ -692,6 +692,16 @@ fn void AirW.fields(AirW* w, AirField** fs, usz n)
     for (usz i = 0; i < n; i++) { if (i > 0) { w.s(", "); } w.field(fs[i]); }
     w.c(')');
 }
+fn void AirW.attrs(AirW* w, AirDecl* d)
+{
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        w.s("attr "); w.name(d.attr_name[i]);
+        if (d.attr_str[i] != null) { w.c(' '); w.opt_str(d.attr_str[i]); }
+        else if (d.attr_has_int[i]) { w.c(' '); w.int_(d.attr_int[i]); }
+        w.c(' ');
+    }
+}
 fn void AirW.decl(AirW* w, AirDecl* d)
 {
     if (d == null) { w.err("null declaration"); return; }
@@ -723,6 +733,7 @@ fn void AirW.decl_body(AirW* w, AirDecl* d)
         case ADECL_DEFCO:
         case ADECL_DECLARE:
         {
+            w.attrs(d);
             if (d.is_pub)     { w.s("pub "); }
             if (d.is_extern)  { w.s("extern "); }
             if (d.is_fastcc)  { w.s("fastcc "); }
@@ -743,6 +754,7 @@ fn void AirW.decl_body(AirW* w, AirDecl* d)
         }
         case ADECL_DATA:
         {
+            w.attrs(d);
             if (d.is_pub) { w.s("pub "); }
             w.s("data "); w.name(d.name); w.mult(d.mult);
             if (d.typaram_count > 0) { w.s(" ["); for (usz i = 0; i < d.typaram_count; i++) { if (i > 0) { w.s(", "); } w.binder(d.typarams[i]); } w.c(']'); }
@@ -779,6 +791,7 @@ fn void AirW.decl_body(AirW* w, AirDecl* d)
         }
         case ADECL_GLOBAL:
         {
+            w.attrs(d);
             if (d.is_pub) { w.s("pub "); }
             if (d.is_extern) { w.s("extern "); }
             w.s("global "); if (d.g_mut) { w.s("mut "); }

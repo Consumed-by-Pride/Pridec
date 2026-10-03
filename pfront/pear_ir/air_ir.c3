@@ -177,6 +177,8 @@ struct AirDecl {
     char* extern_link; AirEffectOp*[16] ops; usz op_count;
     char* import_path; char* import_alias; bool import_glob; char* module_name;
     AirPrd* g_init; bool g_mut;   // ADECL_GLOBAL: constant initialiser (null = zero) and mutability
+    // AIR 3.0 declaration attributes: `attr NAME [STRING|INT]` before the declaration (section, align, naked, noinline, inline, cold, packed)
+    char*[8] attr_name; char*[8] attr_str; long[8] attr_int; bool[8] attr_has_int; usz attr_count;
 }
 struct AirModule {
     uint id; char* name; char* source_path;
@@ -309,9 +311,14 @@ fn AirBranch* air_mk_branch(AirArena* a, AirPat* pat, AirCmd* body) {
     AirBranch* b=air_new_AirBranch(a); if(b==null)return null;
     b.pat=pat; b.body=body; b.guard=null; return b;
 }
+fn void air_add_attr(AirDecl* d, char* nm, char* str, long iv, bool has_int)
+{
+    if (d == null || d.attr_count >= 8) { return; }
+    d.attr_name[d.attr_count] = nm; d.attr_str[d.attr_count] = str; d.attr_int[d.attr_count] = iv; d.attr_has_int[d.attr_count] = has_int; d.attr_count++;
+}
 fn AirDecl* air_mk_decl(AirArena* a, AirDeclTag tag, char* nm) {
     AirDecl* d=air_new_AirDecl(a); if(d==null)return null;
-    d.tag=tag; d.name=nm; d.typaram_count=0; d.mult=AMULT_UNR;
+    d.tag=tag; d.name=nm; d.typaram_count=0; d.mult=AMULT_UNR; d.attr_count=0;
     d.ctor_count=0; d.dtor_count=0; d.param_count=0;
     d.def_body=null; d.ret_ty=null; d.is_pub=false; d.is_extern=false;
     d.is_varargs=false; d.memory_readonly=false; d.fact_state=AFACT_UNKNOWN; d.extern_link=null; d.op_count=0;

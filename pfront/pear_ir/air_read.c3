@@ -1185,6 +1185,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
     AirArena* a = r.a;
     bool is_pub = false; bool is_extern = false; bool is_fastcc = false; bool is_varargs = false;
     bool ro = false; bool facts = false; char* link = null;
+    char*[8] pend_attr_n; char*[8] pend_attr_s; long[8] pend_attr_i; bool[8] pend_attr_h; usz pend_attr_c = 0;
     while (!r.failed && r.kind == T_ID)
     {
         if (r.eat_kw("pub")) { is_pub = true; continue; }
@@ -1192,6 +1193,17 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         if (r.eat_kw("fastcc")) { is_fastcc = true; continue; }
         if (r.eat_kw("varargs")) { is_varargs = true; continue; }
         if (r.eat_kw("readonly")) { ro = true; continue; }
+        if (r.is_kw("attr"))
+        {
+            r.next();
+            char* an = r.name();
+            if (pend_attr_c >= 8) { r.fail("more than 8 attributes on a declaration"); continue; }
+            if (r.kind == T_STR) { char* sv = r.dup_tok(); r.next(); pend_attr_n[pend_attr_c] = an; pend_attr_s[pend_attr_c] = sv; pend_attr_i[pend_attr_c] = 0; pend_attr_h[pend_attr_c] = false; }
+            else if (r.kind == T_INT) { long iv = r.ival; r.next(); pend_attr_n[pend_attr_c] = an; pend_attr_s[pend_attr_c] = null; pend_attr_i[pend_attr_c] = iv; pend_attr_h[pend_attr_c] = true; }
+            else { pend_attr_n[pend_attr_c] = an; pend_attr_s[pend_attr_c] = null; pend_attr_i[pend_attr_c] = 0; pend_attr_h[pend_attr_c] = false; }
+            pend_attr_c++;
+            continue;
+        }
         if (r.is_kw("facts"))
         {
             r.next();
@@ -1235,6 +1247,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         AirDecl* d = air_ir::air_mk_decl(a, tg, r.name());
         d.is_pub = is_pub; d.is_extern = is_extern; d.is_fastcc = is_fastcc; d.is_varargs = is_varargs;
         d.extern_link = link; d.memory_readonly = ro;
+        for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         d.fact_state = facts ? AFACT_AST_FINAL : AFACT_UNKNOWN;   // claims are candidates, always
         r.typarams(d);
         d.param_count = r.binder_list(&d.params[0], 16);
@@ -1251,6 +1264,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         r.next();
         AirDecl* d = air_ir::air_mk_decl(a, ADECL_GLOBAL, null);
         d.is_pub = is_pub; d.is_extern = is_extern;
+        for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         if (r.eat_kw("mut")) { d.g_mut = true; }
         d.name = r.name(); r.expect_p(':'); d.ret_ty = r.typ();
         if (r.eat_p('=')) { d.g_init = r.prd(); }
@@ -1263,6 +1277,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         bool is_data = r.is_kw("data"); r.next();
         AirDecl* d = air_ir::air_mk_decl(a, is_data ? ADECL_DATA : ADECL_CODATA, r.name());
         d.is_pub = is_pub;
+        for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         if (r.eat_kw("lin")) { d.mult = AMULT_LIN; } else if (r.eat_kw("aff")) { d.mult = AMULT_AFF; }
         r.typarams(d);
         r.expect_p('{');

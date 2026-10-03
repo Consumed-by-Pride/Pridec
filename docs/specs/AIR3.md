@@ -50,6 +50,29 @@ Header: `air 3.0 Main "src";`. A file is a list of declarations; the syntax is t
 Everything above is gated by `tests/air3/prog/at01_atomics.pie` (native and wasm32) and `tests/air3/prog_x86/asm01_inline.pie`
 (x86-64 hosts only).
 
+## Declaration attributes
+
+A declaration may carry up to 8 attributes, written before its modifiers: `attr NAME [STRING | INT]`.
+The low profile defines these (anything else is dropped by the producer, never invented):
+
+| attr | on | LLVM | Pride source |
+|---|---|---|---|
+| `attr section "x"` | `def`, `global` | `section "x"` | `#section(".text.boot")` |
+| `attr align N` (power of two) | `def`, `global` | `align N` | `#align(64)` |
+| `attr packed` | `data` | `type <{ … }>` (also for constant initialisers) | `#packed` |
+| `attr naked` | `def` | `naked`: no prologue/epilogue; the body must be inline asm plus a non-returning end | `#naked` |
+| `attr noinline` / `attr inline` / `attr cold` | `def` | `noinline` / `alwaysinline` / `cold` | `#noinline`, `#inline`, `#cold` |
+
+Pride writes them as `#name`, `#name(arg)` or `#[a, b(1)]` on the lines before a declaration. `section`/`align` on a `data` type
+or `packed` on a function are errors in `air_ll` (they have no meaning there). Known limit: trailing attributes of a function nested in an `impl` attach to the impl.
+Gated by `tests/air3/prog/at02_decl_attrs.pie`, `tests/air3/good/attrs_packed_section.air` and, for a `#naked` `_start`, `tests/air3/prog_fs/fs02_naked_start.pie`.
+
+## Freestanding
+
+`airtool emit-ll X.air --syscall=x86_64-linux` lowers `syscall(n, …)` (≤ 7 operands) to the x86-64 `syscall` instruction instead of a libc call;
+`scripts/ll-exe.py --freestanding` links with `-nostdlib -static -Wl,-e,_start`. A program supplying its own `_start` (naked, asm that aligns the stack
+and calls a Pride function, see `fs02`) then runs with no libc and no crt. Gated (x86-64 hosts) by `tests/air3/prog_fs/`.
+
 ## Consumer limits (air_ll)
 
 16384 names, 4096 blocks, 16384 phi edges and 8192 strings per function/module; aggregates ≤ 64 parts;
