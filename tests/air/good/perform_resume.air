@@ -1,0 +1,29 @@
+// AIR 2.2 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)
+// canonical text; grammar in docs/specs/AIR.md; do not hand-edit
+air 2.2 Main "perform.pie";
+
+effect E {
+  op `i64` : infer;
+};
+
+def f() : i64 =
+  mu~ %ret_2.
+    match unit {
+      tuple() ->
+        handle {
+          <mu %k1.
+            perform `E.op`(1 : infer) · %k1 | %ret_2>
+        } {
+          ctor `E.op`(bind x, bind k) ->
+            <2 : infer | %resume>;
+        };
+    };
+
+def main() : i64 =
+  mu~ %ret_2.
+    match unit {
+      tuple() ->
+        <f | call · comu _x1.
+          <(add _x1 1 : infer) | %ret_2>>;
+    };
+

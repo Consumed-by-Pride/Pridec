@@ -244,3 +244,11 @@ What is NOT achieved
 - Strict λ̄μμ̃ is NOT fully achieved. Conventions J1/J2/N1 and flat scoping remain (counted by the verifier, plan in AIR.md §12). Verifier-found lowering defects remain: `syscall` operands dropped (49 exec XFAILs), dropped statements (`tests/pfront/45_opt_branch`), unbound variables in 22 corpus programs (`tests/air/VERIFY_KNOWN.tsv`).
 - Never emitted by the lowering (so a backend cannot be tested on them yet): see `docs/pear2/COVERAGE.md`.
 - Still outstanding and not claimed: P02, P04–P06; ledger items §24, §49, §55 untouched.
+
+## n3/air-lower-all (AIR 2.2: is everything lowered to .air?)
+Measured, not claimed (details `docs/pear2/LOWERING.md`): entry-module audit 185 programs / ~13,165 constructs / **0 unlowered**
+(`scripts/air-audit.py`); effects now carry `perform E.op(p) . k` and handler arms as variant patterns (PEAR 1 has no handler runtime
+and says so); clause guards and destructuring `let` lowered; MSP `quote/splice/eval/reify` are still unbound builtin calls (V3, not faithful);
+interfaces/impls/rewrite+IRDL rules are compile-time only; `static mut` has no AIR storage; generics not instantiated.
+Gate: `make test` EXIT 0 (pfront 173/5, conformance 151/111, PEAR 35/0/1, exec 45/0/47, AIR text 238/0, lowering 35 ok/15 known); O0-O3 identical per case.
+Note: the sandbox was restored 3x; the first commit of this branch is a combined recovery commit (stated in its body).

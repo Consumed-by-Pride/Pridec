@@ -355,6 +355,26 @@ struct PNode
     Payload  p;
 }
 
+// `fn f : T -> U  #extern("symbol")`: the attribute is not an AST node; the symbol is kept in a side table keyed by the
+// declaration (the parser fills it, the AIR lowering reads it).
+const usz MAX_EXT_SYMS = 16384;
+PNode*[MAX_EXT_SYMS] g_ext_node;
+char*[MAX_EXT_SYMS]  g_ext_ptr;
+usz[MAX_EXT_SYMS]    g_ext_len;
+usz                  g_ext_n;
+char*                g_pend_ext_ptr;
+usz                  g_pend_ext_len;
+fn void set_ext_sym(PNode* n, char* s, usz len)
+{
+    if (g_ext_n >= MAX_EXT_SYMS) { return; }
+    g_ext_node[g_ext_n] = n; g_ext_ptr[g_ext_n] = s; g_ext_len[g_ext_n] = len; g_ext_n++;
+}
+fn char* ext_sym_of(PNode* n, usz* len)
+{
+    for (usz i = 0; i < g_ext_n; i++) { if (g_ext_node[i] == n) { *len = g_ext_len[i]; return g_ext_ptr[i]; } }
+    return null;
+}
+
 // ── Arena ───────────────────────────────────────────────────────────────────
 const usz SLAB_SIZE = 4 * 1024 * 1024;
 const usz MAX_SLABS = 512;

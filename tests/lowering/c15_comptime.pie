@@ -1,0 +1,2 @@
+-- EXIT: 42
+fn main(_) -> i64 { let n: i64 = comptime 6 * 7; return n; }

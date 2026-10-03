@@ -21,7 +21,7 @@ fn term_get_state : i64 -> TermState
   | fd ->
     let p = os.linux.malloc(64i64)
     os.linux.memset(p, 0i32, 64u64)
-    let r = os.linux.ioctl(fd, TCGETS, p)
+    let r = os.linux.ioctl(fd, TCGETS, p as i64)
     if r < 0i64
       os.linux.free(p)
       TermState { fd: fd, saved_flags: 0 as ptr }
@@ -32,7 +32,7 @@ fn term_restore_state : *TermState -> i64
   | st ->
     if st.saved_flags as i64 == 0i64 then -1i64
     else
-      let r = os.linux.ioctl(st.fd, TCSETS, st.saved_flags)
+      let r = os.linux.ioctl(st.fd, TCSETS, st.saved_flags as i64)
       os.linux.free(st.saved_flags)
       st.saved_flags = 0 as ptr
       r
@@ -47,6 +47,6 @@ fn term_enable_raw_mode : i64 -> (TermState, i64)
       -- Turn off ECHO, ICANON, ISIG, IEXTEN in c_lflag (offset 12, u32)
       let lflag_ptr = (raw_p as i64 + 12i64) as *u32
       lflag_ptr[0i64] = lflag_ptr[0i64] & ~(ECHO | ICANON | ISIG | IEXTEN)
-      let r = os.linux.ioctl(fd, TCSETS, raw_p)
+      let r = os.linux.ioctl(fd, TCSETS, raw_p as i64)
       os.linux.free(raw_p)
       (orig, r)

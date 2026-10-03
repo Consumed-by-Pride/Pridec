@@ -106,6 +106,22 @@ fn void Folder.init(Folder* f, Arena* a, pfront_core::DiagBag* d,
     f.changed = false;
 }
 
+// the suffix type a folded arithmetic expression inherits from its literals (`1i32 - 1023i32` stays i32); false when none is written
+fn bool lit_type_of(Node* n, char* w, bool* sg, int depth)
+{
+    if (n == null || depth > 40) { return false; }
+    if (n.kind == N_EXPR_INT) { if (n.p.width != 0 && n.p.aux != 99) { *w = n.p.width; *sg = n.p.is_signed; return true; } return false; }
+    if (n.kind == N_EXPR_BINARY)
+    {
+        Tk op = (Tk)n.p.op;
+        if (op == Tk.TOKEN_EQEQ || op == Tk.TOKEN_NEQ || op == Tk.TOKEN_LT || op == Tk.TOKEN_GT || op == Tk.TOKEN_LTEQ || op == Tk.TOKEN_GTEQ) { return false; }
+        for (usz i = 0; i < n.child_count && i < 2; i++) { if (lit_type_of(n.children[i], w, sg, depth + 1)) { return true; } }
+        return false;
+    }
+    if (n.kind == N_EXPR_UNARY && n.child_count > 0) { return lit_type_of(n.children[0], w, sg, depth + 1); }
+    return false;
+}
+
 // Build a fresh literal node from a ConstValue, carrying the span of `span`.
 fn Node* Folder.make_lit_from(Folder* f, Node* span, ConstValue v)
 {
@@ -136,7 +152,10 @@ fn Node* Folder.make_lit_from(Folder* f, Node* span, ConstValue v)
     {
         n.p.ival = (ulong)v.ival;
         n.p.width = 64;
+        n.p.aux = 99;   // folded: the width is a default, not a written suffix
         n.effects = 0;
+        char lw_ = 0; bool lsg = true;
+        if (span.kind != N_EXPR_CAST && lit_type_of(span, &lw_, &lsg, 0)) { n.p.width = lw_; n.p.is_signed = lsg; n.p.aux = 0; }   // `1i32 - 1023i32` stays i32
     }
     return n;
 }
@@ -171,9 +190,16 @@ fn Node* Folder.fold(Folder* f, Node* n)
         ConstValue v = f.eval.eval(n, 0);
         if (v.status == ConstStatus.CONST_OK
             && n.kind != N_EXPR_INT && n.kind != N_EXPR_FLOAT
-            && n.kind != N_EXPR_BOOL && n.kind != N_EXPR_CHAR)
+            && n.kind != N_EXPR_BOOL && n.kind != N_EXPR_CHAR
+            && !(n.kind == N_EXPR_CAST && n.type_ann != null && n.type_ann.kind != N_TY_NAME))   // `0 as *T` stays a cast: a bare 0 would be an integer
         {
             r = f.make_lit_from(n, v);
+            if (r != null && r != n && n.kind == N_EXPR_CAST) { r.type_ann = n.type_ann; }   // `300 as u16` keeps its type
+            if (r != null && r != n && r.kind == N_EXPR_INT && n.kind != N_EXPR_CAST)
+            {
+                char lw_ = 0; bool lsg = true;
+                if (lit_type_of(n, &lw_, &lsg, 0)) { r.p.width = lw_; r.p.is_signed = lsg; r.p.aux = 0; }
+            }
             if (r != null && r != n) { f.folded = f.folded + 1; f.changed = true; }
         }
     }
@@ -587,6 +613,7 @@ fn Node* Folder.make_int(Folder* f, Node* span, long v)
     {
         n.p.ival = (ulong)v;
         n.p.width = 64;
+        n.p.aux = 99;
         n.p.is_signed = true;
         n.effects = 0;
     }

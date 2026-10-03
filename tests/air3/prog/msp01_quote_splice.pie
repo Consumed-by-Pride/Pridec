@@ -1,0 +1,7 @@
+-- EXIT: 8
+-- MSP: `quote e` is a delayed computation (code value = closure), `splice`/`eval` call it
+fn main : () -> i64
+  | () ->
+      let q = quote (3i64 + 4i64)
+      let r = quote (splice q + 1i64)
+      eval r

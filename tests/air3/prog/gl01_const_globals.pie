@@ -1,0 +1,34 @@
+-- EXIT: 54
+-- globals with constant aggregate initialisers: struct, nested struct, tuple, array, zero-filled array, string
+struct Pt
+  x: i64
+  y: i64
+
+struct Cfg
+  origin: Pt
+  scale: i32
+  on: bool
+  name: *u8
+
+let ORIGIN : Pt = Pt { x: 3i64, y: 4i64 }
+let CFG : Cfg = Cfg { origin: Pt { x: 10i64, y: 20i64 }, scale: 5i32, on: true, name: "hi" }
+let TABLE : [i64; 4] = [1i64, 2i64, 3i64, 4i64]
+let ZEROS : [i64; 8] = [0i64; 8]
+let PAIR : (i64, bool) = (7i64, true)
+let mut COUNTER : i64 = 0i64
+
+fn bump : () -> i64
+  | () ->
+    COUNTER = COUNTER + 1i64
+    COUNTER
+
+fn main : () -> i64
+  | () ->
+    let a = ORIGIN.x + ORIGIN.y                 -- 7
+    let b = CFG.origin.y + CFG.scale as i64     -- 25
+    let t = TABLE[2i64] + ZEROS[5i64]           -- 3
+    let c = if CFG.on then PAIR.0 else 0i64     -- 7
+    let n = (CFG.name)[1i64] as i64 - 105i64    -- 'i' - 105 = 0
+    bump()
+    bump()
+    a + b + t + c + n + COUNTER + 10i64         -- 7+25+3+7+0+2+10 = 54

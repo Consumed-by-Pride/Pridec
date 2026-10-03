@@ -1,0 +1,18 @@
+-- EXIT: 15
+-- A handle expression inside a recursive function: every dynamic frame has its own result slot.
+effect Z
+  z : i64 -> i64
+fn leafz : i64 -> i64 ! [Z]
+  | n -> Z.z(n)
+fn one : i64 -> i64
+  | n ->
+      handle leafz(n)
+        | Z.z x k -> k(x + 0)
+fn depth : i64 -> i64
+  | n ->
+      if n == 0
+        0
+      else
+        one(n) + depth(n - 1)
+fn main : () -> i64
+  | () -> depth(5)

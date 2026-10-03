@@ -1,0 +1,2 @@
+-- EXIT: 41
+fn main(_) -> i64 { let a: *u8 = alloc [u8; 4]; a[0] = 1u8; a[1] = 40u8; let r: i64 = (a[0] as i64) + (a[1] as i64); free a; return r; }

@@ -220,7 +220,7 @@ fn f64_to_sci : (f64, i64, *u8, bool) -> i64
         buf[n]=48u8; n=n+1i64
         buf[n]=46u8; n=n+1i64
         buf[n]=48u8; n=n+1i64
-        buf[n]=if upper_e then 69u8 else 101u8; n=n+1i64
+        buf[n]=(if upper_e then 69u8 else 101u8); n=n+1i64
         buf[n]=43u8; n=n+1i64; buf[n]=48u8; n=n+1i64; buf[n]=48u8; n+1i64
       else
         if mant >= 10.0f64
@@ -239,7 +239,7 @@ fn f64_to_sci : (f64, i64, *u8, bool) -> i64
             frac=frac*10.0f64; let d=frac as i64
             buf[n]=(48i64+d) as u8; n=n+1i64
             frac=frac-d as f64; p=p+1i64
-        buf[n]=if upper_e then 69u8 else 101u8; n=n+1i64
+        buf[n]=(if upper_e then 69u8 else 101u8); n=n+1i64
         if exp >= 0i64 then buf[n]=43u8 else buf[n]=45u8; n=n+1i64
         let abs_exp = if exp<0i64 then -exp else exp
         if abs_exp < 10i64 then buf[n]=48u8; n=n+1i64
@@ -488,13 +488,13 @@ fn vfmt_write : (*io.BufWriter, ptr, ptr, ptr, i64) -> i64
               let mut slen : i64 = 0i64
               while cs[slen] != 0u8 then slen=slen+1i64
               let actual_len = if sp.prec >= 0i64 && sp.prec < slen then sp.prec else slen
-              r = write_field(w, cs, actual_len, false, sp)
+              r = write_field(w, cs, actual_len, false, &sp)
 
             else if sp.type_ == 99u8   -- 'c'
               let ch = (arg_ptr as *u8)[0i64]
               let tmp : *u8 = os.linux.malloc(1i64) as *u8
               tmp[0i64] = ch
-              r = write_field(w, tmp, 1i64, false, sp)
+              r = write_field(w, tmp, 1i64, false, &sp)
               os.linux.free(tmp as ptr)
 
             else if sp.type_ == 112u8   -- 'p'
@@ -502,7 +502,7 @@ fn vfmt_write : (*io.BufWriter, ptr, ptr, ptr, i64) -> i64
               let tmp : *u8 = os.linux.malloc(20i64) as *u8
               tmp[0i64]=48u8; tmp[1i64]=120u8
               let hn = u64_to_hex_lower(pval, (tmp as i64+2i64) as *u8)
-              r = write_field(w, tmp, hn+2i64, false, sp)
+              r = write_field(w, tmp, hn+2i64, false, &sp)
               os.linux.free(tmp as ptr)
 
             else if sp.type_ == 102u8 || sp.type_ == 70u8 ||

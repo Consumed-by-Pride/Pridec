@@ -1,0 +1,10 @@
+-- EXIT: 3
+effect E
+  op : i64 -> i64
+fn f : () -> i64
+  | () ->
+    handle
+      perform E.op(1i64)
+    | E.op x k -> resume 2i64
+fn main : () -> i64
+  | () -> f() + 1

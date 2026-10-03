@@ -1,0 +1,5 @@
+-- EXIT: 5
+fn guarded : (i64, i64) -> i64
+  | (a, b) if a > b -> a
+  | (a, _) -> 0
+fn main(_) -> i64 { return guarded(5, 2) + guarded(1, 2); }

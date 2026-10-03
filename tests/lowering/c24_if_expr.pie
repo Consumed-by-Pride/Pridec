@@ -1,0 +1,2 @@
+-- EXIT: 9
+fn main(_) -> i64 { let x: i64 = 3; let y: i64 = if x > 2 { 9 } else { 1 }; return y; }

@@ -235,6 +235,16 @@ fn void FactScan.cmd(FactScan* s, air_ir::AirCmd* c, int depth)
             s.escaped |= s.prd(c.prd, depth + 1) | s.control; return;
         case ACMD_NOP: case ACMD_TRAP: case ACMD_UB: case ACMD_BREAK: case ACMD_CONTINUE:
             return;
+        case ACMD_SYSCALL:
+        {
+            // A system call may write any memory and may retain any pointer operand.
+            s.writes = true;
+            ulong sm = s.prd(c.prd, depth + 1);
+            for (usz i = 0; i < c.prd_count && i < 16; i++) { sm |= s.prd(c.prds[i], depth + 1); }
+            s.escaped |= sm | s.control;
+            s.cns(c.cns, 0, null, depth + 1);
+            return;
+        }
         case ACMD_JUMP:
             for (usz i = 0; i < c.jump_arg_count && i < 16; i++) { s.escaped |= s.lookup(c.jump_args[i]); }
             if (c.jump_arg_count > 16) { s.complete = false; }

@@ -1,0 +1,19 @@
+# tests/lowering/KNOWN.tsv -- cases whose current status is NOT "lowered, valid, and runs to the expected exit code".
+# Columns: case | native exit code today (NOBIN = no executable) | verifier counts V1 V2 V3 V4 of the emitted .air | reason
+# EXACT match is required both ways: a regression fails, and a case that starts working must be removed here.
+# "PEAR 1 SEGV" = pear1c (frozen legacy backend) built an executable that crashes; the .air itself checks and verifies.
+c06_loop_break	139	0 0 0 0	PEAR 1 SEGV: `while` with `break` -- the .air is well-formed (label/jump), the legacy backend crashes; not diagnosed further
+c08_match_guard	139	0 0 0 0	guards are now in the AIR (`guard { <c | %guard> }`); PEAR 1 does not implement guarded branches
+c10_enum_match	139	0 0 0 0	PEAR 1 SEGV: enum constructor patterns (backend limit, tests/exec/XFAIL.tsv family)
+c11_higher_order	NOBIN	-	front end rejects the function-typed tuple parameter `(i64 -> i64, i64) -> i64` (E1012); no .air
+c12_tuple	139	0 0 0 0	`let (a, b) = t` is now lowered to `match t { tuple(bind a, bind b) -> ... }` (was: a, b unbound, exit 0); PEAR 1 cannot run tuple patterns
+c21_interface_impl	139	0 0 0 0	interface/impl are compile-time only (not in AIR); the call goes through a dictionary PEAR 1 does not have
+c22_generic	139	0 0 0 0	PEAR 1 SEGV on a generic fn (type parameters are carried in the .air, not instantiated)
+c25_mut_global	37	0 0 0 0	WRONG: `static mut` has no storage in AIR (2.x); the global is a nullary `def` and G = ... rebinds a local (needs an AIR global declaration)
+e01_handle_resume	139	0 0 0 0	handlers: perform/handle/handler binders are in the AIR (2.2, verifies clean); PEAR 1 has no handler runtime and reports `unsupported AIR form` (ledger P04-P06)
+e02_handle_abort	139	0 0 0 0	handlers: perform/handle are in the AIR (2.2); PEAR 1 has no handler runtime and reports `unsupported AIR form` (ledger P04-P06)
+e03_resume_kw	139	0 0 0 0	handlers: perform/handle are in the AIR (2.2); PEAR 1 has no handler runtime and reports `unsupported AIR form` (ledger P04-P06)
+e04_two_ops	139	0 0 0 0	handlers: perform/handle/handler binders are in the AIR (2.2, verifies clean); PEAR 1 has no handler runtime and reports `unsupported AIR form` (ledger P04-P06)
+e05_nested_handlers	139	0 0 0 0	handlers: perform/handle/handler binders are in the AIR (2.2, verifies clean); PEAR 1 has no handler runtime and reports `unsupported AIR form` (ledger P04-P06)
+e06_pure_in_handler	139	0 0 0 0	handlers: perform/handle/handler binders are in the AIR (2.2, verifies clean); PEAR 1 has no handler runtime and reports `unsupported AIR form` (ledger P04-P06)
+m02_quote_splice	139	0 0 1 0	MSP quote/splice: `quote`/`splice` appear as unbound builtin calls in the AIR (V3); staging is resolved by the theory layer for comptime/const-fold only

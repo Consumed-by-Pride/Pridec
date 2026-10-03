@@ -286,8 +286,10 @@ fn BindingTime PartialEvaluator.binding_time(PartialEvaluator* pe, Node* e, int 
             return BindingTime.BT_DYNAMIC;
         }
 
-        case N_EXPR_UNARY:
         case N_EXPR_CAST:
+            if (e.type_ann != null && e.type_ann.kind != Nk.N_TY_NAME) { return BindingTime.BT_DYNAMIC; }   // `0 as *T` is a pointer, not the integer 0
+            return pe.binding_time(e.child(0), depth + 1);
+        case N_EXPR_UNARY:
             return pe.binding_time(e.child(0), depth + 1);
 
         case N_EXPR_IF:
@@ -466,6 +468,7 @@ fn Value PartialEvaluator.eval(PartialEvaluator* pe, Node* e, int depth)
         }
 
         case N_EXPR_CAST:
+            if (e.type_ann != null && e.type_ann.kind != Nk.N_TY_NAME) { return v_error(); }
             return pe.eval(e.child(0), depth + 1);
 
         case N_EXPR_COMPTIME:
@@ -644,10 +647,21 @@ fn Node* PartialEvaluator.residualise(PartialEvaluator* pe, Value* v, Node* orig
             Node* n = pe.arena.node(Nk.N_EXPR_INT, origin.line, origin.col);
             if (n == null) { return origin; }
             n.p.ival = (ulong)v.ival;
+            Node* origin_ann = origin.type_ann;
             n.p.width = origin.p.width;
             n.p.is_signed = origin.p.is_signed;
+            if (origin.kind == Nk.N_EXPR_IDENT && origin.resolved != null && origin.resolved.kind == Nk.N_DECL_CONST)
+            {   // a const name stands for its initialiser: the folded literal keeps the initialiser's suffix type (`5u32`)
+                Node* cd = origin.resolved;
+                if (cd.type_ann != null) { origin_ann = cd.type_ann; }
+                for (usz ci = 0; ci < cd.child_count; ci++)
+                {
+                    Node* cc = cd.children[ci];
+                    if (cc != null && cc.kind == Nk.N_EXPR_INT && cc.p.width != 0) { n.p.width = cc.p.width; n.p.is_signed = cc.p.is_signed; }
+                }
+            }
             n.flags = pfront_core::NF_SYNTHETIC;
-            n.type_ann = origin.type_ann;
+            n.type_ann = origin_ann;
             n.owner = origin.owner;
             pe.residualised = pe.residualised + 1;
             return n;

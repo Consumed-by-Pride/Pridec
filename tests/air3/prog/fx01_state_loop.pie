@@ -1,0 +1,21 @@
+-- EXIT: 55
+-- A state effect: get/put handled with a mutable cell captured BY REFERENCE; 10 puts in a loop.
+effect St
+  get : () -> i64
+  put : i64 -> i64
+fn counter : i64 -> i64 ! [St]
+  | n ->
+      let mut i : i64 = 1
+      while i <= n
+        let cur : i64 = St.get()
+        let ignored : i64 = St.put(cur + i)
+        i = i + 1
+      St.get()
+fn main : () -> i64
+  | () ->
+      let mut cell : i64 = 0
+      handle counter(10)
+        | St.get u k -> k cell
+        | St.put v k ->
+            cell = v
+            k(v)

@@ -1,0 +1,5 @@
+-- EXIT: 42
+fn identity<T> : T -> T
+  | x -> x
+fn main : () -> i64
+  | () -> identity(42i64)

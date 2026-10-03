@@ -420,7 +420,7 @@ fn f64_fmt_sci : (f64, i32, *u8, bool) -> i64
       if prec > 0i32
         buf[n]=46u8; n=n+1i64
         let mut p:i32=0i32; while p<prec then buf[n]=48u8; n=n+1i64; p=p+1i32
-      buf[n]=if upper_e then 69u8 else 101u8; n=n+1i64
+      buf[n]=(if upper_e then 69u8 else 101u8); n=n+1i64
       buf[n]=43u8; n=n+1i64; buf[n]=48u8; n=n+1i64; buf[n]=48u8; n+1i64
     else
       if neg then buf[n]=45u8; n=n+1i64
@@ -439,7 +439,7 @@ fn f64_fmt_sci : (f64, i32, *u8, bool) -> i64
           frac=frac*10.0f64; let d=frac as i64
           buf[n]=(48i64+d) as u8; n=n+1i64; frac=frac-d as f64; p=p+1i32
 
-      buf[n]=if upper_e then 69u8 else 101u8; n=n+1i64
+      buf[n]=(if upper_e then 69u8 else 101u8); n=n+1i64
       if exp10>=0i64 then buf[n]=43u8 else buf[n]=45u8; n=n+1i64
       let aexp=if exp10<0i64 then -exp10 else exp10
       if aexp<10i64 then buf[n]=48u8; n=n+1i64
@@ -959,7 +959,7 @@ fn hex_dump_range : (i64, ptr, i64, i64, i64) -> ()
       j=0i64
       while j<row
         let c=b[off+j] as i64
-        line_buf[p]=if c>=32i64&&c<127i64 then c as u8 else 46u8; p=p+1i64; j=j+1i64
+        line_buf[p]=(if c>=32i64&&c<127i64 then c as u8 else 46u8); p=p+1i64; j=j+1i64
       line_buf[p]=124u8; line_buf[p+1i64]=10u8; p=p+2i64
       os.linux.write(fd, line_buf as ptr, p)
       off = off + row

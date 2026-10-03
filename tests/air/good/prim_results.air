@@ -1,0 +1,14 @@
+// AIR 2.2 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)
+// canonical text; grammar in docs/specs/AIR.md; do not hand-edit
+air 2.2 Main "prim.pie";
+
+def main() : i64 =
+  mu~ %ret_2.
+    match unit {
+      tuple() ->
+        syscall(39) · comu pid.
+          atomic add seq_cst(pid, 1) · comu old.
+            asm "nop"(old) · comu r.
+              <r | %ret_2>;
+    };
+

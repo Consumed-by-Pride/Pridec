@@ -19,6 +19,7 @@ import air_emit;
 import air_write;
 import air_read;
 import air_facts;
+import air_audit;
 
 alias PNode = pfront_core::PNode;
 
@@ -132,6 +133,7 @@ fn int emit_air_program(PNode** roots, usz root_count, pfront_core::Interner* it
     {
         if (roots[i] == null) continue;
         lr.module_body(roots[i]);
+        air_audit::report(roots[i], i, module_name_of(roots[i]), i == 0);
     }
     air_facts::validate_module(&mod);
     int errs = air_write::write_module(&mod, out_path);

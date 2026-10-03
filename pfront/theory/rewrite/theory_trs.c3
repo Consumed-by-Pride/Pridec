@@ -796,6 +796,7 @@ fn Node* fold_builtins(Arena* a, Node* n, int depth)
     if (lit == null) { return n; }
     lit.p.ival = (ulong)v.i;
     lit.p.width = 64;
+    lit.p.aux = 99;
     lit.p.is_signed = true;
     lit.flags = lit.flags | pfront_core::NF_SYNTHETIC;
     return lit;
