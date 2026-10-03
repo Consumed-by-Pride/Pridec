@@ -21,6 +21,7 @@ import pfront_core;
 import pfront_lex;
 import air_ir;
 import air_ll;
+import air_text;
 import air_lower;
 import air_types;
 import air_write;
@@ -66,6 +67,7 @@ struct FnInfo
     Node* decl; char* name; AirTyp* ret; AirTyp*[16] pty; usz np; AirTyp* fnty; bool ext; bool queued; bool seen; bool variadic;
 }
 struct StInfo { Node* decl; char* name; AirTyp* ty; }
+struct Fat { AirTyp* elem; AirTyp* ty; bool is_str; }
 struct GlInfo { Node* decl; char* name; AirTyp* ty; }
 
 struct Low
@@ -81,6 +83,8 @@ struct Low
     AirTyp* ret_ty; char* cur_fn; Node* cur_node;
     int errors; int fn_errors; int fns_ok; int fail_fn; Node* entry_decl;
     bool uses_alloc;
+    Fat[48] fats; usz nfat;
+    int unchecked;
 }
 
 // ── small utilities ────────────────────────────────────────────────────────
@@ -195,6 +199,8 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
         case Nk.N_TY_NAME: case Nk.N_TY_PATH:
         {
             char* nm = air_types::air_node_text(t, lw.it);
+            if (nm != null && seq(nm, "str")) { return lw.fat_ty(null, true); }
+            if (nm != null && seq(nm, "ptr")) { return lw.ptr(lw.m.t_u8); }   // the untyped pointer
             if (nm != null)
             {
                 AirTyp* pr = air_types::air_prim_ty(lw.m, nm);
@@ -211,6 +217,11 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
             Node* c0 = t.children[0];
             AirTyp* in_ = (c0 != null && c0.kind == Nk.N_TY_UNIT) ? lw.m.t_u8 : lw.ty(c0);   // *() is an untyped pointer: ptr(u8)
             return in_ == null ? null : lw.ptr(in_);
+        }
+        case Nk.N_TY_SLICE:
+        {
+            AirTyp* el = t.child_count > 0 ? lw.ty(t.children[0]) : null;
+            return el == null ? null : lw.fat_ty(el, false);
         }
         case Nk.N_TY_ARRAY:
         {
@@ -468,6 +479,12 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         case Nk.N_EXPR_CHAR: return lw.m.t_char;
         case Nk.N_EXPR_FLOAT: return lw.m.t_f64;
         case Nk.N_EXPR_STRING: return lw.ptr(lw.m.t_u8);
+        case Nk.N_EXPR_ARRAY:
+        {
+            if (n.child_count == 0) { return null; }
+            AirTyp* e0 = lw.hint(n.children[0]);
+            return e0 == null ? null : air_ir::air_mk_typ_array(lw.a, e0, (long)n.child_count);
+        }
         case Nk.N_EXPR_IDENT:
         {
             Node* r = n.resolved;
@@ -509,6 +526,7 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         {
             AirTyp* b = lw.hint(n.children[0]);
             if (b != null && b.tag == ATYP_ARRAY) { return b.args[0]; }
+            AirTyp* fe = lw.fat_elem(b); if (fe != null) { return fe; }
             return lw.pointee(b);
         }
         case Nk.N_EXPR_FIELD:
@@ -582,6 +600,114 @@ fn GlInfo* Low.global_for(Low* lw, Node* d)
     return g;
 }
 
+
+// ── fat pointers: `[T]` and `str` are the record { ptr: ptr(T), len: i64 } ──────────────────────
+fn usz mang(AirTyp* t, char* b, usz n, usz cap)
+{
+    if (t == null || n + 8 >= cap) { return n; }
+    if (t.tag == ATYP_PTR) { n += (usz)snprintf(b + n, (usz)(cap - n), "p."); return mang(t.args[0], b, n, cap); }
+    if (t.tag == ATYP_NOMINAL) { return n + (usz)snprintf(b + n, (usz)(cap - n), "%s", t.name); }
+    if (t.tag == ATYP_ARRAY) { n += (usz)snprintf(b + n, (usz)(cap - n), "a%ld.", t.ival); return mang(t.args[0], b, n, cap); }
+    return n + (usz)snprintf(b + n, (usz)(cap - n), "%s", air_text::typ_kw(t.tag));
+}
+fn AirTyp* Low.fat_ty(Low* lw, AirTyp* elem, bool is_str)
+{
+    for (usz i = 0; i < lw.nfat; i++)
+    {
+        if (lw.fats[i].is_str == is_str && (is_str || air_ll::ty_eq(lw.fats[i].elem, elem))) { return lw.fats[i].ty; }
+    }
+    if (lw.nfat >= 48) { lw.unsup(null, "more than 48 slice types"); return null; }
+    if (is_str) { elem = lw.m.t_u8; }
+    char[200] nm; usz n = 0;
+    if (is_str) { snprintf(&nm[0], 200, "str"); }
+    else { n = (usz)snprintf(&nm[0], 200, "slice."); mang(elem, &nm[0], n, 200); }
+    char* name = lw.dup(&nm[0]);
+    AirTyp* t = lw.nominal(name);
+    lw.fats[lw.nfat].elem = elem; lw.fats[lw.nfat].ty = t; lw.fats[lw.nfat].is_str = is_str; lw.nfat++;
+    AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, name);
+    AirCtorDecl* c = air_ir::air_mk_ctor_decl(lw.a, name);
+    c.result_ty = t;
+    d.add_ctor(c);
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("ptr"), lw.ptr(elem), AMULT_UNR));
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("len"), lw.m.t_i64, AMULT_UNR));
+    lw.m.add_decl(d);
+    return t;
+}
+// the element type when `t` is a slice (or `str`), else null
+fn AirTyp* Low.fat_elem(Low* lw, AirTyp* t)
+{
+    if (t == null || t.tag != ATYP_NOMINAL) { return null; }
+    for (usz i = 0; i < lw.nfat; i++) { if (lw.fats[i].ty == t || (lw.fats[i].ty.name != null && seq(lw.fats[i].ty.name, t.name))) { return lw.fats[i].elem; } }
+    return null;
+}
+fn Vx Low.mk_fat(Low* lw, AirTyp* ft, Vx ptr, Vx len)
+{
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_RECORD;
+    AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("ptr"); f0.value = ptr.p;
+    AirFieldInit* f1 = air_ir::air_new_AirFieldInit(lw.a); f1.name = lw.dup("len"); f1.value = len.p;
+    p.rec_inits[0] = f0; p.rec_inits[1] = f1; p.rec_init_count = 2;
+    return lw.let_(p, ft, "_fat");
+}
+fn Vx Low.field_of(Low* lw, Vx v, char* f, long k, AirTyp* t)
+{
+    Ins* ins = lw.push(I_FIELD); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_f"); ins.a = v.p; ins.fld = f; ins.idx = k;
+    return lw.vref(ins.name, t);
+}
+// a slice over an array that lives in memory (aliases it: writes through the slice are visible in the array)
+fn Vx Low.slice_at(Low* lw, AirPrd* ptr, AirTyp* arr, AirTyp* sl)
+{
+    Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int(0, lw.m.t_i64);
+    Vx g = lw.gep(ptr, arr, &ix[0], 2, arr.args[0]);
+    return lw.mk_fat(sl, g, lw.lit_int(arr.ival, lw.m.t_i64));
+}
+// an array VALUE (a literal, a call result) becomes a slice over a stack copy of it
+fn Vx Low.array_to_slice(Low* lw, Vx arr, AirTyp* sl)
+{
+    Vx slot = lw.alloca_(arr.t);
+    lw.store(slot.p, arr);
+    return lw.slice_at(slot.p, arr.t, sl);
+}
+// trap unless 0 <= i < len (one unsigned compare); `unchecked { }` removes the test
+fn void Low.bounds(Low* lw, Vx i, Vx len)
+{
+    if (lw.unchecked > 0 || !lw.live()) { return; }
+    AirTyp* u = lw.m.t_u64;
+    Vx c = lw.binop(ABIN_LT, lw.coerce(i, u), lw.coerce(len, u));
+    usz ok = lw.blk("bnd.ok"); usz bad = lw.blk("bnd.fail");
+    lw.t_cond(c, ok, bad);
+    lw.cur = bad; lw.t_end(T_TRAP);
+    lw.cur = ok;
+}
+fn Vx Low.array_lit(Low* lw, Node* n, AirTyp* want)
+{
+    AirTyp* el = null; AirTyp* sl = null;
+    if (want != null && want.tag == ATYP_ARRAY) { el = want.args[0]; }
+    else if (want != null) { AirTyp* fe = lw.fat_elem(want); if (fe != null && !lw.is_str_t(want)) { el = fe; sl = want; } }
+    Vx[64] vs; usz cnt = 0;
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        if (cnt >= 64) { lw.unsup(n, "array literal with more than 64 elements"); return lw.unit(); }
+        Vx v = lw.expr(n.children[i], el);
+        if (el == null) { el = v.t; }
+        if (el != null) { v = lw.coerce_arg(n.children[i], v, el); }
+        vs[cnt] = v; cnt++;
+    }
+    if (el == null) { lw.err(n, "empty array literal without a known element type", null); return lw.unit(); }
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_ARRAY;
+    for (usz i = 0; i < cnt; i++) { p.add_sub(vs[i].p); }
+    AirTyp* at = air_ir::air_mk_typ_array(lw.a, el, (long)cnt);
+    Vx v = lw.let_(p, at, "_arr");
+    if (sl != null) { return lw.array_to_slice(v, sl); }
+    return v;
+}
+fn bool Low.is_str_t(Low* lw, AirTyp* t)
+{
+    if (t == null || t.tag != ATYP_NOMINAL) { return false; }
+    for (usz i = 0; i < lw.nfat; i++) { if (lw.fats[i].is_str && seq(lw.fats[i].ty.name, t.name)) { return true; } }
+    return false;
+}
+
 // ── expressions ────────────────────────────────────────────────────────────
 fn bool Low.is_unit_t(Low* lw, AirTyp* t) { return t != null && t.tag == ATYP_UNIT; }
 
@@ -637,7 +763,9 @@ fn Vx Low.lit(Low* lw, Node* n, AirTyp* want)
             char* tmp = lw.a.dup(n.p.sptr == null ? (char*)"" : n.p.sptr, sl);
             usz dl = sl == 0 ? 0 : air_lower::lit_decode(n.p.sptr, sl, tmp);
             AirPrd* p = n.kind == Nk.N_EXPR_BYTES ? air_ir::air_mk_bytes(lw.a, tmp, dl) : air_ir::air_mk_str(lw.a, tmp, dl);
-            Vx r; r.p = p; r.t = lw.ptr(lw.m.t_u8); p.ty = r.t; return r;
+            Vx r; r.p = p; r.t = lw.ptr(lw.m.t_u8); p.ty = r.t;
+            if (n.kind == Nk.N_EXPR_STRING && want != null && lw.is_str_t(want)) { return lw.mk_fat(want, r, lw.lit_int((long)dl, lw.m.t_i64)); }   // str = { ptr, len }
+            return r;
         }
         default: break;
     }
@@ -731,12 +859,24 @@ fn bool Low.place(Low* lw, Node* n, Pl* out)
                 Pl bp;
                 if (!lw.place(n.children[0], &bp)) { lw.unsup(n, "indexing an array that is not in memory"); return false; }
                 Vx z = lw.lit_int(0, lw.m.t_i64); Vx[2] ix; ix[0] = z; ix[1] = lw.coerce(i, lw.m.t_i64);
+                if (!(i.p != null && i.p.tag == APRD_INT && i.p.ival >= 0 && i.p.ival < bt.ival)) { lw.bounds(ix[1], lw.lit_int(bt.ival, lw.m.t_i64)); }
                 Vx g = lw.gep(bp.ptr, bp.t, &ix[0], 2, bt.args[0]);
                 out.ptr = g.p; out.t = bt.args[0]; return true;
             }
+            AirTyp* se = lw.fat_elem(bt);
+            if (se != null)
+            {
+                Vx sv = lw.expr(n.children[0], null);
+                Vx sp = lw.field_of(sv, "ptr", 0, lw.ptr(se)); Vx sn = lw.field_of(sv, "len", 1, lw.m.t_i64);
+                Vx ii = lw.coerce(i, lw.m.t_i64);
+                lw.bounds(ii, sn);
+                Vx[1] ix1; ix1[0] = ii;
+                Vx g = lw.gep(sp.p, se, &ix1[0], 1, se);
+                out.ptr = g.p; out.t = se; return true;
+            }
             Vx b = lw.expr(n.children[0], null);
             AirTyp* e = lw.pointee(b.t);
-            if (e == null) { lw.err(n, "indexing a value that is neither a pointer nor an array", null); return false; }
+            if (e == null) { lw.err(n, "indexing a value that is neither a pointer, an array nor a slice", null); return false; }
             Vx[1] ix; ix[0] = i.t != null && air_ll::ty_is_int(i.t) ? i : lw.coerce(i, lw.m.t_i64);
             Vx g = lw.gep(b.p, e, &ix[0], 1, e);
             out.ptr = g.p; out.t = e; return true;
@@ -805,6 +945,12 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
 {
     if (a.t == null || air_ll::ty_eq(a.t, want)) { return a; }
     if (a.p != null && a.p.tag == APRD_INT && air_ll::ty_is_int(want)) { return lw.lit_int(a.p.ival, want); }
+    if (a.t.tag == ATYP_ARRAY && lw.fat_elem(want) != null && !lw.is_str_t(want) && air_ll::ty_eq(a.t.args[0], lw.fat_elem(want))) {
+        Pl pl;   // an array that has an address decays to a slice that ALIASES it
+        if (at != null && (at.kind == Nk.N_EXPR_IDENT || at.kind == Nk.N_EXPR_FIELD || at.kind == Nk.N_EXPR_INDEX || at.kind == Nk.N_EXPR_DEREF)
+            && lw.place(at, &pl) && air_ll::ty_eq(pl.t, a.t)) { return lw.slice_at(pl.ptr, pl.t, want); }
+        return lw.array_to_slice(a, want);
+    }
     // lossless integer widening is implicit (a `u8` returned from an `i64` function); narrowing needs `as`
     if (air_ll::ty_is_int(a.t) && air_ll::ty_is_int(want) && air_ll::ty_bits(a.t) < air_ll::ty_bits(want)
         && (air_ll::ty_is_signed(a.t) == air_ll::ty_is_signed(want) || !air_ll::ty_is_signed(a.t)))
@@ -866,6 +1012,11 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_EXPR_INDEX: case Nk.N_EXPR_FIELD: case Nk.N_EXPR_DEREF:
         {
             Pl p;
+            if (n.kind == Nk.N_EXPR_FIELD && n.child_count > 0)
+            {
+                AirTyp* abt = lw.hint(n.children[0]); char* af = lw.text(n);
+                if (abt != null && abt.tag == ATYP_ARRAY && af != null && seq(af, "len")) { return lw.lit_int(abt.ival, lw.m.t_i64); }
+            }
             if (lw.place(n, &p)) { return lw.load(p.ptr, p.t); }
             if (n.kind == Nk.N_EXPR_FIELD && n.child_count > 0)
             {
@@ -889,6 +1040,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             lw.unsup(n, "address of a value that is not in memory"); return lw.unit();
         }
         case Nk.N_EXPR_STRUCT_LIT: return lw.struct_lit(n);
+        case Nk.N_EXPR_ARRAY: return lw.array_lit(n, want);
         case Nk.N_EXPR_TUPLE:
         {
             AirTyp* wt = (want != null && want.tag == ATYP_TUPLE) ? want : null;
@@ -938,7 +1090,12 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_EXPR_TRAP: lw.t_end(T_TRAP); return lw.unit();
         case Nk.N_EXPR_UNREACHABLE: lw.t_end(T_UNREACH); return lw.unit();
         case Nk.N_EXPR_UNSAFE: case Nk.N_EXPR_UNCHECKED:
-            return n.child_count > 0 ? lw.expr(n.children[n.child_count - 1], want) : lw.unit();
+        {
+            if (n.kind == Nk.N_EXPR_UNCHECKED) { lw.unchecked++; }
+            Vx uv = n.child_count > 0 ? lw.expr(n.children[n.child_count - 1], want) : lw.unit();
+            if (n.kind == Nk.N_EXPR_UNCHECKED) { lw.unchecked--; }
+            return uv;
+        }
         default:
             lw.unsup(n, "expression"); return lw.unit();
     }
@@ -1166,7 +1323,7 @@ fn void Low.let_decl(Low* lw, Node* n)
                    || (n.flags & pfront_core::NF_ADDR_TAKEN) != 0 || (pat.flags & pfront_core::NF_ADDR_TAKEN) != 0;
     if (pat.kind == Nk.N_PAT_WILDCARD) { return; }
     char* nm = lw.uname(lw.text(pat));
-    if (mutable || (v.p == null))
+    if (mutable || (v.p == null) || t.tag == ATYP_ARRAY)   // arrays live in memory: they can be sliced / indexed by address
     {
         Vx s = lw.alloca_(t);
         // the slot gets the user's name so the .air stays readable
@@ -1677,6 +1834,7 @@ fn int emit_low_program(Node** roots, usz root_count, pfront_core::Interner* it,
     lw.blks = (Blk*)calloc(MAXBLK, Blk::size); lw.nb = 0;
     lw.vars = (VarB*)calloc(MAXVAR, VarB::size); lw.nvars = 0;
     lw.names = (char**)calloc(MAXNM, 8); lw.nnames = 0;
+    lw.nfat = 0; lw.unchecked = 0;
     lw.errors = 0; lw.fn_errors = 0; lw.fns_ok = 0; lw.fail_fn = 0; lw.cur = NOBLK;
     Node* mn = null;
     for (usz i = 0; i < root_count && mn == null; i++) { mn = find_main(roots[i], it); }
