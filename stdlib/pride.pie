@@ -33,15 +33,15 @@ fn perform : (i64, i64) -> i64                         | (op, a) -> effects.effe
 fn resume : i64 -> i64                                 | v -> effects.effect_resume(v)
 
 -- Untyped HOSE (Fibers, Prompt Markers, Dynamic-Winding, Local Scoping)
-fn fiber_spawn : (ptr, ptr) -> effects.Fiber           | (f, a) -> effects.fiber_spawn(f, a)
-fn fiber_yield : i64 -> i64                            | v -> effects.fiber_yield(v)
-fn fiber_resume : (*effects.Fiber, i64) -> i64         | (f, a) -> effects.fiber_resume(f, a)
-fn prompt_install : i64 -> effects.PromptMarker        | p -> effects.prompt_install(p)
-fn prompt_unwind : *effects.PromptMarker -> ()         | p -> effects.prompt_unwind(p)
+fn fiber_spawn : (ptr, ptr) -> effects.Fiber           | (f, a) -> effects.Fiber { raw: effects.fiber_spawn(f, a) }
+fn fiber_yield : i64 -> i64                            | v -> effects.fiber_yield(v) as i64
+fn fiber_resume : (*effects.Fiber, i64) -> i64         | (f, a) -> effects.fiber_resume(f.raw, a) as i64
+fn prompt_install : i64 -> effects.PromptMarker        | p -> effects.PromptMarker { id: effects.prompt_install(p) }
+fn prompt_unwind : *effects.PromptMarker -> ()         | p -> effects.prompt_unwind(p.id)
 fn is_in_scope : i64 -> bool                           | p -> effects.is_in_scope(p)
-fn scoped_yield_in : (i64, i64, i64) -> i64            | (p, o, v) -> effects.scoped_yield_in(p, o, v)
-fn scoped_yield_out : (i64, i64, i64) -> i64           | (p, o, v) -> effects.scoped_yield_out(p, o, v)
-fn cont_split : ptr -> effects.Continuation            | k -> effects.cont_split(k)
+fn scoped_yield_in : (i64, i64, i64) -> i64            | (p, o, v) -> effects.scoped_yield_in(p, o, v) as i64
+fn scoped_yield_out : (i64, i64, i64) -> i64           | (p, o, v) -> effects.scoped_yield_out(p, o, v) as i64
+fn cont_split : ptr -> effects.Continuation            | k -> effects.Continuation { raw: effects.cont_split(k) }
 fn cont_fuse : *effects.Continuation -> ptr            | c -> effects.cont_fuse(c)
 fn cont_verify_fusion_law : (*effects.Continuation, i64) -> bool | (c, v) -> effects.cont_verify_fusion_law(c, v)
 fn dynamic_wind_push : (i64, ptr, ptr, ptr) -> ()      | (p, i, o, e) -> effects.dynamic_wind_push(p, i, o, e)
@@ -76,11 +76,11 @@ fn tag_of_ptr : ptr -> i64                             | p -> subtyping.tag_of_u
 fn cast_union : (i64, i64, i64) -> (i64, bool)         | (v, s, e) -> subtyping.cast_union_checked(v, s, e)
 
 -- AST Term Rewriting
-fn rule_new : (ptr, ptr, i64) -> *rewrite.Rule         | (l, r, p) -> rewrite.rule_new(l, r, p)
+fn rule_new : (ptr, ptr, i64) -> rewrite.Rule          | (l, r, p) -> rewrite.rule_new(l as i64, r as i64, p)
 fn rule_destroy : *rewrite.Rule -> ()                  | r -> rewrite.rule_destroy(r)
 fn rewrite_engine_new : i64 -> rewrite.RewriteEngine   | s -> rewrite.rewrite_engine_new(s)
 fn rewrite_engine_destroy : *rewrite.RewriteEngine -> () | e -> rewrite.rewrite_engine_destroy(e)
-fn engine_add_rule : (*rewrite.RewriteEngine, ptr, ptr, i64) -> () | (e, l, r, p) -> rewrite.engine_add_rule(e, l, r, p)
+fn engine_add_rule : (*rewrite.RewriteEngine, ptr, ptr, i64) -> () | (e, l, r, p) -> rewrite.engine_add_rule(e, l as i64, r as i64, p)
 fn engine_rewrite : (*rewrite.RewriteEngine, ptr) -> str.string.String | (e, i) -> rewrite.engine_rewrite_loop(e, i)
 
 -- IRDL (The Crown Jewel)

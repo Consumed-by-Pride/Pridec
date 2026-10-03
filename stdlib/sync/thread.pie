@@ -32,4 +32,4 @@ fn thread_current_id : () -> u64
   | () -> os.linux.pthread_self()
 
 fn thread_yield : () -> i32
-  | () -> os.linux.sched_yield()
+  | () -> os.linux.sched_yield() as i32

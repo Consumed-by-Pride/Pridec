@@ -501,6 +501,7 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
         while (true)
         {
             bool clash = seq(nm, "malloc") || seq(nm, "free") || seq(nm, "write") || seq(nm, "syscall") || seq(nm, "main") && !lw.is_entry(d);
+            if (!clash && lw.is_extern_symbol(nm)) { clash = true; }   // an extern keeps its C symbol, so a Pride def of the same name is the one renamed
             for (usz i = 0; i < lw.nfn; i++) { if (seq(lw.fns[i].name, nm)) { clash = true; } }
             if (!clash) { break; }
             char[160] b; k++; snprintf(&b[0], 160, "%s.%d", base, k); nm = lw.dup(&b[0]);
@@ -1834,6 +1835,22 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
     }
 }
 
+fn bool Low.is_extern_symbol(Low* lw, char* nm)
+{
+    for (usz r = 0; r < lw.nroots; r++)
+    {
+        Node* root = lw.roots[r]; if (root == null) { continue; }
+        for (usz i = 0; i < root.child_count; i++)
+        {
+            Node* c = root.children[i];
+            if (c == null || (c.kind != Nk.N_DECL_FN && c.kind != Nk.N_DECL_EXTERN_FN)) { continue; }
+            usz esl = 0; char* esp = pfront_core::ext_sym_of(c, &esl);
+            if (esp != null) { char[160] sb; usz k = esl < 159 ? esl : 159; for (usz j = 0; j < k; j++) { sb[j] = esp[j]; } sb[k] = 0; if (seq(&sb[0], nm)) { return true; } }
+            else if (c.kind == Nk.N_DECL_EXTERN_FN) { char* cn = lw.text(c); if (cn != null && seq(cn, nm)) { return true; } }
+        }
+    }
+    return false;
+}
 fn Node* Low.type_in_root(Low* lw, Node* root, char* nm)
 {
     if (nm == null || root == null) { return null; }
@@ -3516,7 +3533,25 @@ fn Vx Low.perform_op(Low* lw, Node* eff, Node* op, Node** args, usz na, Node* at
 // ── resume ──
 fn Vx Low.resume_do(Low* lw, Node* arg, Node* at)
 {
-    if (!lw.arm.on) { lw.err(at, "resume outside a handler arm", null); return lw.unit(); }
+    if (!lw.arm.on)
+    {
+        // outside a handler arm `resume(x)` is an ordinary call when the program defines a function of that name
+        // (stdlib/pride/effects.pie wraps the runtime's __pride_resume as `resume`)
+        Node* rf = arg == null ? null : lw.fn_by_name("resume");
+        FnInfo* f = rf == null ? null : lw.fn_for(rf);
+        if (f != null && f.np == 1)
+        {
+            lw.queue(f);
+            Vx a = lw.expr(arg, f.pty[0]); a = lw.coerce_arg(arg, a, f.pty[0]);
+            if (!lw.live()) { return lw.unit(); }
+            Ins* ci = lw.push(I_CALL); if (ci == null) { return lw.unit(); }
+            ci.name = lw.fresh("_r"); ci.a = air_ir::air_mk_var(lw.a, f.name); ci.nargs = 1; ci.args[0] = a.p;
+            Vx r = lw.vref(ci.name, f.ret);
+            if (!f.ext) { lw.check_unw(); }
+            return r;
+        }
+        lw.err(at, "resume outside a handler arm", null); return lw.unit();
+    }
     if (arg != null)
     {
         Vx v = lw.expr(arg, lw.arm.opret);
@@ -3994,7 +4029,7 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
             FnInfo* fq = lw.fn_for(c);
             if (fq != null) { lw.queue(fq); nroots_q++; }
         }
-        if (nroots_q == 0) { printf("air-low: error: no `main` function and no function to lower\n"); arena.destroy(); return 1; }
+        if (nroots_q == 0) { printf("air-low: note: no function to lower (constants only); writing an empty library module\n"); }
     }
     // worklist: functions are lowered as they are first referenced
     bool progress = true;

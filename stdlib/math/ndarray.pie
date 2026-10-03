@@ -81,7 +81,7 @@ fn ndarray_layout_offset : (*NdArrayLayout, ptr) -> i64
 
 fn ndarray_layout_slice_view : (*NdArrayLayout, i64, i64, i64) -> NdArrayLayout
   | (ly, dim, start, end_) ->
-    let new_ly = ndarray_layout_new(ly.ndim, ly.shape, ly.strides, ly.offset)
+    let mut new_ly = ndarray_layout_new(ly.ndim, ly.shape, ly.strides, ly.offset)
     let sh = new_ly.shape as *i64
     let st = new_ly.strides as *i64
     sh[dim] = end_ - start
