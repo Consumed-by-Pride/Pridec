@@ -255,6 +255,13 @@ fn void AirW.float_lit(AirW* w, double v)
 }
 
 // ── Producers ─────────────────────────────────────────────────────────────
+// AIR 2.1: syscall/asm/atomic deliver their result to a consumer (` \xc2\xb7 k`). A missing
+// consumer is a writer error: the result of the primitive would be unreachable.
+fn void AirW.result(AirW* w, AirCns* k, int d)
+{
+    if (k == null) { w.err("syscall/asm/atomic/perform without a result continuation (AIR 2.1/2.2)"); return; }
+    w.s(" \xc2\xb7 "); w.cns(k, d);
+}
 fn void AirW.prds(AirW* w, AirPrd** ps, usz n, int d)
 {
     w.c('(');
@@ -578,6 +585,7 @@ fn void AirW.cmd(AirW* w, AirCmd* c, int d)
         case ACMD_PERFORM:
         {
             w.s("perform "); w.name(c.eff_op); w.c('('); w.prd(c.prd, d); w.c(')');
+            w.result(c.cns, d);      // AIR 2.2: the value the handler resumes with
             return;
         }
         case ACMD_RESUME:  w.s("resume(");  w.prd(c.prd, d); w.c(')'); return;
@@ -602,11 +610,15 @@ fn void AirW.cmd(AirW* w, AirCmd* c, int d)
             else if (c.asm_dialect == 2) { w.s(" att"); }
             else if (c.asm_dialect != 0) { w.err("unknown asm dialect"); }
             w.c(' '); w.opt_str(c.asm_text); w.prds(&c.prds[0], c.prd_count, d);
+            w.result(c.cns, d);
             return;
         }
         case ACMD_SYSCALL:
         {
-            w.s("syscall "); w.prd(c.prd, d); w.prds(&c.prds[0], c.prd_count, d);
+            w.s("syscall("); w.prd(c.prd, d);
+            for (usz i = 0; i < c.prd_count; i++) { w.s(", "); w.prd(c.prds[i], d); }
+            w.c(')');
+            w.result(c.cns, d);
             return;
         }
         case ACMD_ATOMIC:
@@ -614,7 +626,10 @@ fn void AirW.cmd(AirW* w, AirCmd* c, int d)
             char* op = air_text::atomic_op_name(c.atomic_op);
             char* ord = air_text::atomic_order_name(c.atomic_order);
             if (op == null || ord == null) { w.err("atomic op/order out of range"); op = "load"; ord = "relaxed"; }
-            w.s("atomic "); w.s(op); w.c(' '); w.s(ord); w.c('('); w.prd(c.prd, d); w.c(')');
+            w.s("atomic "); w.s(op); w.c(' '); w.s(ord); w.c('('); w.prd(c.prd, d);
+            for (usz i = 0; i < c.prd_count; i++) { w.s(", "); w.prd(c.prds[i], d); }
+            w.c(')');
+            w.result(c.cns, d);
             return;
         }
         case ACMD_FENCE:
@@ -777,14 +792,14 @@ fn int write_module(AirModule* m, char* path)
     void* f = (path != null) ? fopen(path, "w") : fdopen(1, "w");
     if (f == null) { return -1; }
     w.out = f;
-    w.s("// AIR 2.0 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)\n");
+    w.s("// AIR 2.2 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)\n");
     w.s("// canonical text; grammar in docs/specs/AIR.md; do not hand-edit\n");
     w.dg_on = (getenv("AIR_DIGEST") != null);
     w.dg_quiet = false;
     w.dg_total = 0;
     w.dg_verbose = (getenv("AIR_DIGEST_V") != null);
     w.dg = 0;
-    w.s("air 2.0 "); w.name(m.name); w.c(' '); w.opt_str(m.source_path); w.s(";\n\n");
+    w.s("air 2.2 "); w.name(m.name); w.c(' '); w.opt_str(m.source_path); w.s(";\n\n");
     for (usz i = 0; i < m.decl_count; i++) { w.decl(m.decls[i]); }
     if (path != null) { fclose(f); } else { fflush(f); }
     void* se = fdopen(2, "w");

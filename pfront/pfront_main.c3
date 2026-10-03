@@ -37,11 +37,13 @@ import pfront_dump;
 import pfront_constfold;
 import pfront_sccp;
 import air;
+import air_audit;
 
 // --emit-air-pretty selects the legacy human-oriented AIR dump (diagnostic only).
 bool g_air_pretty = false;
 // --air-roundtrip: test-only differential check of the .air text format (see air.c3).
 bool g_air_roundtrip = false;
+bool g_air_audit = false;      // --air-audit: report source constructs the lowering never consumed
 
 extern fn void* malloc(usz size);
 extern fn void  free(void* ptr);
@@ -612,7 +614,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 for (usz i = 0; i < amc && an < 256; i++)
                 {
                     pfront_core::PNode* aa = ld.module_ast_at(i);
-                    if (aa != null) { air_roots[an] = aa; an = an + 1; }
+                    if (aa != null) { air_audit::set_path(an, ld.module_path_at(i)); air_roots[an] = aa; an = an + 1; }
                 }
                 if (an == 0) { air_roots[0] = entry.ast; an = 1; }
                 int werrs = air::emit_air_program(&air_roots[0], an, it, path);
@@ -735,6 +737,7 @@ fn void print_usage()
     printf("  -O0 | -O1 | -O2 | -O3   optimisation level for the middle end (default -O2)\n");
     printf("  --no-opt          disable the optimiser (same as -O0 for the middle end)\n");
     printf("  --emit-air        write the whole program as AIR 2.0 text next to the source (FILE.air)\n");
+    printf("  --air-audit       with --emit-air: list source constructs the AIR lowering never consumed\n");
     printf("  --emit-air-pretty print the entry module in the old human-oriented, lossy AIR notation\n");
     printf("  --emit-ast        print the annotated AST with pass flags (pure, readonly, reduction, indep, ...)\n");
     printf("  --emit-sexp       print the AST as s-expressions\n");
@@ -850,6 +853,7 @@ fn int main(String[] args)
         else if (streq(a, "--emit-sexp"))    { emit_ast = true; emit_sexp = true; }
         else if (streq(a, "--emit-air"))     { emit_air = true; }
         else if (streq(a, "--air-roundtrip")) { g_air_roundtrip = true; }
+        else if (streq(a, "--air-audit")) { g_air_audit = true; air_audit::enable(true); }
         else if (streq(a, "--emit-air-pretty")) { emit_air = true; g_air_pretty = true; }
         else if (streq(a, "--emit-bc") || streq(a, "--emit-exe"))
         {

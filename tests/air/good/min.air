@@ -1,6 +1,6 @@
-// AIR 2.0 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)
+// AIR 2.2 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)
 // canonical text; grammar in docs/specs/AIR.md; do not hand-edit
-air 2.0 Main "min.pie";
+air 2.2 Main "min.pie";
 
 extern declare write(_ : i32, _ : ptr(u8), _ : i64) : i64;
 

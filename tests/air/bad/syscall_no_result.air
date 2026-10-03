@@ -1,0 +1,9 @@
+// EXPECT: check
+air 2.2 Main "prim.pie";
+
+def main() : i64 =
+  mu~ %ret_2.
+    match unit {
+      tuple() ->
+        syscall(39);
+    };

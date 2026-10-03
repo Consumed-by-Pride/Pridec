@@ -43,6 +43,7 @@ struct Rd
     char      punct;
     long      ival;
     double    fval;
+    int       ver_minor;   // header version 2.<ver_minor>: 2.1 requires result continuations (2.2: perform too)
     char*     tb;      // decoded token text (ids, strings)
     usz       tlen;
     int       tline;
@@ -881,6 +882,13 @@ fn int Rd.order(Rd* r)
     r.fail("expected a memory-order name");
     return 0;
 }
+// AIR 2.1: syscall/asm/atomic end with ` \xc2\xb7 k` (result continuation). A 2.0 file has none
+// and means "result discarded" (cns stays null); a 2.1 file must carry one.
+fn void Rd.result(Rd* r, AirCmd* c)
+{
+    if (r.kind == T_MID) { r.next(); c.cns = r.cns(); }
+    else if (r.ver_minor >= 1) { r.fail("expected ` \xc2\xb7 continuation` after a syscall/asm/atomic (AIR 2.1)"); }
+}
 fn AirCmd* Rd.cmd(Rd* r)
 {
     if (r.failed) { return null; }
@@ -991,7 +999,11 @@ fn AirCmd* Rd.cmd(Rd* r)
     {
         r.next();
         AirCmd* c = r.new_cmd(ACMD_PERFORM); if (c == null) { return null; }
-        c.eff_op = r.name(); r.expect_p('('); c.prd = r.prd(); r.expect_p(')'); return c;
+        c.eff_op = r.name(); r.expect_p('('); c.prd = r.prd(); r.expect_p(')');
+        // AIR 2.2: ` \xc2\xb7 k` receives the value the handler resumes with (2.0/2.1 files have none)
+        if (r.kind == T_MID) { r.next(); c.cns = r.cns(); }
+        else if (r.ver_minor >= 2) { r.fail("expected ` \xc2\xb7 continuation` after a perform (AIR 2.2)"); }
+        return c;
     }
     if (r.is_kw("resume") || r.is_kw("assert") || r.is_kw("assume") || r.is_kw("ret"))
     {
@@ -1046,25 +1058,22 @@ fn AirCmd* Rd.cmd(Rd* r)
             }
         }
         r.expect_p(')');
+        r.result(c);
         return c;
     }
     if (r.is_kw("syscall"))
     {
         r.next();
         AirCmd* c = r.new_cmd(ACMD_SYSCALL); if (c == null) { return null; }
-        c.prd = r.prd();
         r.expect_p('(');
-        if (!r.is_p(')'))
+        c.prd = r.prd();
+        while (r.eat_p(','))
         {
-            while (!r.failed)
-            {
-                if (c.prd_count >= 16) { r.fail("more than 16 syscall operands"); return null; }
-                c.prds[c.prd_count] = r.prd(); c.prd_count++;
-                if (r.eat_p(',')) { continue; }
-                break;
-            }
+            if (c.prd_count >= 16) { r.fail("more than 16 syscall operands"); return null; }
+            c.prds[c.prd_count] = r.prd(); c.prd_count++;
         }
         r.expect_p(')');
+        r.result(c);
         return c;
     }
     if (r.is_kw("atomic"))
@@ -1079,7 +1088,14 @@ fn AirCmd* Rd.cmd(Rd* r)
         if (op < 0) { r.fail("expected an atomic operation name"); return null; }
         r.next();
         c.atomic_op = op; c.atomic_order = r.order();
-        r.expect_p('('); c.prd = r.prd(); r.expect_p(')');
+        r.expect_p('('); c.prd = r.prd();
+        while (!r.failed && r.eat_p(','))
+        {
+            if (c.prd_count >= 16) { r.fail("more than 16 atomic operands"); return null; }
+            c.prds[c.prd_count] = r.prd(); c.prd_count++;
+        }
+        r.expect_p(')');
+        r.result(c);
         return c;
     }
     if (r.is_kw("fence"))
@@ -1266,7 +1282,7 @@ fn bool read_text(char* text, usz len, char* path, AirArena* a, AirModule* m, bo
     r.a = a; r.failed = false; r.path = path; r.quiet = quiet;
     r.errmsg = null; r.err_line = 0; r.err_col = 0;
     r.tb = (char*)malloc(len + 16);
-    r.tlen = 0; r.tline = 1; r.tcol = 1;
+    r.tlen = 0; r.tline = 1; r.tcol = 1; r.ver_minor = 0;
     if (r.tb == null) { return false; }
     r.next();
     // header:  air 2.0 NAME SOURCE ;
@@ -1274,8 +1290,10 @@ fn bool read_text(char* text, usz len, char* path, AirArena* a, AirModule* m, bo
     if (!r.failed)
     {
         if (r.kind != T_FLOAT) { r.fail("expected the version after 'air'"); }
-        else if (r.fval != 2.0) { r.fail("unsupported AIR version (this reader implements 2.0)"); }
-        else { r.next(); }
+        else if (r.fval == 2.0) { r.ver_minor = 0; r.next(); }
+        else if (r.fval == 2.1) { r.ver_minor = 1; r.next(); }
+        else if (r.fval == 2.2) { r.ver_minor = 2; r.next(); }
+        else { r.fail("unsupported AIR version (this reader implements 2.0, 2.1 and 2.2)"); }
     }
     char* mname = r.name();
     char* msrc = null;
