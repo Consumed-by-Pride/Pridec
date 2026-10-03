@@ -33,6 +33,9 @@ export PATH="$PATH:$HOME/.local/bin"
 if python3 -c "import ziglang, wasmtime" 2>/dev/null; then
     out=$(bash tests/air3/low_corpus.sh --wasm tests/air3/prog/*.pie 2>&1 | tail -1); echo "wasm prog: $out"
     case "$out" in *"FRONT=0 NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: wasm32 prog programs"; fail=1;; esac
+    # 32-bit x86 (usz = i32), native: zig's musl; stdout of programs that print through the x86-64 `syscall` numbers does not apply, so only prog/ runs
+    out=$(bash tests/air3/low_corpus.sh --i386 tests/air3/prog/*.pie 2>&1 | tail -1); echo "i386 prog: $out"
+    case "$out" in *"FRONT=0 NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: i386 prog programs"; fail=1;; esac
     out=$(bash tests/air3/low_corpus.sh --wasm 2>&1 | tail -1); echo "wasm exec: $out"
     wpass=$(echo "$out" | sed -n 's/.*PASS=\([0-9]*\).*/\1/p')
     case "$out" in *"NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: wasm32 exec corpus"; fail=1;; esac

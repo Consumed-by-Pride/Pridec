@@ -14,14 +14,14 @@
 set -u
 cd "$(dirname "$0")/../.."
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
-V=0; TSV=""; files=(); WASM=0; FS=0; LLX=""; EXX=""
+V=0; TSV=""; files=(); WASM=0; I386=0; FS=0; LLX=""; EXX=""
 export PATH="$PATH:$HOME/.local/bin"
-while [ $# -gt 0 ]; do case "$1" in -v) V=1;; --wasm) WASM=1; LLX="--target=wasm32-wasi";; --freestanding) FS=1; LLX="--syscall=x86_64-linux"; EXX="--freestanding";; --tsv) TSV="$2"; shift;; *) files+=("$1");; esac; shift; done
+while [ $# -gt 0 ]; do case "$1" in -v) V=1;; --wasm) WASM=1; LLX="--target=wasm32-wasi";; --i386) I386=1; LLX="--target=i686-unknown-linux-musl";; --freestanding) FS=1; LLX="--syscall=x86_64-linux"; EXX="--freestanding";; --tsv) TSV="$2"; shift;; *) files+=("$1");; esac; shift; done
 [ ${#files[@]} = 0 ] && files=(tests/exec/*.pie tests/exec/pear/*.pie)
 W=tmp/low-corpus; rm -rf "$W"; mkdir -p "$W"
 declare -A cnt; : > "$W/rows.tsv"
 expect_of() { grep -m1 '^-- EXPECT:' "$1" | sed 's/^-- EXPECT: //'; }
-exit_of()   { v=""; [ $WASM = 1 ] && v=$(grep -m1 '^-- WASM32-EXIT:' "$1" | sed 's/^-- WASM32-EXIT: *//'); [ -z "$v" ] && v=$(grep -m1 '^-- LOW-EXIT:' "$1" | sed 's/^-- LOW-EXIT: *//'); [ -z "$v" ] && v=$(grep -m1 '^-- EXIT:' "$1" | sed 's/^-- EXIT: *//'); printf '%s' "${v:-0}"; }   # WASM32-EXIT: (wasm only) where the result depends on the pointer width; LOW-EXIT: where PEAR1 deviates from the spec (defer is function-scoped)
+exit_of()   { v=""; { [ $WASM = 1 ] || [ $I386 = 1 ]; } && v=$(grep -m1 '^-- WASM32-EXIT:' "$1" | sed 's/^-- WASM32-EXIT: *//'); [ -z "$v" ] && v=$(grep -m1 '^-- LOW-EXIT:' "$1" | sed 's/^-- LOW-EXIT: *//'); [ -z "$v" ] && v=$(grep -m1 '^-- EXIT:' "$1" | sed 's/^-- EXIT: *//'); printf '%s' "${v:-0}"; }   # WASM32-EXIT: (wasm and i386 only) where the result depends on the pointer width; LOW-EXIT: where PEAR1 deviates from the spec (defer is function-scoped)
 for f in "${files[@]}"; do
     [ -f "$f" ] || continue
     id=$(echo "${f#tests/exec/}" | sed 's/\.pie$//; s#/#_#g')
@@ -33,7 +33,8 @@ for f in "${files[@]}"; do
         st=NOLOWER; why=$(echo "$out" | grep -m1 'air-low:\|error' | sed 's/^air-low: error: //' | cut -c1-110)
     elif ! tmp/airtool verify-low "$low" >"$W/$id.v" 2>&1; then st=VERIFY; why=$(head -1 "$W/$id.v" | cut -c1-110)
     elif ! tmp/airtool emit-ll "$low" -o "$W/$id.ll" $LLX >"$W/$id.e" 2>&1; then st=LLVM; why=$(head -1 "$W/$id.e" | cut -c1-110)
-    elif [ $WASM = 0 ] && ! python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id.exe" $EXX >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail' "$W/$id.b" | cut -c1-110)
+    elif [ $I386 = 1 ] && ! { python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id" -O1 && python3 -m ziglang cc -target x86-linux-musl "$W/$id.o" -o "$W/$id.exe"; } >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail\|undefined' "$W/$id.b" | cut -c1-110)
+    elif [ $WASM = 0 ] && [ $I386 = 0 ] && ! python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id.exe" $EXX >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail' "$W/$id.b" | cut -c1-110)
     elif [ $WASM = 1 ] && ! { python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id" -O1 --triple wasm32-wasi && python3 -m ziglang cc -target wasm32-wasi "$W/$id.o" runtime/wasi/pride_rt.c -o "$W/$id.exe"; } >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail\|undefined' "$W/$id.b" | cut -c1-110)
     else
         want=$(expect_of "$f"); wx=$(exit_of "$f")

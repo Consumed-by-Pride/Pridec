@@ -74,6 +74,30 @@ Gated by `tests/air3/prog/at02_decl_attrs.pie`, `tests/air3/good/attrs_packed_se
 `scripts/ll-exe.py --freestanding` links with `-nostdlib -static -Wl,-e,_start`. A program supplying its own `_start` (naked, asm that aligns the stack
 and calls a Pride function, see `fs02`) then runs with no libc and no crt. Gated (x86-64 hosts) by `tests/air3/prog_fs/`.
 
+## Target
+
+`usz` and `isz` are as wide as a pointer of the target. `airtool emit-ll X.air --target=TRIPLE` writes `target triple = "TRIPLE"` into the `.ll` and
+prints them as `i32` for a 32-bit triple (wasm32, i386..i686, arm, thumb, riscv32, mips, powerpc, ...) and `i64` otherwise (no `--target`: `i64`).
+`sizeof`/`alignof` yield `usz`; a slice's or `str`'s stored `len` is `usz` (the language-level `.len` reads as `i64`); the runtime entry points the lowering
+calls are `malloc(usz) -> ptr` and `write(i32, ptr, usz) -> isz`. `ll-exe.py` honours the module's triple (cross targets give an object file) and takes
+`--cpu`, `--features=-sse,+soft-float`, `--reloc static`, `--code-model kernel`, and `--ld-script FILE` (bare metal: `ld -nostdlib -static -T FILE`).
+Verified: every `tests/air3/prog` program builds for i686, aarch64, riscv64, riscv32 and armv7; runs under wasmtime (wasm32) and natively as a 32-bit x86
+musl executable (`low_corpus.sh --i386`). `-- WASM32-EXIT:` in a test header gives the expected status where the pointer width matters (wasm and i386).
+Externs keep their Pride-declared signatures: a Pride `i64` is not a C `long` on a 32-bit target.
+
+## OS-level definitions
+
+| Pride | AIR 3 / LLVM |
+|---|---|
+| `#export("sym")` on a `fn` | the definition is named exactly `sym` (never suffixed); the runtime's `declare` of that name is dropped (`malloc`, `free`, `memcpy`, `syscall`, `_start`, ...) |
+| `#used` on a global | kept although no Pride code names it (assembly does) |
+| `#noredzone`, `#no_builtins` | `noredzone`, `"no-builtins"` (a body that is `memcpy` must not be turned into a call to `memcpy`) |
+| `asm { "..." : "={eax}"(a), "={ebx}"(b) : "{eax}"(leaf) }` | several outputs: the call returns a tuple, each output is stored to its place; `+r`(x) is an output tied to an input holding x |
+
+Bare metal (`tests/air3/bare.sh`): `tests/air3/prog_bare/kernel.pie` (naked `_start` in `.text.boot`, packed 16-aligned GDT in `.gdt`, port I/O and `cpuid`
+through asm, volatile VGA MMIO, naked ISR stub, `#noredzone`) is built for `x86_64-unknown-none-elf` with `-sse +soft-float`, the kernel code model and
+`kernel.ld`; the image is inspected (entry `0x100000`, no undefined symbol, GDT bytes, no SSE register), not run: there is no QEMU here.
+
 ## Consumer limits (air_ll)
 
 16384 names, 4096 blocks, 16384 phi edges and 8192 strings per function/module; aggregates ≤ 64 parts;
