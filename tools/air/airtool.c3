@@ -3,6 +3,7 @@
 //
 //   airtool check FILE.air          parse; exit 0 if well-formed, 1 otherwise
 //   airtool verify FILE.air         parse + validity rules V1..V4 (docs/specs/AIR.md)
+//   airtool lint  FILE.air [-e]     how much of an .ll's work is still left to the consumer (air_lint.c3)
 //   airtool fmt   FILE.air [-o OUT] parse and re-print canonically
 //
 // The canonical printer is the same one pfrontc uses, so `fmt` of a pfrontc
@@ -14,6 +15,7 @@ import air_read;
 import air_write;
 import air_facts;
 import air_verify;
+import air_lint;
 
 extern fn int printf(char* fmt, ...);
 
@@ -45,6 +47,18 @@ fn int main(String[] args)
         int[8] cnt;
         int n = air_verify::verify_module(&mod, &cnt[0], false, 1000000);
         printf("verify: %d violation(s)  V1=%d V2=%d V3=%d V4=%d  | conventions: J1(implicit %%kN joins)=%d N1(module-path roots)=%d J2(%%resume)=%d\n", n, cnt[0], cnt[1], cnt[2], cnt[3], cnt[4], cnt[5], cnt[6]);
+        arena.destroy();
+        return n == 0 ? 0 : 1;
+    }
+    if (eq(cmd, "lint"))
+    {
+        // airtool lint FILE.air [-e]   -e: entry module only. One line, machine readable.
+        bool entry = args.len >= 4 && eq((char*)args[3].ptr, "-e");
+        int[20] lc;
+        int n = air_lint::lint_module(&mod, &lc[0], entry);
+        printf("lint: %d |", n);
+        for (usz i = 0; i < 16; i++) { printf(" %s=%d;", air_lint::rule_name(i), lc[i]); }
+        printf("\n");
         arena.destroy();
         return n == 0 ? 0 : 1;
     }

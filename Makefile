@@ -161,7 +161,7 @@ $(PEAR1): $(PEAR1_SRC) $(AIR_READ_CORE) | c3c
 # only the IR, the text reader/writer and the validity rules.
 AIR_CORE  := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/air_text.c3 \
              pfront/pear_ir/air_write.c3 pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3 \
-             pfront/pear_ir/air_verify.c3 tools/air/airtool.c3
+             pfront/pear_ir/air_verify.c3 pfront/pear_ir/air_lint.c3 tools/air/airtool.c3
 AIRTOOL   := tmp/airtool
 airtool: $(AIRTOOL)
 $(AIRTOOL): $(AIR_CORE) | c3c
