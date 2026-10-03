@@ -239,7 +239,7 @@ fn void Low.copy_attrs(Low* lw, AirDecl* ad, Node* src)
             if (!ok || v <= 0 || (v & (v - 1)) != 0) { continue; }
             air_ir::air_add_attr(ad, lw.dup("align"), null, v, true);
         }
-        else if (seq(nn, "packed") || seq(nn, "thread_local") || seq(nn, "naked") || seq(nn, "noinline") || seq(nn, "inline") || seq(nn, "cold"))
+        else if (seq(nn, "packed") || seq(nn, "noredzone") || seq(nn, "no_builtins") || seq(nn, "thread_local") || seq(nn, "naked") || seq(nn, "noinline") || seq(nn, "inline") || seq(nn, "cold"))
         {
             air_ir::air_add_attr(ad, lw.dup(nn), null, 0, false);
         }
@@ -520,6 +520,17 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
     FnInfo* f = &lw.fns[lw.nfn];
     usz esl = 0; char* esp = pfront_core::ext_sym_of(d, &esl);
     f.decl = d; f.ext = d.kind == Nk.N_DECL_EXTERN_FN || (d.kind == Nk.N_DECL_FN && esp != null); f.nts = nt;
+    char* xsym = null;   // #export("symbol"): a definition under exactly that symbol (an OS supplies `malloc`, `memcpy`, `_start`, ... itself)
+    {
+        char* an; usz anl; char* aa; usz aal; bool ais;
+        for (usz k = 0; pfront_core::attr_at(d, k, &an, &anl, &aa, &aal, &ais); k++)
+        {
+            if (anl == 6 && an[0] == 'e' && an[1] == 'x' && an[2] == 'p' && an[3] == 'o' && an[4] == 'r' && an[5] == 't' && ais && aa != null && aal > 0 && aal < 199 && nt == 0 && !f.ext)
+            {
+                char[200] xb; for (usz i = 0; i < aal; i++) { xb[i] = aa[i]; } xb[aal] = 0; xsym = lw.dup(&xb[0]);
+            }
+        }
+    }
     for (usz j = 0; j < nt; j++) { f.ts[j].tp = tps[j]; f.ts[j].t = targs[j]; }
     char* base = lw.text(d); if (base == null) { base = "_fn"; }
     if (esp != null)   // #extern("symbol"): the C symbol is the name
@@ -536,7 +547,12 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
     }
     // names are unique across the program; externs keep their C symbol, so they are never renamed
     char* nm = lw.dup(base);
-    if (!f.ext)
+    if (xsym != null)
+    {
+        nm = xsym;
+        for (usz i = 0; i < lw.nfn; i++) { if (seq(lw.fns[i].name, nm)) { lw.err(d, "two definitions export the same symbol", nm); } }
+    }
+    else if (!f.ext)
     {
         int k = 1;
         while (true)
@@ -2384,7 +2400,7 @@ fn Vx Low.alloc(Low* lw, Node* n)
     Vx count = cnt == null ? lw.lit_int(1, lw.m.t_i64) : lw.coerce(lw.expr(cnt, lw.m.t_i64), lw.m.t_i64);
     Vx esz = lw.sizeof_(el);
     Vx esz64 = lw.coerce(esz, lw.m.t_i64);
-    Vx bytes = lw.binop(ABIN_MUL, count, esz64);
+    Vx bytes = lw.coerce(lw.binop(ABIN_MUL, count, esz64), lw.m.t_usz);
     Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
     ins.name = lw.fresh("_m"); ins.a = air_ir::air_mk_var(lw.a, "malloc"); ins.nargs = 1; ins.args[0] = bytes.p;
     Vx raw = lw.vref(ins.name, lw.ptr(lw.m.t_u8));
@@ -3598,7 +3614,7 @@ fn bool Low.lam_escapes(Low* lw, Node* n)
 // malloc(sizeof T) as a ptr(T)
 fn Vx Low.heap_box(Low* lw, AirTyp* t)
 {
-    Vx esz = lw.coerce(lw.sizeof_(t), lw.m.t_i64);
+    Vx esz = lw.coerce(lw.sizeof_(t), lw.m.t_usz);
     Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
     ins.name = lw.fresh("_m"); ins.a = air_ir::air_mk_var(lw.a, "malloc"); ins.nargs = 1; ins.args[0] = esz.p;
     Vx raw = lw.vref(ins.name, lw.ptr(lw.m.t_u8));
@@ -4441,6 +4457,19 @@ fn Node* find_main(Node* root, pfront_core::Interner* it)
     return null;
 }
 
+// does the declaration carry `#name`?
+fn bool node_has_attr(Node* d, char* want)
+{
+    char* an; usz anl; char* aa; usz aal; bool ais;
+    for (usz k = 0; pfront_core::attr_at(d, k, &an, &anl, &aa, &aal, &ais); k++)
+    {
+        usz wl = 0; while (want[wl] != 0) { wl++; }
+        if (anl != wl) { continue; }
+        bool same = true; for (usz i = 0; i < wl; i++) { if (an[i] != want[i]) { same = false; } }
+        if (same) { return true; }
+    }
+    return false;
+}
 // emit_low_program -- lower the program reachable from `main` to FILE.low.air.
 // Returns the number of lowering errors (0 = a .air was written), or -1/-2 on setup failure.
 fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_core::Interner* it, char* src_path, char* out_path)
@@ -4453,6 +4482,13 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
     AirModule mod;
     if (!mod.init(&arena, "Main", src_path)) { arena.destroy(); return -2; }
     mod.low = true;
+    for (usz di = 0; di < mod.decl_count; di++)   // the runtime entry points a lowered program may call take and return target-width integers (size_t / ssize_t)
+    {
+        AirDecl* rd = mod.decls[di];
+        if (rd == null || rd.tag != ADECL_DECLARE || rd.name == null) { continue; }
+        if (air_text::streq(rd.name, "malloc") && rd.param_count == 1) { rd.params[0].ty = mod.t_usz; }
+        if (air_text::streq(rd.name, "write") && rd.param_count == 3) { rd.params[2].ty = mod.t_usz; rd.ret_ty = mod.t_isz; }
+    }
     Low lw;
     lw.a = &arena; lw.m = &mod; lw.it = it; lw.roots = roots; lw.nroots = root_count;
     for (usz r = 0; r < root_count; r++) { for (usz i = 0; roots[r] != null && i < roots[r].child_count; i++) { Node* c = roots[r].children[i]; if (c != null && c.kind == Nk.N_DECL_EFFECT) { lw.eff_on = true; } } }
@@ -4491,6 +4527,16 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
             if (fq != null) { lw.queue(fq); nroots_q++; }
         }
         if (nroots_q == 0) { printf("air-low: note: no function to lower (constants only); writing an empty library module\n"); }
+    }
+    // `#used` globals are kept although no Pride code names them (assembly does: a GDT, a stack, a vector table)
+    {
+        Node* er2 = entry_root != null ? entry_root : roots[0];
+        for (usz i = 0; i < er2.child_count; i++)
+        {
+            Node* c = er2.children[i];
+            if (c == null || (c.kind != Nk.N_DECL_STATIC && c.kind != Nk.N_DECL_LET) || !node_has_attr(c, "used")) { continue; }
+            lw.cur_fn = lw.text(c); lw.global_for(c);
+        }
     }
     // worklist: functions are lowered as they are first referenced
     bool progress = true;

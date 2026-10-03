@@ -1,0 +1,86 @@
+-- a bare-metal x86-64 kernel skeleton (no OS, no libc): a #naked entry in .text.boot that sets the stack and calls kmain, a packed
+-- GDT in its own section with 16-byte alignment, port I/O and control-register access through inline asm (several outputs),
+-- volatile MMIO to the VGA text buffer, an ISR stub that is #naked, and no red zone / no SSE.
+-- checked by tests/air3/bare.sh (linked with kernel.ld at 0x100000; not run: it needs a machine)
+#packed
+struct GdtEntry
+  limit_lo: u16
+  base_lo: u16
+  base_mid: u8
+  access: u8
+  flags_limit: u8
+  base_hi: u8
+
+#used
+#section(".gdt")
+#align(16)
+let GDT : [GdtEntry; 3] = [
+  GdtEntry { limit_lo: 0u16, base_lo: 0u16, base_mid: 0u8, access: 0u8, flags_limit: 0u8, base_hi: 0u8 },
+  GdtEntry { limit_lo: 65535u16, base_lo: 0u16, base_mid: 0u8, access: 154u8, flags_limit: 175u8, base_hi: 0u8 },
+  GdtEntry { limit_lo: 65535u16, base_lo: 0u16, base_mid: 0u8, access: 146u8, flags_limit: 207u8, base_hi: 0u8 }
+]
+
+#used
+#section(".bss")
+#align(4096)
+let mut STACK : [u8; 16384] = [0u8; 16384]
+
+let mut TICKS : i64 = 0i64
+
+fn outb : (u16, u8) -> ()
+  | (port, v) ->
+      asm { "outb %1, %0" : : "{dx}"(port), "{al}"(v) : "memory" }
+      ()
+
+fn inb : u16 -> u8
+  | (port) ->
+      let mut r : u8 = 0u8
+      asm { "inb %1, %0" : "={al}"(r) : "{dx}"(port) : "memory" }
+      r
+
+fn cpuid : i32 -> i64
+  | (leaf) ->
+      let mut a : i32 = 0i32
+      let mut b : i32 = 0i32
+      let mut c : i32 = 0i32
+      let mut d : i32 = 0i32
+      asm { "cpuid" : "={eax}"(a), "={ebx}"(b), "={ecx}"(c), "={edx}"(d) : "{eax}"(leaf), "{ecx}"(0i32) }
+      (a as i64) + (b as i64) + (c as i64) + (d as i64)
+
+fn vga_put : (i64, u16) -> ()
+  | (i, cell) ->
+      let vga : *u16 = 753664 as *u16
+      volatile vga[i] = cell
+      ()
+
+#noredzone
+fn timer_isr : () -> ()
+  | () ->
+      TICKS = TICKS + 1i64
+      outb(32u16, 32u8)
+      ()
+
+#naked
+fn isr_stub : () -> ()
+  | () ->
+      asm { "pushq %rax\n\tcallq timer_isr\n\tpopq %rax\n\tiretq" : : : "memory" }
+      while true
+        ()
+
+fn kmain : () -> ()
+  | () ->
+      vga_put(0i64, 3919u16)
+      let id = cpuid(0i32)
+      if id == 0i64 then vga_put(1i64, 3921u16) else vga_put(1i64, 3922u16)
+      let s = inb(96u16)
+      outb(244u16, s)
+      while true
+        asm { "hlt" : : : "memory" }
+
+#section(".text.boot")
+#naked
+fn _start : () -> ()
+  | () ->
+      asm { "leaq STACK+16384(%rip), %rsp\n\txorl %ebp, %ebp\n\tcallq kmain\n1:\thlt\n\tjmp 1b" : : : "memory" }
+      while true
+        ()

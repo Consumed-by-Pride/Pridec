@@ -1071,6 +1071,8 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
     if (decl_has_attr(d, "noinline")) { hdr.put(" noinline"); }
     if (decl_has_attr(d, "inline") && !decl_has_attr(d, "noinline")) { hdr.put(" alwaysinline"); }
     if (decl_has_attr(d, "cold"))     { hdr.put(" cold"); }
+    if (decl_has_attr(d, "noredzone")) { hdr.put(" noredzone"); }          // kernel code: an interrupt may land on the stack below rsp
+    if (decl_has_attr(d, "no_builtins")) { hdr.put(" \"no-builtins\""); }   // do not turn this body into a call to memcpy/memset (it may BE memcpy)
     if (decl_has_attr(d, "packed"))   { l.err("packed applies to data types", d.name); }
     if (decl_has_attr(d, "thread_local")) { l.err("thread_local applies to globals", d.name); }
     { char* sec = decl_attr_str(d, "section"); if (sec != null) { hdr.put(" section \""); hdr.put(sec); hdr.putc('"'); } }
@@ -1229,8 +1231,13 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
                 break;
             }
             case ADECL_DECLARE:
+            {
+                bool defd = false;   // a program that defines the symbol itself (`#export("malloc")`) replaces the runtime's declaration
+                for (usz j = 0; j < m.decl_count; j++) { AirDecl* e = m.decls[j]; if (e != null && e.tag == ADECL_DEF && air_text::streq(e.name, d.name)) { defd = true; } }
+                if (defd) { if (air_text::streq(d.name, "syscall")) { have_syscall = true; } break; }
                 if (air_text::streq(d.name, "syscall")) { have_syscall = true; }
                 l.declare(d, &body); break;
+            }
             case ADECL_DEF: l.function(d, &body); break;
             case ADECL_MODULE: case ADECL_IMPORT: case ADECL_DATA: break;
             default: l.err("declaration is not part of the low profile", d.name); break;
