@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference .ll -> executable driver (LLVM-23 via ctypes + the system linker). No clang/llc needed.
 
-  python3 scripts/ll-exe.py in.ll -o out [-O0..-O3] [--emit-obj]
+  python3 scripts/ll-exe.py in.ll -o out [-O0..-O3] [--emit-obj] [--triple wasm32-unknown-unknown]
 Parses the .ll, runs the LLVM verifier, optionally the default<On> pipeline, writes an object file
 and links it with gcc (libc provides malloc/free/write/_start). Exit 0 = built; 1 = parse/verify/link error
 (message on stderr). Used as the oracle for AIR 3.0 (docs/specs/AIR3.md): if a program built from
@@ -29,10 +29,12 @@ L.LLVMVerifyModule.argtypes = [vp, ctypes.c_int, ctypes.POINTER(cp)]
 vmsg = cp()
 if L.LLVMVerifyModule(mod, 1, ctypes.byref(vmsg)):
     sys.exit("ll-exe: verifier: " + (vmsg.value or b"?").decode())
-for t in ("X86",):
+want_triple = args[args.index("--triple") + 1].encode() if "--triple" in args else None
+for t in ("X86", "WebAssembly"):
     for s in ("TargetInfo", "Target", "TargetMC", "AsmPrinter", "AsmParser"):
-        getattr(L, f"LLVMInitialize{t}{s}")()
-triple = ctypes.cast(L.LLVMGetDefaultTargetTriple(), cp).value
+        try: getattr(L, f"LLVMInitialize{t}{s}")()
+        except AttributeError: pass
+triple = want_triple or ctypes.cast(L.LLVMGetDefaultTargetTriple(), cp).value
 tgt = vp(); err = cp()
 L.LLVMGetTargetFromTriple.argtypes = [cp, ctypes.POINTER(vp), ctypes.POINTER(cp)]
 if L.LLVMGetTargetFromTriple(triple, ctypes.byref(tgt), ctypes.byref(err)):
@@ -41,6 +43,11 @@ lvl = {"-O0": 0, "-O1": 1, "-O2": 2, "-O3": 3}[opt]
 L.LLVMCreateTargetMachine.restype = vp
 L.LLVMCreateTargetMachine.argtypes = [vp, cp, cp, cp, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 tm = L.LLVMCreateTargetMachine(tgt, triple, b"generic", b"", lvl, 2, 0)   # reloc PIC=2, code model default=0
+if want_triple:   # cross target: the module takes the target's triple and data layout; the result is always an object file
+    L.LLVMSetTarget.argtypes = [vp, cp]; L.LLVMSetTarget(mod, triple)
+    L.LLVMCreateTargetDataLayout.restype = vp; L.LLVMCreateTargetDataLayout.argtypes = [vp]
+    L.LLVMSetModuleDataLayout.argtypes = [vp, vp]; L.LLVMSetModuleDataLayout(mod, L.LLVMCreateTargetDataLayout(tm))
+    if "--emit-obj" not in args: args.append("--emit-obj")
 if lvl > 0:
     L.LLVMRunPasses.argtypes = [vp, cp, vp, vp]
     L.LLVMCreatePassBuilderOptions.restype = vp
