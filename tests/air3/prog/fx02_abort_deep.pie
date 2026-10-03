@@ -1,0 +1,18 @@
+-- EXIT: 77
+-- An abort raised three calls deep unwinds through every frame; code after the perform never runs.
+effect Fail
+  fail : i64 -> i64
+fn leaf : i64 -> i64 ! [Fail]
+  | n -> Fail.fail(n + 70)
+fn mid : i64 -> i64 ! [Fail]
+  | n ->
+      let a : i64 = leaf(n)
+      a + 1000000
+fn top : i64 -> i64 ! [Fail]
+  | n ->
+      let b : i64 = mid(n)
+      b + 2000000
+fn main : () -> i64
+  | () ->
+      handle top(7)
+        | Fail.fail code k -> code

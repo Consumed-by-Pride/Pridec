@@ -1,0 +1,18 @@
+-- EXIT: 18
+-- An arm that resumes on one path and aborts on the other.
+effect C
+  pick : i64 -> i64
+fn work : i64 -> i64 ! [C]
+  | n ->
+      let a : i64 = C.pick(n)
+      a * 2
+fn run : i64 -> i64
+  | n ->
+      handle work(n)
+        | C.pick q k ->
+            if q > 3
+              k (q + 2)
+            else
+              0 - 1
+fn main : () -> i64
+  | () -> run(4) + run(1) + 7
