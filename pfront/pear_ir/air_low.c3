@@ -3176,6 +3176,24 @@ fn bool Low.lam_sig(Low* lw, Node* n, AirTyp* want, AirTyp** ps, usz* np, AirTyp
     if (*ret == null) { lw.err(n, "lambda needs a result type", null); return false; }
     return true;
 }
+// A closure whose environment may outlive the creating call needs a heap environment. Only a lambda written directly as a
+// call argument (or the callee) keeps its environment on the stack (it is the same discipline Rust enforces with lifetimes
+// and the callee is trusted not to keep it); every other position -- let, return, field, assignment -- heap-allocates.
+fn bool Low.lam_escapes(Low* lw, Node* n)
+{
+    Node* p = n.parent;
+    if (p != null && p.kind == Nk.N_EXPR_CALL) { return false; }
+    return true;
+}
+// malloc(sizeof T) as a ptr(T)
+fn Vx Low.heap_box(Low* lw, AirTyp* t)
+{
+    Vx esz = lw.coerce(lw.sizeof_(t), lw.m.t_i64);
+    Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_m"); ins.a = air_ir::air_mk_var(lw.a, "malloc"); ins.nargs = 1; ins.args[0] = esz.p;
+    Vx raw = lw.vref(ins.name, lw.ptr(lw.m.t_u8));
+    return lw.coerce(raw, lw.ptr(t));
+}
 fn Vx Low.lambda(Low* lw, Node* n, AirTyp* want)
 {
     AirTyp*[16] ps; usz np = 0; AirTyp* ret = null;
@@ -3206,7 +3224,8 @@ fn Vx Low.lambda(Low* lw, Node* n, AirTyp* want)
             cd.add_field(air_ir::air_mk_field(lw.a, lw.dup(&fnm[0]), ft, AMULT_UNR));
         }
         lw.m.add_decl(d);
-        Vx slot = lw.alloca_(f.envty);
+        bool heap = lw.lam_escapes(n);
+        Vx slot = heap ? lw.heap_box(f.envty) : lw.alloca_(f.envty);
         for (usz i = 0; i < f.ncaps; i++)
         {
             VarB* v = lw.find_var(f.caps[i].decl);
@@ -3214,7 +3233,19 @@ fn Vx Low.lambda(Low* lw, Node* n, AirTyp* want)
             AirTyp* ft = f.caps[i].by_ref ? lw.ptr(f.caps[i].t) : f.caps[i].t;
             Vx g = lw.gep(slot.p, f.envty, &ix[0], 2, ft);
             Vx val; val.p = v.p; val.t = v.t;
-            if (f.caps[i].by_ref) { val.t = lw.ptr(v.t); }   // the slot's address: later writes are visible both ways
+            if (f.caps[i].by_ref)
+            {
+                if (heap)
+                {
+                    // an escaping closure owns a heap copy of a captured `mut` variable (the stack slot would dangle):
+                    // writes by the closure persist in the box, the creator's variable is no longer shared (move semantics)
+                    Vx box = lw.heap_box(v.t);
+                    Vx cur = lw.load(v.p, v.t);
+                    lw.store(box.p, cur);
+                    val.p = box.p; val.t = lw.ptr(v.t);
+                }
+                else { val.t = lw.ptr(v.t); }   // the slot's address: later writes are visible both ways
+            }
             lw.store(g.p, val);
         }
         env = lw.coerce(slot, lw.ptr(lw.m.t_u8));

@@ -15,7 +15,7 @@ Gate (`make test-air3`, part of `make test`; `tests/air3/gate.sh`, floors in `te
 |---|---|
 | `tests/air3/prog/*.pie` (effects, closures, raw fn pointers, tuples, wide signatures, constant globals, offside `else`, quote/splice) | all pass: built from the low `.air`, executed, exit code/stdout as the header says |
 | `tests/exec` (84 programs) | 72 PASS, 12 are rejected by the front end itself (`XFAIL.tsv`); 0 NOLOWER / VERIFY / LLVM / WRONG |
-| the same `.ll` through LLVM's WebAssembly backend (`ll-exe.py --triple wasm32-unknown-unknown`) | 13/13 prog programs produce a wasm object (not linked or run: no `wasm-ld` in this sandbox) |
+| the same `.ll` built for `wasm32-wasi` (LLVM wasm backend → zig `wasm-ld` + wasi-libc + `runtime/wasi/pride_rt.c`) and **run under wasmtime** (`low_corpus.sh --wasm`, in the gate) | 14/14 prog and 72/72 exec programs produce the same exit status and stdout as native. Externs keep their Pride-declared signatures, so `ll-exe.py` renames each external `F` to `pride_rt_F` and the shim adapts the 32-bit libc ABI (`malloc(i64)` vs wasm32 `malloc(i32)` trapped before this); only `malloc/free/write/syscall/labs/abs/…` exist so far |
 | `stdlib/**` (260 modules, library mode) | 260/260 lower, verify-low, and compile to an `-O2` LLVM object |
 
 "Library mode": a module with no `main` lowers every non-generic function it defines.
@@ -32,7 +32,7 @@ Gate (`make test-air3`, part of `make test`; `tests/air3/gate.sh`, floors in `te
 ## 3 What is still not at LLVM level (honest list)
 
 * generics: ≤ 4 type parameters, instantiated at call sites only; interfaces/impls are not instantiated (no dictionaries, no `obj.method()`);
-* closures: the environment lives on the stack — an escaping closure dangles (needs heap environments);
+* closures: an environment is heap-allocated unless the lambda is written directly as a call argument (`cl01`: returned adder, returned counter, closure in a struct; on the stack it segfaulted). An escaping closure owns a heap copy of a captured `mut` variable (move semantics: the creator's variable is no longer shared). A stack closure passed to a callee that stores it still dangles (trusted callee, no lifetime check). Nothing is ever freed (no GC / drop yet);
 * effects: tail-resumptive and aborting arms only; non-tail-resumptive (multi-shot, `resume` inside a nested continuation) is rejected;
 * MSP is thunk-based (no staging optimisation), `poison` is arbitrary, `offsetof` lowers to `sizeof usize`;
 * `*|` (saturating) is unsupported; plain `+ - *` wrap;

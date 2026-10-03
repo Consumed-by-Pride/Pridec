@@ -1,0 +1,28 @@
+-- EXIT: 37
+-- closures that outlive the function that made them: a returned adder (captured value), a returned counter (captured `mut` variable, owned by the closure), a closure stored in a struct
+struct Box
+  f : fn(i64) -> i64
+fn make_adder : i64 -> fn(i64) -> i64
+  | n -> fn (x: i64) -> i64 { x + n }
+fn make_counter : i64 -> fn(i64) -> i64
+  | start ->
+      let mut c : i64 = start
+      fn (d: i64) -> i64 { c = c + d; c }
+fn make_box : i64 -> Box
+  | k -> Box { f: fn (x: i64) -> i64 { x * k } }
+fn clobber : i64 -> i64
+  | n ->
+      let a : [i64; 64] = [n; 64]
+      a[0] + a[63]
+fn main : () -> i64
+  | () ->
+      let add5 = make_adder(5)
+      let ctr = make_counter(10)
+      let b = make_box(3)
+      let _ = clobber(1000)
+      let a1 = add5(1)
+      ctr(1)
+      ctr(2)
+      let c3 = ctr(3)
+      let t = b.f
+      a1 + c3 + t(5) + 2 - 2 - 0
