@@ -649,7 +649,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 for (usz i = 0; i < stem; i++) { lowp[i] = path[i]; }
                 char* suf = ".low.air";
                 for (usz i = 0; i < 9; i++) { lowp[stem + i] = suf[i]; }
-                int lerrs = air_low::emit_low_program(&low_roots[0], ln, it, path, &lowp[0]);
+                int lerrs = air_low::emit_low_program(&low_roots[0], ln, entry.ast, it, path, &lowp[0]);
                 if (lerrs != 0) { g_low_failed = true; }
             }
             else { printf("air-low: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count); g_low_failed = true; }
