@@ -1,4 +1,4 @@
-# AIR 2.0 — the `.air` text format
+# AIR 2.1 — the `.air` text format
 
 **Status: normative and implemented.** `pfrontc FILE.pie --emit-air` writes it, `airtool` and the legacy
 backend `pear1c` read it, and `tests/air/run.sh` checks it. Where this document and the code disagree the
@@ -11,13 +11,13 @@ everything after it — PEAR 1 (legacy, `legacy/pear1/`), PEAR 2 (new) — is a 
 file. This document is the whole interface between the two sides. The earlier design text is kept as
 [`AIR-1.0-vision.md`](AIR-1.0-vision.md); it is aspirational and does not describe what is emitted.
 
-Contents: 1 Why 2.0 · 2 What a file is · 3 Lexical · 4 Grammar · 5 Names and scope · 6 Types · 7 Meaning of each
+Contents: 1 Why 2.x · 2 What a file is · 3 Lexical · 4 Grammar · 5 Names and scope · 6 Types · 7 Meaning of each
 form · 8 Conventions a consumer must implement · 9 Claims (`facts`) · 10 Validity (V1–V4) · 11 What the producer
 gets wrong today · 12 Path to a strict calculus · 13 Tools and tests
 
 ---
 
-## 1 Why 2.0
+## 1 Why 2.x
 
 AIR 1.0 (`AIR-1.0-vision.md`) was a design. The emitter printed a different, lossy notation (`μ̃%ret_2. <p|[0]·%ret_2>`,
 `; air facts:` comments, only the entry module) that no parser could read back, and PEAR consumed the in-memory
@@ -40,7 +40,7 @@ standard library), in load order, as a flat sequence of declarations. The entry 
 
 ```
 // comment to end of line
-air 2.0 Main "tests/exec/p03_fib.pie";    // header: format version, entry-module name, source path (or nil)
+air 2.2 Main "tests/exec/p03_fib.pie";    // header: format version, entry-module name, source path (or nil)
 
 extern declare malloc(_ : i64) : ptr(u8); // declaration without a body (provided by the host / libc)
 
@@ -54,7 +54,9 @@ def id_i64(x : infer) : infer = ...;
 
 Rules:
 
-* The header is mandatory and must be `air 2.0`. A reader **rejects** any other version (no best-effort).
+* The header is mandatory and must be `air 2.2` (a reader also accepts `air 2.1` and `air 2.0` files, except that a 2.0 `syscall P(args)` is not
+  accepted: 2.1 spells it `syscall(P, args) · k`; `asm`/`atomic` without `· k` are read as discarding in 2.0, and `perform` without `· k`
+  is read as discarding in 2.0/2.1 — see §7a/§7b). Any other version is **rejected** (no best-effort).
 * `module NAME;` is a marker only; it opens no scope. All names live in **one flat top-level namespace**.
 * **Duplicate top-level names:** the *first* definition wins and later ones are ignored. The producer emits such
   duplicates today (e.g. `getpid` is defined by two library modules); backend 1 reports them and keeps the first.
@@ -91,7 +93,7 @@ language of `air_read`; `air_write` prints exactly it.
 
 ```
 file      ::= header decl*
-header    ::= air 2.0 NAME (STRING | nil) ;
+header    ::= air (2.0 | 2.1) NAME (STRING | nil) ;
 NAME      ::= identifier | quoted-identifier | nil
 
 decl      ::= module NAME ;
@@ -124,12 +126,13 @@ cmd       ::= nil
             | if prd then cmd else cmd
             | while prd do "{" cmd "}"  |  for NAME in prd do "{" cmd "}"
             | match [dense] prd "{" branch* "}"
-            | handle "{" cmd "}" "{" branch* "}"  |  perform NAME "(" prd ")"  |  resume "(" prd ")"
+            | handle "{" cmd "}" "{" branch* "}"  |  perform NAME "(" prd ")" result  |  resume "(" prd ")"
             | label NAME "(" binder,* ")" . cmd  |  jump NAME "(" NAME,* ")"  |  break NAME  |  continue NAME
             | (block|unsafe|unchecked|comptime|defer) "{" cmd "}"
             | (assert|assume|ret) "(" prd ")"  |  ub (STRING|nil)  |  trap  |  nop
-            | syscall prd "(" prd,* ")"  |  asm [intel|att] (STRING|nil) "(" prd,* ")"
-            | atomic ATOMICOP ORDER "(" prd ")"  |  fence ORDER
+            | syscall "(" prd,+ ")" result  |  asm [intel|att] (STRING|nil) "(" prd,* ")" result
+            | atomic ATOMICOP ORDER "(" prd,+ ")" result  |  fence ORDER
+result    ::= "·" cns          -- syscall/asm/atomic: required since 2.1 (2.0: absent, discarded); perform: required since 2.2
 branch    ::= pat [guard "{" cmd "}"] -> cmd ;
 ORDER     ::= relaxed | acquire | release | acq_rel | seq_cst
 ATOMICOP  ::= load store xchg add sub and or xor nand max min umax umin
@@ -225,14 +228,63 @@ backend runs it correctly yet. Frequencies of every form in real output: [`docs/
 | `fst`, `snd`, `proj i`, `deref`, `default`, `share`, `erase` | pair/tuple projection, dereference, multiplicity operations | emitted for fst/snd/proj; the rest never produced |
 | `label L(x…). c` / `jump L(a…)` | block definition / transfer to it (loops are label + jump) | executable |
 | `(op a b)` | binary operation; `div`/`mod` division by zero is **not** modelled (no trap) | executable |
-| `syscall n(a…)` | Linux syscall number `n` with arguments | **emitted without operands today (§11)**; no backend executes it |
-| `perform`, `handle`, `resume` | algebraic effects | emitted; **do not execute correctly** (ledger P04–P06) |
+| `syscall(n, a…) · k` | Linux syscall number `n` with arguments; the result is delivered to the consumer `k` | emitted with operands and result since 2.1; PEAR 1 calls libc `syscall` (variadic) |
+| `asm "t"(a…) · k`, `atomic op ord(p, v…) · k` | inline assembly / atomic read-modify-write; result delivered to `k` | emitted since 2.1 when written in source; **PEAR 1 rejects them with a diagnostic** (it used to compile them to nothing) |
+| `perform Eff.op(p) · k`, `handle`, `resume` | algebraic effects (§7b) | emitted since 2.2 with the operation name, payload, resumed-value consumer and handler binders; **PEAR 1 has no handler runtime and now says so** (ledger P04–P06) |
 | `quote`, `reify`, `eval`, `splice` | staging | emitted as free variables (§11); unsupported |
 | `ub "msg"`, `trap`, `poison(T)`, `unreachable` | undefined behaviour made explicit | emitted; not exercised by a passing suite |
-| `atomic`, `fence`, `asm`, `while`, `for`, `letrec`, `break`, `continue`, `ret`, `con`, `inl`, `inr`, `cometa`, `cocase`, `defco` | defined by the grammar | **never produced** today (loops are label/jump; see COVERAGE.md) |
+| `fence`, `while`, `for`, `letrec`, `break`, `continue`, `ret`, `con`, `inl`, `inr`, `cometa`, `cocase`, `defco` | defined by the grammar | **never produced** today (loops are label/jump; see COVERAGE.md) |
 
 Integer arithmetic is two's-complement at the width of the operands (64-bit when `infer`). Signedness comes from the
 type annotation; `infer` is treated as signed.
+
+### 7a Primitives with results (2.1)
+
+`syscall`, `asm` and `atomic` produce a value. In 2.0 the text had no place for it: the producer printed
+`syscall nil();` for `let n = syscall(39, …)`, dropping both the operands and the result. 2.1 follows the rule used
+everywhere else in the calculus — **a command that yields a value ends in a consumer**:
+
+```
+syscall(1 : i64, 1 : i64, _x2, 14 : i64) · comu _x1.      -- write(1, buf, 14); the byte count is _x1
+  syscall(231 : i64, 0 : i64) · %ret_2
+```
+
+Operands are evaluated left to right; a non-trivial operand is bound first (`<e | comu _xN. …>`), so the operand list
+holds only producers. The syscall number is the first element of the list (so `syscall(n)` has one element and a
+typed literal number never abuts `(`). A 2.1 reader **fails** on a primitive without `· k`; a 2.0 file keeps parsing
+and the result consumer is null (discarded).
+
+String and byte-string literals carry the **decoded bytes** (quotes stripped, `\\ \" \n \t \r \0 \xHH`
+resolved). Before 2.1's producer the token's source text, quotes and escapes included, was emitted, so
+`"Hello\n"` printed as `"Hello\n"` with the quotes.
+
+### 7b Effects and guards (2.2)
+
+*HOSE.* Three producer defects made handlers unreadable by any backend; 2.2 fixes the lowering and the one missing
+piece of syntax:
+
+```
+handle { <worker | call · 5 : i64 · %ret_2> } {
+  ctor `Ask.ask`(bind q, bind k) ->                  -- branch pattern = the operation, then payload binder(s), then the continuation
+    <(mul q 10) | comu _x4. <k | call · _x4 · %ret_2>>;
+}
+perform `Ask.ask`(n) · comu _x3. let a = _x3 in …    -- `· k` receives the value the handler resumes with
+```
+
+* `perform Eff.op(p) · k` — operation names are qualified (`Eff.op`) everywhere; the call form `Eff.op(args)` on an effect name
+  is a `perform`. Before 2.2 the result of a `perform` could not be consumed (`let a = Ask.ask(n)` lost `a`), and the call form
+  was lowered as an ordinary method call through a field of the effect.
+* A handler branch's pattern is the variant `Eff.op(payload…, k)`: the payload binders, then the continuation binder when the
+  source names it. Before 2.2 the pattern was `_`, the binders vanished (V3 on `q`, `k`) and a spurious `<unit | %ret>` was
+  sequenced before the arm body.
+* `resume(p)` / `<p | %resume>` is unchanged (convention J2).
+* **Guards:** `pat guard { c } -> body` — `c` is a command that cuts a boolean to the implicit covariable `%guard` (bound by the
+  guard itself; the verifier scopes it). The branch is taken only when the pattern matches **and** the boolean is true; otherwise
+  matching continues with the next branch. Clause guards (`| (a, b) if a > b -> …`) and match-arm guards (`| k, k > 0 -> …`) are
+  produced; before 2.2 both were silently dropped, which made a guarded clause unconditional.
+
+None of this executes today: PEAR 1 has no handler runtime and does not implement guarded branches (§7). What changed is that a
+backend can now *see* the program.
 
 ## 8 Conventions a consumer must implement
 
@@ -288,14 +340,17 @@ test requires an exact match in both directions, so it is a ratchet (§12).
 Measured on the real corpus (`tests/air/VERIFY_KNOWN.tsv` and `docs/pear2/COVERAGE.md`); each is a front-end defect,
 none is a property of the source programs:
 
-1. **`syscall` loses its operands.** `air_lower.c3` (`N_EXPR_SYSCALL`) builds an empty `ACMD_SYSCALL`, so `.air` has
-   `syscall nil();`. This is why 49 exec cases are expected failures (`tests/exec/XFAIL.tsv`): programs that print via
-   `syscall(1, 1, buf, n)` print nothing. Fixing it is a lowering change (ledger item P-syscall).
-2. **Unbound variables** (V3, 22 corpus programs): the staging builtins `quote`/`eval`/`reify`, session endpoints `tx`/`rx`,
-   the effect resume value `k`, pattern binders of rewrite rules and enum payload clauses (`{ A: a } -> a + 100`), and block-scope
-   leaks. A consumer must treat such a variable as **unsupported and diagnose it**; never as an external symbol.
-3. **Dropped statements.** `tests/pfront/45_opt_branch.pie` (`let r = if … ; while 0 …; r`) lowers to a function whose
-   whole body is `<r | %ret_2>`: the `let` and the loop vanished.
+1. ~~**`syscall` loses its operands.**~~ Fixed in 2.1 (§7a). `syscall` programs now print: `01_hello` passes. The other
+   exec cases in `tests/exec/XFAIL.tsv` that used to be masked by this are now individually listed with their real
+   reason (front-end rejection, clause-style functions in PEAR 1, …).
+2. **Unbound variables** (V3, 13 corpus programs, was 22): the staging builtins `quote`/`eval`/`reify`, session endpoints `tx`/`rx`,
+   enum payload clauses (`{ A: a } -> a + 100`), and block-scope leaks. Fixed in 2.2 lowering: handler binders `q`/`k`, destructuring
+   `let (a, b) = t`, rewrite-rule clauses (now classified compile-time-only and no longer lowered as garbage). A consumer must treat such a variable as **unsupported and diagnose it**; never as an external symbol.
+3. **Dropped statements.** Lowering no longer drops any statement of an entry module (`scripts/air-audit.py`: 0 of ~13,000
+   constructs unlowered, was 561 — see `docs/pear2/LOWERING.md`). One case remains, and it is not the lowering:
+   `tests/pfront/45_opt_branch.pie` at -O2 (`let r = if … ; while 0 …; r`) reaches the lowering as `(block (ident r))` — the
+   middle-end optimizer (with the theory layer on) deleted the `let` but kept the use, and its own pass report says
+   "1 declaration(s) vanished with no pass claiming them". At -O0 and with `--no-theory` the `.air` is complete.
 4. **Types are mostly `infer`** (§6), and effect/handler constructs do not execute (§7).
 5. **Flat scoping and implicit joins** (§5, §8) — the representation relies on naming patterns.
 
@@ -312,7 +367,7 @@ verifier ratchet and a differential on the exec suites):
 5. *Types:* carry resolved types instead of `infer`.
 
 When V1–V3 and the conventions are all zero over the corpus, the verifier can be made strict and this document
-bumps to AIR 2.1 (a reader that only knows 2.0 keeps working for files with no conventions).
+bumps to AIR 3.0 (a reader that only knows 2.x keeps working for files with no conventions).
 
 ## 13 Tools and tests
 
