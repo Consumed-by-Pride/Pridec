@@ -4514,12 +4514,12 @@ fn Node* Parser.parse_fn_decl(Parser* p, bool is_pub)
             cl.flags = cl.flags | pfront_core::NF_SYNTHETIC;
             if (init != null) { p.add(cl, init); }
             p.add(n, cl);
-            p.skip_trailing_attrs();
+            p.skip_trailing_attrs(); p.attach_ext(n);
             p.skip_newlines();
             return n;
         }
 
-        p.skip_trailing_attrs();
+        p.skip_trailing_attrs(); p.attach_ext(n);
         p.skip_newlines();
         bool indented = p.accept(Tk.TOKEN_INDENT);
         p.skip_newlines();
@@ -4541,7 +4541,7 @@ fn Node* Parser.parse_fn_decl(Parser* p, bool is_pub)
          Skipped here, after the INDENT, so both spellings work and
          neither needs its own rule.
         */
-        p.skip_trailing_attrs();
+        p.skip_trailing_attrs(); p.attach_ext(n);
         p.skip_newlines();
 
         /*
@@ -4694,7 +4694,7 @@ fn Node* Parser.parse_fn_decl(Parser* p, bool is_pub)
         Node* row = p.parse_effect_row();
         if (row != null) { p.add(n, row); }
     }
-    p.skip_trailing_attrs();
+    p.skip_trailing_attrs(); p.attach_ext(n);
     if (p.check(Tk.TOKEN_KW_WHERE))
     {
         p.advance();
@@ -5453,6 +5453,12 @@ fn void Parser.skip_attributes(Parser* p)
 // Trailing attributes: `fn f : T -> U   #extern("name") #cc(c)`. These sit at
 // the END of a signature line, so every declaration parser must tolerate them
 // before the layout terminator. Skipping them here keeps that in one place.
+fn void Parser.attach_ext(Parser* p, Node* n)
+{
+    if (pfront_core::g_pend_ext_ptr == null) { return; }
+    pfront_core::set_ext_sym(n, pfront_core::g_pend_ext_ptr, pfront_core::g_pend_ext_len);
+    pfront_core::g_pend_ext_ptr = null; pfront_core::g_pend_ext_len = 0;
+}
 fn void Parser.skip_trailing_attrs(Parser* p)
 {
     while (p.check(Tk.TOKEN_HASH) || p.check(Tk.TOKEN_AT))
@@ -5472,10 +5478,18 @@ fn void Parser.skip_trailing_attrs(Parser* p)
         }
         // #name or #name(args) — also accept keyword-valued attribute names
         // such as #extern / #inline / #packed, which the lexer keywordises.
+        bool is_ext_attr = p.check(Tk.TOKEN_KW_EXTERN);
         if (!p.check(Tk.TOKEN_NEWLINE) && !p.at_end()) { p.advance(); }
         if (p.check(Tk.TOKEN_LPAREN))
         {
             p.advance();
+            if (is_ext_attr && p.check(Tk.TOKEN_LIT_STRING))
+            {
+                Tok st = p.cur();
+                char* sp = st.start; usz sl = st.len;
+                if (sl >= 2 && sp[0] == '"') { sp = sp + 1; sl = sl - 2; }
+                pfront_core::g_pend_ext_ptr = sp; pfront_core::g_pend_ext_len = sl;
+            }
             int depth = 1;
             while (depth > 0 && !p.at_end())
             {

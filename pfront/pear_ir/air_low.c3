@@ -468,9 +468,16 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
 {
     if (lw.nfn >= MAXFN) { lw.unsup(d, "more than 4096 functions"); return null; }
     FnInfo* f = &lw.fns[lw.nfn];
-    f.decl = d; f.ext = d.kind == Nk.N_DECL_EXTERN_FN; f.nts = nt;
+    usz esl = 0; char* esp = pfront_core::ext_sym_of(d, &esl);
+    f.decl = d; f.ext = d.kind == Nk.N_DECL_EXTERN_FN || (d.kind == Nk.N_DECL_FN && esp != null); f.nts = nt;
     for (usz j = 0; j < nt; j++) { f.ts[j].tp = tps[j]; f.ts[j].t = targs[j]; }
     char* base = lw.text(d); if (base == null) { base = "_fn"; }
+    if (esp != null)   // #extern("symbol"): the C symbol is the name
+    {
+        char[200] sb; usz k = esl < 199 ? esl : 199;
+        for (usz i = 0; i < k; i++) { sb[i] = esp[i]; } sb[k] = 0;
+        base = lw.dup(&sb[0]);
+    }
     if (nt > 0)
     {
         char[300] bb; usz bn = (usz)snprintf(&bb[0], 300, "%s", base);
@@ -711,6 +718,14 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
             {
                 Node* op = lw.effect_op(n.children[0].resolved, lw.dname(n)); AirTyp*[8] ps; usz np = 0; AirTyp* ret = null;
                 return (op != null && lw.op_sig(op, &ps[0], &np, &ret)) ? ret : null;
+            }
+            Node* mcr = n.resolved;
+            if (mcr != null && (mcr.kind == Nk.N_DECL_FN || mcr.kind == Nk.N_DECL_EXTERN_FN))
+            {
+                Node*[4] mtp; FnInfo* mf = null;
+                if (lw.typarams(mcr, &mtp[0]) == 0) { mf = lw.fn_for(mcr); }
+                else { int se = lw.errors; int sfe = lw.fn_errors; mf = lw.callee_fn(n, mcr); if (mf == null) { lw.errors = se; lw.fn_errors = sfe; } }
+                return mf == null ? null : mf.ret;
             }
             long hv = -1; Enm* he = n.child_count > 0 ? lw.enum_ctor_base(n.children[0], lw.dname(n), &hv) : null;
             return he == null ? null : he.ty;
@@ -1492,6 +1507,11 @@ fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
         Vx cv = lw.expr(cal, null);
         return lw.call_clo(n, cv, lw.clo_of(cv.t));
     }
+    return lw.call_to(n, cr, want);
+}
+// a call whose callee declaration is known; `n.children[1..]` are the arguments (a call node or a `Module.fn(..)` method node)
+fn Vx Low.call_to(Low* lw, Node* n, Node* cr, AirTyp* want)
+{
     FnInfo* f = lw.callee_fn(n, cr);
     if (f == null) { return lw.unit(); }
     lw.queue(f);
@@ -1631,7 +1651,11 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         {
             Pl p;
             if (n.child_count > 0 && lw.place(n.children[0], &p)) { Vx r; r.p = p.ptr; r.t = lw.ptr(p.t); return r; }
-            lw.unsup(n, "address of a value that is not in memory"); return lw.unit();
+            if (n.child_count == 0 || lw.fn_errors > 0) { return lw.unit(); }
+            // `&e` of a value that has no address (an immutable `let`, a call result): the address of a stack copy
+            Vx sv = lw.expr(n.children[0], (want != null && want.tag == ATYP_PTR) ? want.args[0] : null);
+            if (!lw.live() || sv.t == null) { return lw.unit(); }
+            Vx sl = lw.alloca_(sv.t); lw.store(sl.p, sv); return sl;
         }
         case Nk.N_EXPR_STRUCT_LIT: return lw.struct_lit(n, want);
         case Nk.N_EXPR_ARRAY: return lw.array_lit(n, want);
@@ -1652,6 +1676,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
                 if (op == null) { lw.err(n, "unknown effect operation", lw.dname(n)); return lw.unit(); }
                 return lw.perform_op(eff, op, &n.children[1], n.child_count - 1, n);
             }
+            if (n.resolved != null && (n.resolved.kind == Nk.N_DECL_FN || n.resolved.kind == Nk.N_DECL_EXTERN_FN)) { return lw.call_to(n, n.resolved, want); }   // `module.fn(args)`
             long vi = -1; char* mn = lw.dname(n);
             Enm* e = n.child_count > 0 ? lw.enum_ctor_base(n.children[0], mn, &vi) : null;
             if (e == null) { lw.unsup(n, "method call"); return lw.unit(); }
@@ -3364,6 +3389,9 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
             f.queued = false; progress = true;
             if (f.ext)
             {
+                bool dup_decl = false;   // two source declarations of one C symbol: one declaration
+                for (usz di = 0; di < lw.m.decl_count; di++) { AirDecl* od = lw.m.decls[di]; if (od != null && od.tag == ADECL_DECLARE && seq(od.name, f.name)) { dup_decl = true; } }
+                if (dup_decl) { continue; }
                 AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DECLARE, f.name);
                 ad.is_extern = true; ad.ret_ty = f.ret; ad.is_varargs = f.variadic;
                 for (usz k = 0; k < f.np; k++) { ad.add_param(air_ir::air_mk_binder(lw.a, lw.dup("_"), f.pty[k], AMULT_UNR)); }
