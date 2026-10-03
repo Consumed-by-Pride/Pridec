@@ -30,7 +30,11 @@ vmsg = cp()
 if L.LLVMVerifyModule(mod, 1, ctypes.byref(vmsg)):
     sys.exit("ll-exe: verifier: " + (vmsg.value or b"?").decode())
 want_triple = args[args.index("--triple") + 1].encode() if "--triple" in args else None
-for t in ("X86", "WebAssembly"):
+if want_triple is None:   # `emit-ll --target=T` wrote `target triple = "T"` into the module: honour it
+    import re
+    _m = re.search(rb'^target triple = "([^"]+)"', open(src, "rb").read(), re.M)
+    if _m: want_triple = _m.group(1)
+for t in ("X86", "WebAssembly", "AArch64", "RISCV", "ARM"):
     for s in ("TargetInfo", "Target", "TargetMC", "AsmPrinter", "AsmParser"):
         try: getattr(L, f"LLVMInitialize{t}{s}")()
         except AttributeError: pass

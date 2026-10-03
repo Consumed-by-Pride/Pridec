@@ -38,6 +38,12 @@ fn int main(String[] args)
     char* path = (char*)args[2].ptr;
     char* out = null;
     for (usz ai = 3; ai < args.len; ai++) { if (eq((char*)args[ai].ptr, "--syscall=x86_64-linux")) { air_ll::g_syscall_mode = 1; } }   // emit-ll: `syscall` as the x86-64 Linux instruction (no libc)
+    for (usz ai = 3; ai < args.len; ai++)   // emit-ll --target=TRIPLE: `target triple`, and usz/isz as wide as that target's pointer
+    {
+        char* ar = (char*)args[ai].ptr;
+        if (ar[0] == '-' && ar[1] == '-' && ar[2] == 't' && ar[3] == 'a' && ar[4] == 'r' && ar[5] == 'g' && ar[6] == 'e' && ar[7] == 't' && ar[8] == '=')
+        { air_ll::g_triple = ar + 9; air_ll::g_ptr_bits = air_ll::triple_ptr_bits(ar + 9); }
+    }
     if (args.len >= 5 && eq((char*)args[3].ptr, "-o")) { out = (char*)args[4].ptr; }
     AirArena arena;
     if (!arena.init()) { return 3; }

@@ -1037,7 +1037,7 @@ fn AirTyp* Low.fat_ty(Low* lw, AirTyp* elem, bool is_str)
     c.result_ty = t;
     d.add_ctor(c);
     c.add_field(air_ir::air_mk_field(lw.a, lw.dup("ptr"), lw.ptr(elem), AMULT_UNR));
-    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("len"), lw.m.t_i64, AMULT_UNR));
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("len"), lw.m.t_usz, AMULT_UNR));   // the length is as wide as a pointer of the target
     lw.m.add_decl(d);
     return t;
 }
@@ -1048,8 +1048,9 @@ fn AirTyp* Low.fat_elem(Low* lw, AirTyp* t)
     for (usz i = 0; i < lw.nfat; i++) { if (lw.fats[i].ty == t || (lw.fats[i].ty.name != null && seq(lw.fats[i].ty.name, t.name))) { return lw.fats[i].elem; } }
     return null;
 }
-fn Vx Low.mk_fat(Low* lw, AirTyp* ft, Vx ptr, Vx len)
+fn Vx Low.mk_fat(Low* lw, AirTyp* ft, Vx ptr, Vx len0)
 {
+    Vx len = lw.coerce(len0, lw.m.t_usz);
     AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_RECORD;
     AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("ptr"); f0.value = ptr.p;
     AirFieldInit* f1 = air_ir::air_new_AirFieldInit(lw.a); f1.name = lw.dup("len"); f1.value = len.p;
@@ -1760,7 +1761,7 @@ fn bool Low.place(Low* lw, Node* n, Pl* out)
             if (se != null)
             {
                 Vx sv = lw.expr(n.children[0], null);
-                Vx sp = lw.field_of(sv, "ptr", 0, lw.ptr(se)); Vx sn = lw.field_of(sv, "len", 1, lw.m.t_i64);
+                Vx sp = lw.field_of(sv, "ptr", 0, lw.ptr(se)); Vx sn = lw.coerce(lw.field_of(sv, "len", 1, lw.m.t_usz), lw.m.t_i64);
                 Vx ii = lw.coerce(i, lw.m.t_i64);
                 lw.bounds(ii, sn);
                 Vx[1] ix1; ix1[0] = ii;
@@ -2200,6 +2201,11 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
                 if (ee != null) { return lw.variant_value(ee, (usz)evi, null, 0, n); }
                 AirTyp* abt = lw.hint(n.children[0]); char* af = lw.text(n);
                 if (abt != null && abt.tag == ATYP_ARRAY && af != null && seq(af, "len")) { return lw.lit_int(abt.ival, lw.m.t_i64); }
+                if (abt != null && af != null && seq(af, "len") && lw.fat_elem(abt) != null)   // the stored length is `usz`; the language-level `.len` is `i64`
+                {
+                    Vx sv = lw.expr(n.children[0], null); if (!lw.live()) { return lw.unit(); }
+                    return lw.coerce(lw.field_of(sv, "len", 1, lw.m.t_usz), lw.m.t_i64);
+                }
                 if (abt != null && abt.tag == ATYP_TUPLE && n.p.aux == 1)   // `t.0`
                 {
                     long ti = (long)n.p.ival;
@@ -2970,7 +2976,7 @@ fn Vx Low.slicing(Low* lw, Node* n)
     {
         el = lw.fat_elem(bt); rt = bt;
         Vx sv = lw.expr(n.children[0], null); if (!lw.live()) { return lw.unit(); }
-        Vx sp = lw.field_of(sv, "ptr", 0, lw.ptr(el)); len = lw.field_of(sv, "len", 1, i64t);
+        Vx sp = lw.field_of(sv, "ptr", 0, lw.ptr(el)); len = lw.coerce(lw.field_of(sv, "len", 1, lw.m.t_usz), i64t);
         lw.bounds(hi, lw.binop(ABIN_ADD, len, lw.lit_int(1, i64t)));
         lw.bounds(lo, lw.binop(ABIN_ADD, hi, lw.lit_int(1, i64t)));
         Vx[1] ix1; ix1[0] = lo;
@@ -3018,7 +3024,7 @@ fn Vx Low.for_each(Low* lw, Node* n, Node* pat, Node* it, Node* body)
     {
         el = lw.fat_elem(bt);
         Vx sv = have_pre ? pre : lw.expr(it, null); if (!lw.live()) { return lw.unit(); }
-        base = lw.field_of(sv, "ptr", 0, lw.ptr(el)).p; len = lw.field_of(sv, "len", 1, lw.m.t_i64);
+        base = lw.field_of(sv, "ptr", 0, lw.ptr(el)).p; len = lw.coerce(lw.field_of(sv, "len", 1, lw.m.t_usz), lw.m.t_i64);
     }
     else { lw.unsup(n, "for over something that is not a range, an array or a slice"); return lw.unit(); }
     if (!lw.live()) { return lw.unit(); }
