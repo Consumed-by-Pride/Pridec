@@ -69,10 +69,13 @@ struct FnInfo
 {
     Node* decl; char* name; AirTyp* ret; AirTyp*[16] pty; usz np; AirTyp* fnty; bool ext; bool queued; bool seen; bool variadic;
     bool is_lam; bool is_adapt; FnInfo* adapt; Cap[16] caps; usz ncaps; AirTyp* envty;
+    TSub[4] ts; usz nts;
 }
 // a function VALUE is the record { fn: ptr, env: ptr(u8) }; `fn` takes the environment as its first argument
 struct CloI { AirTyp* ty; AirTyp* fnty; AirTyp*[8] ps; usz np; AirTyp* ret; }
-struct StInfo { Node* decl; char* name; AirTyp* ty; }
+// generics are monomorphised: an instance is keyed by its declaration and the concrete type arguments
+struct TSub { Node* tp; AirTyp* t; }
+struct StInfo { Node* decl; char* name; AirTyp* ty; AirTyp*[4] targs; usz nt; }
 struct Fat { AirTyp* elem; AirTyp* ty; bool is_str; }
 // an enum is the explicit record { tag: i64, payload: [words x i64] }; every payload field sits at its own
 // 8-byte word offset and is stored/loaded through a typed pointer (the layout is decided HERE, not by the consumer)
@@ -97,6 +100,7 @@ struct Low
     Enm* ens; usz nen;
     CloI* clos; usz nclo; usz nlam;
     DeferR[16] defers; usz ndefer; bool in_replay;
+    TSub[16] tsub; usz ntsub;
     int unchecked;
 }
 
@@ -167,12 +171,48 @@ fn AirDecl* Low.data_of(Low* lw, AirTyp* t)
     return null;
 }
 
+fn usz Low.typarams(Low* lw, Node* d, Node** out)
+{
+    usz n = 0;
+    for (usz i = 0; i < d.child_count && n < 4; i++) { Node* c = d.children[i]; if (c != null && c.kind == Nk.N_DECL_TYPEPARAM) { out[n] = c; n++; } }
+    return n;
+}
+fn AirTyp* Low.tsub_get(Low* lw, Node* tp)
+{
+    for (usz i = lw.ntsub; i > 0; i--) { if (lw.tsub[i - 1].tp == tp) { return lw.tsub[i - 1].t; } }
+    return null;
+}
+fn void Low.tsub_push(Low* lw, Node* tp, AirTyp* t)
+{
+    if (lw.ntsub < 16) { lw.tsub[lw.ntsub].tp = tp; lw.tsub[lw.ntsub].t = t; lw.ntsub++; }
+}
+fn StInfo* Low.st_of(Low* lw, AirTyp* t)
+{
+    if (t == null || t.tag != ATYP_NOMINAL) { return null; }
+    for (usz i = 0; i < lw.nst; i++) { if (lw.sts[i].ty == t || seq(lw.sts[i].name, t.name)) { return &lw.sts[i]; } }
+    return null;
+}
 fn AirTyp* Low.struct_ty(Low* lw, Node* decl)
 {
-    for (usz i = 0; i < lw.nst; i++) { if (lw.sts[i].decl == decl) { return lw.sts[i].ty; } }
+    Node*[4] tps;
+    if (lw.typarams(decl, &tps[0]) > 0) { lw.unsup(decl, "generic struct used without type arguments"); return null; }
+    return lw.struct_inst(decl, null, 0);
+}
+fn AirTyp* Low.struct_inst(Low* lw, Node* decl, AirTyp** targs, usz nt)
+{
+    for (usz i = 0; i < lw.nst; i++)
+    {
+        if (lw.sts[i].decl != decl || lw.sts[i].nt != nt) { continue; }
+        bool same = true;
+        for (usz j = 0; j < nt; j++) { if (!air_ll::ty_eq(lw.sts[i].targs[j], targs[j])) { same = false; } }
+        if (same) { return lw.sts[i].ty; }
+    }
     if (lw.nst >= MAXST) { lw.unsup(decl, "more than 1024 struct types"); return null; }
     char* base = lw.text(decl);
     if (base == null) { base = "S"; }
+    char[300] bb; usz bn = (usz)snprintf(&bb[0], 300, "%s", base);
+    for (usz j = 0; j < nt; j++) { bn += (usz)snprintf(&bb[0] + bn, (usz)(300 - bn), "."); bn = mang(targs[j], &bb[0], bn, 300); }
+    base = lw.dup(&bb[0]);
     // unique among data names
     char* nm = lw.dup(base);
     int k = 1;
@@ -180,16 +220,22 @@ fn AirTyp* Low.struct_ty(Low* lw, Node* decl)
     {
         bool clash = false;
         for (usz i = 0; i < lw.nst; i++) { if (seq(lw.sts[i].name, nm)) { clash = true; } }
+        for (usz i = 0; i < lw.nen; i++) { if (seq(lw.ens[i].name, nm)) { clash = true; } }
         if (!clash) { break; }
-        char[160] b; k++; snprintf(&b[0], 160, "%s.%d", base, k); nm = lw.dup(&b[0]);
+        char[360] b; k++; snprintf(&b[0], 360, "%s.%d", base, k); nm = lw.dup(&b[0]);
     }
     AirTyp* t = lw.nominal(nm);
-    lw.sts[lw.nst].decl = decl; lw.sts[lw.nst].name = nm; lw.sts[lw.nst].ty = t; lw.nst++;
+    lw.sts[lw.nst].decl = decl; lw.sts[lw.nst].name = nm; lw.sts[lw.nst].ty = t; lw.sts[lw.nst].nt = nt;
+    for (usz j = 0; j < nt; j++) { lw.sts[lw.nst].targs[j] = targs[j]; }
+    lw.nst++;
     AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, nm);
     AirCtorDecl* c = air_ir::air_mk_ctor_decl(lw.a, nm);
     c.result_ty = t;
     d.add_ctor(c);
     lw.m.add_decl(d);
+    Node*[4] tps; usz ntp = lw.typarams(decl, &tps[0]);
+    usz mark = lw.ntsub;
+    for (usz j = 0; j < ntp && j < nt; j++) { lw.tsub_push(tps[j], targs[j]); }
     for (usz i = 0; i < decl.child_count; i++)
     {
         Node* f = decl.children[i];
@@ -199,7 +245,46 @@ fn AirTyp* Low.struct_ty(Low* lw, Node* decl)
         char* fnm = lw.text(f);
         c.add_field(air_ir::air_mk_field(lw.a, lw.dup(fnm != null ? fnm : "_"), ft, AMULT_UNR));
     }
+    lw.ntsub = mark;
     return t;
+}
+// bind the type parameters of a generic declaration by matching its declared types against actual ones
+fn void Low.unify(Low* lw, Node* tn, AirTyp* a)
+{
+    if (tn == null || a == null) { return; }
+    switch (tn.kind)
+    {
+        case Nk.N_TY_NAME:
+        {
+            Node* r = tn.resolved;
+            if (r != null && r.kind == Nk.N_DECL_TYPEPARAM)
+            {
+                for (usz i = lw.ntsub; i > 0; i--) { if (lw.tsub[i - 1].tp == r) { if (lw.tsub[i - 1].t == null) { lw.tsub[i - 1].t = a; } return; } }
+            }
+            return;
+        }
+        case Nk.N_TY_ARRAY: if (a.tag == ATYP_ARRAY && tn.child_count > 0) { lw.unify(tn.children[0], a.args[0]); } return;
+        case Nk.N_TY_PTR: if (a.tag == ATYP_PTR && tn.child_count > 0) { lw.unify(tn.children[0], a.args[0]); } return;
+        case Nk.N_TY_SLICE: { AirTyp* fe = lw.fat_elem(a); if (fe != null && tn.child_count > 0) { lw.unify(tn.children[0], fe); } return; }
+        case Nk.N_TY_TUPLE: if (a.tag == ATYP_TUPLE) { for (usz i = 0; i < tn.child_count && i < a.arg_count; i++) { lw.unify(tn.children[i], a.args[i]); } } return;
+        case Nk.N_TY_CONSTRAINT: if (tn.child_count > 0) { lw.unify(tn.children[0], a); } return;
+        case Nk.N_TY_GENERIC:
+        {
+            StInfo* st = lw.st_of(a);
+            if (st != null && tn.child_count > 0 && tn.children[0].resolved == st.decl) { for (usz i = 1; i < tn.child_count && i - 1 < st.nt; i++) { lw.unify(tn.children[i], st.targs[i - 1]); } }
+            return;
+        }
+        case Nk.N_TY_FN:
+        {
+            CloI* ci = lw.clo_of(a); if (ci == null || tn.child_count < 2) { return; }
+            Node* dom = tn.children[0];
+            if (dom.kind == Nk.N_TY_TUPLE) { for (usz i = 0; i < dom.child_count && i < ci.np; i++) { lw.unify(dom.children[i], ci.ps[i]); } }
+            else if (dom.kind != Nk.N_TY_UNIT && ci.np > 0) { lw.unify(dom, ci.ps[0]); }
+            lw.unify(tn.children[1], ci.ret);
+            return;
+        }
+        default: return;
+    }
 }
 
 fn AirTyp* Low.ty(Low* lw, Node* t)
@@ -220,6 +305,12 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
                 if (pr != null && pr.tag != ATYP_STR && pr.tag != ATYP_BYTES) { return pr; }
             }
             Node* r = t.resolved;
+            if (r != null && r.kind == Nk.N_DECL_TYPEPARAM)
+            {
+                AirTyp* bt = lw.tsub_get(r);
+                if (bt == null) { lw.unsup(t, "type parameter with no instantiation"); return null; }
+                return bt;
+            }
             if (r != null && (r.kind == Nk.N_DECL_STRUCT)) { return lw.struct_ty(r); }
             if (r != null && r.kind == Nk.N_DECL_ENUM) { Enm* en = lw.enum_for(r); return en == null ? null : en.ty; }
             if (r != null && r.kind == Nk.N_DECL_TYPE && r.type_ann != null && r.type_ann != t) { return lw.ty(r.type_ann); }
@@ -231,6 +322,14 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
             Node* c0 = t.children[0];
             AirTyp* in_ = (c0 != null && c0.kind == Nk.N_TY_UNIT) ? lw.m.t_u8 : lw.ty(c0);   // *() is an untyped pointer: ptr(u8)
             return in_ == null ? null : lw.ptr(in_);
+        }
+        case Nk.N_TY_GENERIC:
+        {
+            Node* h = t.child_count > 0 ? t.children[0] : null;
+            if (h == null || h.resolved == null || h.resolved.kind != Nk.N_DECL_STRUCT) { lw.unsup(t, "generic type"); return null; }
+            AirTyp*[4] ta; usz nta = 0;
+            for (usz i = 1; i < t.child_count && nta < 4; i++) { AirTyp* x = lw.ty(t.children[i]); if (x == null) { return null; } ta[nta] = x; nta++; }
+            return lw.struct_inst(h.resolved, &ta[0], nta);
         }
         case Nk.N_TY_SLICE:
         {
@@ -289,11 +388,66 @@ fn bool Low.sig_of(Low* lw, Node* tf, AirTyp** ps, usz* np, AirTyp** rt)
 // ── function registry ──────────────────────────────────────────────────────
 fn FnInfo* Low.fn_for(Low* lw, Node* d)
 {
-    for (usz i = 0; i < lw.nfn; i++) { if (lw.fns[i].decl == d) { return &lw.fns[i]; } }
+    Node*[4] tps;
+    if (lw.typarams(d, &tps[0]) > 0) { lw.unsup(d, "generic function used without type arguments"); return null; }
+    return lw.fn_inst(d, null, 0);
+}
+fn FnInfo* Low.fn_inst(Low* lw, Node* d, AirTyp** targs, usz nt)
+{
+    for (usz i = 0; i < lw.nfn; i++)
+    {
+        if (lw.fns[i].decl != d || lw.fns[i].is_lam || lw.fns[i].is_adapt || lw.fns[i].nts != nt) { continue; }
+        bool same = true;
+        for (usz j = 0; j < nt; j++) { if (!air_ll::ty_eq(lw.fns[i].ts[j].t, targs[j])) { same = false; } }
+        if (same) { return &lw.fns[i]; }
+    }
+    usz mark = lw.ntsub;
+    Node*[4] tps; usz ntp = lw.typarams(d, &tps[0]);
+    for (usz j = 0; j < ntp && j < nt; j++) { lw.tsub_push(tps[j], targs[j]); }
+    FnInfo* f = lw.fn_build(d, targs, nt, &tps[0]);
+    lw.ntsub = mark;
+    return f;
+}
+// pick the instance a call refers to: infer the type arguments by unifying the declared parameter types with the arguments
+fn FnInfo* Low.callee_fn(Low* lw, Node* call, Node* cr)
+{
+    Node*[4] tps; usz ntp = lw.typarams(cr, &tps[0]);
+    if (ntp == 0) { return lw.fn_for(cr); }
+    usz mark = lw.ntsub;
+    for (usz j = 0; j < ntp; j++) { lw.tsub_push(tps[j], null); }
+    Node* ft = cr.type_ann;
+    if (ft != null && ft.kind == Nk.N_TY_FN && ft.child_count > 0)
+    {
+        Node* dom = ft.children[0];
+        for (usz i = 1; i < call.child_count; i++)
+        {
+            Node* pn = null;
+            if (dom.kind == Nk.N_TY_TUPLE) { pn = (i - 1) < dom.child_count ? dom.children[i - 1] : null; }
+            else if (i == 1) { pn = dom; }
+            AirTyp* ah = lw.hint(call.children[i]);
+            if (ah == null && call.children[i].kind == Nk.N_EXPR_INT) { ah = lw.m.t_i64; }
+            lw.unify(pn, ah);
+        }
+    }
+    AirTyp*[4] ta; bool ok = true;
+    for (usz j = 0; j < ntp; j++) { ta[j] = lw.tsub[mark + j].t; if (ta[j] == null) { ok = false; } }
+    lw.ntsub = mark;
+    if (!ok) { lw.err(call, "cannot infer the type arguments of this call", lw.text(cr)); return null; }
+    return lw.fn_inst(cr, &ta[0], ntp);
+}
+fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
+{
     if (lw.nfn >= MAXFN) { lw.unsup(d, "more than 4096 functions"); return null; }
     FnInfo* f = &lw.fns[lw.nfn];
-    f.decl = d; f.ext = d.kind == Nk.N_DECL_EXTERN_FN;
+    f.decl = d; f.ext = d.kind == Nk.N_DECL_EXTERN_FN; f.nts = nt;
+    for (usz j = 0; j < nt; j++) { f.ts[j].tp = tps[j]; f.ts[j].t = targs[j]; }
     char* base = lw.text(d); if (base == null) { base = "_fn"; }
+    if (nt > 0)
+    {
+        char[300] bb; usz bn = (usz)snprintf(&bb[0], 300, "%s", base);
+        for (usz j = 0; j < nt; j++) { bn += (usz)snprintf(&bb[0] + bn, (usz)(300 - bn), "."); bn = mang(targs[j], &bb[0], bn, 300); }
+        base = lw.dup(&bb[0]);
+    }
     // names are unique across the program; externs keep their C symbol, so they are never renamed
     char* nm = lw.dup(base);
     if (!f.ext)
@@ -540,7 +694,9 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
             Node* cr = n.children[0].resolved;
             if (cr != null && (cr.kind == Nk.N_DECL_FN || cr.kind == Nk.N_DECL_EXTERN_FN))
             {
-                FnInfo* f = lw.fn_for(cr);
+                Node*[4] htp; FnInfo* f = null;
+                if (lw.typarams(cr, &htp[0]) == 0) { f = lw.fn_for(cr); }
+                else { int se = lw.errors; int sfe = lw.fn_errors; f = lw.callee_fn(n, cr); if (f == null) { lw.errors = se; lw.fn_errors = sfe; } }
                 return f == null ? null : f.ret;
             }
             return null;
@@ -580,7 +736,9 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         case Nk.N_EXPR_STRUCT_LIT:
         {
             Node* r = n.resolved; if (r == null && n.child_count > 0) { r = n.children[0].resolved; }
-            return (r != null && r.kind == Nk.N_DECL_STRUCT) ? lw.struct_ty(r) : null;
+            if (r == null || r.kind != Nk.N_DECL_STRUCT) { return null; }
+            Node*[4] hq; if (lw.typarams(r, &hq[0]) > 0) { int se = lw.errors; int sf = lw.fn_errors; AirTyp* gt = lw.lit_struct_ty(n, r, null); if (gt == null) { lw.errors = se; lw.fn_errors = sf; } return gt; }
+            return lw.struct_ty(r);
         }
         case Nk.N_EXPR_SIZEOF: case Nk.N_EXPR_ALIGNOF: return lw.m.t_usz;
         case Nk.N_EXPR_SYSCALL: return lw.m.t_i64;
@@ -1102,7 +1260,7 @@ fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
         Vx cv = lw.expr(cal, null);
         return lw.call_clo(n, cv, lw.clo_of(cv.t));
     }
-    FnInfo* f = lw.fn_for(cr);
+    FnInfo* f = lw.callee_fn(n, cr);
     if (f == null) { return lw.unit(); }
     lw.queue(f);
     usz na = n.child_count - 1;
@@ -1230,7 +1388,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             if (n.child_count > 0 && lw.place(n.children[0], &p)) { Vx r; r.p = p.ptr; r.t = lw.ptr(p.t); return r; }
             lw.unsup(n, "address of a value that is not in memory"); return lw.unit();
         }
-        case Nk.N_EXPR_STRUCT_LIT: return lw.struct_lit(n);
+        case Nk.N_EXPR_STRUCT_LIT: return lw.struct_lit(n, want);
         case Nk.N_EXPR_ARRAY: return lw.array_lit(n, want);
         case Nk.N_EXPR_LAMBDA: return lw.lambda(n, want);
         case Nk.N_EXPR_METHOD:
@@ -1321,11 +1479,41 @@ fn Vx Low.alloc(Low* lw, Node* n)
     return lw.coerce(raw, lw.ptr(el));
 }
 
-fn Vx Low.struct_lit(Low* lw, Node* n)
+// the (possibly generic) struct type of a literal: from the expected type, else from the field values
+fn AirTyp* Low.lit_struct_ty(Low* lw, Node* n, Node* r, AirTyp* want)
+{
+    Node*[4] tps; usz ntp = lw.typarams(r, &tps[0]);
+    if (ntp == 0) { return lw.struct_ty(r); }
+    StInfo* ws = lw.st_of(want);
+    if (ws != null && ws.decl == r) { return want; }
+    usz mark = lw.ntsub;
+    for (usz j = 0; j < ntp; j++) { lw.tsub_push(tps[j], null); }
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        Node* fi = n.children[i]; if (fi == null || fi.kind != Nk.N_EXPR_FIELD_INIT || fi.child_count == 0) { continue; }
+        char* fnm = lw.text(fi);
+        for (usz k = 0; k < r.child_count; k++)
+        {
+            Node* fd = r.children[k];
+            if (fd == null || fd.kind != Nk.N_DECL_FIELD) { continue; }
+            char* dn = lw.text(fd);
+            if (dn == null || fnm == null || !seq(dn, fnm)) { continue; }
+            AirTyp* ah = lw.hint(fi.children[0]);
+            if (ah == null && fi.children[0].kind == Nk.N_EXPR_INT) { ah = lw.m.t_i64; }
+            lw.unify(fd.type_ann, ah);
+        }
+    }
+    AirTyp*[4] ta; bool ok = true;
+    for (usz j = 0; j < ntp; j++) { ta[j] = lw.tsub[mark + j].t; if (ta[j] == null) { ok = false; } }
+    lw.ntsub = mark;
+    if (!ok) { lw.err(n, "cannot infer the type arguments of this struct literal", lw.text(r)); return null; }
+    return lw.struct_inst(r, &ta[0], ntp);
+}
+fn Vx Low.struct_lit(Low* lw, Node* n, AirTyp* want)
 {
     Node* r = n.resolved; if (r == null && n.child_count > 0) { r = n.children[0].resolved; }
     if (r == null || r.kind != Nk.N_DECL_STRUCT) { lw.unsup(n, "literal of a non-struct type"); return lw.unit(); }
-    AirTyp* st = lw.struct_ty(r);
+    AirTyp* st = lw.lit_struct_ty(n, r, want);
     AirDecl* d = lw.data_of(st);
     if (st == null || d == null) { return lw.unit(); }
     AirCtorDecl* c = d.ctors[0];
@@ -2270,6 +2458,7 @@ fn void Low.lower_fn(Low* lw, FnInfo* f)
     if (f.is_lam) { lw.lower_lambda(f); return; }
     if (f.is_adapt) { lw.lower_adapter(f); return; }
     Node* d = f.decl;
+    lw.ntsub = 0; for (usz j = 0; j < f.nts; j++) { lw.tsub_push(f.ts[j].tp, f.ts[j].t); }
     lw.cur_fn = f.name; lw.fn_errors = 0; lw.cur_node = d;
     lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nnames = 0; lw.tmpn = 0;
     lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
