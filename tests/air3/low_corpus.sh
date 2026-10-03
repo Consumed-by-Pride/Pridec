@@ -4,6 +4,7 @@
 # and compared with the program's own `-- EXPECT:` / `-- EXIT:` header (same rules as tests/exec/run.sh).
 #
 # Statuses:  PASS      built from the low .air and behaved as the header says
+#            FRONT     the front end itself rejects the program (not a lowering matter; tests/exec/XFAIL.tsv)
 #            NOLOWER   pfrontc --emit-air-low reported a construct it does not lower yet (first diagnostic shown)
 #            VERIFY    the lowering wrote a .air that verify-low rejected   (a LOWERING BUG, must be 0)
 #            LLVM      emit-ll / LLVM verification / link failed            (a LOWERING or CONSUMER BUG, must be 0)
@@ -25,7 +26,9 @@ for f in "${files[@]}"; do
     id=$(echo "${f#tests/exec/}" | sed 's/\.pie$//; s#/#_#g')
     low="$W/$id.low.air"; st=""; why=""
     out=$(PFRONT_LOW_OUT="$low" ./pfrontc "$f" --emit-air-low --quiet 2>&1); rc=$?
-    if [ ! -f "$low" ]; then
+    if echo "$out" | grep -q 'errors=[1-9]'; then
+        st=FRONT; why=$(PFRONT_LOW_OUT="$low" ./pfrontc "$f" --emit-air-low 2>&1 | grep -m1 -i 'error' | cut -c1-110)
+    elif [ ! -f "$low" ]; then
         st=NOLOWER; why=$(echo "$out" | grep -m1 'air-low:\|error' | sed 's/^air-low: error: //' | cut -c1-110)
     elif ! tmp/airtool verify-low "$low" >"$W/$id.v" 2>&1; then st=VERIFY; why=$(head -1 "$W/$id.v" | cut -c1-110)
     elif ! tmp/airtool emit-ll "$low" -o "$W/$id.ll" >"$W/$id.e" 2>&1; then st=LLVM; why=$(head -1 "$W/$id.e" | cut -c1-110)
@@ -44,5 +47,5 @@ for f in "${files[@]}"; do
     [ "$st" = PASS ] && [ $V = 1 ] && printf '  %-8s %s\n' PASS "$id"
 done
 [ -n "$TSV" ] && cp "$W/rows.tsv" "$TSV"
-echo "low corpus: PASS=${cnt[PASS]:-0} NOLOWER=${cnt[NOLOWER]:-0} VERIFY=${cnt[VERIFY]:-0} LLVM=${cnt[LLVM]:-0} WRONG=${cnt[WRONG]:-0} of ${#files[@]}"
+echo "low corpus: PASS=${cnt[PASS]:-0} FRONT=${cnt[FRONT]:-0} NOLOWER=${cnt[NOLOWER]:-0} VERIFY=${cnt[VERIFY]:-0} LLVM=${cnt[LLVM]:-0} WRONG=${cnt[WRONG]:-0} of ${#files[@]}"
 [ "${cnt[VERIFY]:-0}" = 0 ] && [ "${cnt[LLVM]:-0}" = 0 ] && [ "${cnt[WRONG]:-0}" = 0 ]

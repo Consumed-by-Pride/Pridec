@@ -289,25 +289,34 @@ fn FnInfo* Low.fn_for(Low* lw, Node* d)
     {
         if (!lw.sig_of(d.type_ann, &f.pty[0], &f.np, &f.ret)) { lw.nfn--; return null; }
     }
-    else if (f.ext)
+    else if (f.ext || d.kind == Nk.N_DECL_FN)
     {
-        // extern fn: params are N_DECL_PARAM children, result is the node's own annotation
+        // `extern fn` and brace-style `fn f(a: T, b: U) -> R { .. }`: params are N_DECL_PARAM children,
+        // the result is the node's own annotation
         f.np = 0;
         for (usz i = 0; i < d.child_count; i++)
         {
             Node* c = d.children[i];
             if (c == null || c.kind != Nk.N_DECL_PARAM) { continue; }
-            AirTyp* pt = lw.ty(c.type_ann); if (pt == null) { lw.nfn--; return null; }
+            Node* tn = c.type_ann;
+            if (tn == null && c.child_count > 0 && c.children[0] != null) { tn = c.children[0].type_ann; }
+            if (tn == null && c.child_count > 0 && c.children[0] != null && c.children[0].kind == Nk.N_PAT_WILDCARD) { continue; }   // `main(_)`: no parameter
+            AirTyp* pt = lw.ty(tn); if (pt == null) { lw.nfn--; return null; }
             if (f.np < 16) { f.pty[f.np] = pt; f.np++; }
         }
         Node* rn = d.type_ann;
-        f.ret = rn == null ? lw.m.t_unit : lw.ty(rn);
+        f.ret = (rn == null || rn.kind == Nk.N_TY_FN) ? lw.m.t_unit : lw.ty(rn);
         if (f.ret == null) { lw.nfn--; return null; }
         f.variadic = (d.flags & pfront_core::NF_VARIADIC) != 0;
     }
     else { lw.unsup(d, "function without a signature"); lw.nfn--; return null; }
     f.fnty = air_ir::air_mk_typ_arrow(lw.a, f.np == 0 ? lw.m.t_unit : (f.np == 1 ? f.pty[0] : air_ir::air_mk_typ_tuple(lw.a, &f.pty[0], f.np)), f.ret);
     return f;
+}
+fn bool Low.is_brace_fn(Low* lw, Node* d)
+{
+    for (usz i = 0; i < d.child_count; i++) { if (d.children[i] != null && d.children[i].kind == Nk.N_DECL_PARAM) { return true; } }
+    return d.type_ann != null && d.type_ann.kind != Nk.N_TY_FN;
 }
 fn bool Low.is_entry(Low* lw, Node* d) { return d != null && d == lw.entry_decl; }
 
@@ -642,10 +651,22 @@ fn AirTyp* Low.ty_quiet(Low* lw, Node* t)
     return r;
 }
 
+fn VarB* Low.find_var_named(Low* lw, Node* id)
+{
+    char* nm = lw.text(id);
+    if (nm == null) { return null; }
+    for (usz i = lw.nvars; i > 0; i--)
+    {
+        char* vn = lw.text(lw.vars[i - 1].decl);
+        if (vn != null && seq(vn, nm)) { return &lw.vars[i - 1]; }
+    }
+    return null;
+}
 fn Vx Low.read_var(Low* lw, Node* id)
 {
     Node* r = id.resolved;
     VarB* v = lw.find_var(r);
+    if (v == null && r == null) { v = lw.find_var_named(id); }   // names inside type positions (`[u8; n + 1]`) are not resolved by the front end
     if (v != null)
     {
         if (v.slot) { return lw.load(v.p, v.t); }
@@ -1008,9 +1029,9 @@ fn bool Low.binop_for(Low* lw, Tk op, AirBinop* out)
 {
     switch (op)
     {
-        case Tk.TOKEN_PLUS: *out = ABIN_ADD; return true;
-        case Tk.TOKEN_MINUS: *out = ABIN_SUB; return true;
-        case Tk.TOKEN_STAR: *out = ABIN_MUL; return true;
+        case Tk.TOKEN_PLUS: case Tk.TOKEN_PLUS_PERCENT: *out = ABIN_ADD; return true;
+        case Tk.TOKEN_MINUS: case Tk.TOKEN_MINUS_PERCENT: *out = ABIN_SUB; return true;
+        case Tk.TOKEN_STAR: case Tk.TOKEN_STAR_PERCENT: *out = ABIN_MUL; return true;
         case Tk.TOKEN_SLASH: *out = ABIN_DIV; return true;
         case Tk.TOKEN_PERCENT: *out = ABIN_MOD; return true;
         case Tk.TOKEN_AMP: *out = ABIN_AND; return true;
@@ -1028,11 +1049,39 @@ fn bool Low.binop_for(Low* lw, Tk op, AirBinop* out)
     }
 }
 
+// an extern declaration for an LLVM intrinsic: the low profile has no operation for it, an ordinary call to
+// a function named `llvm.*` is the escape hatch (a consumer that is not LLVM must implement the name)
+fn char* Low.intrinsic(Low* lw, char* nm, AirTyp** ps, usz np, AirTyp* ret)
+{
+    for (usz i = 0; i < lw.m.decl_count; i++) { AirDecl* d = lw.m.decls[i]; if (d != null && d.tag == ADECL_DECLARE && seq(d.name, nm)) { return d.name; } }
+    char* nn = lw.dup(nm);
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DECLARE, nn);
+    ad.is_extern = true; ad.ret_ty = ret;
+    for (usz i = 0; i < np; i++) { ad.add_param(air_ir::air_mk_binder(lw.a, lw.dup("_"), ps[i], AMULT_UNR)); }
+    lw.m.add_decl(ad);
+    return nn;
+}
+fn Vx Low.saturating(Low* lw, Node* n, bool add, AirTyp* want)
+{
+    AirTyp* h = lw.hint(n.children[0]); if (h == null) { h = lw.hint(n.children[1]); } if (h == null) { h = want; }
+    Vx l = lw.expr(n.children[0], h); Vx r = lw.expr(n.children[1], h != null ? h : l.t);
+    if (l.t == null || !air_ll::ty_is_int(l.t)) { lw.err(n, "saturating arithmetic needs integers", null); return lw.unit(); }
+    if (!air_ll::ty_eq(l.t, r.t)) { r = lw.coerce_arg(n.children[1], r, l.t); }
+    char[64] b; int bits = air_ll::ty_bits(l.t);
+    snprintf(&b[0], 64, "llvm.%c%s.sat.i%d", air_ll::ty_is_signed(l.t) ? 's' : 'u', add ? "add" : "sub", bits);
+    AirTyp*[2] ps; ps[0] = l.t; ps[1] = l.t;
+    char* fnm = lw.intrinsic(&b[0], &ps[0], 2, l.t);
+    if (!lw.live()) { return lw.unit(); }
+    Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_sat"); ins.a = air_ir::air_mk_var(lw.a, fnm); ins.nargs = 2; ins.args[0] = l.p; ins.args[1] = r.p;
+    return lw.vref(ins.name, l.t);
+}
 fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
 {
     if (n.child_count < 2) { return lw.unit(); }
     Tk op = (Tk)n.p.op;
     if (op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_PIPEPIPE) { return lw.shortcircuit(n, op == Tk.TOKEN_AMPAMP); }
+    if (op == Tk.TOKEN_PLUS_PIPE || op == Tk.TOKEN_MINUS_PIPE) { return lw.saturating(n, op == Tk.TOKEN_PLUS_PIPE, want); }
     AirBinop b;
     if (!lw.binop_for(op, &b)) { lw.unsup(n, "binary operator"); return lw.unit(); }
     bool cmp = b == ABIN_EQ || b == ABIN_NEQ || b == ABIN_LT || b == ABIN_GT || b == ABIN_LE || b == ABIN_GE;
@@ -1496,7 +1545,25 @@ fn void Low.lower_fn(Low* lw, FnInfo* f)
         if (c.kind == Nk.N_CLAUSE && narms < 256) { arms[narms] = c; narms++; }
     }
     Vx rv = lw.unit();
-    if (narms == 0) { lw.unsup(d, "function without clauses"); }
+    if (narms == 0 && lw.is_brace_fn(d))
+    {
+        usz pi = 0; Node* body = null;
+        for (usz i = 0; i < d.child_count; i++)
+        {
+            Node* c = d.children[i]; if (c == null) { continue; }
+            if (c.kind == Nk.N_DECL_PARAM)
+            {
+                Node* pat = c.child_count > 0 ? c.children[0] : null;
+                if (pat != null && pat.kind == Nk.N_PAT_WILDCARD && c.type_ann == null && pat.type_ann == null) { continue; }
+                if (pi < f.np && pat != null) { lw.pat(pat, pv[pi], NOBLK); }
+                pi++;
+            }
+            else if (c.kind == Nk.N_BLOCK || pfront_core::is_expr(c.kind)) { body = c; }
+        }
+        if (body == null) { lw.unsup(d, "function without a body"); }
+        else { rv = lw.expr(body, f.ret); lw.finish_ret(rv, d); }
+    }
+    else if (narms == 0) { lw.unsup(d, "function without clauses"); }
     else
     {
         // a single irrefutable clause binds names directly; several clauses are an arm chain
