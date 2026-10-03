@@ -76,11 +76,13 @@ struct CloI { AirTyp* ty; AirTyp* fnty; AirTyp*[8] ps; usz np; AirTyp* ret; }
 // generics are monomorphised: an instance is keyed by its declaration and the concrete type arguments
 struct TSub { Node* tp; AirTyp* t; }
 struct StInfo { Node* decl; char* name; AirTyp* ty; AirTyp*[4] targs; usz nt; }
+// an untagged `union` is a block of words; every field is a typed view of offset 0
+struct UniI { Node* decl; AirTyp* ty; char*[8] fnames; AirTyp*[8] ft; usz nf; usz words; }
 struct Fat { AirTyp* elem; AirTyp* ty; bool is_str; }
 // an enum is the explicit record { tag: i64, payload: [words x i64] }; every payload field sits at its own
 // 8-byte word offset and is stored/loaded through a typed pointer (the layout is decided HERE, not by the consumer)
 struct VarI { char* name; Node* decl; AirTyp*[8] ft; usz nf; usz[8] off; }
-struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; }
+struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; AirTyp*[8] um; usz nm; }   // nm > 0: a set-theoretic union `A ∪ B` (variants are its members)
 struct GlInfo { Node* decl; char* name; AirTyp* ty; }
 
 struct Low
@@ -101,6 +103,8 @@ struct Low
     CloI* clos; usz nclo; usz nlam;
     DeferR[16] defers; usz ndefer; bool in_replay;
     TSub[16] tsub; usz ntsub;
+    Node** roots; usz nroots;
+    UniI[32] unis; usz nuni;
     int unchecked;
 }
 
@@ -312,6 +316,7 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
                 return bt;
             }
             if (r != null && (r.kind == Nk.N_DECL_STRUCT)) { return lw.struct_ty(r); }
+            if (r != null && r.kind == Nk.N_DECL_UNION) { return lw.union_ty(r); }
             if (r != null && r.kind == Nk.N_DECL_ENUM) { Enm* en = lw.enum_for(r); return en == null ? null : en.ty; }
             if (r != null && r.kind == Nk.N_DECL_TYPE && r.type_ann != null && r.type_ann != t) { return lw.ty(r.type_ann); }
             lw.unsup(t, nm != null ? nm : "type"); return null;
@@ -322,6 +327,21 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
             Node* c0 = t.children[0];
             AirTyp* in_ = (c0 != null && c0.kind == Nk.N_TY_UNIT) ? lw.m.t_u8 : lw.ty(c0);   // *() is an untyped pointer: ptr(u8)
             return in_ == null ? null : lw.ptr(in_);
+        }
+        case Nk.N_TY_UNION:
+        {
+            AirTyp*[8] ms; usz nm = 0;
+            lw.flatten_union(t, &ms[0], &nm, false);
+            if (nm == 0) { return null; }
+            if (nm == 1) { return ms[0]; }
+            return lw.union_enum_ty(&ms[0], nm);
+        }
+        case Nk.N_TY_INTERSECT:
+        {
+            AirTyp*[8] ms; usz nm = 0;
+            lw.flatten_union(t, &ms[0], &nm, true);
+            if (nm == 1) { return ms[0]; }
+            lw.unsup(t, "intersection of distinct types"); return null;
         }
         case Nk.N_TY_GENERIC:
         {
@@ -638,6 +658,8 @@ fn VarB* Low.find_var(Low* lw, Node* decl)
 fn AirTyp* Low.pointee(Low* lw, AirTyp* t) { return (t != null && t.tag == ATYP_PTR) ? t.args[0] : null; }
 fn AirTyp* Low.field_ty(Low* lw, AirTyp* st, char* f, long* idx)
 {
+    UniI* un = lw.uni_of(st);
+    if (un != null) { *idx = 0; return lw.uni_field(un, f); }
     AirDecl* d = lw.data_of(st);
     if (d == null || d.ctor_count != 1) { return null; }
     AirCtorDecl* c = d.ctors[0];
@@ -692,6 +714,7 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         {
             if (n.child_count == 0) { return null; }
             Node* cr = n.children[0].resolved;
+            if (cr == null && n.children[0].kind == Nk.N_EXPR_IDENT) { cr = lw.fn_by_name(lw.text(n.children[0])); }
             if (cr != null && (cr.kind == Nk.N_DECL_FN || cr.kind == Nk.N_DECL_EXTERN_FN))
             {
                 Node*[4] htp; FnInfo* f = null;
@@ -736,6 +759,7 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         case Nk.N_EXPR_STRUCT_LIT:
         {
             Node* r = n.resolved; if (r == null && n.child_count > 0) { r = n.children[0].resolved; }
+            if (r != null && r.kind == Nk.N_DECL_UNION) { return lw.union_ty(r); }
             if (r == null || r.kind != Nk.N_DECL_STRUCT) { return null; }
             Node*[4] hq; if (lw.typarams(r, &hq[0]) > 0) { int se = lw.errors; int sf = lw.fn_errors; AirTyp* gt = lw.lit_struct_ty(n, r, null); if (gt == null) { lw.errors = se; lw.fn_errors = sf; } return gt; }
             return lw.struct_ty(r);
@@ -910,6 +934,77 @@ fn bool Low.is_str_t(Low* lw, AirTyp* t)
 }
 
 
+
+// ── untagged unions ───────────────────────────────────────────────────────
+fn AirTyp* Low.union_ty(Low* lw, Node* decl)
+{
+    for (usz i = 0; i < lw.nuni; i++) { if (lw.unis[i].decl == decl) { return lw.unis[i].ty; } }
+    if (lw.nuni >= 32) { lw.unsup(decl, "more than 32 union types"); return null; }
+    UniI* u = &lw.unis[lw.nuni]; lw.nuni++;
+    u.decl = decl; u.nf = 0; u.words = 1;
+    char* base = lw.dname(decl); if (base == null) { base = "Union"; }
+    char* nm = lw.dup(base); int k = 1;
+    while (true)
+    {
+        bool clash = false;
+        for (usz i = 0; i + 1 < lw.nuni; i++) { if (seq(lw.unis[i].ty.name, nm)) { clash = true; } }
+        for (usz i = 0; i < lw.nst; i++) { if (seq(lw.sts[i].name, nm)) { clash = true; } }
+        for (usz i = 0; i < lw.nen; i++) { if (seq(lw.ens[i].name, nm)) { clash = true; } }
+        if (!clash) { break; }
+        char[160] b; k++; snprintf(&b[0], 160, "%s.%d", base, k); nm = lw.dup(&b[0]);
+    }
+    u.ty = lw.nominal(nm);
+    for (usz i = 0; i < decl.child_count; i++)
+    {
+        Node* f = decl.children[i]; if (f == null || f.kind != Nk.N_DECL_FIELD || u.nf >= 8) { continue; }
+        AirTyp* ft = lw.ty(f.type_ann); if (ft == null) { return null; }
+        u.fnames[u.nf] = lw.dup(lw.text(f)); u.ft[u.nf] = ft; u.nf++;
+        usz w = lw.words(ft); if (w > u.words) { u.words = w; }
+    }
+    AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, nm);
+    AirCtorDecl* c = air_ir::air_mk_ctor_decl(lw.a, nm);
+    c.result_ty = u.ty; d.add_ctor(c);
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("bits"), air_ir::air_mk_typ_array(lw.a, lw.m.t_i64, (long)u.words), AMULT_UNR));
+    lw.m.add_decl(d);
+    return u.ty;
+}
+fn UniI* Low.uni_of(Low* lw, AirTyp* t)
+{
+    if (t == null || t.tag != ATYP_NOMINAL) { return null; }
+    for (usz i = 0; i < lw.nuni; i++) { if (seq(lw.unis[i].ty.name, t.name)) { return &lw.unis[i]; } }
+    return null;
+}
+fn AirTyp* Low.uni_field(Low* lw, UniI* u, char* f)
+{
+    if (f == null) { return null; }
+    for (usz i = 0; i < u.nf; i++) { if (seq(u.fnames[i], f)) { return u.ft[i]; } }
+    return null;
+}
+fn Vx Low.union_lit(Low* lw, Node* n, Node* r)
+{
+    AirTyp* ut = lw.union_ty(r); UniI* u = lw.uni_of(ut);
+    if (ut == null || u == null) { return lw.unit(); }
+    Vx slot = lw.alloca_(ut);
+    // zero the whole block first: bytes outside the written field are defined
+    AirPrd* z = air_ir::air_new_AirPrd(lw.a); z.tag = APRD_ARRAY;
+    for (usz i = 0; i < u.words; i++) { AirPrd* zi = air_ir::air_mk_int(lw.a, 0); zi.ty = lw.m.t_i64; z.add_sub(zi); }
+    Vx zv = lw.let_(z, air_ir::air_mk_typ_array(lw.a, lw.m.t_i64, (long)u.words), "_z");
+    Vx zr; AirPrd* rec = air_ir::air_new_AirPrd(lw.a); rec.tag = APRD_RECORD;
+    AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("bits"); f0.value = zv.p; rec.rec_inits[0] = f0; rec.rec_init_count = 1;
+    zr = lw.let_(rec, ut, "_u0");
+    lw.store(slot.p, zr);
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        Node* fi = n.children[i]; if (fi == null || fi.kind != Nk.N_EXPR_FIELD_INIT || fi.child_count == 0) { continue; }
+        char* fnm = lw.text(fi); AirTyp* ft = lw.uni_field(u, fnm);
+        if (ft == null) { lw.err(fi, "field is not declared", fnm); return lw.unit(); }
+        Vx v = lw.expr(fi.children[0], ft); v = lw.coerce_arg(fi, v, ft);
+        Vx pp = lw.coerce(slot, lw.ptr(ft));
+        lw.store(pp.p, v);
+    }
+    return lw.load(slot.p, ut);
+}
+
 // ── enums ─────────────────────────────────────────────────────────────────
 fn char* Low.dname(Low* lw, Node* n)   // a declaration's own name (variants: the first child is a payload TYPE)
 {
@@ -943,7 +1038,7 @@ fn Enm* Low.enum_for(Low* lw, Node* decl)
     for (usz i = 0; i < lw.nen; i++) { if (lw.ens[i].decl == decl) { return &lw.ens[i]; } }
     if (lw.nen >= 64) { lw.unsup(decl, "more than 64 enum types"); return null; }
     Enm* e = &lw.ens[lw.nen]; lw.nen++;
-    e.decl = decl; e.nv = 0; e.words = 1;
+    e.decl = decl; e.nv = 0; e.words = 1; e.nm = 0;
     char* base = lw.dname(decl); if (base == null) { base = "Enum"; }
     char* nm = lw.dup(base); int k = 1;
     while (true)
@@ -1005,6 +1100,11 @@ fn Vx Low.variant_value(Low* lw, Enm* e, usz vi, Node** argn, usz na, Node* at)
     if (na != v.nf) { lw.err(at, "wrong number of payload values for the variant", v.name); return lw.unit(); }
     Vx[8] av;
     for (usz i = 0; i < na; i++) { av[i] = lw.expr(argn[i], v.ft[i]); av[i] = lw.coerce_arg(argn[i], av[i], v.ft[i]); }
+    return lw.variant_pack(e, vi, &av[0], na);
+}
+fn Vx Low.variant_pack(Low* lw, Enm* e, usz vi, Vx* av, usz na)
+{
+    VarI* v = &e.v[vi];
     if (!lw.live()) { return lw.unit(); }
     Vx slot = lw.alloca_(e.ty);
     Vx[2] ti; ti[0] = lw.lit_int(0, lw.m.t_i64); ti[1] = lw.lit_int(0, lw.m.t_i32);
@@ -1017,6 +1117,77 @@ fn Vx Low.variant_value(Low* lw, Enm* e, usz vi, Node** argn, usz na, Node* at)
         lw.store(pp.p, av[i]);
     }
     return lw.load(slot.p, e.ty);
+}
+// ── set-theoretic unions: a tagged record over the member types ──
+fn void Low.flatten_union(Low* lw, Node* t, AirTyp** out, usz* n, bool inter)
+{
+    if (t == null) { return; }
+    if ((!inter && t.kind == Nk.N_TY_UNION) || (inter && t.kind == Nk.N_TY_INTERSECT))
+    {
+        for (usz i = 0; i < t.child_count; i++) { lw.flatten_union(t.children[i], out, n, inter); }
+        return;
+    }
+    if (t.kind == Nk.N_TY_NAME && t.resolved != null && t.resolved.kind == Nk.N_DECL_TYPE && t.resolved.type_ann != null
+        && ((!inter && t.resolved.type_ann.kind == Nk.N_TY_UNION) || (inter && t.resolved.type_ann.kind == Nk.N_TY_INTERSECT)))
+    { lw.flatten_union(t.resolved.type_ann, out, n, inter); return; }
+    AirTyp* m = lw.ty(t); if (m == null) { return; }
+    for (usz i = 0; i < *n; i++) { if (air_ll::ty_eq(out[i], m)) { return; } }
+    if (*n < 8) { out[*n] = m; *n = *n + 1; }
+}
+fn AirTyp* Low.union_enum_ty(Low* lw, AirTyp** ms, usz nm)
+{
+    for (usz i = 0; i < lw.nen; i++)
+    {
+        Enm* e = &lw.ens[i]; if (e.nm != nm) { continue; }
+        bool same = true;
+        for (usz j = 0; j < nm; j++) { if (!air_ll::ty_eq(e.um[j], ms[j])) { same = false; } }
+        if (same) { return e.ty; }
+    }
+    if (lw.nen >= 64) { lw.unsup(null, "more than 64 enum/union types"); return null; }
+    Enm* e = &lw.ens[lw.nen]; lw.nen++;
+    e.decl = null; e.nv = 0; e.words = 1; e.nm = nm;
+    char[300] bb; usz bn = (usz)snprintf(&bb[0], 300, "Union");
+    for (usz j = 0; j < nm; j++) { bn += (usz)snprintf(&bb[0] + bn, (usz)(300 - bn), "."); bn = mang(ms[j], &bb[0], bn, 300); }
+    e.name = lw.dup(&bb[0]); e.ty = lw.nominal(e.name);
+    for (usz j = 0; j < nm; j++)
+    {
+        e.um[j] = ms[j];
+        VarI* vi = &e.v[e.nv]; e.nv++;
+        char[16] vn; snprintf(&vn[0], 16, "m%d", (int)j);
+        vi.name = lw.dup(&vn[0]); vi.decl = null; vi.nf = 1; vi.ft[0] = ms[j]; vi.off[0] = 0;
+        usz w = lw.words(ms[j]); if (w > e.words) { e.words = w; }
+    }
+    AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, e.name);
+    AirCtorDecl* c = air_ir::air_mk_ctor_decl(lw.a, e.name);
+    c.result_ty = e.ty; d.add_ctor(c);
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("tag"), lw.m.t_i64, AMULT_UNR));
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("payload"), air_ir::air_mk_typ_array(lw.a, lw.m.t_i64, (long)e.words), AMULT_UNR));
+    lw.m.add_decl(d);
+    return e.ty;
+}
+// `u as T` for a union `u`: switch on the tag, convert the active member, join
+fn Vx Low.union_cast(Low* lw, Vx u, AirTyp* to, Enm* e)
+{
+    if (!lw.live()) { return lw.unit(); }
+    Vx slot = lw.alloca_(e.ty); lw.store(slot.p, u);
+    Vx tag = lw.field_of(u, "tag", 0, lw.m.t_i64);
+    usz jb = lw.blk("ucast.join"); char* pn = lw.fresh("_uc");
+    lw.blks[jb].pnames[0] = pn; lw.blks[jb].ptys[0] = to; lw.blks[jb].np = 1;
+    for (usz i = 0; i < e.nv; i++)
+    {
+        usz arm = lw.blk("ucast.arm"); usz nxt = lw.blk("ucast.next");
+        Vx eq = lw.binop(ABIN_EQ, tag, lw.lit_int((long)i, lw.m.t_i64));
+        lw.t_cond(eq, arm, nxt);
+        lw.cur = arm;
+        Vx pp = lw.payload_ptr(slot, e, i, 0);
+        Vx val = lw.load(pp.p, e.v[i].ft[0]);
+        Vx cv = lw.cast(val, to);
+        Vx[1] ja; ja[0] = cv; lw.t_jump(jb, &ja[0], 1);
+        lw.cur = nxt;
+    }
+    lw.t_end(T_TRAP);
+    lw.cur = jb;
+    return lw.vref(pn, to);
 }
 // `E.V` / `E.V(args)`: the base names an enum
 fn Enm* Low.enum_ctor_base(Low* lw, Node* base, char* name, long* vi)
@@ -1226,6 +1397,26 @@ fn bool Low.place(Low* lw, Node* n, Pl* out)
             AirTyp* bt = lw.hint(n.children[0]);
             char* f = lw.text(n); long k = -1;
             if (bt == null || f == null) { return false; }
+            {   // a union field is a typed view of offset 0
+                AirTyp* ubt = bt.tag == ATYP_PTR ? bt.args[0] : bt;
+                UniI* un = lw.uni_of(ubt);
+                if (un != null)
+                {
+                    AirTyp* uft = lw.uni_field(un, f);
+                    if (uft == null) { lw.err(n, "field is not declared", f); return false; }
+                    AirPrd* base = null;
+                    if (bt.tag == ATYP_PTR) { Vx bv = lw.expr(n.children[0], null); base = bv.p; }
+                    else
+                    {
+                        Pl ub;
+                        if (lw.place(n.children[0], &ub)) { base = ub.ptr; }
+                        else { Vx bv = lw.expr(n.children[0], null); Vx sl = lw.alloca_(bv.t); lw.store(sl.p, bv); base = sl.p; }
+                    }
+                    Vx bp; bp.p = base; bp.t = lw.ptr(ubt);
+                    Vx pp = lw.coerce(bp, lw.ptr(uft));
+                    out.ptr = pp.p; out.t = uft; return true;
+                }
+            }
             if (bt.tag == ATYP_PTR)
             {
                 AirTyp* st = bt.args[0]; AirTyp* ft = lw.field_ty(st, f, &k);
@@ -1247,11 +1438,30 @@ fn bool Low.place(Low* lw, Node* n, Pl* out)
     }
 }
 
+// theory rewrites (IRDL rule right-hand sides) build new call nodes whose callee identifier is not resolved: find the
+// function by name in the program (the entry module first)
+fn Node* Low.fn_by_name(Low* lw, char* nm)
+{
+    if (nm == null) { return null; }
+    for (usz r = 0; r < lw.nroots; r++)
+    {
+        Node* root = lw.roots[r]; if (root == null) { continue; }
+        for (usz i = 0; i < root.child_count; i++)
+        {
+            Node* c = root.children[i];
+            if (c == null || (c.kind != Nk.N_DECL_FN && c.kind != Nk.N_DECL_EXTERN_FN)) { continue; }
+            char* cn = lw.text(c);
+            if (cn != null && seq(cn, nm)) { return c; }
+        }
+    }
+    return null;
+}
 fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
 {
     if (n.child_count == 0) { return lw.unit(); }
     Node* cal = n.children[0];
     Node* cr = cal.resolved;
+    if (cr == null && cal.kind == Nk.N_EXPR_IDENT) { cr = lw.fn_by_name(lw.text(cal)); }
     if (cr == null || !(cr.kind == Nk.N_DECL_FN || cr.kind == Nk.N_DECL_EXTERN_FN))
     {
         // a call through a function VALUE (a closure record)
@@ -1289,6 +1499,16 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
 {
     if (a.t == null || air_ll::ty_eq(a.t, want)) { return a; }
     if (a.p != null && a.p.tag == APRD_INT && air_ll::ty_is_int(want)) { return lw.lit_int(a.p.ival, want); }
+    Enm* ue = lw.enum_of_ty(want);
+    if (ue != null && ue.nm > 0)   // a member flows into its union
+    {
+        for (usz i = 0; i < ue.nm; i++)
+        {
+            Vx m = a;
+            if (air_ll::ty_eq(ue.um[i], a.t) || (a.p != null && a.p.tag == APRD_INT && air_ll::ty_is_int(ue.um[i]) && air_ll::ty_is_int(a.t) == false))
+            { Vx[1] av1; av1[0] = m; return lw.variant_pack(ue, i, &av1[0], 1); }
+        }
+    }
     if (a.t.tag == ATYP_ARROW && lw.clo_of(want) != null) { return lw.to_clo(a, want, at); }
     if (a.t.tag == ATYP_ARRAY && lw.fat_elem(want) != null && !lw.is_str_t(want) && air_ll::ty_eq(a.t.args[0], lw.fat_elem(want))) {
         Pl pl;   // an array that has an address decays to a slice that ALIASES it
@@ -1328,6 +1548,8 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             Node* c0 = n.children[0];
             bool lit0 = c0.kind == Nk.N_EXPR_INT || c0.kind == Nk.N_EXPR_FLOAT;
             Vx v = lw.expr(c0, lit0 ? to : h);
+            Enm* ce = lw.enum_of_ty(v.t);
+            if (ce != null && ce.nm > 0) { return lw.union_cast(v, to, ce); }
             return lw.cast(v, to);
         }
         case Nk.N_EXPR_IF: return lw.if_(n, want);
@@ -1512,6 +1734,7 @@ fn AirTyp* Low.lit_struct_ty(Low* lw, Node* n, Node* r, AirTyp* want)
 fn Vx Low.struct_lit(Low* lw, Node* n, AirTyp* want)
 {
     Node* r = n.resolved; if (r == null && n.child_count > 0) { r = n.children[0].resolved; }
+    if (r != null && r.kind == Nk.N_DECL_UNION) { return lw.union_lit(n, r); }
     if (r == null || r.kind != Nk.N_DECL_STRUCT) { lw.unsup(n, "literal of a non-struct type"); return lw.unit(); }
     AirTyp* st = lw.lit_struct_ty(n, r, want);
     AirDecl* d = lw.data_of(st);
@@ -2602,14 +2825,14 @@ fn int emit_low_program(Node** roots, usz root_count, pfront_core::Interner* it,
     if (!mod.init(&arena, "Main", src_path)) { arena.destroy(); return -2; }
     mod.low = true;
     Low lw;
-    lw.a = &arena; lw.m = &mod; lw.it = it;
+    lw.a = &arena; lw.m = &mod; lw.it = it; lw.roots = roots; lw.nroots = root_count;
     lw.fns = (FnInfo*)calloc(MAXFN, FnInfo::size); lw.nfn = 0; lw.done_fn = 0;
     lw.sts = (StInfo*)calloc(MAXST, StInfo::size); lw.nst = 0;
     lw.gls = (GlInfo*)calloc(MAXGL, GlInfo::size); lw.ngl = 0;
     lw.blks = (Blk*)calloc(MAXBLK, Blk::size); lw.nb = 0;
     lw.vars = (VarB*)calloc(MAXVAR, VarB::size); lw.nvars = 0;
     lw.names = (char**)calloc(MAXNM, 8); lw.nnames = 0;
-    lw.nfat = 0; lw.unchecked = 0;
+    lw.nfat = 0; lw.unchecked = 0; lw.nuni = 0;
     lw.ens = (Enm*)calloc(64, Enm::size); lw.nen = 0;
     lw.clos = (CloI*)calloc(128, CloI::size); lw.nclo = 0; lw.nlam = 0;
     lw.errors = 0; lw.fn_errors = 0; lw.fns_ok = 0; lw.fail_fn = 0; lw.cur = NOBLK;
