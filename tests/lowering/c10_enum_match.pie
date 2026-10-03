@@ -1,0 +1,10 @@
+-- EXIT: 42
+enum E
+  A(i64)
+  B
+fn main : () -> i64
+  | () ->
+      let e = E.A(41)
+      match e
+        | A(a2) -> a2 + 1
+        | B -> 0

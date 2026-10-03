@@ -1,0 +1,5 @@
+-- EXIT: 4
+fn main : () -> i64
+  | () ->
+      let q = quote 4i64
+      4

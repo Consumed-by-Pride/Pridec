@@ -1,0 +1,12 @@
+-- EXIT: 150
+effect Ask
+  ask : i64 -> i64
+fn worker : i64 -> i64 ! [Ask]
+  | n ->
+      let a : i64 = Ask.ask(n)
+      let b : i64 = Ask.ask(n * 2)
+      a + b
+fn main : () -> i64
+  | () ->
+      handle worker(5)
+        | Ask.ask q k -> k (q * 10)

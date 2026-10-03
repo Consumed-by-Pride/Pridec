@@ -1,0 +1,2 @@
+-- EXIT: 1
+fn main(_) -> i64 { let a: bool = false; let b: bool = true; if a && b { return 0; } if a || b { return 1; } return 2; }

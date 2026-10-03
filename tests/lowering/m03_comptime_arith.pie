@@ -1,0 +1,3 @@
+-- EXIT: 8
+fn main : () -> i64
+  | () -> comptime 2 * 2 + 4

@@ -1,0 +1,9 @@
+-- EXIT: 6
+fn f : i64 -> i64
+  | n ->
+    let mut i = 0i64
+    while i < n
+      if i > 5i64 then break
+      i = i + 1i64
+    i
+fn main(_) -> i64 { return f(100); }

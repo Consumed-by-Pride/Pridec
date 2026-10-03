@@ -1,0 +1,2 @@
+-- EXIT: 45
+fn main(_) -> i64 { let mut i: i64 = 0; let mut s: i64 = 0; while i < 10 { s = s + i; i = i + 1; } return s; }
