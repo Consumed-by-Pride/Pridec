@@ -489,6 +489,13 @@ fn usz UseMap.reads_of(UseMap* u, Node* binder)
     return u.items[at].reads;
 }
 
+fn usz UseMap.writes_of(UseMap* u, Node* binder)
+{
+    int at = u.find(binder);
+    if (at < 0) { return 0; }
+    return u.items[at].writes;
+}
+
 // Walk the tree attributing every identifier occurrence to its binder. An
 // identifier on the left of an assignment is a WRITE, not a read — counting
 // it as a read would keep every dead store alive.
@@ -1300,7 +1307,8 @@ fn bool Optimizer.dce_block(Optimizer* o, Node* b)
                 // variable may be referenced textually and still be dead,
                 // because every such reference is itself in dead code or the
                 // value never reaches a use along any CFG path.
-                bool syntactically_dead = o.uses.reads_of(binder) == 0;
+                // a binder that is still ASSIGNED somewhere keeps its `let`: dropping it would leave the assignments dangling
+                bool syntactically_dead = o.uses.reads_of(binder) == 0 && o.uses.writes_of(binder) == 0;
                 bool liveness_dead = false;
                 if (o.live != null && !syntactically_dead)
                 {

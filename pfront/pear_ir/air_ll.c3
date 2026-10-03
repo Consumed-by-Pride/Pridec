@@ -601,6 +601,7 @@ fn Val Ll.coerce(Ll* l, AirPrd* p)
     else if (ty_is_ptr(f) && ti) { kind = "ptrtoint"; }
     else if (fi && ty_is_ptr(to)) { kind = "inttoptr"; }
     else if (ty_is_ptr(f) && ty_is_ptr(to)) { v.op = a.op; return v; }
+    else if ((f.tag == ATYP_ARROW && ty_is_ptr(to)) || (ty_is_ptr(f) && to.tag == ATYP_ARROW)) { v.op = a.op; return v; }   // a code pointer is a pointer
     else { l.err("coerce between these types is not defined", null); return v; }
     char* r = l.fresh(); Sb* o = l.out();
     o.put("  "); o.put(r); o.putc(' '); o.put("= "); o.put(kind); o.putc(' '); l.ty(o, f); o.putc(' '); o.put(a.op); o.put(" to "); l.ty(o, to); o.putc('\n');
@@ -623,7 +624,7 @@ fn usz Ll.find_label(Ll* l, char* nm)
 }
 fn char* Ll.anon_name(Ll* l, char* stem)
 {
-    Sb s; s.init(); s.put(stem); s.int_((long)l.anon); l.anon++; return s.take();
+    Sb s; s.init(); s.put("a."); s.put(stem); s.int_((long)l.anon); l.anon++; return s.take();   // `a.` keeps emitter-made blocks apart from the program's own labels
 }
 
 fn void Ll.terminate(Ll* l) { l.blks[l.cur].done = true; }

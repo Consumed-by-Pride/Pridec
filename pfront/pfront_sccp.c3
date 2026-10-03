@@ -15,6 +15,7 @@ module pfront_sccp;
 import pfront_lex;
 import pfront_core;
 import pfront_cfg;
+import pfront_constfold;
 
 alias Tk   = pfront_lex::TokenType;
 alias Nk   = pfront_core::NodeKind;
@@ -230,6 +231,7 @@ fn Lval Sccp.eval(Sccp* s, Node* n)
             return s.eval(n.children[n.child_count - 1]);
         case Nk.N_EXPR_CAST:
             if (n.child_count < 1) { return lv_bot(); }
+            if (n.type_ann == null || n.type_ann.kind != Nk.N_TY_NAME) { return lv_bot(); }   // `0 as *T`: SCCP is untyped, a pointer is not the integer
             {
                 Lval* a = s.get(n.children[0]);
                 if (a == null) { return lv_bot(); }
@@ -599,7 +601,7 @@ fn Span node_span(Node* n) { Span s; s.line = (n != null) ? n.line : 0; s.col = 
 fn Node* sccp_mk_int(Arena* a, long v, Span sp)
 {
     Node* n = a.node(Nk.N_EXPR_INT, sp.line, sp.col);
-    if (n != null) { n.p.ival = (ulong)v; n.p.width = 64; n.effects = 0; }
+    if (n != null) { n.p.ival = (ulong)v; n.p.width = 64; n.p.aux = 99; n.effects = 0; }
     return n;
 }
 
@@ -630,7 +632,10 @@ fn Node* Sccp.replace_const(Sccp* s, Node* n)
     Span sp = node_span(n);
     if (lv.is_bool) { s.substitutions = s.substitutions + 1; return sccp_mk_bool(s.arena, lv.ival != 0, sp); }
     s.substitutions = s.substitutions + 1;
-    return sccp_mk_int(s.arena, lv.ival, sp);
+    Node* ri = sccp_mk_int(s.arena, lv.ival, sp);
+    char lw_ = 0; bool lsg = true;
+    if (ri != null && pfront_constfold::lit_type_of(n, &lw_, &lsg, 0)) { ri.p.width = lw_; ri.p.is_signed = lsg; ri.p.aux = 0; }   // keep the written suffix type (`1i32 - 1023i32`)
+    return ri;
 }
 
 // Walk tree, replacing nodes with constant values and folding constant ifs.
