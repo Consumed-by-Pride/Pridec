@@ -906,7 +906,9 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
     l.cur_ret = d.ret_ty;
     if (!ty_low(d.ret_ty, 0)) { l.err("return type is not part of the low profile", null); }
     bool is_main = air_text::streq(d.name, "main");
-    bool wrap = is_main && (d.ret_ty == null || ty_is_unit(d.ret_ty));
+    bool unit_main = d.ret_ty == null || ty_is_unit(d.ret_ty);
+    bool int_main = is_main && d.ret_ty != null && ty_is_int(d.ret_ty) && ty_bits(d.ret_ty) != 32;   // the C ABI entry returns i32 (a wasm32 `main` of another width has a different signature)
+    bool wrap = is_main && (unit_main || int_main);
     Sb hdr; hdr.init();
     hdr.put("define "); l.ret_ty(&hdr, d.ret_ty); hdr.putc(' '); hdr.name('@', wrap ? "pride_main" : d.name); hdr.putc('(');
     usz entry = l.new_block("entry", false);
@@ -989,7 +991,14 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
     out.put("}\n\n");
     if (wrap)
     {
-        out.put("define i32 @main() {\n  call void @\"pride_main\"()\n  ret i32 0\n}\n\n");
+        if (unit_main) { out.put("define i32 @main() {\n  call void @\"pride_main\"()\n  ret i32 0\n}\n\n"); }
+        else
+        {
+            out.put("define i32 @main() {\n  %r = call "); l.ty(out, d.ret_ty); out.put(" @\"pride_main\"()\n");
+            int mb = ty_bits(d.ret_ty);
+            if (mb > 32) { out.put("  %t = trunc "); l.ty(out, d.ret_ty); out.put(" %r to i32\n  ret i32 %t\n}\n\n"); }
+            else { out.put(ty_is_signed(d.ret_ty) ? "  %t = sext " : "  %t = zext "); l.ty(out, d.ret_ty); out.put(" %r to i32\n  ret i32 %t\n}\n\n"); }
+        }
     }
     l.fn_name = null;
 }

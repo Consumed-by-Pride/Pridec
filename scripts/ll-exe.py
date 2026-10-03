@@ -42,6 +42,21 @@ if L.LLVMGetTargetFromTriple(triple, ctypes.byref(tgt), ctypes.byref(err)):
 lvl = {"-O0": 0, "-O1": 1, "-O2": 2, "-O3": 3}[opt]
 L.LLVMCreateTargetMachine.restype = vp
 L.LLVMCreateTargetMachine.argtypes = [vp, cp, cp, cp, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+if want_triple and want_triple.startswith(b"wasm"):
+    # wasm32: see runtime/wasi/pride_rt.c -- every external F becomes pride_rt_F (Pride-declared signatures), main becomes pride_rt_main
+    L.LLVMGetFirstFunction.restype = vp; L.LLVMGetFirstFunction.argtypes = [vp]
+    L.LLVMGetNextFunction.restype = vp; L.LLVMGetNextFunction.argtypes = [vp]
+    L.LLVMIsDeclaration.argtypes = [vp]
+    L.LLVMGetValueName2.restype = cp; L.LLVMGetValueName2.argtypes = [vp, ctypes.POINTER(ctypes.c_size_t)]
+    L.LLVMSetValueName2.argtypes = [vp, cp, ctypes.c_size_t]
+    _fs = []; _f = L.LLVMGetFirstFunction(mod)
+    while _f: _fs.append(_f); _f = L.LLVMGetNextFunction(_f)
+    for _f in _fs:
+        _n = ctypes.c_size_t(); _nm = L.LLVMGetValueName2(_f, ctypes.byref(_n)); _nm = ctypes.string_at(_nm, _n.value)
+        if _nm == b"main": _new = b"pride_rt_main"
+        elif L.LLVMIsDeclaration(_f) and not _nm.startswith(b"llvm."): _new = b"pride_rt_" + _nm
+        else: continue
+        L.LLVMSetValueName2(_f, _new, len(_new))
 tm = L.LLVMCreateTargetMachine(tgt, triple, b"generic", b"", lvl, 2, 0)   # reloc PIC=2, code model default=0
 if want_triple:   # cross target: the module takes the target's triple and data layout; the result is always an object file
     L.LLVMSetTarget.argtypes = [vp, cp]; L.LLVMSetTarget(mod, triple)

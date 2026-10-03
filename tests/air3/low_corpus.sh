@@ -14,8 +14,9 @@
 set -u
 cd "$(dirname "$0")/../.."
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
-V=0; TSV=""; files=()
-while [ $# -gt 0 ]; do case "$1" in -v) V=1;; --tsv) TSV="$2"; shift;; *) files+=("$1");; esac; shift; done
+V=0; TSV=""; files=(); WASM=0
+export PATH="$PATH:$HOME/.local/bin"
+while [ $# -gt 0 ]; do case "$1" in -v) V=1;; --wasm) WASM=1;; --tsv) TSV="$2"; shift;; *) files+=("$1");; esac; shift; done
 [ ${#files[@]} = 0 ] && files=(tests/exec/*.pie tests/exec/pear/*.pie)
 W=tmp/low-corpus; rm -rf "$W"; mkdir -p "$W"
 declare -A cnt; : > "$W/rows.tsv"
@@ -32,10 +33,11 @@ for f in "${files[@]}"; do
         st=NOLOWER; why=$(echo "$out" | grep -m1 'air-low:\|error' | sed 's/^air-low: error: //' | cut -c1-110)
     elif ! tmp/airtool verify-low "$low" >"$W/$id.v" 2>&1; then st=VERIFY; why=$(head -1 "$W/$id.v" | cut -c1-110)
     elif ! tmp/airtool emit-ll "$low" -o "$W/$id.ll" >"$W/$id.e" 2>&1; then st=LLVM; why=$(head -1 "$W/$id.e" | cut -c1-110)
-    elif ! python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id.exe" >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail' "$W/$id.b" | cut -c1-110)
+    elif [ $WASM = 0 ] && ! python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id.exe" >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail' "$W/$id.b" | cut -c1-110)
+    elif [ $WASM = 1 ] && ! { python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id" -O1 --triple wasm32-wasi && python3 -m ziglang cc -target wasm32-wasi "$W/$id.o" runtime/wasi/pride_rt.c -o "$W/$id.exe"; } >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail\|undefined' "$W/$id.b" | cut -c1-110)
     else
         want=$(expect_of "$f"); wx=$(exit_of "$f")
-        got=$(timeout 5 "$W/$id.exe" 2>/dev/null; echo "rc=$?"); grc=${got##*rc=}; got=${got%rc=*}
+        if [ $WASM = 1 ]; then got=$(timeout 20 python3 scripts/wasm-run.py "$W/$id.exe" 2>/dev/null; echo "rc=$?"); else got=$(timeout 5 "$W/$id.exe" 2>/dev/null; echo "rc=$?"); fi; grc=${got##*rc=}; got=${got%rc=*}
         got=${got%$'\n'}   # the header has no trailing newline
         wantd=$(printf '%b' "$want")
         if [ "$grc" = "$wx" ] && { [ -z "$want" ] || [ "$got" = "$wantd" ]; }; then st=PASS
@@ -47,5 +49,5 @@ for f in "${files[@]}"; do
     [ "$st" = PASS ] && [ $V = 1 ] && printf '  %-8s %s\n' PASS "$id"
 done
 [ -n "$TSV" ] && cp "$W/rows.tsv" "$TSV"
-echo "low corpus: PASS=${cnt[PASS]:-0} FRONT=${cnt[FRONT]:-0} NOLOWER=${cnt[NOLOWER]:-0} VERIFY=${cnt[VERIFY]:-0} LLVM=${cnt[LLVM]:-0} WRONG=${cnt[WRONG]:-0} of ${#files[@]}"
+echo "low corpus$([ $WASM = 1 ] && echo " (wasm32-wasi under wasmtime)"): PASS=${cnt[PASS]:-0} FRONT=${cnt[FRONT]:-0} NOLOWER=${cnt[NOLOWER]:-0} VERIFY=${cnt[VERIFY]:-0} LLVM=${cnt[LLVM]:-0} WRONG=${cnt[WRONG]:-0} of ${#files[@]}"
 [ "${cnt[VERIFY]:-0}" = 0 ] && [ "${cnt[LLVM]:-0}" = 0 ] && [ "${cnt[WRONG]:-0}" = 0 ]
