@@ -322,6 +322,13 @@ fn char* AirLower.fresh_lbl(AirLower* lr, char* hint) { return lr.scope.fresh_la
 fn char* node_text(Node* n, pfront_core::Interner* it)
 {
     if (n == null) return null;
+    // `field: value` -- the field name is the node's own name; the first ident child is the VALUE
+    // (`Date { year: y }` would otherwise be named `y`)
+    if (n.kind == Nk.N_EXPR_FIELD_INIT && it != null && n.name_id != 0)
+    {
+        char* fname = it.text(n.name_id);
+        if (fname != null && fname[0] != 0) return fname;
+    }
     // Decl/binder/module/use/field/etc: name lives in the first ident child.
     if (pfront_core::is_decl(n.kind)
         || n.kind == Nk.N_MODULE

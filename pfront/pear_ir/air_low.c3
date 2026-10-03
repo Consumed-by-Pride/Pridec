@@ -474,7 +474,7 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
             VarB* v = lw.find_var(r);
             if (v != null) { return v.t; }
             if (r != null && r.kind == Nk.N_DECL_CONST && r.type_ann != null) { return lw.ty(r.type_ann); }
-            if (r != null && r.kind == Nk.N_DECL_STATIC) { return lw.static_ty(r); }
+            if (r != null && (r.kind == Nk.N_DECL_STATIC || r.kind == Nk.N_DECL_LET)) { return lw.static_ty(r); }
             return null;
         }
         case Nk.N_EXPR_CAST: return lw.ty(n.type_ann);
@@ -574,6 +574,7 @@ fn GlInfo* Low.global_for(Low* lw, Node* d)
         bool neg = false;
         if (e.kind == Nk.N_EXPR_UNARY && (Tk)e.p.op == Tk.TOKEN_MINUS && e.child_count > 0) { neg = true; e = e.children[0]; }
         if (e.kind == Nk.N_EXPR_INT && air_ll::ty_is_int(t)) { ad.g_init = air_ir::air_mk_int(lw.a, neg ? -(long)e.p.ival : (long)e.p.ival); ad.g_init.ty = t; }
+        else if (e.kind == Nk.N_EXPR_FLOAT && air_ll::ty_is_float(t)) { ad.g_init = air_ir::air_mk_float(lw.a, neg ? -e.p.fval : e.p.fval); ad.g_init.ty = t; }
         else if (e.kind == Nk.N_EXPR_BOOL && t.tag == ATYP_BOOL) { ad.g_init = air_ir::air_mk_prd_bool(lw.a, e.p.ival != 0); ad.g_init.ty = t; }
         else { lw.unsup(init, "global initialiser that is not a literal"); }
     }
@@ -685,7 +686,7 @@ fn Vx Low.read_var(Low* lw, Node* id)
         for (usz i = 0; i < r.child_count; i++) { Node* c = r.children[i]; if (c != null && pfront_core::is_expr(c.kind)) { init = c; } }
         if (init != null) { return lw.expr(init, r.type_ann != null ? lw.ty_quiet(r.type_ann) : null); }
     }
-    if (r != null && r.kind == Nk.N_DECL_STATIC)
+    if (r != null && (r.kind == Nk.N_DECL_STATIC || r.kind == Nk.N_DECL_LET))   // a top-level `let` is a global
     {
         GlInfo* g = lw.global_for(r);
         if (g == null) { return lw.unit(); }
@@ -706,7 +707,7 @@ fn bool Low.place(Low* lw, Node* n, Pl* out)
             Node* r = n.resolved;
             VarB* v = lw.find_var(r);
             if (v != null && v.slot) { out.ptr = v.p; out.t = v.t; return true; }
-            if (r != null && r.kind == Nk.N_DECL_STATIC)
+            if (r != null && (r.kind == Nk.N_DECL_STATIC || r.kind == Nk.N_DECL_LET))
             {
                 GlInfo* g = lw.global_for(r); if (g == null) { return false; }
                 out.ptr = air_ir::air_mk_var(lw.a, g.name); out.t = g.ty; return true;
@@ -804,6 +805,10 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
 {
     if (a.t == null || air_ll::ty_eq(a.t, want)) { return a; }
     if (a.p != null && a.p.tag == APRD_INT && air_ll::ty_is_int(want)) { return lw.lit_int(a.p.ival, want); }
+    // lossless integer widening is implicit (a `u8` returned from an `i64` function); narrowing needs `as`
+    if (air_ll::ty_is_int(a.t) && air_ll::ty_is_int(want) && air_ll::ty_bits(a.t) < air_ll::ty_bits(want)
+        && (air_ll::ty_is_signed(a.t) == air_ll::ty_is_signed(want) || !air_ll::ty_is_signed(a.t)))
+    { return lw.cast(a, want); }
     lw.err(at, "argument type differs from the parameter type", null);
     return a;
 }
