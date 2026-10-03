@@ -1,0 +1,13 @@
+-- EXIT: 11
+effect A
+  a : i64 -> i64
+effect B
+  b : i64 -> i64
+fn w : () -> i64 ! [A, B]
+  | () -> A.a(1) + B.b(2)
+fn main : () -> i64
+  | () ->
+      handle
+        handle w()
+          | A.a x k -> k (x * 3)
+      | B.b y k -> k (y * 4)

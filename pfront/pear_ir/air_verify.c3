@@ -182,7 +182,7 @@ fn void Verify.chk_cns(Verify* v, AirCns* k)
     for (usz i = 0; i < k.branch_count; i++)
     {
         AirBranch* b = k.branches[i];
-        if (b != null) { v.chk_cmd(b.guard); v.chk_cmd(b.body); }
+        if (b != null) { v.chk_guard(b.guard); v.chk_cmd(b.body); }
     }
     for (usz i = 0; i < k.cobranch_count; i++)
     {
@@ -194,6 +194,15 @@ fn void Verify.chk_cns(Verify* v, AirCns* k)
         v.ncov = m2;
     }
     v.chk_cmd(k.body);
+    v.ncov = mark;
+}
+// A branch guard is checked with the implicit covariable %guard in scope (AIR.md section 7b).
+fn void Verify.chk_guard(Verify* v, AirCmd* g)
+{
+    if (g == null) { return; }
+    usz mark = v.ncov;
+    if (v.ncov < VMAX) { v.cov[v.ncov] = (char*)"%guard"; v.ncov++; }
+    v.chk_cmd(g);
     v.ncov = mark;
 }
 fn void Verify.chk_cmd(Verify* v, AirCmd* c)
@@ -233,7 +242,7 @@ fn void Verify.chk_cmd(Verify* v, AirCmd* c)
     for (usz i = 0; i < c.branch_count; i++)
     {
         AirBranch* b = c.branches[i];
-        if (b != null) { v.chk_cmd(b.guard); v.chk_cmd(b.body); }
+        if (b != null) { v.chk_guard(b.guard); v.chk_cmd(b.body); }
     }
     v.ncov = cmark; v.nlab = lmark;
 }

@@ -64,7 +64,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air airtool legacy-pear test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-lowering airtool legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -90,7 +90,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air
+test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-lowering
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -173,6 +173,12 @@ $(AIRTOOL): $(AIR_CORE) | c3c
 test-air: $(BINARY) $(AIRTOOL)
 	@echo "==> AIR 2.0 text contract"
 	bash tests/air/run.sh ./$(BINARY) $(AIRTOOL)
+
+# AIR lowering table: one feature per program in tests/lowering, audit + verify + native exit code,
+# with the known-failing cases recorded exactly (tests/lowering/KNOWN.tsv).
+test-lowering: $(BINARY) $(AIRTOOL) $(PEAR1)
+	@echo "==> AIR lowering table (audit, verify, native exit code)"
+	bash tests/lowering/run.sh ./$(BINARY)
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)

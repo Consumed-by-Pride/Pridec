@@ -1,0 +1,11 @@
+-- EXIT: 0
+mod t
+use pride.effects
+fn main : () -> i32
+  | () ->
+      let pid : i64 = 99
+      let marker = effects.prompt_install(pid)
+      let a : bool = effects.is_in_scope(pid)
+      effects.prompt_unwind(&marker)
+      let b : bool = effects.is_in_scope(pid)
+      if a && !b then 0 else 1

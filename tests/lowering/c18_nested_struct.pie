@@ -1,0 +1,4 @@
+-- EXIT: 42
+struct I { v: i64; }
+struct O { i: I; w: i64; }
+fn main(_) -> i64 { let o: O = O { i: I { v: 40 }, w: 2 }; return o.i.v + o.w; }

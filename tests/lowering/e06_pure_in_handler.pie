@@ -1,0 +1,9 @@
+-- EXIT: 5
+effect A
+  a : i64 -> i64
+fn w : () -> i64 ! [A]
+  | () -> 5
+fn main : () -> i64
+  | () ->
+      handle w()
+        | A.a x k -> k 0

@@ -1,0 +1,11 @@
+-- EXIT: 7
+effect Ask
+  ask : i64 -> i64
+fn worker : i64 -> i64 ! [Ask]
+  | n ->
+      let a : i64 = Ask.ask(n)
+      a + 1000
+fn main : () -> i64
+  | () ->
+      handle worker(5)
+        | Ask.ask q k -> 7

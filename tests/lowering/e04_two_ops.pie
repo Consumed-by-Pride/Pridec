@@ -1,0 +1,14 @@
+-- EXIT: 42
+effect S
+  get : i64 -> i64
+  put : i64 -> i64
+fn w : i64 -> i64 ! [S]
+  | n ->
+      let a : i64 = S.get(n)
+      let b : i64 = S.put(a + 1)
+      b
+fn main : () -> i64
+  | () ->
+      handle w(0)
+        | S.get u k -> k 41
+        | S.put v k -> k v

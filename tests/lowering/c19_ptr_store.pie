@@ -1,0 +1,2 @@
+-- EXIT: 42
+fn main(_) -> i64 { let p: *i64 = alloc [i64; 2]; *p = 42; let r: i64 = *p; free p; return r; }
