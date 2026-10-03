@@ -1,0 +1,1648 @@
+// ============================================================================
+// air_low.c3 -- typed lowering: resolved PNode AST -> AIR 3.0 low profile.
+//
+// This is the "everything is lowered" half of the .air contract (docs/pear2/AIR3_PLAN.md).
+// It sits BESIDE air_lower.c3 (the untyped AIR-H lowering that PEAR 1 still consumes) and
+// never touches it. Its output is read by air_ll.c3 (the reference consumer), airtool
+// verify-low and, later, PEAR 2: every value has a concrete type, every local is either an
+// SSA name or an `alloca`, every loop is a label/jump, every call names a function.
+//
+// What it accepts is the subset listed in docs/pear2/AIR3_PLAN.md ("lowered today"). A
+// construct outside it is a DIAGNOSTIC naming the construct and the function; no .air is
+// written. There is no silent approximation: that is the point of the low profile.
+//
+// Shape of the work:
+//   * a function body becomes basic blocks (instructions + one terminator);
+//   * the blocks are assembled into the nested AIR: seq { label B1. ..; seq { label B2. ..; entry } };
+//   * only functions reachable from `main` are lowered.
+// ============================================================================
+module air_low;
+import pfront_core;
+import pfront_lex;
+import air_ir;
+import air_ll;
+import air_lower;
+import air_types;
+import air_write;
+
+alias Node = pfront_core::PNode;
+alias Nk   = pfront_core::NodeKind;
+alias Tk   = pfront_lex::TokenType;
+
+extern fn void* calloc(usz count_, usz size_);
+extern fn void* realloc(void* p, usz size_);
+extern fn int   snprintf(char* buf, usz cap_, char* fmt, ...);
+extern fn int   printf(char* fmt, ...);
+extern fn int   fflush(void* f);
+extern fn int   remove(char* path);
+extern fn char* getenv(char* name);
+
+const usz MAXFN  = 4096;
+const usz MAXST  = 1024;
+const usz MAXGL  = 1024;
+const usz MAXBLK = 8192;
+const usz MAXVAR = 8192;
+const usz MAXNM  = 32768;
+const usz NOBLK  = 0xFFFFFFFF;
+
+enum InsK : int { I_LET, I_STORE, I_CALL, I_FIELD, I_PROJ, I_SYS }
+struct Ins
+{
+    InsK k; char* name; AirPrd* a; AirPrd* b; AirPrd*[8] args; usz nargs; char* fld; long idx;
+}
+enum TermK : int { T_NONE, T_RET, T_JUMP, T_COND, T_TRAP, T_UNREACH }
+struct Blk
+{
+    char* name; char*[8] pnames; AirTyp*[8] ptys; usz np;
+    Ins* ins; usz ni; usz cap;
+    TermK tk; AirPrd* tp; char*[8] jargs; usz nj; usz t1; usz t2; usz npred;
+}
+struct Vx { AirPrd* p; AirTyp* t; }
+struct Pl { AirPrd* ptr; AirTyp* t; }
+struct VarB { Node* decl; AirPrd* p; AirTyp* t; bool slot; }
+struct LoopF { usz brk; usz cont; }
+struct FnInfo
+{
+    Node* decl; char* name; AirTyp* ret; AirTyp*[16] pty; usz np; AirTyp* fnty; bool ext; bool queued; bool seen; bool variadic;
+}
+struct StInfo { Node* decl; char* name; AirTyp* ty; }
+struct GlInfo { Node* decl; char* name; AirTyp* ty; }
+
+struct Low
+{
+    AirArena* a; AirModule* m; pfront_core::Interner* it;
+    FnInfo* fns; usz nfn; usz done_fn;
+    StInfo* sts; usz nst;
+    GlInfo* gls; usz ngl;
+    Blk* blks; usz nb; usz cur;
+    VarB* vars; usz nvars;
+    LoopF[64] loops; usz nloops;
+    char** names; usz nnames; usz tmpn; usz lbln;
+    AirTyp* ret_ty; char* cur_fn; Node* cur_node;
+    int errors; int fn_errors; int fns_ok; int fail_fn; Node* entry_decl;
+    bool uses_alloc;
+}
+
+// ── small utilities ────────────────────────────────────────────────────────
+fn bool seq(char* a, char* b)
+{
+    if (a == null || b == null) { return a == b; }
+    usz i = 0; while (a[i] != 0 && b[i] != 0) { if (a[i] != b[i]) { return false; } i++; }
+    return a[i] == b[i];
+}
+fn char* Low.dup(Low* lw, char* s)
+{
+    if (s == null) { return null; }
+    usz n = 0; while (s[n] != 0) { n++; }
+    return lw.a.dup(s, n);
+}
+fn char* Low.text(Low* lw, Node* n) { return air_lower::node_text(n, lw.it); }
+
+fn void Low.err(Low* lw, Node* n, char* what, char* who)
+{
+    lw.errors++; lw.fn_errors++;
+    if (lw.fn_errors > 1) { return; }      // first error per function only: later ones are cascades
+    Node* at = n != null ? n : lw.cur_node;
+    printf("air-low: error: %d:%d: in `%s`: %s%s%s\n", at != null ? at.line : 0, at != null ? at.col : 0,
+           lw.cur_fn != null ? lw.cur_fn : "?", what, who != null ? ": " : "", who != null ? who : "");
+}
+fn void Low.unsup(Low* lw, Node* n, char* what)
+{
+    char[128] b;
+    snprintf(&b[0], 128, "not lowered yet (%s)", what);
+    lw.err(n, &b[0], n != null ? pfront_core::kind_name(n.kind) : null);
+}
+
+fn char* Low.fresh(Low* lw, char* stem)
+{
+    char[64] b; lw.tmpn++;
+    snprintf(&b[0], 64, "%s%d", stem, (int)lw.tmpn);
+    char* r = lw.dup(&b[0]);
+    if (lw.nnames < MAXNM) { lw.names[lw.nnames] = r; lw.nnames++; }
+    return r;
+}
+// a user name, made unique within the function (low profile is single assignment)
+fn char* Low.uname(Low* lw, char* base)
+{
+    if (base == null || base[0] == 0) { base = "_"; }
+    bool used = false;
+    for (usz i = 0; i < lw.nnames; i++) { if (seq(lw.names[i], base)) { used = true; break; } }
+    if (!used) { char* r = lw.dup(base); if (lw.nnames < MAXNM) { lw.names[lw.nnames] = r; lw.nnames++; } return r; }
+    char[160] b; lw.tmpn++;
+    snprintf(&b[0], 160, "%s.%d", base, (int)lw.tmpn);
+    char* r = lw.dup(&b[0]);
+    if (lw.nnames < MAXNM) { lw.names[lw.nnames] = r; lw.nnames++; }
+    return r;
+}
+
+// ── types ──────────────────────────────────────────────────────────────────
+fn AirTyp* Low.nominal(Low* lw, char* nm) { AirTyp* t = air_ir::air_mk_typ(lw.a, ATYP_NOMINAL); t.name = nm; return t; }
+fn AirTyp* Low.ptr(Low* lw, AirTyp* t) { return air_ir::air_mk_typ_ptr(lw.a, t); }
+
+fn AirDecl* Low.data_of(Low* lw, AirTyp* t)
+{
+    if (t == null || t.tag != ATYP_NOMINAL) { return null; }
+    for (usz i = 0; i < lw.m.decl_count; i++)
+    {
+        AirDecl* d = lw.m.decls[i];
+        if (d != null && d.tag == ADECL_DATA && seq(d.name, t.name)) { return d; }
+    }
+    return null;
+}
+
+fn AirTyp* Low.struct_ty(Low* lw, Node* decl)
+{
+    for (usz i = 0; i < lw.nst; i++) { if (lw.sts[i].decl == decl) { return lw.sts[i].ty; } }
+    if (lw.nst >= MAXST) { lw.unsup(decl, "more than 1024 struct types"); return null; }
+    char* base = lw.text(decl);
+    if (base == null) { base = "S"; }
+    // unique among data names
+    char* nm = lw.dup(base);
+    int k = 1;
+    while (true)
+    {
+        bool clash = false;
+        for (usz i = 0; i < lw.nst; i++) { if (seq(lw.sts[i].name, nm)) { clash = true; } }
+        if (!clash) { break; }
+        char[160] b; k++; snprintf(&b[0], 160, "%s.%d", base, k); nm = lw.dup(&b[0]);
+    }
+    AirTyp* t = lw.nominal(nm);
+    lw.sts[lw.nst].decl = decl; lw.sts[lw.nst].name = nm; lw.sts[lw.nst].ty = t; lw.nst++;
+    AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, nm);
+    AirCtorDecl* c = air_ir::air_mk_ctor_decl(lw.a, nm);
+    c.result_ty = t;
+    d.add_ctor(c);
+    lw.m.add_decl(d);
+    for (usz i = 0; i < decl.child_count; i++)
+    {
+        Node* f = decl.children[i];
+        if (f == null || f.kind != Nk.N_DECL_FIELD) { continue; }
+        AirTyp* ft = lw.ty(f.type_ann);
+        if (ft == null) { lw.unsup(f, "field type"); ft = lw.m.t_i64; }
+        char* fnm = lw.text(f);
+        c.add_field(air_ir::air_mk_field(lw.a, lw.dup(fnm != null ? fnm : "_"), ft, AMULT_UNR));
+    }
+    return t;
+}
+
+fn AirTyp* Low.ty(Low* lw, Node* t)
+{
+    if (t == null) { return null; }
+    switch (t.kind)
+    {
+        case Nk.N_TY_UNIT: return lw.m.t_unit;
+        case Nk.N_TY_BOTTOM: return lw.m.t_bottom;
+        case Nk.N_TY_NAME: case Nk.N_TY_PATH:
+        {
+            char* nm = air_types::air_node_text(t, lw.it);
+            if (nm != null)
+            {
+                AirTyp* pr = air_types::air_prim_ty(lw.m, nm);
+                if (pr != null && pr.tag != ATYP_STR && pr.tag != ATYP_BYTES) { return pr; }
+            }
+            Node* r = t.resolved;
+            if (r != null && (r.kind == Nk.N_DECL_STRUCT)) { return lw.struct_ty(r); }
+            if (r != null && r.kind == Nk.N_DECL_TYPE && r.type_ann != null && r.type_ann != t) { return lw.ty(r.type_ann); }
+            lw.unsup(t, nm != null ? nm : "type"); return null;
+        }
+        case Nk.N_TY_PTR:
+        {
+            if (t.child_count == 0) { return null; }
+            Node* c0 = t.children[0];
+            AirTyp* in_ = (c0 != null && c0.kind == Nk.N_TY_UNIT) ? lw.m.t_u8 : lw.ty(c0);   // *() is an untyped pointer: ptr(u8)
+            return in_ == null ? null : lw.ptr(in_);
+        }
+        case Nk.N_TY_ARRAY:
+        {
+            if (t.child_count < 2 || t.children[1] == null || t.children[1].kind != Nk.N_EXPR_INT) { lw.unsup(t, "array type without a constant length"); return null; }
+            AirTyp* el = lw.ty(t.children[0]);
+            return el == null ? null : air_ir::air_mk_typ_array(lw.a, el, (long)t.children[1].p.ival);
+        }
+        case Nk.N_TY_TUPLE:
+        {
+            AirTyp*[8] ts; usz n = 0;
+            for (usz i = 0; i < t.child_count && n < 8; i++) { AirTyp* e = lw.ty(t.children[i]); if (e == null) { return null; } ts[n] = e; n++; }
+            return air_ir::air_mk_typ_tuple(lw.a, &ts[0], n);
+        }
+        case Nk.N_TY_FN:
+        {
+            AirTyp*[16] ps; usz np; AirTyp* rt;
+            if (!lw.sig_of(t, &ps[0], &np, &rt)) { return null; }
+            AirTyp* dom = np == 0 ? lw.m.t_unit : (np == 1 ? ps[0] : air_ir::air_mk_typ_tuple(lw.a, &ps[0], np));
+            return air_ir::air_mk_typ_arrow(lw.a, dom, rt);
+        }
+        case Nk.N_TY_CONSTRAINT: case Nk.N_TY_WHERE:
+            return t.child_count > 0 ? lw.ty(t.children[0]) : null;
+        default:
+            lw.unsup(t, "type"); return null;
+    }
+}
+
+// `A -> R ! [fx]`: parameters are the domain (a tuple = several), the result is the constraint child
+fn bool Low.sig_of(Low* lw, Node* tf, AirTyp** ps, usz* np, AirTyp** rt)
+{
+    usz cc = tf.child_count;
+    if (cc > 0 && tf.children[cc - 1] != null && tf.children[cc - 1].kind == Nk.N_TY_EFFECT_ROW) { cc--; }
+    if (cc < 2) { lw.unsup(tf, "function type shape"); return false; }
+    Node* dom = tf.children[0];
+    *np = 0;
+    if (dom.kind == Nk.N_TY_UNIT) { }
+    else if (dom.kind == Nk.N_TY_TUPLE)
+    {
+        for (usz i = 0; i < dom.child_count && *np < 16; i++)
+        {
+            AirTyp* e = lw.ty(dom.children[i]); if (e == null) { return false; }
+            ps[*np] = e; *np = *np + 1;
+        }
+    }
+    else { AirTyp* e = lw.ty(dom); if (e == null) { return false; } ps[0] = e; *np = 1; }
+    AirTyp* r = lw.ty(tf.children[cc - 1]);
+    if (r == null) { return false; }
+    *rt = r;
+    return true;
+}
+
+// ── function registry ──────────────────────────────────────────────────────
+fn FnInfo* Low.fn_for(Low* lw, Node* d)
+{
+    for (usz i = 0; i < lw.nfn; i++) { if (lw.fns[i].decl == d) { return &lw.fns[i]; } }
+    if (lw.nfn >= MAXFN) { lw.unsup(d, "more than 4096 functions"); return null; }
+    FnInfo* f = &lw.fns[lw.nfn];
+    f.decl = d; f.ext = d.kind == Nk.N_DECL_EXTERN_FN;
+    char* base = lw.text(d); if (base == null) { base = "_fn"; }
+    // names are unique across the program; externs keep their C symbol, so they are never renamed
+    char* nm = lw.dup(base);
+    if (!f.ext)
+    {
+        int k = 1;
+        while (true)
+        {
+            bool clash = seq(nm, "malloc") || seq(nm, "free") || seq(nm, "write") || seq(nm, "syscall") || seq(nm, "main") && !lw.is_entry(d);
+            for (usz i = 0; i < lw.nfn; i++) { if (seq(lw.fns[i].name, nm)) { clash = true; } }
+            if (!clash) { break; }
+            char[160] b; k++; snprintf(&b[0], 160, "%s.%d", base, k); nm = lw.dup(&b[0]);
+        }
+    }
+    f.name = nm;
+    lw.nfn++;
+    if (d.kind == Nk.N_DECL_FN && d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN)
+    {
+        if (!lw.sig_of(d.type_ann, &f.pty[0], &f.np, &f.ret)) { lw.nfn--; return null; }
+    }
+    else if (f.ext)
+    {
+        // extern fn: params are N_DECL_PARAM children, result is the node's own annotation
+        f.np = 0;
+        for (usz i = 0; i < d.child_count; i++)
+        {
+            Node* c = d.children[i];
+            if (c == null || c.kind != Nk.N_DECL_PARAM) { continue; }
+            AirTyp* pt = lw.ty(c.type_ann); if (pt == null) { lw.nfn--; return null; }
+            if (f.np < 16) { f.pty[f.np] = pt; f.np++; }
+        }
+        Node* rn = d.type_ann;
+        f.ret = rn == null ? lw.m.t_unit : lw.ty(rn);
+        if (f.ret == null) { lw.nfn--; return null; }
+        f.variadic = (d.flags & pfront_core::NF_VARIADIC) != 0;
+    }
+    else { lw.unsup(d, "function without a signature"); lw.nfn--; return null; }
+    f.fnty = air_ir::air_mk_typ_arrow(lw.a, f.np == 0 ? lw.m.t_unit : (f.np == 1 ? f.pty[0] : air_ir::air_mk_typ_tuple(lw.a, &f.pty[0], f.np)), f.ret);
+    return f;
+}
+fn bool Low.is_entry(Low* lw, Node* d) { return d != null && d == lw.entry_decl; }
+
+// ── blocks ─────────────────────────────────────────────────────────────────
+fn usz Low.blk(Low* lw, char* stem)
+{
+    if (lw.nb >= MAXBLK) { lw.unsup(null, "more than 8192 basic blocks in one function"); return 0; }
+    usz i = lw.nb; lw.nb++;
+    Blk* b = &lw.blks[i];
+    b.name = lw.fresh(stem); b.np = 0; b.ni = 0; b.tk = T_NONE; b.npred = 0; b.nj = 0;
+    return i;
+}
+fn bool Low.live(Low* lw) { return lw.cur != NOBLK; }
+fn Ins* Low.push(Low* lw, InsK k)
+{
+    if (lw.cur == NOBLK) { return null; }
+    Blk* b = &lw.blks[lw.cur];
+    if (b.ni >= b.cap)
+    {
+        usz nc = b.cap == 0 ? 16 : b.cap * 2;
+        b.ins = (Ins*)realloc(b.ins, nc * Ins::size); b.cap = nc;
+    }
+    Ins* r = &b.ins[b.ni]; b.ni++;
+    r.k = k; r.name = null; r.a = null; r.b = null; r.nargs = 0; r.fld = null; r.idx = 0;
+    return r;
+}
+fn Vx Low.unit(Low* lw) { Vx v; v.p = lw.m.p_unit; v.t = lw.m.t_unit; return v; }
+fn Vx Low.vref(Low* lw, char* nm, AirTyp* t) { Vx v; v.p = air_ir::air_mk_var(lw.a, nm); v.t = t; return v; }
+
+fn Vx Low.let_(Low* lw, AirPrd* p, AirTyp* t, char* stem)
+{
+    p.ty = t;
+    Ins* i = lw.push(I_LET);
+    if (i == null) { return lw.unit(); }
+    i.name = lw.fresh(stem); i.a = p;
+    return lw.vref(i.name, t);
+}
+fn bool is_lit(AirPrd* p) { return p != null && (p.tag == APRD_INT || p.tag == APRD_BOOL || p.tag == APRD_FLOAT || p.tag == APRD_CHAR || p.tag == APRD_NULL || p.tag == APRD_UNIT); }
+fn bool is_atom(AirPrd* p) { return p != null && (p.tag == APRD_VAR || is_lit(p)); }
+// a name for a value (jump arguments are names)
+fn char* Low.name_of(Low* lw, Vx v)
+{
+    if (v.p != null && v.p.tag == APRD_VAR) { return v.p.name; }
+    Vx t = lw.let_(v.p, v.t, "_v");
+    return t.p != null && t.p.tag == APRD_VAR ? t.p.name : "_v";
+}
+
+fn Vx Low.lit_int(Low* lw, long v, AirTyp* t)
+{
+    AirPrd* p = air_ir::air_mk_int(lw.a, v); p.ty = t;
+    Vx r; r.p = p; r.t = t; return r;
+}
+fn Vx Low.lit_bool(Low* lw, bool b) { Vx r; r.p = air_ir::air_mk_prd_bool(lw.a, b); r.p.ty = lw.m.t_bool; r.t = lw.m.t_bool; return r; }
+
+fn Vx Low.binop(Low* lw, AirBinop op, Vx a, Vx b)
+{
+    bool cmp = op == ABIN_EQ || op == ABIN_NEQ || op == ABIN_LT || op == ABIN_GT || op == ABIN_LE || op == ABIN_GE;
+    AirPrd* p = air_ir::air_mk_binop(lw.a, op, a.p, b.p);
+    return lw.let_(p, cmp ? lw.m.t_bool : a.t, "_t");
+}
+fn Vx Low.coerce(Low* lw, Vx v, AirTyp* to)
+{
+    if (to == null || v.t == null || air_ll::ty_eq(v.t, to)) { return v; }
+    if (v.p != null && v.p.tag == APRD_INT && air_ll::ty_is_int(to)) { return lw.lit_int(v.p.ival, to); }
+    if (v.p != null && v.p.tag == APRD_NULL && to.tag == ATYP_PTR) { AirPrd* np_ = air_ir::air_mk_prd_null(lw.a); np_.ty = to; Vx r; r.p = np_; r.t = to; return r; }
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_COERCE; p.add_sub(v.p); p.ty = to;
+    return lw.let_(p, to, "_c");
+}
+fn Vx Low.load(Low* lw, AirPrd* ptr, AirTyp* t)
+{
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_LOAD; p.add_sub(ptr);
+    return lw.let_(p, t, "_l");
+}
+fn void Low.store(Low* lw, AirPrd* ptr, Vx v)
+{
+    Ins* i = lw.push(I_STORE); if (i == null) { return; }
+    i.a = ptr; i.b = v.p;
+}
+// gep[T](base, idx...) with the resulting pointer type
+fn Vx Low.gep(Low* lw, AirPrd* base, AirTyp* src, Vx* idx, usz ni, AirTyp* result_pointee)
+{
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_GEP; p.ty_arg = src; p.add_sub(base);
+    for (usz i = 0; i < ni; i++) { p.add_sub(idx[i].p); }
+    return lw.let_(p, lw.ptr(result_pointee), "_g");
+}
+fn Vx Low.alloca_(Low* lw, AirTyp* t)
+{
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_ALLOCA; p.ty_arg = t;
+    return lw.let_(p, lw.ptr(t), "_s");
+}
+
+fn void Low.mark_pred(Low* lw, usz b) { if (b != NOBLK) { lw.blks[b].npred++; } }
+fn void Low.t_ret(Low* lw, Vx v)
+{
+    if (lw.cur == NOBLK) { return; }
+    Blk* b = &lw.blks[lw.cur]; b.tk = T_RET; b.tp = v.p; lw.cur = NOBLK;
+}
+fn void Low.t_jump(Low* lw, usz to, Vx* args, usz n)
+{
+    if (lw.cur == NOBLK) { return; }
+    char*[8] names;
+    for (usz i = 0; i < n && i < 8; i++) { names[i] = lw.name_of(args[i]); }
+    Blk* b = &lw.blks[lw.cur];
+    b.tk = T_JUMP; b.t1 = to; b.nj = n;
+    for (usz i = 0; i < n && i < 8; i++) { b.jargs[i] = names[i]; }
+    lw.mark_pred(to); lw.cur = NOBLK;
+}
+fn void Low.t_jump0(Low* lw, usz to) { Vx[1] none; lw.t_jump(to, &none[0], 0); }
+fn void Low.t_cond(Low* lw, Vx c, usz yes, usz no)
+{
+    if (lw.cur == NOBLK) { return; }
+    Blk* b = &lw.blks[lw.cur]; b.tk = T_COND; b.tp = c.p; b.t1 = yes; b.t2 = no;
+    lw.mark_pred(yes); lw.mark_pred(no); lw.cur = NOBLK;
+}
+fn void Low.t_end(Low* lw, TermK k)
+{
+    if (lw.cur == NOBLK) { return; }
+    lw.blks[lw.cur].tk = k; lw.cur = NOBLK;
+}
+
+// ── variables ──────────────────────────────────────────────────────────────
+fn void Low.bind_var(Low* lw, Node* decl, AirPrd* p, AirTyp* t, bool slot)
+{
+    if (lw.nvars >= MAXVAR) { lw.unsup(decl, "more than 8192 locals in one function"); return; }
+    lw.vars[lw.nvars].decl = decl; lw.vars[lw.nvars].p = p; lw.vars[lw.nvars].t = t; lw.vars[lw.nvars].slot = slot; lw.nvars++;
+}
+fn VarB* Low.find_var(Low* lw, Node* decl)
+{
+    for (usz i = lw.nvars; i > 0; i--) { if (lw.vars[i - 1].decl == decl) { return &lw.vars[i - 1]; } }
+    return null;
+}
+
+// ── type hints (no code is emitted) ────────────────────────────────────────
+fn AirTyp* Low.pointee(Low* lw, AirTyp* t) { return (t != null && t.tag == ATYP_PTR) ? t.args[0] : null; }
+fn AirTyp* Low.field_ty(Low* lw, AirTyp* st, char* f, long* idx)
+{
+    AirDecl* d = lw.data_of(st);
+    if (d == null || d.ctor_count != 1) { return null; }
+    AirCtorDecl* c = d.ctors[0];
+    for (usz i = 0; i < c.field_count; i++) { if (seq(c.fields[i].name, f)) { *idx = (long)i; return c.fields[i].ty; } }
+    return null;
+}
+fn AirTyp* Low.hint(Low* lw, Node* n)
+{
+    if (n == null) { return null; }
+    switch (n.kind)
+    {
+        case Nk.N_EXPR_BOOL: return lw.m.t_bool;
+        case Nk.N_EXPR_CHAR: return lw.m.t_char;
+        case Nk.N_EXPR_FLOAT: return lw.m.t_f64;
+        case Nk.N_EXPR_STRING: return lw.ptr(lw.m.t_u8);
+        case Nk.N_EXPR_IDENT:
+        {
+            Node* r = n.resolved;
+            VarB* v = lw.find_var(r);
+            if (v != null) { return v.t; }
+            if (r != null && r.kind == Nk.N_DECL_CONST && r.type_ann != null) { return lw.ty(r.type_ann); }
+            if (r != null && r.kind == Nk.N_DECL_STATIC) { return lw.static_ty(r); }
+            return null;
+        }
+        case Nk.N_EXPR_CAST: return lw.ty(n.type_ann);
+        case Nk.N_EXPR_CALL:
+        {
+            if (n.child_count == 0) { return null; }
+            Node* cr = n.children[0].resolved;
+            if (cr != null && (cr.kind == Nk.N_DECL_FN || cr.kind == Nk.N_DECL_EXTERN_FN))
+            {
+                FnInfo* f = lw.fn_for(cr);
+                return f == null ? null : f.ret;
+            }
+            return null;
+        }
+        case Nk.N_EXPR_BINARY:
+        {
+            Tk op = (Tk)n.p.op;
+            if (op == Tk.TOKEN_EQEQ || op == Tk.TOKEN_NEQ || op == Tk.TOKEN_LT || op == Tk.TOKEN_GT || op == Tk.TOKEN_LTEQ || op == Tk.TOKEN_GTEQ
+                || op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_PIPEPIPE) { return lw.m.t_bool; }
+            AirTyp* l = lw.hint(n.children[0]);
+            if (l != null) { return l; }
+            return lw.hint(n.children[1]);
+        }
+        case Nk.N_EXPR_UNARY:
+        {
+            if ((Tk)n.p.op == Tk.TOKEN_BANG) { return lw.m.t_bool; }
+            return lw.hint(n.children[0]);
+        }
+        case Nk.N_EXPR_DEREF: return lw.pointee(lw.hint(n.children[0]));
+        case Nk.N_EXPR_REF: { AirTyp* t = lw.hint(n.children[0]); return t == null ? null : lw.ptr(t); }
+        case Nk.N_EXPR_INDEX:
+        {
+            AirTyp* b = lw.hint(n.children[0]);
+            if (b != null && b.tag == ATYP_ARRAY) { return b.args[0]; }
+            return lw.pointee(b);
+        }
+        case Nk.N_EXPR_FIELD:
+        {
+            AirTyp* b = lw.hint(n.children[0]);
+            if (b != null && b.tag == ATYP_PTR) { b = b.args[0]; }
+            char* f = lw.text(n); long ix = 0;
+            return b == null || f == null ? null : lw.field_ty(b, f, &ix);
+        }
+        case Nk.N_EXPR_STRUCT_LIT:
+        {
+            Node* r = n.resolved; if (r == null && n.child_count > 0) { r = n.children[0].resolved; }
+            return (r != null && r.kind == Nk.N_DECL_STRUCT) ? lw.struct_ty(r) : null;
+        }
+        case Nk.N_EXPR_SIZEOF: case Nk.N_EXPR_ALIGNOF: return lw.m.t_usz;
+        case Nk.N_EXPR_SYSCALL: return lw.m.t_i64;
+        case Nk.N_BLOCK: return n.child_count > 0 ? lw.hint(n.children[n.child_count - 1]) : lw.m.t_unit;
+        case Nk.N_EXPR_ALLOC:
+        {
+            AirTyp* e = lw.alloc_elem(n, null);
+            return e == null ? null : lw.ptr(e);
+        }
+        default: return null;
+    }
+}
+
+// ── statics ────────────────────────────────────────────────────────────────
+fn AirTyp* Low.static_ty(Low* lw, Node* d)
+{
+    for (usz i = 0; i < lw.ngl; i++) { if (lw.gls[i].decl == d) { return lw.gls[i].ty; } }
+    AirTyp* t = d.type_ann != null ? lw.ty(d.type_ann) : null;
+    if (t == null)
+    {
+        for (usz i = 0; i < d.child_count; i++) { Node* c = d.children[i]; if (c != null && c.type_ann != null && pfront_core::is_type(c.type_ann.kind)) { t = lw.ty(c.type_ann); break; } }
+    }
+    return t;
+}
+fn GlInfo* Low.global_for(Low* lw, Node* d)
+{
+    for (usz i = 0; i < lw.ngl; i++) { if (lw.gls[i].decl == d) { return &lw.gls[i]; } }
+    if (lw.ngl >= MAXGL) { lw.unsup(d, "more than 1024 globals"); return null; }
+    AirTyp* t = lw.static_ty(d);
+    if (t == null) { lw.unsup(d, "global without a declared type"); return null; }
+    char* base = lw.text(d); if (base == null) { base = "g"; }
+    char* nm = lw.dup(base); int k = 1;
+    while (true)
+    {
+        bool clash = false;
+        for (usz i = 0; i < lw.ngl; i++) { if (seq(lw.gls[i].name, nm)) { clash = true; } }
+        for (usz i = 0; i < lw.nfn; i++) { if (seq(lw.fns[i].name, nm)) { clash = true; } }
+        if (!clash) { break; }
+        char[160] b; k++; snprintf(&b[0], 160, "%s.%d", base, k); nm = lw.dup(&b[0]);
+    }
+    GlInfo* g = &lw.gls[lw.ngl]; g.decl = d; g.name = nm; g.ty = t; lw.ngl++;
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_GLOBAL, nm);
+    ad.ret_ty = t; ad.g_mut = (d.flags & pfront_core::NF_MUT) != 0;
+    // constant initialiser: a literal (anything else needs a run-time initialiser, not lowered yet)
+    Node* init = null;
+    for (usz i = 0; i < d.child_count; i++) { Node* c = d.children[i]; if (c != null && pfront_core::is_expr(c.kind)) { init = c; } }
+    if (init != null)
+    {
+        Node* e = init;
+        bool neg = false;
+        if (e.kind == Nk.N_EXPR_UNARY && (Tk)e.p.op == Tk.TOKEN_MINUS && e.child_count > 0) { neg = true; e = e.children[0]; }
+        if (e.kind == Nk.N_EXPR_INT && air_ll::ty_is_int(t)) { ad.g_init = air_ir::air_mk_int(lw.a, neg ? -(long)e.p.ival : (long)e.p.ival); ad.g_init.ty = t; }
+        else if (e.kind == Nk.N_EXPR_BOOL && t.tag == ATYP_BOOL) { ad.g_init = air_ir::air_mk_prd_bool(lw.a, e.p.ival != 0); ad.g_init.ty = t; }
+        else { lw.unsup(init, "global initialiser that is not a literal"); }
+    }
+    lw.m.add_decl(ad);
+    return g;
+}
+
+// ── expressions ────────────────────────────────────────────────────────────
+fn bool Low.is_unit_t(Low* lw, AirTyp* t) { return t != null && t.tag == ATYP_UNIT; }
+
+// the AirTyp of the element an `alloc` produces; count (when not constant) is lowered by the caller
+fn AirTyp* Low.alloc_elem(Low* lw, Node* n, Node** count)
+{
+    Node* t = n.type_ann != null ? n.type_ann : (n.child_count > 0 ? n.children[0] : null);
+    if (t == null) { return null; }
+    if (t.kind == Nk.N_TY_ARRAY && t.child_count >= 2)
+    {
+        if (count != null) { *count = t.children[1]; }
+        return lw.ty(t.children[0]);
+    }
+    if (pfront_core::is_type(t.kind)) { return lw.ty(t); }
+    return null;
+}
+
+fn Vx Low.lit(Low* lw, Node* n, AirTyp* want)
+{
+    switch (n.kind)
+    {
+        case Nk.N_EXPR_INT:
+        {
+            AirTyp* t = want;
+            if (t == null || !(air_ll::ty_is_int(t) || air_ll::ty_is_float(t)))
+            {
+                t = lw.m.t_i64;
+                AirTyp* a = n.type_ann != null ? lw.ty_quiet(n.type_ann) : null;
+                if (a != null && air_ll::ty_is_int(a)) { t = a; }
+            }
+            if (air_ll::ty_is_float(t))
+            {
+                AirPrd* f = air_ir::air_mk_float(lw.a, (double)(long)n.p.ival); f.ty = t; Vx r; r.p = f; r.t = t; return r;
+            }
+            return lw.lit_int((long)n.p.ival, t);
+        }
+        case Nk.N_EXPR_FLOAT:
+        {
+            AirTyp* t = (want != null && air_ll::ty_is_float(want)) ? want : lw.m.t_f64;
+            AirPrd* f = air_ir::air_mk_float(lw.a, n.p.fval); f.ty = t; Vx r; r.p = f; r.t = t; return r;
+        }
+        case Nk.N_EXPR_BOOL: return lw.lit_bool(n.p.ival != 0);
+        case Nk.N_EXPR_CHAR: { AirTyp* t = (want != null && air_ll::ty_is_int(want)) ? want : lw.m.t_char; return lw.lit_int((long)n.p.ival, t); }
+        case Nk.N_EXPR_UNIT: return lw.unit();
+        case Nk.N_EXPR_NULL:
+        {
+            AirTyp* t = (want != null && want.tag == ATYP_PTR) ? want : lw.ptr(lw.m.t_u8);
+            AirPrd* p = air_ir::air_mk_prd_null(lw.a); p.ty = t; Vx r; r.p = p; r.t = t; return r;
+        }
+        case Nk.N_EXPR_STRING: case Nk.N_EXPR_BYTES:
+        {
+            usz sl = n.p.sptr == null ? 0 : (usz)n.p.slen;
+            char* tmp = lw.a.dup(n.p.sptr == null ? (char*)"" : n.p.sptr, sl);
+            usz dl = sl == 0 ? 0 : air_lower::lit_decode(n.p.sptr, sl, tmp);
+            AirPrd* p = n.kind == Nk.N_EXPR_BYTES ? air_ir::air_mk_bytes(lw.a, tmp, dl) : air_ir::air_mk_str(lw.a, tmp, dl);
+            Vx r; r.p = p; r.t = lw.ptr(lw.m.t_u8); p.ty = r.t; return r;
+        }
+        default: break;
+    }
+    return lw.unit();
+}
+// translate a type but do not report an unsupported one (hints only)
+fn AirTyp* Low.ty_quiet(Low* lw, Node* t)
+{
+    int e0 = lw.errors; int f0 = lw.fn_errors;
+    AirTyp* r = lw.ty(t);
+    lw.errors = e0; lw.fn_errors = f0;
+    return r;
+}
+
+fn Vx Low.read_var(Low* lw, Node* id)
+{
+    Node* r = id.resolved;
+    VarB* v = lw.find_var(r);
+    if (v != null)
+    {
+        if (v.slot) { return lw.load(v.p, v.t); }
+        Vx x; x.p = v.p; x.t = v.t; return x;
+    }
+    if (r != null && (r.kind == Nk.N_DECL_FN || r.kind == Nk.N_DECL_EXTERN_FN))
+    {
+        FnInfo* f = lw.fn_for(r);
+        if (f == null) { return lw.unit(); }
+        lw.queue(f);
+        Vx x; x.p = air_ir::air_mk_var(lw.a, f.name); x.t = f.fnty; return x;
+    }
+    if (r != null && r.kind == Nk.N_DECL_CONST)
+    {
+        Node* init = null;
+        for (usz i = 0; i < r.child_count; i++) { Node* c = r.children[i]; if (c != null && pfront_core::is_expr(c.kind)) { init = c; } }
+        if (init != null) { return lw.expr(init, r.type_ann != null ? lw.ty_quiet(r.type_ann) : null); }
+    }
+    if (r != null && r.kind == Nk.N_DECL_STATIC)
+    {
+        GlInfo* g = lw.global_for(r);
+        if (g == null) { return lw.unit(); }
+        return lw.load(air_ir::air_mk_var(lw.a, g.name), g.ty);
+    }
+    lw.err(id, "name does not resolve to a local, function or global", lw.text(id));
+    return lw.unit();
+}
+fn void Low.queue(Low* lw, FnInfo* f) { if (!f.seen) { f.seen = true; f.queued = true; } }
+
+// places: an address plus the type stored there
+fn bool Low.place(Low* lw, Node* n, Pl* out)
+{
+    switch (n.kind)
+    {
+        case Nk.N_EXPR_IDENT:
+        {
+            Node* r = n.resolved;
+            VarB* v = lw.find_var(r);
+            if (v != null && v.slot) { out.ptr = v.p; out.t = v.t; return true; }
+            if (r != null && r.kind == Nk.N_DECL_STATIC)
+            {
+                GlInfo* g = lw.global_for(r); if (g == null) { return false; }
+                out.ptr = air_ir::air_mk_var(lw.a, g.name); out.t = g.ty; return true;
+            }
+            return false;
+        }
+        case Nk.N_EXPR_DEREF:
+        {
+            Vx p = lw.expr(n.children[0], null);
+            AirTyp* e = lw.pointee(p.t);
+            if (e == null) { lw.err(n, "dereference of a non-pointer", null); return false; }
+            out.ptr = p.p; out.t = e; return true;
+        }
+        case Nk.N_EXPR_INDEX:
+        {
+            if (n.child_count < 2) { return false; }
+            AirTyp* bt = lw.hint(n.children[0]);
+            Vx i = lw.expr(n.children[1], lw.m.t_i64);
+            if (bt != null && bt.tag == ATYP_ARRAY)
+            {
+                Pl bp;
+                if (!lw.place(n.children[0], &bp)) { lw.unsup(n, "indexing an array that is not in memory"); return false; }
+                Vx z = lw.lit_int(0, lw.m.t_i64); Vx[2] ix; ix[0] = z; ix[1] = lw.coerce(i, lw.m.t_i64);
+                Vx g = lw.gep(bp.ptr, bp.t, &ix[0], 2, bt.args[0]);
+                out.ptr = g.p; out.t = bt.args[0]; return true;
+            }
+            Vx b = lw.expr(n.children[0], null);
+            AirTyp* e = lw.pointee(b.t);
+            if (e == null) { lw.err(n, "indexing a value that is neither a pointer nor an array", null); return false; }
+            Vx[1] ix; ix[0] = i.t != null && air_ll::ty_is_int(i.t) ? i : lw.coerce(i, lw.m.t_i64);
+            Vx g = lw.gep(b.p, e, &ix[0], 1, e);
+            out.ptr = g.p; out.t = e; return true;
+        }
+        case Nk.N_EXPR_FIELD:
+        {
+            AirTyp* bt = lw.hint(n.children[0]);
+            char* f = lw.text(n); long k = -1;
+            if (bt == null || f == null) { return false; }
+            if (bt.tag == ATYP_PTR)
+            {
+                AirTyp* st = bt.args[0]; AirTyp* ft = lw.field_ty(st, f, &k);
+                if (ft == null) { lw.err(n, "field is not declared", f); return false; }
+                Vx b = lw.expr(n.children[0], null);
+                Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int(k, lw.m.t_i32);
+                Vx g = lw.gep(b.p, st, &ix[0], 2, ft);
+                out.ptr = g.p; out.t = ft; return true;
+            }
+            AirTyp* ft = lw.field_ty(bt, f, &k);
+            if (ft == null) { return false; }
+            Pl bp;
+            if (!lw.place(n.children[0], &bp)) { return false; }
+            Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int(k, lw.m.t_i32);
+            Vx g = lw.gep(bp.ptr, bt, &ix[0], 2, ft);
+            out.ptr = g.p; out.t = ft; return true;
+        }
+        default: return false;
+    }
+}
+
+fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
+{
+    if (n.child_count == 0) { return lw.unit(); }
+    Node* cal = n.children[0];
+    Node* cr = cal.resolved;
+    if (cr == null || !(cr.kind == Nk.N_DECL_FN || cr.kind == Nk.N_DECL_EXTERN_FN))
+    {
+        lw.unsup(n, "call through a function value / method / generic callee"); return lw.unit();
+    }
+    FnInfo* f = lw.fn_for(cr);
+    if (f == null) { return lw.unit(); }
+    lw.queue(f);
+    usz na = n.child_count - 1;
+    // a single `()` argument means no arguments
+    if (na == 1 && f.np == 0) { na = 0; }
+    if (na != f.np && !(f.variadic && na >= f.np)) { lw.err(n, "wrong number of arguments", f.name); return lw.unit(); }
+    Vx[16] av;
+    for (usz i = 0; i < na && i < 16; i++)
+    {
+        AirTyp* pt = i < f.np ? f.pty[i] : null;
+        Vx a = lw.expr(n.children[i + 1], pt);
+        if (pt != null) { a = lw.coerce_arg(n.children[i + 1], a, pt); }
+        av[i] = a;
+    }
+    if (!lw.live()) { return lw.unit(); }
+    Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, f.name); ins.nargs = na;
+    for (usz i = 0; i < na && i < 8; i++) { ins.args[i] = av[i].p; }
+    if (na > 8) { lw.unsup(n, "call with more than 8 arguments"); }
+    Vx r = lw.vref(ins.name, f.ret);
+    if (f.ret.tag == ATYP_BOTTOM) { lw.t_end(T_UNREACH); }
+    return r;
+}
+// an argument must already have the parameter's type (literals adopt it); anything else is a type error
+fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
+{
+    if (a.t == null || air_ll::ty_eq(a.t, want)) { return a; }
+    if (a.p != null && a.p.tag == APRD_INT && air_ll::ty_is_int(want)) { return lw.lit_int(a.p.ival, want); }
+    lw.err(at, "argument type differs from the parameter type", null);
+    return a;
+}
+
+fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
+{
+    if (n == null) { return lw.unit(); }
+    if (lw.fn_errors > 0) { return lw.unit(); }
+    lw.cur_node = n;
+    switch (n.kind)
+    {
+        case Nk.N_EXPR_INT: case Nk.N_EXPR_FLOAT: case Nk.N_EXPR_BOOL: case Nk.N_EXPR_CHAR: case Nk.N_EXPR_UNIT:
+        case Nk.N_EXPR_NULL: case Nk.N_EXPR_STRING: case Nk.N_EXPR_BYTES:
+            return lw.lit(n, want);
+        case Nk.N_EXPR_IDENT: return lw.read_var(n);
+        case Nk.N_BLOCK: return lw.block(n, want);
+        case Nk.N_EXPR_BINARY: return lw.binary(n, want);
+        case Nk.N_EXPR_UNARY: return lw.unary(n, want);
+        case Nk.N_EXPR_CALL: return lw.call(n, want);
+        case Nk.N_EXPR_CAST:
+        {
+            AirTyp* to = lw.ty(n.type_ann);
+            if (to == null || n.child_count == 0) { return lw.unit(); }
+            AirTyp* h = lw.hint(n.children[0]);
+            // literals take the target type directly; everything else is evaluated at its own type
+            Node* c0 = n.children[0];
+            bool lit0 = c0.kind == Nk.N_EXPR_INT || c0.kind == Nk.N_EXPR_FLOAT;
+            Vx v = lw.expr(c0, lit0 ? to : h);
+            return lw.cast(v, to);
+        }
+        case Nk.N_EXPR_IF: return lw.if_(n, want);
+        case Nk.N_EXPR_WHILE: return lw.while_(n);
+        case Nk.N_EXPR_FOR: return lw.for_(n);
+        case Nk.N_EXPR_LOOP: return lw.loop_(n);
+        case Nk.N_EXPR_MATCH: return lw.match_(n, want);
+        case Nk.N_STMT_RETURN:
+        {
+            Vx v = n.child_count > 0 ? lw.expr(n.children[0], lw.ret_ty) : lw.unit();
+            lw.finish_ret(v, n);
+            return lw.unit();
+        }
+        case Nk.N_STMT_BREAK:
+        {
+            if (lw.nloops == 0) { lw.err(n, "break outside a loop", null); return lw.unit(); }
+            lw.t_jump0(lw.loops[lw.nloops - 1].brk); return lw.unit();
+        }
+        case Nk.N_STMT_CONTINUE:
+        {
+            if (lw.nloops == 0) { lw.err(n, "continue outside a loop", null); return lw.unit(); }
+            lw.t_jump0(lw.loops[lw.nloops - 1].cont); return lw.unit();
+        }
+        case Nk.N_STMT_EXPR: return n.child_count > 0 ? lw.expr(n.children[0], null) : lw.unit();
+        case Nk.N_DECL_LET: lw.let_decl(n); return lw.unit();
+        case Nk.N_STMT_ASSIGN: case Nk.N_EXPR_ASSIGN: case Nk.N_STMT_COMPOUND_ASSIGN: lw.assign(n); return lw.unit();
+        case Nk.N_EXPR_INDEX: case Nk.N_EXPR_FIELD: case Nk.N_EXPR_DEREF:
+        {
+            Pl p;
+            if (lw.place(n, &p)) { return lw.load(p.ptr, p.t); }
+            if (n.kind == Nk.N_EXPR_FIELD && n.child_count > 0)
+            {
+                AirTyp* bt = lw.hint(n.children[0]); char* f = lw.text(n); long k = -1;
+                AirTyp* ft = (bt != null && f != null) ? lw.field_ty(bt, f, &k) : null;
+                if (ft != null)
+                {
+                    Vx b = lw.expr(n.children[0], bt);
+                    Ins* ins = lw.push(I_FIELD); if (ins == null) { return lw.unit(); }
+                    ins.name = lw.fresh("_f"); ins.a = b.p; ins.fld = f; ins.idx = k;
+                    return lw.vref(ins.name, ft);
+                }
+            }
+            if (lw.fn_errors == 0) { lw.unsup(n, "this access path"); }
+            return lw.unit();
+        }
+        case Nk.N_EXPR_REF:
+        {
+            Pl p;
+            if (n.child_count > 0 && lw.place(n.children[0], &p)) { Vx r; r.p = p.ptr; r.t = lw.ptr(p.t); return r; }
+            lw.unsup(n, "address of a value that is not in memory"); return lw.unit();
+        }
+        case Nk.N_EXPR_STRUCT_LIT: return lw.struct_lit(n);
+        case Nk.N_EXPR_TUPLE:
+        {
+            AirTyp* wt = (want != null && want.tag == ATYP_TUPLE) ? want : null;
+            if (n.child_count == 0) { return lw.unit(); }
+            AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_TUPLE;
+            AirTyp*[8] ts;
+            for (usz i = 0; i < n.child_count && i < 8; i++)
+            {
+                Vx e = lw.expr(n.children[i], wt != null && i < wt.arg_count ? wt.args[i] : null);
+                ts[i] = e.t; p.add_sub(e.p);
+            }
+            AirTyp* tt = air_ir::air_mk_typ_tuple(lw.a, &ts[0], n.child_count);
+            return lw.let_(p, tt, "_tu");
+        }
+        case Nk.N_EXPR_ALLOC: return lw.alloc(n);
+        case Nk.N_EXPR_FREE:
+        {
+            if (n.child_count == 0) { return lw.unit(); }
+            Vx p = lw.expr(n.children[0], null);
+            Vx b = lw.coerce(p, lw.ptr(lw.m.t_u8));
+            Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+            ins.name = lw.fresh("_fr"); ins.a = air_ir::air_mk_var(lw.a, "free"); ins.nargs = 1; ins.args[0] = b.p;
+            return lw.unit();
+        }
+        case Nk.N_EXPR_SIZEOF:
+        {
+            AirTyp* t = n.child_count > 0 ? lw.ty(n.children[0]) : lw.ty(n.type_ann);
+            if (t == null) { return lw.unit(); }
+            AirPrd* p = air_ir::air_mk_sizeof(lw.a, t);
+            return lw.let_(p, lw.m.t_usz, "_sz");
+        }
+        case Nk.N_EXPR_SYSCALL:
+        {
+            if (n.child_count == 0 || n.child_count > 7) { lw.err(n, "syscall needs 1 to 7 operands", null); return lw.unit(); }
+            Vx[8] av;
+            for (usz i = 0; i < n.child_count; i++)
+            {
+                Vx a = lw.expr(n.children[i], lw.m.t_i64);
+                av[i] = lw.cast(a, lw.m.t_i64);
+            }
+            Ins* ins = lw.push(I_SYS); if (ins == null) { return lw.unit(); }
+            ins.name = lw.fresh("_sys"); ins.nargs = n.child_count;
+            for (usz i = 0; i < n.child_count; i++) { ins.args[i] = av[i].p; }
+            return lw.vref(ins.name, lw.m.t_i64);
+        }
+        case Nk.N_EXPR_UB: lw.t_end(T_UNREACH); return lw.unit();
+        case Nk.N_EXPR_TRAP: lw.t_end(T_TRAP); return lw.unit();
+        case Nk.N_EXPR_UNREACHABLE: lw.t_end(T_UNREACH); return lw.unit();
+        case Nk.N_EXPR_UNSAFE: case Nk.N_EXPR_UNCHECKED:
+            return n.child_count > 0 ? lw.expr(n.children[n.child_count - 1], want) : lw.unit();
+        default:
+            lw.unsup(n, "expression"); return lw.unit();
+    }
+}
+
+// value conversion with the rules of `as`
+fn Vx Low.cast(Low* lw, Vx v, AirTyp* to)
+{
+    if (v.t == null || to == null) { return v; }
+    return lw.coerce(v, to);
+}
+
+fn Vx Low.alloc(Low* lw, Node* n)
+{
+    Node* cnt = null;
+    AirTyp* el = lw.alloc_elem(n, &cnt);
+    if (el == null) { lw.unsup(n, "alloc of this type"); return lw.unit(); }
+    Vx count = cnt == null ? lw.lit_int(1, lw.m.t_i64) : lw.coerce(lw.expr(cnt, lw.m.t_i64), lw.m.t_i64);
+    Vx esz = lw.let_(air_ir::air_mk_sizeof(lw.a, el), lw.m.t_usz, "_sz");
+    Vx esz64 = lw.coerce(esz, lw.m.t_i64);
+    Vx bytes = lw.binop(ABIN_MUL, count, esz64);
+    Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_m"); ins.a = air_ir::air_mk_var(lw.a, "malloc"); ins.nargs = 1; ins.args[0] = bytes.p;
+    Vx raw = lw.vref(ins.name, lw.ptr(lw.m.t_u8));
+    return lw.coerce(raw, lw.ptr(el));
+}
+
+fn Vx Low.struct_lit(Low* lw, Node* n)
+{
+    Node* r = n.resolved; if (r == null && n.child_count > 0) { r = n.children[0].resolved; }
+    if (r == null || r.kind != Nk.N_DECL_STRUCT) { lw.unsup(n, "literal of a non-struct type"); return lw.unit(); }
+    AirTyp* st = lw.struct_ty(r);
+    AirDecl* d = lw.data_of(st);
+    if (st == null || d == null) { return lw.unit(); }
+    AirCtorDecl* c = d.ctors[0];
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_RECORD;
+    Vx[16] vals; bool[16] seen;
+    for (usz i = 0; i < 16; i++) { seen[i] = false; }
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        Node* fi = n.children[i];
+        if (fi == null || fi.kind != Nk.N_EXPR_FIELD_INIT) { continue; }
+        char* fnm = lw.text(fi); long k = -1;
+        AirTyp* ft = fnm == null ? null : lw.field_ty(st, fnm, &k);
+        if (ft == null || k < 0 || k >= 16) { lw.err(fi, "field is not declared", fnm); return lw.unit(); }
+        Vx v = lw.expr(fi.child_count > 0 ? fi.children[0] : null, ft);
+        v = lw.coerce_arg(fi, v, ft);
+        vals[(usz)k] = v; seen[(usz)k] = true;
+    }
+    for (usz i = 0; i < c.field_count && i < 16; i++)
+    {
+        if (!seen[i]) { lw.err(n, "field is not initialised", c.fields[i].name); return lw.unit(); }
+        AirFieldInit* fi = air_ir::air_new_AirFieldInit(lw.a);
+        fi.name = c.fields[i].name; fi.value = vals[i].p;
+        p.rec_inits[p.rec_init_count] = fi; p.rec_init_count++;
+    }
+    return lw.let_(p, st, "_rec");
+}
+
+fn Vx Low.unary(Low* lw, Node* n, AirTyp* want)
+{
+    if (n.child_count == 0) { return lw.unit(); }
+    Tk op = (Tk)n.p.op;
+    if (op == Tk.TOKEN_MINUS)
+    {
+        Node* c0 = n.children[0];
+        if (c0.kind == Nk.N_EXPR_INT)
+        {
+            Vx l = lw.lit(c0, want);
+            return lw.lit_int(-l.p.ival, l.t);
+        }
+        Vx v = lw.expr(c0, want);
+        AirPrd* p = air_ir::air_mk_unop(lw.a, AUN_NEG, v.p);
+        return lw.let_(p, v.t, "_n");
+    }
+    if (op == Tk.TOKEN_BANG || op == Tk.TOKEN_KW_NOT)
+    {
+        Vx v = lw.expr(n.children[0], null);
+        AirUnop u = (v.t != null && v.t.tag == ATYP_BOOL) ? AUN_NOT : AUN_BITNOT;
+        AirPrd* p = air_ir::air_mk_unop(lw.a, u, v.p);
+        return lw.let_(p, v.t, "_n");
+    }
+    if (op == Tk.TOKEN_TILDE)
+    {
+        Vx v = lw.expr(n.children[0], want);
+        AirPrd* p = air_ir::air_mk_unop(lw.a, AUN_BITNOT, v.p);
+        return lw.let_(p, v.t, "_n");
+    }
+    lw.unsup(n, "unary operator"); return lw.unit();
+}
+
+fn bool Low.binop_for(Low* lw, Tk op, AirBinop* out)
+{
+    switch (op)
+    {
+        case Tk.TOKEN_PLUS: *out = ABIN_ADD; return true;
+        case Tk.TOKEN_MINUS: *out = ABIN_SUB; return true;
+        case Tk.TOKEN_STAR: *out = ABIN_MUL; return true;
+        case Tk.TOKEN_SLASH: *out = ABIN_DIV; return true;
+        case Tk.TOKEN_PERCENT: *out = ABIN_MOD; return true;
+        case Tk.TOKEN_AMP: *out = ABIN_AND; return true;
+        case Tk.TOKEN_PIPE: *out = ABIN_OR; return true;
+        case Tk.TOKEN_XOR: *out = ABIN_XOR; return true;
+        case Tk.TOKEN_LSHIFT: *out = ABIN_SHL; return true;
+        case Tk.TOKEN_RSHIFT: *out = ABIN_SHR; return true;
+        case Tk.TOKEN_EQEQ: *out = ABIN_EQ; return true;
+        case Tk.TOKEN_NEQ: *out = ABIN_NEQ; return true;
+        case Tk.TOKEN_LT: *out = ABIN_LT; return true;
+        case Tk.TOKEN_GT: *out = ABIN_GT; return true;
+        case Tk.TOKEN_LTEQ: *out = ABIN_LE; return true;
+        case Tk.TOKEN_GTEQ: *out = ABIN_GE; return true;
+        default: return false;
+    }
+}
+
+fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
+{
+    if (n.child_count < 2) { return lw.unit(); }
+    Tk op = (Tk)n.p.op;
+    if (op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_PIPEPIPE) { return lw.shortcircuit(n, op == Tk.TOKEN_AMPAMP); }
+    AirBinop b;
+    if (!lw.binop_for(op, &b)) { lw.unsup(n, "binary operator"); return lw.unit(); }
+    bool cmp = b == ABIN_EQ || b == ABIN_NEQ || b == ABIN_LT || b == ABIN_GT || b == ABIN_LE || b == ABIN_GE;
+    bool shift = b == ABIN_SHL || b == ABIN_SHR;
+    AirTyp* h = lw.hint(n.children[0]);
+    if (h == null) { h = lw.hint(n.children[1]); }
+    if (h == null && !cmp) { h = want; }
+    Vx l = lw.expr(n.children[0], h);
+    Vx r = lw.expr(n.children[1], shift ? l.t : (h != null ? h : l.t));
+    if (l.t != null && r.t != null && !air_ll::ty_eq(l.t, r.t))
+    {
+        if (r.p != null && r.p.tag == APRD_INT && air_ll::ty_is_int(l.t)) { r = lw.lit_int(r.p.ival, l.t); }
+        else if (l.p != null && l.p.tag == APRD_INT && air_ll::ty_is_int(r.t)) { l = lw.lit_int(l.p.ival, r.t); }
+        else if (l.t.tag == ATYP_PTR && r.p != null && r.p.tag == APRD_NULL) { r = lw.coerce(r, l.t); }
+        else if (shift && air_ll::ty_is_int(l.t) && air_ll::ty_is_int(r.t)) { r = lw.coerce(r, l.t); }
+        else { lw.err(n, "operands have different types", null); return lw.unit(); }
+    }
+    if (!lw.live()) { return lw.unit(); }
+    return lw.binop(b, l, r);
+}
+
+// a && b / a || b: the right side runs only when needed; the result is a bool block parameter
+fn Vx Low.shortcircuit(Low* lw, Node* n, bool is_and)
+{
+    Vx l = lw.expr(n.children[0], lw.m.t_bool);
+    if (!lw.live()) { return lw.unit(); }
+    usz rhs = lw.blk("sc.rhs"); usz join = lw.blk("sc.join");
+    char* pn = lw.fresh("_b");
+    lw.blks[join].pnames[0] = pn; lw.blks[join].ptys[0] = lw.m.t_bool; lw.blks[join].np = 1;
+    // short value goes straight to the join
+    usz shortb = lw.blk("sc.short");
+    if (is_and) { lw.t_cond(l, rhs, shortb); } else { lw.t_cond(l, shortb, rhs); }
+    lw.cur = shortb;
+    { Vx[1] a; a[0] = lw.lit_bool(!is_and); lw.t_jump(join, &a[0], 1); }
+    lw.cur = rhs;
+    Vx r = lw.expr(n.children[1], lw.m.t_bool);
+    if (lw.live()) { Vx[1] a; a[0] = r; lw.t_jump(join, &a[0], 1); }
+    lw.cur = join;
+    return lw.vref(pn, lw.m.t_bool);
+}
+
+fn Vx Low.block(Low* lw, Node* n, AirTyp* want)
+{
+    Vx last = lw.unit();
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        Node* c = n.children[i];
+        if (c == null) { continue; }
+        bool is_last = i + 1 == n.child_count;
+        last = lw.expr(c, is_last ? want : null);
+        if (lw.fn_errors > 0) { break; }
+        if (!lw.live()) { break; }       // code after return/break/trap is unreachable
+    }
+    return last;
+}
+
+fn void Low.let_decl(Low* lw, Node* n)
+{
+    // children: pattern, [initialiser]
+    Node* pat = n.child_count > 0 ? n.children[0] : null;
+    Node* init = n.child_count > 1 ? n.children[1] : null;
+    if (pat == null) { lw.unsup(n, "let without a pattern"); return; }
+    if (pat.kind != Nk.N_PAT_IDENT && pat.kind != Nk.N_PAT_WILDCARD) { lw.unsup(pat, "destructuring let"); return; }
+    AirTyp* declared = pat.type_ann != null ? lw.ty(pat.type_ann) : (n.type_ann != null ? lw.ty(n.type_ann) : null);
+    if (pat.type_ann != null && declared == null) { return; }
+    Vx v;
+    if (init != null) { v = lw.expr(init, declared); v = declared != null ? lw.coerce_arg(init, v, declared) : v; }
+    else
+    {
+        if (declared == null) { lw.unsup(n, "let without a type or initialiser"); return; }
+        v.t = declared; v.p = null;
+    }
+    AirTyp* t = declared != null ? declared : v.t;
+    if (t == null) { lw.unsup(n, "let of an untyped value"); return; }
+    if (!lw.live()) { return; }
+    bool mutable = (n.flags & pfront_core::NF_MUT) != 0 || (pat.flags & pfront_core::NF_MUT) != 0
+                   || (n.flags & pfront_core::NF_ADDR_TAKEN) != 0 || (pat.flags & pfront_core::NF_ADDR_TAKEN) != 0;
+    if (pat.kind == Nk.N_PAT_WILDCARD) { return; }
+    char* nm = lw.uname(lw.text(pat));
+    if (mutable || (v.p == null))
+    {
+        Vx s = lw.alloca_(t);
+        // the slot gets the user's name so the .air stays readable
+        if (s.p != null && s.p.tag == APRD_VAR) { s.p = air_ir::air_mk_var(lw.a, s.p.name); }
+        if (v.p != null) { lw.store(s.p, v); }
+        lw.bind_var(pat, s.p, t, true);
+        return;
+    }
+    // immutable: an SSA name
+    if (v.p != null && v.p.tag == APRD_VAR) { lw.bind_var(pat, v.p, t, false); return; }
+    Ins* ins = lw.push(I_LET); if (ins == null) { return; }
+    ins.name = nm; ins.a = v.p; v.p.ty = t;
+    lw.bind_var(pat, air_ir::air_mk_var(lw.a, nm), t, false);
+}
+
+fn void Low.assign(Low* lw, Node* n)
+{
+    if (n.child_count < 2) { return; }
+    Pl p;
+    if (!lw.place(n.children[0], &p))
+    {
+        if (lw.fn_errors == 0) { lw.unsup(n.children[0], "assignment target that is not a mutable place"); }
+        return;
+    }
+    if (n.kind == Nk.N_STMT_COMPOUND_ASSIGN)
+    {
+        AirBinop b = air_lower::compound_binop((long)n.p.op);
+        Vx cur = lw.load(p.ptr, p.t);
+        bool shift = b == ABIN_SHL || b == ABIN_SHR;
+        Vx r = lw.expr(n.children[1], p.t);
+        if (shift) { r = lw.coerce(r, p.t); }
+        else { r = lw.coerce_arg(n.children[1], r, p.t); }
+        if (!lw.live()) { return; }
+        Vx res = lw.binop(b, cur, r);
+        lw.store(p.ptr, res);
+        return;
+    }
+    Vx v = lw.expr(n.children[1], p.t);
+    v = lw.coerce_arg(n.children[1], v, p.t);
+    if (!lw.live()) { return; }
+    lw.store(p.ptr, v);
+}
+
+// a value flowing out of if/match arms: unit/bottom arms carry nothing
+fn bool Low.carries(Low* lw, AirTyp* t) { return t != null && t.tag != ATYP_UNIT && t.tag != ATYP_BOTTOM; }
+
+fn Vx Low.if_(Low* lw, Node* n, AirTyp* want)
+{
+    if (n.child_count < 2) { return lw.unit(); }
+    Vx c = lw.expr(n.children[0], lw.m.t_bool);
+    if (!lw.live()) { return lw.unit(); }
+    if (c.t == null || c.t.tag != ATYP_BOOL) { lw.err(n, "if condition is not a bool", null); return lw.unit(); }
+    bool has_else = n.child_count > 2;
+    usz tb = lw.blk("then"); usz eb = lw.blk("else"); usz jb = lw.blk("join");
+    lw.t_cond(c, tb, eb);
+    AirTyp* rt = null; bool t_live = false; bool e_live = false; Vx tv = lw.unit(); Vx ev = lw.unit();
+    lw.cur = tb;
+    tv = lw.expr(n.children[1], has_else ? want : null);
+    t_live = lw.live();
+    if (t_live) { rt = tv.t; }
+    usz t_end = lw.cur;
+    // the then-arm's last block still needs its jump: delay it until the join's parameter is known
+    lw.cur = eb;
+    if (has_else) { ev = lw.expr(n.children[2], (rt != null && lw.carries(rt)) ? rt : want); }
+    e_live = lw.live();
+    usz e_end = lw.cur;
+    AirTyp* jt = null;
+    if (has_else)
+    {
+        if (t_live && e_live)
+        {
+            if (tv.t != null && ev.t != null && !air_ll::ty_eq(tv.t, ev.t))
+            {
+                if (ev.p != null && ev.p.tag == APRD_INT && air_ll::ty_is_int(tv.t)) { ev = lw.lit_int(ev.p.ival, tv.t); }
+                else if (tv.p != null && tv.p.tag == APRD_INT && air_ll::ty_is_int(ev.t)) { tv = lw.lit_int(tv.p.ival, ev.t); }
+                else if (lw.carries(tv.t) || lw.carries(ev.t)) { lw.err(n, "if branches have different types", null); return lw.unit(); }
+            }
+            jt = tv.t;
+        }
+        else if (t_live) { jt = tv.t; }
+        else if (e_live) { jt = ev.t; }
+    }
+    bool carry = has_else && lw.carries(jt);
+    char* pn = null;
+    if (carry) { pn = lw.fresh("_j"); lw.blks[jb].pnames[0] = pn; lw.blks[jb].ptys[0] = jt; lw.blks[jb].np = 1; }
+    if (t_live)
+    {
+        lw.cur = t_end;
+        if (carry) { Vx[1] a; a[0] = tv; lw.t_jump(jb, &a[0], 1); } else { lw.t_jump0(jb); }
+    }
+    if (e_live)
+    {
+        lw.cur = e_end;
+        if (carry) { Vx[1] a; a[0] = ev; lw.t_jump(jb, &a[0], 1); } else { lw.t_jump0(jb); }
+    }
+    if (lw.blks[jb].npred == 0) { lw.cur = NOBLK; return lw.unit(); }
+    lw.cur = jb;
+    if (carry) { return lw.vref(pn, jt); }
+    return lw.unit();
+}
+
+fn Vx Low.while_(Low* lw, Node* n)
+{
+    if (n.child_count < 2) { return lw.unit(); }
+    bool post = (n.flags & pfront_core::NF_POSTTEST) != 0;
+    if (post) { lw.unsup(n, "do-while"); return lw.unit(); }
+    usz head = lw.blk("wh.head"); usz body = lw.blk("wh.body"); usz exit = lw.blk("wh.exit");
+    lw.t_jump0(head);
+    lw.cur = head;
+    Vx c = lw.expr(n.children[0], lw.m.t_bool);
+    if (lw.live())
+    {
+        if (c.t == null || c.t.tag != ATYP_BOOL) { lw.err(n, "while condition is not a bool", null); return lw.unit(); }
+        lw.t_cond(c, body, exit);
+    }
+    lw.cur = body;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.nloops++;
+    lw.expr(n.children[1], null);
+    lw.nloops--;
+    if (lw.live()) { lw.t_jump0(head); }
+    lw.cur = lw.blks[exit].npred > 0 ? exit : NOBLK;
+    return lw.unit();
+}
+
+fn Vx Low.loop_(Low* lw, Node* n)
+{
+    usz head = lw.blk("lp.head"); usz exit = lw.blk("lp.exit");
+    lw.t_jump0(head);
+    lw.cur = head;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.nloops++;
+    if (n.child_count > 0) { lw.expr(n.children[n.child_count - 1], null); }
+    lw.nloops--;
+    if (lw.live()) { lw.t_jump0(head); }
+    lw.cur = lw.blks[exit].npred > 0 ? exit : NOBLK;
+    return lw.unit();
+}
+
+fn Vx Low.for_(Low* lw, Node* n)
+{
+    if (n.child_count < 3) { return lw.unit(); }
+    Node* pat = n.children[0]; Node* it = n.children[1]; Node* body = n.children[2];
+    if (it == null || it.kind != Nk.N_EXPR_RANGE || it.child_count < 2) { lw.unsup(n, "for over something that is not a range"); return lw.unit(); }
+    bool incl = (it.flags & pfront_core::NF_INCLUSIVE) != 0;
+    AirTyp* h = lw.hint(it.children[0]); if (h == null) { h = lw.hint(it.children[1]); }
+    if (h == null) { h = lw.m.t_i64; }
+    Vx lo = lw.expr(it.children[0], h); Vx hi = lw.expr(it.children[1], h);
+    if (!lw.live()) { return lw.unit(); }
+    if (lo.t != null && !air_ll::ty_is_int(lo.t)) { lw.err(n, "for range bounds are not integers", null); return lw.unit(); }
+    if (hi.t != null && !air_ll::ty_eq(lo.t, hi.t)) { hi = lw.coerce(hi, lo.t); }
+    AirTyp* t = lo.t;
+    Vx slot = lw.alloca_(t);
+    lw.store(slot.p, lo);
+    usz head = lw.blk("for.head"); usz body_b = lw.blk("for.body"); usz step = lw.blk("for.step"); usz exit = lw.blk("for.exit");
+    lw.t_jump0(head);
+    lw.cur = head;
+    Vx i = lw.load(slot.p, t);
+    Vx c = lw.binop(incl ? ABIN_LE : ABIN_LT, i, hi);
+    lw.t_cond(c, body_b, exit);
+    lw.cur = body_b;
+    if (pat != null && pat.kind == Nk.N_PAT_IDENT)
+    {
+        char* nm = lw.uname(lw.text(pat));
+        Ins* ins = lw.push(I_LET);
+        if (ins != null) { ins.name = nm; ins.a = i.p; i.p.ty = t; lw.bind_var(pat, air_ir::air_mk_var(lw.a, nm), t, false); }
+    }
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.nloops++;
+    lw.expr(body, null);
+    lw.nloops--;
+    if (lw.live()) { lw.t_jump0(step); }
+    if (lw.blks[step].npred > 0)
+    {
+        lw.cur = step;
+        Vx cur = lw.load(slot.p, t);
+        Vx nx = lw.binop(ABIN_ADD, cur, lw.lit_int(1, t));
+        lw.store(slot.p, nx);
+        lw.t_jump0(head);
+    }
+    lw.cur = exit;
+    return lw.unit();
+}
+
+// ── patterns and match ─────────────────────────────────────────────────────
+// Tests `v` against pattern `p`; on mismatch control goes to `fail`. Binds names. Returns false if unsupported.
+fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
+{
+    if (p == null) { return true; }
+    switch (p.kind)
+    {
+        case Nk.N_PAT_WILDCARD: return true;
+        case Nk.N_PAT_IDENT:
+        {
+            if (lw.is_unit_t(v.t)) { return true; }
+            char* nm = lw.uname(lw.text(p));
+            Ins* ins = lw.push(I_LET); if (ins == null) { return true; }
+            ins.name = nm; ins.a = v.p; v.p.ty = v.t;
+            lw.bind_var(p, air_ir::air_mk_var(lw.a, nm), v.t, false);
+            return true;
+        }
+        case Nk.N_PAT_LITERAL:
+        {
+            if (p.child_count == 0) { lw.unsup(p, "literal pattern"); return false; }
+            Node* lit = p.children[0];
+            Vx l = lw.expr(lit, v.t);
+            if (!lw.live()) { return true; }
+            if (l.t != null && v.t != null && !air_ll::ty_eq(l.t, v.t))
+            {
+                if (l.p != null && l.p.tag == APRD_INT && air_ll::ty_is_int(v.t)) { l = lw.lit_int(l.p.ival, v.t); }
+                else { lw.err(p, "pattern type differs from the scrutinee", null); return false; }
+            }
+            Vx eq = lw.binop(ABIN_EQ, v, l);
+            usz ok = lw.blk("pat.ok");
+            lw.t_cond(eq, ok, fail);
+            lw.cur = ok;
+            return true;
+        }
+        case Nk.N_PAT_RANGE:
+        {
+            if (p.child_count < 2) { lw.unsup(p, "range pattern"); return false; }
+            Vx lo = lw.expr(p.children[0], v.t); Vx hi = lw.expr(p.children[1], v.t);
+            Vx a = lw.binop(ABIN_GE, v, lo);
+            Vx b = lw.binop((p.flags & pfront_core::NF_INCLUSIVE) != 0 ? ABIN_LE : ABIN_LT, v, hi);
+            usz mid = lw.blk("pat.mid"); usz ok = lw.blk("pat.ok");
+            lw.t_cond(a, mid, fail);
+            lw.cur = mid;
+            lw.t_cond(b, ok, fail);
+            lw.cur = ok;
+            return true;
+        }
+        case Nk.N_PAT_TUPLE:
+        {
+            if (p.child_count == 0 && lw.is_unit_t(v.t)) { return true; }
+            if (v.t == null || v.t.tag != ATYP_TUPLE || v.t.arg_count != p.child_count) { lw.unsup(p, "tuple pattern against this type"); return false; }
+            for (usz i = 0; i < p.child_count; i++)
+            {
+                Ins* ins = lw.push(I_PROJ); if (ins == null) { return true; }
+                ins.name = lw.fresh("_p"); ins.a = v.p; ins.idx = (long)i;
+                Vx e = lw.vref(ins.name, v.t.args[i]);
+                if (!lw.pat(p.children[i], e, fail)) { return false; }
+            }
+            return true;
+        }
+        default:
+            lw.unsup(p, "pattern"); return false;
+    }
+}
+fn bool Low.irrefutable(Low* lw, Node* p)
+{
+    if (p == null) { return true; }
+    if (p.kind == Nk.N_PAT_WILDCARD || p.kind == Nk.N_PAT_IDENT) { return true; }
+    if (p.kind == Nk.N_PAT_TUPLE)
+    {
+        for (usz i = 0; i < p.child_count; i++) { if (!lw.irrefutable(p.children[i])) { return false; } }
+        return true;
+    }
+    return false;
+}
+
+// arms: clause/match-arm nodes (pattern, [guard], body); scrutinees: one value per tuple slot
+fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want, bool tuple_pat)
+{
+    char* pn = null; AirTyp* jt = null; bool carry_known = false; bool carry = false;
+    usz jb = lw.blk("m.join");
+    // results are collected while arms are lowered; the join parameter is added once the type is known
+    usz[64] end_blk; Vx[64] end_val; usz nend = 0;
+    bool exhaustive = false;
+    for (usz ai = 0; ai < narms; ai++)
+    {
+        Node* arm = arms[ai];
+        if (arm == null || arm.child_count == 0) { continue; }
+        usz next = lw.blk("arm.next");
+        usz nv0 = lw.nvars;
+        Node* pat = arm.children[0];
+        bool ok = true;
+        if (tuple_pat && nscr != 1)
+        {
+            if (pat.kind != Nk.N_PAT_TUPLE || pat.child_count != nscr) { lw.unsup(pat, "clause pattern shape"); return lw.unit(); }
+            for (usz i = 0; i < nscr && ok; i++) { ok = lw.pat(pat.children[i], scr[i], next); }
+        }
+        else if (nscr == 0) { }
+        else { ok = lw.pat(pat, scr[0], next); }
+        if (!ok) { return lw.unit(); }
+        Node* guard = null; Node* body = null;
+        for (usz j = 1; j < arm.child_count; j++)
+        {
+            Node* c = arm.children[j]; if (c == null) { continue; }
+            if (c.kind == Nk.N_GUARD) { guard = c; } else { body = c; }
+        }
+        bool irref = true;
+        if (tuple_pat && nscr != 1) { for (usz i = 0; i < nscr; i++) { if (!lw.irrefutable(pat.children[i])) { irref = false; } } }
+        else if (nscr > 0) { irref = lw.irrefutable(pat); }
+        if (guard != null)
+        {
+            irref = false;
+            Vx g = lw.expr(guard.child_count > 0 ? guard.children[0] : null, lw.m.t_bool);
+            if (lw.live()) { usz gok = lw.blk("guard.ok"); lw.t_cond(g, gok, next); lw.cur = gok; }
+        }
+        Vx bv = body != null ? lw.expr(body, (carry_known && carry) ? jt : want) : lw.unit();
+        if (lw.fn_errors > 0) { return lw.unit(); }
+        if (lw.live())
+        {
+            if (nend >= 64) { lw.unsup(arm, "more than 64 arms"); return lw.unit(); }
+            end_blk[nend] = lw.cur; end_val[nend] = bv; nend++;
+            if (!carry_known) { carry_known = true; jt = bv.t; carry = lw.carries(bv.t); }
+            lw.cur = NOBLK;
+        }
+        lw.nvars = nv0;             // pattern names go out of scope
+        if (irref && lw.blks[next].npred == 0) { exhaustive = true; break; }
+        lw.cur = next;
+        if (ai + 1 == narms)
+        {
+            // fell through every arm: the front end proved exhaustiveness, so this is unreachable;
+            // a trap keeps a wrong proof from becoming silent undefined behaviour
+            lw.t_end(T_TRAP);
+        }
+    }
+    if (!exhaustive && lw.live()) { lw.t_end(T_TRAP); }
+    if (carry) { pn = lw.fresh("_m"); lw.blks[jb].pnames[0] = pn; lw.blks[jb].ptys[0] = jt; lw.blks[jb].np = 1; }
+    for (usz i = 0; i < nend; i++)
+    {
+        lw.cur = end_blk[i];
+        Vx ev = end_val[i];
+        if (carry)
+        {
+            if (ev.t != null && !air_ll::ty_eq(ev.t, jt))
+            {
+                if (ev.p != null && ev.p.tag == APRD_INT && air_ll::ty_is_int(jt)) { ev = lw.lit_int(ev.p.ival, jt); }
+                else { lw.err(null, "match arms have different types", null); return lw.unit(); }
+            }
+            Vx[1] a; a[0] = ev; lw.t_jump(jb, &a[0], 1);
+        }
+        else { lw.t_jump0(jb); }
+    }
+    if (lw.blks[jb].npred == 0) { lw.cur = NOBLK; return lw.unit(); }
+    lw.cur = jb;
+    if (carry) { return lw.vref(pn, jt); }
+    return lw.unit();
+}
+
+fn Vx Low.match_(Low* lw, Node* n, AirTyp* want)
+{
+    if (n.child_count < 2) { return lw.unit(); }
+    AirTyp* h = lw.hint(n.children[0]);
+    Vx s = lw.expr(n.children[0], h);
+    if (!lw.live()) { return lw.unit(); }
+    Vx[1] sv; sv[0] = s;
+    return lw.arms(&n.children[1], n.child_count - 1, &sv[0], 1, want, false);
+}
+
+// ── functions ──────────────────────────────────────────────────────────────
+fn void Low.finish_ret(Low* lw, Vx v, Node* at)
+{
+    if (!lw.live()) { return; }
+    if (lw.ret_ty == null) { return; }
+    if (lw.ret_ty.tag == ATYP_UNIT || lw.ret_ty.tag == ATYP_BOTTOM) { lw.t_ret(lw.unit()); return; }
+    Vx c = lw.coerce_arg(at, v, lw.ret_ty);
+    lw.t_ret(c);
+}
+
+fn void Low.lower_fn(Low* lw, FnInfo* f)
+{
+    Node* d = f.decl;
+    lw.cur_fn = f.name; lw.fn_errors = 0; lw.cur_node = d;
+    lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nnames = 0; lw.tmpn = 0;
+    lw.ret_ty = f.ret;
+    usz entry = lw.blk("entry");
+    lw.cur = entry;
+    // parameters
+    AirBinder*[16] pb;
+    Vx[16] pv;
+    for (usz i = 0; i < f.np; i++)
+    {
+        char* pnm = lw.fresh("a");
+        pb[i] = air_ir::air_mk_binder(lw.a, pnm, f.pty[i], AMULT_UNR);
+        pv[i] = lw.vref(pnm, f.pty[i]);
+    }
+    Node*[256] arms; usz narms = 0;
+    Node* single_body = null;
+    for (usz i = 0; i < d.child_count; i++)
+    {
+        Node* c = d.children[i]; if (c == null) { continue; }
+        if (c.kind == Nk.N_CLAUSE && narms < 256) { arms[narms] = c; narms++; }
+    }
+    Vx rv = lw.unit();
+    if (narms == 0) { lw.unsup(d, "function without clauses"); }
+    else
+    {
+        // a single irrefutable clause binds names directly; several clauses are an arm chain
+        rv = lw.arms(&arms[0], narms, &pv[0], f.np, f.ret, true);
+        lw.finish_ret(rv, d);
+    }
+    if (lw.live() && lw.fn_errors == 0) { lw.t_end(T_TRAP); }
+    if (lw.fn_errors > 0) { lw.fail_fn++; return; }
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
+    ad.is_pub = true;
+    for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
+    ad.ret_ty = f.ret;
+    ad.def_body = lw.assemble();
+    lw.m.add_decl(ad);
+    lw.fns_ok++;
+}
+
+fn AirCmd* Low.blk_cmd(Low* lw, Blk* b)
+{
+    AirCmd* c = null;
+    switch (b.tk)
+    {
+        case T_RET: { c = air_ir::air_new_AirCmd(lw.a); c.tag = ACMD_RET; c.prd = b.tp; break; }
+        case T_JUMP: { c = air_ir::air_mk_jump(lw.a, lw.blks[b.t1].name, &b.jargs[0], b.nj); break; }
+        case T_COND:
+            c = air_ir::air_mk_if(lw.a, b.tp, air_ir::air_mk_jump0(lw.a, lw.blks[b.t1].name), air_ir::air_mk_jump0(lw.a, lw.blks[b.t2].name)); break;
+        case T_TRAP: c = air_ir::air_mk_trap(lw.a); break;
+        default: c = air_ir::air_mk_ub(lw.a, null); break;
+    }
+    for (usz ii = b.ni; ii > 0; ii--)
+    {
+        Ins* i = &b.ins[ii - 1];
+        switch (i.k)
+        {
+            case I_LET: c = air_ir::air_mk_let(lw.a, i.name, i.a, c); break;
+            case I_STORE:
+            {
+                AirCmd* s = air_ir::air_new_AirCmd(lw.a); s.tag = ACMD_STORE; s.add_prd(i.a); s.add_prd(i.b);
+                c = air_ir::air_mk_seq(lw.a, s, c); break;
+            }
+            case I_CALL:
+                c = air_ir::air_mk_cut(lw.a, i.a, air_ir::air_mk_call(lw.a, &i.args[0], i.nargs, air_ir::air_mk_comu_cns(lw.a, i.name, c))); break;
+            case I_FIELD:
+            {
+                AirCns* k = air_ir::air_mk_field_cns(lw.a, i.fld, air_ir::air_mk_comu_cns(lw.a, i.name, c)); k.idx = i.idx;
+                c = air_ir::air_mk_cut(lw.a, i.a, k); break;
+            }
+            case I_PROJ:
+                c = air_ir::air_mk_cut(lw.a, i.a, air_ir::air_mk_proj(lw.a, i.idx, air_ir::air_mk_comu_cns(lw.a, i.name, c))); break;
+            case I_SYS:
+            {
+                AirCmd* s = air_ir::air_new_AirCmd(lw.a); s.tag = ACMD_SYSCALL; s.prd = i.args[0];
+                for (usz j = 1; j < i.nargs; j++) { s.add_prd(i.args[j]); }
+                s.cns = air_ir::air_mk_comu_cns(lw.a, i.name, c); c = s; break;
+            }
+        }
+    }
+    return c;
+}
+
+fn AirCmd* Low.assemble(Low* lw)
+{
+    AirCmd* spine = lw.blk_cmd(&lw.blks[0]);
+    for (usz bi = lw.nb; bi > 1; bi--)
+    {
+        Blk* b = &lw.blks[bi - 1];
+        if (b.npred == 0) { continue; }
+        AirBinder*[8] ps;
+        for (usz i = 0; i < b.np; i++) { ps[i] = air_ir::air_mk_binder(lw.a, b.pnames[i], b.ptys[i], AMULT_UNR); }
+        AirCmd* lb = air_ir::air_mk_label(lw.a, b.name, &ps[0], b.np, lw.blk_cmd(b));
+        spine = air_ir::air_mk_seq(lw.a, lb, spine);
+    }
+    return spine;
+}
+
+fn Node* find_main(Node* root, pfront_core::Interner* it)
+{
+    if (root == null) { return null; }
+    for (usz i = 0; i < root.child_count; i++)
+    {
+        Node* c = root.children[i];
+        if (c == null || c.kind != Nk.N_DECL_FN) { continue; }
+        char* nm = air_lower::node_text(c, it);
+        if (nm != null && seq(nm, "main")) { return c; }
+    }
+    return null;
+}
+
+// emit_low_program -- lower the program reachable from `main` to FILE.low.air.
+// Returns the number of lowering errors (0 = a .air was written), or -1/-2 on setup failure.
+fn int emit_low_program(Node** roots, usz root_count, pfront_core::Interner* it, char* src_path, char* out_path)
+{
+    if (roots == null || root_count == 0) { return -2; }
+    char* ovr = getenv("PFRONT_LOW_OUT");   // tests: keep the artifact out of the source tree
+    if (ovr != null && ovr[0] != 0) { out_path = ovr; }
+    AirArena arena;
+    if (!arena.init()) { return -2; }
+    AirModule mod;
+    if (!mod.init(&arena, "Main", src_path)) { arena.destroy(); return -2; }
+    mod.low = true;
+    Low lw;
+    lw.a = &arena; lw.m = &mod; lw.it = it;
+    lw.fns = (FnInfo*)calloc(MAXFN, FnInfo::size); lw.nfn = 0; lw.done_fn = 0;
+    lw.sts = (StInfo*)calloc(MAXST, StInfo::size); lw.nst = 0;
+    lw.gls = (GlInfo*)calloc(MAXGL, GlInfo::size); lw.ngl = 0;
+    lw.blks = (Blk*)calloc(MAXBLK, Blk::size); lw.nb = 0;
+    lw.vars = (VarB*)calloc(MAXVAR, VarB::size); lw.nvars = 0;
+    lw.names = (char**)calloc(MAXNM, 8); lw.nnames = 0;
+    lw.errors = 0; lw.fn_errors = 0; lw.fns_ok = 0; lw.fail_fn = 0; lw.cur = NOBLK;
+    Node* mn = null;
+    for (usz i = 0; i < root_count && mn == null; i++) { mn = find_main(roots[i], it); }
+    if (mn == null) { printf("air-low: error: no `main` function\n"); arena.destroy(); return 1; }
+    lw.entry_decl = mn;
+    lw.cur_fn = "main";
+    FnInfo* mf = lw.fn_for(mn);
+    if (mf == null) { arena.destroy(); return lw.errors > 0 ? lw.errors : 1; }
+    lw.queue(mf);
+    // worklist: functions are lowered as they are first referenced
+    bool progress = true;
+    while (progress)
+    {
+        progress = false;
+        for (usz i = 0; i < lw.nfn; i++)
+        {
+            FnInfo* f = &lw.fns[i];
+            if (!f.queued) { continue; }
+            f.queued = false; progress = true;
+            if (f.ext)
+            {
+                AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DECLARE, f.name);
+                ad.is_extern = true; ad.ret_ty = f.ret; ad.is_varargs = f.variadic;
+                for (usz k = 0; k < f.np; k++) { ad.add_param(air_ir::air_mk_binder(lw.a, lw.dup("_"), f.pty[k], AMULT_UNR)); }
+                lw.m.add_decl(ad);
+                continue;
+            }
+            lw.lower_fn(f);
+        }
+    }
+    int errs = lw.errors;
+    if (errs == 0)
+    {
+        int w = air_write::write_module(&mod, out_path);
+        if (w != 0) { printf("air-low: %d writer error(s)\n", w); errs = w; }
+        else { printf("air-low: %d function(s) lowered -> %s\n", lw.fns_ok, out_path); }
+    }
+    else { printf("air-low: %d error(s) in %d function(s); no .air written\n", errs, lw.fail_fn); }
+    arena.destroy();
+    return errs;
+}

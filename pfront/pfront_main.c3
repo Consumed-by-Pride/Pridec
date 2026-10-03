@@ -38,11 +38,14 @@ import pfront_constfold;
 import pfront_sccp;
 import air;
 import air_audit;
+import air_low;
 
 // --emit-air-pretty selects the legacy human-oriented AIR dump (diagnostic only).
 bool g_air_pretty = false;
 // --air-roundtrip: test-only differential check of the .air text format (see air.c3).
 bool g_air_roundtrip = false;
+bool g_air_low = false;
+bool g_low_failed = false;       // --emit-air-low: the typed AIR 3.0 low-profile lowering (air_low.c3)
 bool g_air_audit = false;      // --air-audit: report source constructs the lowering never consumed
 
 extern fn void* malloc(usz size);
@@ -625,6 +628,32 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 printf("air: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count);
             }
         }
+        if (g_air_low)
+        {
+            if (emit_ok)
+            {
+                pfront_core::PNode*[256] low_roots;
+                usz ln = 0;
+                usz lmc = ld.module_total();
+                for (usz i = 0; i < lmc && ln < 256; i++)
+                {
+                    pfront_core::PNode* la = ld.module_ast_at(i);
+                    if (la != null) { low_roots[ln] = la; ln = ln + 1; }
+                }
+                if (ln == 0) { low_roots[0] = entry.ast; ln = 1; }
+                // FILE.pie -> FILE.low.air
+                char[4096] lowp;
+                usz pl = 0; usz dot = 0; bool has_dot = false;
+                while (path[pl] != 0 && pl < 4000) { if (path[pl] == '.') { dot = pl; has_dot = true; } if (path[pl] == '/') { has_dot = false; } pl++; }
+                usz stem = has_dot ? dot : pl;
+                for (usz i = 0; i < stem; i++) { lowp[i] = path[i]; }
+                char* suf = ".low.air";
+                for (usz i = 0; i < 9; i++) { lowp[stem + i] = suf[i]; }
+                int lerrs = air_low::emit_low_program(&low_roots[0], ln, it, path, &lowp[0]);
+                if (lerrs != 0) { g_low_failed = true; }
+            }
+            else { printf("air-low: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count); g_low_failed = true; }
+        }
         if (g_air_roundtrip && emit_ok)
         {
             pfront_core::PNode*[256] rt_roots;
@@ -737,6 +766,7 @@ fn void print_usage()
     printf("  -O0 | -O1 | -O2 | -O3   optimisation level for the middle end (default -O2)\n");
     printf("  --no-opt          disable the optimiser (same as -O0 for the middle end)\n");
     printf("  --emit-air        write the whole program as AIR 2.0 text next to the source (FILE.air)\n");
+    printf("  --emit-air-low    write the AIR 3.0 LOW-profile lowering (typed, reachable from main) as FILE.low.air; diagnostics instead of a file when a construct is not lowered yet\n");
     printf("  --air-audit       with --emit-air: list source constructs the AIR lowering never consumed\n");
     printf("  --emit-air-pretty print the entry module in the old human-oriented, lossy AIR notation\n");
     printf("  --emit-ast        print the annotated AST with pass flags (pure, readonly, reduction, indep, ...)\n");
@@ -852,6 +882,7 @@ fn int main(String[] args)
         else if (streq(a, "--emit-ast"))     { emit_ast = true; }
         else if (streq(a, "--emit-sexp"))    { emit_ast = true; emit_sexp = true; }
         else if (streq(a, "--emit-air"))     { emit_air = true; }
+        else if (streq(a, "--emit-air-low")) { g_air_low = true; }
         else if (streq(a, "--air-roundtrip")) { g_air_roundtrip = true; }
         else if (streq(a, "--air-audit")) { g_air_audit = true; air_audit::enable(true); }
         else if (streq(a, "--emit-air-pretty")) { emit_air = true; g_air_pretty = true; }
@@ -963,6 +994,7 @@ fn int main(String[] args)
     }
 
     if (rr.errors > 0) { return 2; }
+    if (g_low_failed) { return 3; }
     if (rr.warnings > 0) { return 1; }
     return 0;
 }
