@@ -23,4 +23,6 @@ try:
 except ExitTrap as e:
     finish(e.code)
 except Trap as e:
-    sys.stderr.write("trap: %s\n" % e); finish(134)
+    sys.stderr.write("trap: %s\n" % e)
+    msg = str(e)   # the exit status a native process would die with: ud2 = SIGILL (132), a bad access = SIGSEGV (139)
+    finish(132 if "unreachable" in msg else 139 if "out of bounds" in msg else 134)

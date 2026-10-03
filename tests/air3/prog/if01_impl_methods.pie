@@ -1,0 +1,21 @@
+-- EXIT: 113
+-- interfaces: `impl I for T` methods called as `v.m(..)`, `Self` in an impl, a generic bounded by an interface instantiated at two types
+interface Shape
+  fn area : Self -> i64
+  fn scale : (Self, i64) -> Self
+struct Sq { s: i64; }
+struct Rect { w: i64; h: i64; }
+impl Shape for Sq
+  fn area : Self -> i64 | q -> q.s * q.s
+  fn scale : (Self, i64) -> Self | (q, k) -> Sq { s: q.s * k }
+impl Shape for Rect
+  fn area : Rect -> i64 | r -> r.w * r.h
+  fn scale : (Self, i64) -> Self | (r, k) -> Rect { w: r.w * k, h: r.h }
+fn twice<T: Shape> : (T, T) -> i64
+  | (a, b) -> a.area() + b.area()
+fn main : () -> i64
+  | () ->
+      let q = Sq { s: 3 }
+      let r = Rect { w: 2, h: 5 }
+      let big = q.scale(2)
+      twice(q, q) + twice(r, r) + big.area() + r.scale(3).area() + q.area()

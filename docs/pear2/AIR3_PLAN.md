@@ -31,14 +31,14 @@ Gate (`make test-air3`, part of `make test`; `tests/air3/gate.sh`, floors in `te
 
 ## 3 What is still not at LLVM level (honest list)
 
-* generics: ≤ 4 type parameters, instantiated at call sites only; interfaces/impls are not instantiated (no dictionaries, no `obj.method()`);
+* generics: ≤ 4 type parameters, instantiated at call sites only. Interfaces: `impl I for T` methods are called as `v.m(..)` and resolved statically (a generic bounded by an interface is monomorphised, so one target per instance; `Self` works inside an impl; `if01`). Not done: bare `area(x)` / `Shape.area(x)` (the front end reports the name unresolved), generic impls, default methods, **dynamic dispatch** — the language has no `dyn` syntax, but AIR 3 can already express a vtable (a record of function values), so PEAR2 is not blocked;
 * closures: an environment is heap-allocated unless the lambda is written directly as a call argument (`cl01`: returned adder, returned counter, closure in a struct; on the stack it segfaulted). An escaping closure owns a heap copy of a captured `mut` variable (move semantics: the creator's variable is no longer shared). A stack closure passed to a callee that stores it still dangles (trusted callee, no lifetime check). Nothing is ever freed (no GC / drop yet);
 * effects: tail-resumptive and aborting arms only; non-tail-resumptive (multi-shot, `resume` inside a nested continuation) is rejected;
 * MSP is thunk-based (no staging optimisation), `poison` is arbitrary, `offsetof` lowers to `sizeof usize`;
 * `*|` (saturating) is unsupported; plain `+ - *` wrap;
 * `[v; n]` by value with `n > 64` is rejected; global `[v; n]` is constant only for a zero fill; constant globals ≤ 16 fields/elements per aggregate;
 * structs by value ≤ 16 fields, ≤ 16 defers per function, unions ≤ 8 members, handlers ≤ 8 operations;
-* slices `a[lo..hi]`, `for x in slice`, bare enum constructor identifiers, `Rewrite` rules, `const fn K : u64 = e`: partial;
+* open-ended slice ranges `a[..n]`/`a[n..]` (the parser rejects them: E1050), bare enum constructor identifiers, `Rewrite` rules, `const fn K : u64 = e`: partial;
 * `static mut` has storage (a `global mut`) but no AIR-H counterpart;
 * `air_verify` rule V5 (low-profile conformance inside the verifier) and `air_emit.c3` cases for the 3.0 forms are not done — `verify-low` is the checker;
 * `__pride_*` runtime symbols declared in stdlib have no implementation (declared only);
@@ -46,6 +46,6 @@ Gate (`make test-air3`, part of `make test`; `tests/air3/gate.sh`, floors in `te
 
 ## 4 Order of work
 
-1. interfaces via dictionaries and `obj.method()`; 2. heap environments for escaping closures; 3. slices and ranges;
+1. (done) static interface methods `obj.method()`, heap environments for escaping closures, `for x in slice/array`, `x[lo..hi]` / `x[lo..=hi]` sub-slices (bounds-checked, alias the source; `fe01`, `sl01`, `if01`, `cl01`);
 4. multi-shot/non-tail effects (one-shot continuations via stack copying, or CPS in the producer);
 5. `air_verify` V5 and spec text in `docs/specs/AIR.md`; 6. WASM: `air_ll` output already goes through LLVM's wasm32 backend (objects, gated). Still to do: link with `wasm-ld`, supply a libc/WASI shim for `malloc`/`write`/`syscall`, run under node/wasmtime and compare exit codes. Note `usz`/`isz` are `i64` in AIR 3 (legal on wasm32, just wider than native index math); `sizeof` is computed by LLVM for the target.
