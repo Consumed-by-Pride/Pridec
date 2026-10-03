@@ -389,6 +389,17 @@ fn void AirW.prd_core(AirW* w, AirPrd* p, int d)
         case APRD_SPLICE: w.s("splice("); w.prd(p.sub_count > 0 ? p.subs[0] : null, d); w.c(')'); return;
         case APRD_POISON: w.s("poison("); w.typ(p.ty); w.c(')'); return;
         case APRD_UNREACHABLE_VAL: w.s("unreachable"); return;
+        case APRD_ALLOCA: w.s("alloca("); w.typ(p.ty_arg); w.c(')'); return;
+        case APRD_LOAD:
+            if (p.sub_count != 1) { w.err("load needs one operand"); }
+            w.s("load("); w.prd(p.sub_count > 0 ? p.subs[0] : null, d); w.c(')'); return;
+        case APRD_GEP:
+        {
+            if (p.sub_count < 1) { w.err("gep needs a base pointer"); }
+            w.s("gep["); w.typ(p.ty_arg); w.s("]("); w.prd(p.sub_count > 0 ? p.subs[0] : null, d);
+            for (usz i = 1; i < p.sub_count; i++) { w.s(", "); w.prd(p.subs[i], d); }
+            w.c(')'); return;
+        }
         default:
             w.err("producer tag not representable in AIR 2.0");
             w.s("nil");
@@ -632,6 +643,9 @@ fn void AirW.cmd(AirW* w, AirCmd* c, int d)
             w.result(c.cns, d);
             return;
         }
+        case ACMD_STORE:
+            if (c.prd_count != 2) { w.err("store needs a pointer and a value"); }
+            w.s("store("); w.prd(c.prd_count > 0 ? c.prds[0] : null, d); w.s(", "); w.prd(c.prd_count > 1 ? c.prds[1] : null, d); w.c(')'); return;
         case ACMD_FENCE:
         {
             char* ord = air_text::atomic_order_name(c.atomic_order);
@@ -761,6 +775,16 @@ fn void AirW.decl_body(AirW* w, AirDecl* d)
             w.s("\n};\n\n");
             return;
         }
+        case ADECL_GLOBAL:
+        {
+            if (d.is_pub) { w.s("pub "); }
+            if (d.is_extern) { w.s("extern "); }
+            w.s("global "); if (d.g_mut) { w.s("mut "); }
+            w.name(d.name); w.s(" : "); w.typ(d.ret_ty);
+            if (d.g_init != null) { w.s(" = "); w.prd(d.g_init, 1); }
+            w.s(";\n\n");
+            return;
+        }
         case ADECL_EFFECT:
         {
             if (d.is_pub) { w.s("pub "); }
@@ -792,14 +816,14 @@ fn int write_module(AirModule* m, char* path)
     void* f = (path != null) ? fopen(path, "w") : fdopen(1, "w");
     if (f == null) { return -1; }
     w.out = f;
-    w.s("// AIR 2.2 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)\n");
+    w.s(m.low ? "// AIR 3.0 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde), low profile\n" : "// AIR 2.2 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)\n");
     w.s("// canonical text; grammar in docs/specs/AIR.md; do not hand-edit\n");
     w.dg_on = (getenv("AIR_DIGEST") != null);
     w.dg_quiet = false;
     w.dg_total = 0;
     w.dg_verbose = (getenv("AIR_DIGEST_V") != null);
     w.dg = 0;
-    w.s("air 2.2 "); w.name(m.name); w.c(' '); w.opt_str(m.source_path); w.s(";\n\n");
+    w.s(m.low ? "air 3.0 " : "air 2.2 "); w.name(m.name); w.c(' '); w.opt_str(m.source_path); w.s(";\n\n");
     for (usz i = 0; i < m.decl_count; i++) { w.decl(m.decls[i]); }
     if (path != null) { fclose(f); } else { fflush(f); }
     void* se = fdopen(2, "w");

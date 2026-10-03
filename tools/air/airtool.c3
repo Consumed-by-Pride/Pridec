@@ -16,6 +16,7 @@ import air_write;
 import air_facts;
 import air_verify;
 import air_lint;
+import air_ll;
 
 extern fn int printf(char* fmt, ...);
 
@@ -61,6 +62,22 @@ fn int main(String[] args)
         printf("\n");
         arena.destroy();
         return n == 0 ? 0 : 1;
+    }
+    if (eq(cmd, "verify-low") || eq(cmd, "emit-ll"))
+    {
+        // verify-low: type-check against the low profile (docs/specs/AIR3.md), exit 0 iff clean.
+        // emit-ll FILE.air [-o OUT.ll]: the reference consumer, .air -> LLVM text (same checks).
+        bool emit = eq(cmd, "emit-ll");
+        char* txt = null;
+        int errs = air_ll::to_ll(&mod, &txt, emit);
+        if (emit && errs == 0 && txt != null)
+        {
+            int w = air_ll::write_ll(&mod, out);
+            if (w != 0) { errs = errs + 1; }
+        }
+        else { printf("verify-low: %d error(s)\n", errs); }
+        arena.destroy();
+        return errs == 0 ? 0 : 1;
     }
     if (eq(cmd, "fmt"))
     {

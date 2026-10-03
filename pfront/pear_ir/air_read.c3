@@ -43,6 +43,7 @@ struct Rd
     char      punct;
     long      ival;
     double    fval;
+    int       ver_major;   // 2 or 3 (3 = low profile: alloca/load/gep/store/global are legal)
     int       ver_minor;   // header version 2.<ver_minor>: 2.1 requires result continuations (2.2: perform too)
     char*     tb;      // decoded token text (ids, strings)
     usz       tlen;
@@ -669,6 +670,25 @@ fn AirPrd* Rd.prd_core(Rd* r)
         p.body = r.cmd();
         return p;
     }
+    if (r.is_kw("alloca") || r.is_kw("load") || r.is_kw("gep"))
+    {
+        if (r.ver_major < 3) { r.fail("alloca/load/gep need `air 3.0`"); return null; }
+        bool is_al = r.is_kw("alloca"); bool is_ld = r.is_kw("load"); r.next();
+        AirPrd* p = r.new_prd(is_al ? APRD_ALLOCA : (is_ld ? APRD_LOAD : APRD_GEP)); if (p == null) { return null; }
+        if (!is_al && !is_ld) { r.expect_p('['); p.ty_arg = r.typ(); r.expect_p(']'); }
+        r.expect_p('(');
+        if (is_al) { p.ty_arg = r.typ(); }
+        else
+        {
+            p.subs[0] = r.prd(); p.sub_count = 1;
+            while (!r.failed && r.eat_p(','))
+            {
+                if (p.sub_count >= 16) { r.fail("more than 16 gep operands"); return null; }
+                p.subs[p.sub_count] = r.prd(); p.sub_count++;
+            }
+        }
+        r.expect_p(')'); return p;
+    }
     if (r.is_kw("coerce"))
     {
         r.next(); r.expect_p('(');
@@ -1098,6 +1118,14 @@ fn AirCmd* Rd.cmd(Rd* r)
         r.result(c);
         return c;
     }
+    if (r.is_kw("store"))
+    {
+        if (r.ver_major < 3) { r.fail("store(p, v) needs `air 3.0`"); return null; }
+        r.next(); r.expect_p('(');
+        AirCmd* c = r.new_cmd(ACMD_STORE); if (c == null) { return null; }
+        c.prds[0] = r.prd(); r.expect_p(','); c.prds[1] = r.prd(); c.prd_count = 2;
+        r.expect_p(')'); return c;
+    }
     if (r.is_kw("fence"))
     {
         r.next();
@@ -1212,6 +1240,19 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         if (m.decl_count >= 4096) { r.fail("more than 4096 declarations"); return false; }
         return m.add_decl(d);
     }
+    if (r.is_kw("global"))
+    {
+        if (r.ver_major < 3) { r.fail("global needs `air 3.0`"); return false; }
+        r.next();
+        AirDecl* d = air_ir::air_mk_decl(a, ADECL_GLOBAL, null);
+        d.is_pub = is_pub; d.is_extern = is_extern;
+        if (r.eat_kw("mut")) { d.g_mut = true; }
+        d.name = r.name(); r.expect_p(':'); d.ret_ty = r.typ();
+        if (r.eat_p('=')) { d.g_init = r.prd(); }
+        r.expect_p(';');
+        if (r.failed) { return false; }
+        return m.add_decl(d);
+    }
     if (r.is_kw("data") || r.is_kw("codata"))
     {
         bool is_data = r.is_kw("data"); r.next();
@@ -1282,7 +1323,7 @@ fn bool read_text(char* text, usz len, char* path, AirArena* a, AirModule* m, bo
     r.a = a; r.failed = false; r.path = path; r.quiet = quiet;
     r.errmsg = null; r.err_line = 0; r.err_col = 0;
     r.tb = (char*)malloc(len + 16);
-    r.tlen = 0; r.tline = 1; r.tcol = 1; r.ver_minor = 0;
+    r.tlen = 0; r.tline = 1; r.tcol = 1; r.ver_minor = 0; r.ver_major = 2;
     if (r.tb == null) { return false; }
     r.next();
     // header:  air 2.0 NAME SOURCE ;
@@ -1293,7 +1334,8 @@ fn bool read_text(char* text, usz len, char* path, AirArena* a, AirModule* m, bo
         else if (r.fval == 2.0) { r.ver_minor = 0; r.next(); }
         else if (r.fval == 2.1) { r.ver_minor = 1; r.next(); }
         else if (r.fval == 2.2) { r.ver_minor = 2; r.next(); }
-        else { r.fail("unsupported AIR version (this reader implements 2.0, 2.1 and 2.2)"); }
+        else if (r.fval == 3.0) { r.ver_major = 3; r.ver_minor = 2; r.next(); }   // 3.0 keeps every 2.2 rule
+        else { r.fail("unsupported AIR version (this reader implements 2.0, 2.1, 2.2 and 3.0)"); }
     }
     char* mname = r.name();
     char* msrc = null;
@@ -1306,6 +1348,7 @@ fn bool read_text(char* text, usz len, char* path, AirArena* a, AirModule* m, bo
     {
         if (!m.init(a, mname == null ? "" : mname, msrc)) { r.fail("module init failed"); }
         m.decl_count = 0;    // the file lists every decl, including the libc declares
+        m.low = (r.ver_major == 3);
     }
     while (!r.failed && r.kind != T_EOF)
     {
