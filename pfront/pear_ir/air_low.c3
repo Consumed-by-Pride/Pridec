@@ -2400,7 +2400,7 @@ fn Vx Low.alloc(Low* lw, Node* n)
     Vx count = cnt == null ? lw.lit_int(1, lw.m.t_i64) : lw.coerce(lw.expr(cnt, lw.m.t_i64), lw.m.t_i64);
     Vx esz = lw.sizeof_(el);
     Vx esz64 = lw.coerce(esz, lw.m.t_i64);
-    Vx bytes = lw.coerce(lw.binop(ABIN_MUL, count, esz64), lw.m.t_usz);
+    Vx bytes = lw.binop(ABIN_MUL, count, esz64);
     Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
     ins.name = lw.fresh("_m"); ins.a = air_ir::air_mk_var(lw.a, "malloc"); ins.nargs = 1; ins.args[0] = bytes.p;
     Vx raw = lw.vref(ins.name, lw.ptr(lw.m.t_u8));
@@ -3614,7 +3614,7 @@ fn bool Low.lam_escapes(Low* lw, Node* n)
 // malloc(sizeof T) as a ptr(T)
 fn Vx Low.heap_box(Low* lw, AirTyp* t)
 {
-    Vx esz = lw.coerce(lw.sizeof_(t), lw.m.t_usz);
+    Vx esz = lw.coerce(lw.sizeof_(t), lw.m.t_i64);
     Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
     ins.name = lw.fresh("_m"); ins.a = air_ir::air_mk_var(lw.a, "malloc"); ins.nargs = 1; ins.args[0] = esz.p;
     Vx raw = lw.vref(ins.name, lw.ptr(lw.m.t_u8));
@@ -4482,13 +4482,6 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
     AirModule mod;
     if (!mod.init(&arena, "Main", src_path)) { arena.destroy(); return -2; }
     mod.low = true;
-    for (usz di = 0; di < mod.decl_count; di++)   // the runtime entry points a lowered program may call take and return target-width integers (size_t / ssize_t)
-    {
-        AirDecl* rd = mod.decls[di];
-        if (rd == null || rd.tag != ADECL_DECLARE || rd.name == null) { continue; }
-        if (air_text::streq(rd.name, "malloc") && rd.param_count == 1) { rd.params[0].ty = mod.t_usz; }
-        if (air_text::streq(rd.name, "write") && rd.param_count == 3) { rd.params[2].ty = mod.t_usz; rd.ret_ty = mod.t_isz; }
-    }
     Low lw;
     lw.a = &arena; lw.m = &mod; lw.it = it; lw.roots = roots; lw.nroots = root_count;
     for (usz r = 0; r < root_count; r++) { for (usz i = 0; roots[r] != null && i < roots[r].child_count; i++) { Node* c = roots[r].children[i]; if (c != null && c.kind == Nk.N_DECL_EFFECT) { lw.eff_on = true; } } }

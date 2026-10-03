@@ -79,7 +79,7 @@ and calls a Pride function, see `fs02`) then runs with no libc and no crt. Gated
 `usz` and `isz` are as wide as a pointer of the target. `airtool emit-ll X.air --target=TRIPLE` writes `target triple = "TRIPLE"` into the `.ll` and
 prints them as `i32` for a 32-bit triple (wasm32, i386..i686, arm, thumb, riscv32, mips, powerpc, ...) and `i64` otherwise (no `--target`: `i64`).
 `sizeof`/`alignof` yield `usz`; a slice's or `str`'s stored `len` is `usz` (the language-level `.len` reads as `i64`); the runtime entry points the lowering
-calls are `malloc(usz) -> ptr` and `write(i32, ptr, usz) -> isz`. `ll-exe.py` honours the module's triple (cross targets give an object file) and takes
+calls keep the signatures Pride source declares for them (`malloc(i64) -> ptr`, `free(ptr)`); on 32-bit targets the C ABIs read the low word of that first `i64` argument (cdecl, EABI, RISC-V, the wasm shim), so it works, but a definition exported as `malloc` takes an `i64`. `ll-exe.py` honours the module's triple (cross targets give an object file) and takes
 `--cpu`, `--features=-sse,+soft-float`, `--reloc static`, `--code-model kernel`, and `--ld-script FILE` (bare metal: `ld -nostdlib -static -T FILE`).
 Verified: every `tests/air3/prog` program builds for i686, aarch64, riscv64, riscv32 and armv7; runs under wasmtime (wasm32) and natively as a 32-bit x86
 musl executable (`low_corpus.sh --i386`). `-- WASM32-EXIT:` in a test header gives the expected status where the pointer width matters (wasm and i386).
