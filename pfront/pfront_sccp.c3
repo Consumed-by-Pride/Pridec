@@ -222,12 +222,12 @@ fn Lval Sccp.eval(Sccp* s, Node* n)
         case Nk.N_EXPR_CHAR:  return lv_iconst((long)n.p.ival);
         case Nk.N_EXPR_FLOAT: return lv_fconst(n.p.fval);
         case Nk.N_EXPR_NULL:  return lv_iconst(0);
-        case Nk.N_EXPR_UNIT:  return lv_iconst(0);
+        case Nk.N_EXPR_UNIT:  return lv_bot();   // `()` carries no integer: materialising it as `0` changed the type of an `if` arm
         case Nk.N_EXPR_UNARY: return s.eval_unary(n);
         case Nk.N_EXPR_BINARY:return s.eval_binary(n);
         case Nk.N_EXPR_IF:    return s.eval_select(n);
         case Nk.N_BLOCK:
-            if (n.child_count == 0) { return lv_iconst(0); }
+            if (n.child_count == 0) { return lv_bot(); }
             return s.eval(n.children[n.child_count - 1]);
         case Nk.N_EXPR_CAST:
             if (n.child_count < 1) { return lv_bot(); }

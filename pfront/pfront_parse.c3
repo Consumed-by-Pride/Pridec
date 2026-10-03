@@ -684,6 +684,23 @@ fn bool Parser.arrow_follows_group(Parser* p, usz from)
 
 // True when the token run starting at `from` is only layout before `want`.
 // Used for lookahead across line breaks without mutating parser state.
+// An `else` that starts its own line at a SHALLOWER indent than the block this
+// `if` sits in belongs to an enclosing `if`, not to this one (the offside rule;
+// without this the else of an outer `if` was captured by the inner one, which
+// silently changed the program: `if a / if b / x / else / y` bound `else` to b).
+fn bool Parser.else_is_outer(Parser* p)
+{
+    usz look = 0;
+    while (look + 1 < LA_SIZE)
+    {
+        Tk t = p.peek(look).type;
+        if (t == Tk.TOKEN_NEWLINE || t == Tk.TOKEN_INDENT || t == Tk.TOKEN_DEDENT) { look = look + 1; continue; }
+        break;
+    }
+    if (p.peek(look).type != Tk.TOKEN_KW_ELSE) { return false; }
+    return p.peek(look).col - 1 < p.stmt_indent;
+}
+
 fn bool Parser.layout_then(Parser* p, Tk want)
 {
     usz look = 0;
@@ -3299,7 +3316,7 @@ fn Node* Parser.parse_if(Parser* p)
     // as "expected an expression" on the `else` line. Scan the whole run.
     if (p.check(Tk.TOKEN_NEWLINE) || p.check(Tk.TOKEN_DEDENT))
     {
-        if (p.layout_then(Tk.TOKEN_KW_ELSE))
+        if (p.layout_then(Tk.TOKEN_KW_ELSE) && !p.else_is_outer())
         {
             while (p.check(Tk.TOKEN_NEWLINE) || p.check(Tk.TOKEN_DEDENT))
             {

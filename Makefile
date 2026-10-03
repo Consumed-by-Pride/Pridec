@@ -177,9 +177,11 @@ test-air: $(BINARY) $(AIRTOOL)
 # AIR lowering table: one feature per program in tests/lowering, audit + verify + native exit code,
 # with the known-failing cases recorded exactly (tests/lowering/KNOWN.tsv).
 # AIR 3.0 low profile: hand-written good/bad .air + the reference consumer (.air -> .ll -> executable)
-test-air3: $(AIRTOOL)
+test-air3: $(BINARY) $(AIRTOOL)
 	@echo "==> AIR 3.0 low profile (reference consumer)"
 	bash tests/air3/run.sh $(AIRTOOL)
+	@echo "==> AIR 3.0 lowering gate (pfrontc --emit-air-low -> LLVM -> run)"
+	bash tests/air3/gate.sh
 
 test-lowering: $(BINARY) $(AIRTOOL) $(PEAR1)
 	@echo "==> AIR lowering table (audit, verify, native exit code)"

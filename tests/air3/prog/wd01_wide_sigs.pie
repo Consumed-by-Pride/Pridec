@@ -1,0 +1,15 @@
+-- EXIT: 92
+-- functions with more than 8 parameters, tuples of more than 8 elements, arrays decaying to pointers
+fn sum10 : (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+  | (a, b, c, d, e, f, g, h, i, j) -> a + b + c + d + e + f + g + h + i + j
+
+fn wide : () -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)
+  | () -> (1i64, 2i64, 3i64, 4i64, 5i64, 6i64, 7i64, 8i64, 9i64, 10i64)
+
+fn main : () -> i64
+  | () ->
+    let t = wide()
+    let s = sum10(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9)    -- 55
+    let names = ["ab", "cd", "ef"] as **u8
+    let second = names[1i64] as *u8
+    s + second[0i64] as i64 - 99i64 + 37i64                              -- 55 + 'c' - 99 + 37 = 92 ... +1

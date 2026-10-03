@@ -404,6 +404,54 @@ fn Val Ll.prd(Ll* l, AirPrd* p)
     }
 }
 
+// An initialiser constant for a global (LLVM constant syntax, without the leading type).
+fn void Ll.const_init(Ll* l, Sb* o, AirPrd* g, AirTyp* t, char* gname)
+{
+    if (g == null || t == null) { l.err("global initialiser must be a constant", gname); o.put("zeroinitializer"); return; }
+    switch (g.tag)
+    {
+        case APRD_INT: case APRD_CHAR: o.int_(g.ival); return;
+        case APRD_BOOL: o.put(g.bval ? "true" : "false"); return;
+        case APRD_NULL: o.put("null"); return;
+        case APRD_UNIT: o.put("zeroinitializer"); return;
+        case APRD_FLOAT: { double dv = g.fval; ulong* bp = (ulong*)&dv; o.put("0x"); o.hex(*bp, 16); return; }
+        case APRD_STRING: case APRD_BYTES: o.put(l.str_const(g)); return;
+        case APRD_TUPLE: case APRD_ARRAY:
+        {
+            bool is_t = g.tag == APRD_TUPLE;
+            if (is_t && (t.tag != ATYP_TUPLE || t.arg_count != g.sub_count)) { l.err("tuple initialiser does not match its type", gname); return; }
+            if (!is_t && (t.tag != ATYP_ARRAY || t.ival != (long)g.sub_count)) { l.err("array initialiser does not match its length", gname); return; }
+            o.put(is_t ? "{ " : "[ ");
+            for (usz i = 0; i < g.sub_count; i++)
+            {
+                if (i > 0) { o.put(", "); }
+                AirTyp* et = is_t ? t.args[i] : t.args[0];
+                l.ty(o, et); o.putc(' '); l.const_init(o, g.subs[i], et, gname);
+            }
+            o.put(is_t ? " }" : " ]");
+            return;
+        }
+        case APRD_RECORD:
+        {
+            if (t.tag != ATYP_NOMINAL) { l.err("record initialiser without a nominal type", gname); return; }
+            AirDecl* dd = l.find_data(t.name);
+            if (dd == null || dd.ctor_count != 1 || dd.ctors[0].field_count != g.rec_init_count) { l.err("record initialiser does not match its declaration", gname); return; }
+            AirCtorDecl* c = dd.ctors[0];
+            o.put("{ ");
+            for (usz i = 0; i < c.field_count; i++)
+            {
+                if (i > 0) { o.put(", "); }
+                if (!air_text::streq(c.fields[i].name, g.rec_inits[i].name)) { l.err("record initialiser fields out of declaration order", gname); return; }
+                l.ty(o, c.fields[i].ty); o.putc(' '); l.const_init(o, g.rec_inits[i].value, c.fields[i].ty, gname);
+            }
+            o.put(" }");
+            return;
+        }
+        default: break;
+    }
+    l.err("global initialiser must be a constant", gname); o.put("zeroinitializer");
+}
+
 fn Val Ll.aggregate(Ll* l, AirPrd* p)
 {
     Val v; v.op = "undef"; v.ty = p.ty;
@@ -1008,13 +1056,7 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
                     if (d.g_init == null) { body.put("zeroinitializer"); }
                     else
                     {
-                        AirPrd* g = d.g_init;
-                        if (g.tag == APRD_INT) { body.int_(g.ival); }
-                        else if (g.tag == APRD_BOOL) { body.put(g.bval ? "true" : "false"); }
-                        else if (g.tag == APRD_NULL) { body.put("null"); }
-                        else if (g.tag == APRD_UNIT) { body.put("zeroinitializer"); }
-                        else if (g.tag == APRD_FLOAT) { double dv = g.fval; ulong* bp = (ulong*)&dv; body.put("0x"); body.hex(*bp, 16); }
-                        else { l.err("global initialiser must be a constant", d.name); body.put("zeroinitializer"); }
+                        l.const_init(&body, d.g_init, d.ret_ty, d.name);
                     }
                     body.putc('\n');
                 }

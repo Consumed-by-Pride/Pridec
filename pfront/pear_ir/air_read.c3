@@ -294,7 +294,7 @@ fn AirTyp* Rd.typ(Rd* r)
         {
             while (!r.failed)
             {
-                if (t.arg_count >= 8) { r.fail("more than 8 type arguments"); return null; }
+                if (t.arg_count >= 16) { r.fail("more than 16 type arguments"); return null; }
                 AirTyp* x = r.typ();
                 t.args[t.arg_count] = x; t.arg_count++;
                 if (r.eat_p(',')) { continue; }

@@ -117,7 +117,7 @@ struct AirEffectOp { uint id; char* name; AirTyp* op_ty; }
 
 // ── Core AST nodes ────────────────────────────────────────────────────────
 struct AirTyp {
-    uint id; AirTypTag tag; AirTyp*[8] args; usz arg_count; char* name;
+    uint id; AirTypTag tag; AirTyp*[16] args; usz arg_count; char* name;
     AirMult mult; int mult_exact; long ival; double fval;
     AirFieldInit*[64] rec_fields; usz rec_field_count;
     AirTyp* eff_tail; char* eff_name; void* refine_extra;
@@ -290,7 +290,7 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
 
 // ── Append helpers ───────────────────────────────────────────────────────
 fn bool AirModule.add_decl(AirModule* m, AirDecl* d){ if(d==null)return false; if(m.decl_count>=4096)return false; m.decls[m.decl_count]=d; m.decl_count++; return true; }
-fn void AirTyp.add_arg(AirTyp* t, AirTyp* a){ if(t==null||a==null)return; if(t.arg_count>=8)return; t.args[t.arg_count]=a; t.arg_count++; }
+fn void AirTyp.add_arg(AirTyp* t, AirTyp* a){ if(t==null||a==null)return; if(t.arg_count>=16)return; t.args[t.arg_count]=a; t.arg_count++; }
 fn void AirPrd.add_sub(AirPrd* p, AirPrd* s){ if(p==null||s==null)return; if(p.sub_count>=16)return; p.subs[p.sub_count]=s; p.sub_count++; }
 fn void AirCmd.add_prd(AirCmd* c, AirPrd* p){ if(c==null||p==null)return; if(c.prd_count>=16)return; c.prds[c.prd_count]=p; c.prd_count++; }
 fn void AirCmd.add_branch(AirCmd* c, AirBranch* b){ if(c==null||b==null)return; if(c.branch_count>=64)return; c.branches[c.branch_count]=b; c.branch_count++; }
@@ -508,7 +508,7 @@ fn AirTyp* air_mk_typ_arrow(AirArena* a, AirTyp* dom, AirTyp* cod)
     { AirTyp* t=air_mk_typ(a,ATYP_ARROW); if(t==null)return null; t.add_arg(dom); t.add_arg(cod); return t; }
 fn AirTyp* air_mk_typ_tuple(AirArena* a, AirTyp** args, usz n) {
     AirTyp* t=air_mk_typ(a,ATYP_TUPLE); if(t==null)return null;
-    for(usz i=0;i<n&&i<8;i++)t.add_arg(args[i]); return t;
+    for(usz i=0;i<n&&i<16;i++)t.add_arg(args[i]); return t;
 }
 fn AirTyp* air_mk_typ_array(AirArena* a, AirTyp* elem, long len)
     { AirTyp* t=air_mk_typ(a,ATYP_ARRAY); if(t==null)return null; t.add_arg(elem); t.ival=len; return t; }
