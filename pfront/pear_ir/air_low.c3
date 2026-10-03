@@ -62,7 +62,9 @@ struct Vx { AirPrd* p; AirTyp* t; }
 struct Pl { AirPrd* ptr; AirTyp* t; }
 struct VarB { Node* decl; AirPrd* p; AirTyp* t; bool slot; }
 struct LoopF { usz brk; usz cont; }
-struct Cap { Node* decl; AirTyp* t; bool by_ref; }
+struct Cap { Node* decl; AirTyp* t; bool by_ref; AirPrd* sp; }
+// a `defer`: function-scoped, registered by setting its flag, replayed (in reverse order) before every return
+struct DeferR { Node* node; AirPrd* flag; Cap[8] snap; usz nsnap; }
 struct FnInfo
 {
     Node* decl; char* name; AirTyp* ret; AirTyp*[16] pty; usz np; AirTyp* fnty; bool ext; bool queued; bool seen; bool variadic;
@@ -94,6 +96,7 @@ struct Low
     Fat[48] fats; usz nfat;
     Enm* ens; usz nen;
     CloI* clos; usz nclo; usz nlam;
+    DeferR[16] defers; usz ndefer; bool in_replay;
     int unchecked;
 }
 
@@ -1192,6 +1195,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         }
         case Nk.N_STMT_EXPR: return n.child_count > 0 ? lw.expr(n.children[0], null) : lw.unit();
         case Nk.N_DECL_LET: lw.let_decl(n); return lw.unit();
+        case Nk.N_STMT_DEFER: lw.register_defer(n); return lw.unit();
         case Nk.N_DECL_FN: return lw.unit();   // a nested fn is a top-level def of its own (it captures nothing); reached through its call sites
         case Nk.N_STMT_ASSIGN: case Nk.N_EXPR_ASSIGN: case Nk.N_STMT_COMPOUND_ASSIGN: lw.assign(n); return lw.unit();
         case Nk.N_EXPR_INDEX: case Nk.N_EXPR_FIELD: case Nk.N_EXPR_DEREF:
@@ -1500,7 +1504,18 @@ fn void Low.let_decl(Low* lw, Node* n)
     Node* pat = n.child_count > 0 ? n.children[0] : null;
     Node* init = n.child_count > 1 ? n.children[1] : null;
     if (pat == null) { lw.unsup(n, "let without a pattern"); return; }
-    if (pat.kind != Nk.N_PAT_IDENT && pat.kind != Nk.N_PAT_WILDCARD) { lw.unsup(pat, "destructuring let"); return; }
+    if (pat.kind != Nk.N_PAT_IDENT && pat.kind != Nk.N_PAT_WILDCARD)
+    {
+        // destructuring let: an irrefutable pattern; a refutable one that does not match traps
+        if (init == null) { lw.unsup(pat, "destructuring let without an initialiser"); return; }
+        AirTyp* dh = pat.type_ann != null ? lw.ty(pat.type_ann) : (n.type_ann != null ? lw.ty(n.type_ann) : null);
+        Vx dv = lw.expr(init, dh);
+        if (!lw.live()) { return; }
+        usz bad = lw.blk("let.fail");
+        usz sv = lw.cur; lw.cur = bad; lw.t_end(T_TRAP); lw.cur = sv;
+        lw.pat(pat, dv, bad);
+        return;
+    }
     AirTyp* declared = pat.type_ann != null ? lw.ty(pat.type_ann) : (n.type_ann != null ? lw.ty(n.type_ann) : null);
     if (pat.type_ann != null && declared == null) { return; }
     Vx v;
@@ -1677,7 +1692,11 @@ fn Vx Low.for_(Low* lw, Node* n)
     Vx c = lw.binop(incl ? ABIN_LE : ABIN_LT, i, hi);
     lw.t_cond(c, body_b, exit);
     lw.cur = body_b;
-    if (pat != null && pat.kind == Nk.N_PAT_IDENT)
+    if (pat != null && pat.kind == Nk.N_PAT_IDENT && lw.has_defer(body))
+    {
+        lw.bind_var(pat, slot.p, t, true);   // a deferred statement reads the counter when it replays (after the loop: the exit value)
+    }
+    else if (pat != null && pat.kind == Nk.N_PAT_IDENT)
     {
         char* nm = lw.uname(lw.text(pat));
         Ins* ins = lw.push(I_LET);
@@ -1903,8 +1922,79 @@ fn Vx Low.match_(Low* lw, Node* n, AirTyp* want)
 }
 
 // ── functions ──────────────────────────────────────────────────────────────
+
+// ── defer ─────────────────────────────────────────────────────────────────
+fn bool Low.has_defer(Low* lw, Node* n)
+{
+    if (n == null) { return false; }
+    if (n.kind == Nk.N_STMT_DEFER) { return true; }
+    if (n.kind == Nk.N_EXPR_LAMBDA || n.kind == Nk.N_DECL_FN) { return false; }
+    for (usz i = 0; i < n.child_count; i++) { if (lw.has_defer(n.children[i])) { return true; } }
+    return false;
+}
+// at function entry: one `registered` flag per defer statement (false until its statement executes)
+fn void Low.scan_defers(Low* lw, Node* n, Node* top)
+{
+    if (n == null) { return; }
+    if (n != top && (n.kind == Nk.N_EXPR_LAMBDA || n.kind == Nk.N_DECL_FN)) { return; }
+    if (n.kind == Nk.N_STMT_DEFER)
+    {
+        if (lw.ndefer >= 16) { lw.unsup(n, "more than 16 defer statements in one function"); return; }
+        DeferR* d = &lw.defers[lw.ndefer]; lw.ndefer++;
+        d.node = n; d.nsnap = 0;
+        Vx fl = lw.alloca_(lw.m.t_bool);
+        lw.store(fl.p, lw.lit_bool(false));
+        d.flag = fl.p;
+    }
+    for (usz i = 0; i < n.child_count; i++) { lw.scan_defers(n.children[i], top); }
+}
+fn void Low.register_defer(Low* lw, Node* n)
+{
+    DeferR* d = null;
+    for (usz i = 0; i < lw.ndefer; i++) { if (lw.defers[i].node == n) { d = &lw.defers[i]; } }
+    if (d == null) { lw.unsup(n, "defer in this position"); return; }
+    if (!lw.live()) { return; }
+    // SSA values the body mentions are copied now (they may not dominate the exits); memory slots are read at replay
+    Cap[16] caps; usz nc = 0;
+    for (usz i = 0; i < n.child_count; i++) { lw.collect_caps(n.children[i], n, &caps[0], &nc); }
+    d.nsnap = 0;
+    for (usz i = 0; i < nc && d.nsnap < 8; i++)
+    {
+        if (caps[i].by_ref) { continue; }
+        VarB* v = lw.find_var(caps[i].decl); if (v == null) { continue; }
+        Vx sl = lw.alloca_(v.t);
+        Vx val; val.p = v.p; val.t = v.t;
+        lw.store(sl.p, val);
+        d.snap[d.nsnap].decl = caps[i].decl; d.snap[d.nsnap].t = v.t; d.snap[d.nsnap].sp = sl.p; d.nsnap++;
+    }
+    lw.store(d.flag, lw.lit_bool(true));
+}
+fn void Low.replay_defers(Low* lw)
+{
+    if (lw.in_replay || lw.ndefer == 0 || !lw.live()) { return; }
+    lw.in_replay = true;
+    for (usz k = lw.ndefer; k > 0; k--)
+    {
+        DeferR* d = &lw.defers[k - 1];
+        Vx fl = lw.load(d.flag, lw.m.t_bool);
+        usz run = lw.blk("defer.run"); usz skip = lw.blk("defer.done");
+        lw.t_cond(fl, run, skip);
+        lw.cur = run;
+        usz saved = lw.nvars;
+        for (usz j = 0; j < d.nsnap; j++) { lw.bind_var(d.snap[j].decl, d.snap[j].sp, d.snap[j].t, true); }
+        for (usz i = 0; i < d.node.child_count; i++) { lw.expr(d.node.children[i], null); }
+        lw.nvars = saved;
+        if (lw.live()) { lw.t_jump0(skip); }
+        lw.cur = skip;
+        if (lw.blks[skip].npred == 0) { lw.cur = NOBLK; break; }
+    }
+    lw.in_replay = false;
+}
+
 fn void Low.finish_ret(Low* lw, Vx v, Node* at)
 {
+    if (!lw.live()) { return; }
+    lw.replay_defers();
     if (!lw.live()) { return; }
     if (lw.ret_ty == null) { return; }
     if (lw.ret_ty.tag == ATYP_UNIT || lw.ret_ty.tag == ATYP_BOTTOM) { lw.t_ret(lw.unit()); return; }
@@ -2105,8 +2195,9 @@ fn void Low.lower_lambda(Low* lw, FnInfo* f)
     Node* n = f.decl;
     lw.cur_fn = f.name; lw.fn_errors = 0; lw.cur_node = n;
     lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nnames = 0; lw.tmpn = 0; lw.unchecked = 0;
-    lw.ret_ty = f.ret;
+    lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
     usz entry = lw.blk("entry"); lw.cur = entry;
+    lw.scan_defers(n, n);
     AirBinder*[16] pb; Vx[16] pv;
     for (usz i = 0; i < f.np; i++)
     {
@@ -2153,7 +2244,7 @@ fn void Low.lower_adapter(Low* lw, FnInfo* f)
 {
     lw.cur_fn = f.name; lw.fn_errors = 0; lw.cur_node = null;
     lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nnames = 0; lw.tmpn = 0;
-    lw.ret_ty = f.ret;
+    lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
     usz entry = lw.blk("entry"); lw.cur = entry;
     AirBinder*[16] pb; Vx[16] pv;
     for (usz i = 0; i < f.np; i++)
@@ -2181,9 +2272,10 @@ fn void Low.lower_fn(Low* lw, FnInfo* f)
     Node* d = f.decl;
     lw.cur_fn = f.name; lw.fn_errors = 0; lw.cur_node = d;
     lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nnames = 0; lw.tmpn = 0;
-    lw.ret_ty = f.ret;
+    lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
     usz entry = lw.blk("entry");
     lw.cur = entry;
+    lw.scan_defers(d, d);
     // parameters
     AirBinder*[16] pb;
     Vx[16] pv;
