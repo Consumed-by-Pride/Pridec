@@ -68,6 +68,10 @@ struct FnInfo
 }
 struct StInfo { Node* decl; char* name; AirTyp* ty; }
 struct Fat { AirTyp* elem; AirTyp* ty; bool is_str; }
+// an enum is the explicit record { tag: i64, payload: [words x i64] }; every payload field sits at its own
+// 8-byte word offset and is stored/loaded through a typed pointer (the layout is decided HERE, not by the consumer)
+struct VarI { char* name; Node* decl; AirTyp*[8] ft; usz nf; usz[8] off; }
+struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; }
 struct GlInfo { Node* decl; char* name; AirTyp* ty; }
 
 struct Low
@@ -84,6 +88,7 @@ struct Low
     int errors; int fn_errors; int fns_ok; int fail_fn; Node* entry_decl;
     bool uses_alloc;
     Fat[48] fats; usz nfat;
+    Enm* ens; usz nen;
     int unchecked;
 }
 
@@ -208,6 +213,7 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
             }
             Node* r = t.resolved;
             if (r != null && (r.kind == Nk.N_DECL_STRUCT)) { return lw.struct_ty(r); }
+            if (r != null && r.kind == Nk.N_DECL_ENUM) { Enm* en = lw.enum_for(r); return en == null ? null : en.ty; }
             if (r != null && r.kind == Nk.N_DECL_TYPE && r.type_ann != null && r.type_ann != t) { return lw.ty(r.type_ann); }
             lw.unsup(t, nm != null ? nm : "type"); return null;
         }
@@ -486,6 +492,11 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         case Nk.N_EXPR_CHAR: return lw.m.t_char;
         case Nk.N_EXPR_FLOAT: return lw.m.t_f64;
         case Nk.N_EXPR_STRING: return lw.ptr(lw.m.t_u8);
+        case Nk.N_EXPR_METHOD:
+        {
+            long hv = -1; Enm* he = n.child_count > 0 ? lw.enum_ctor_base(n.children[0], lw.dname(n), &hv) : null;
+            return he == null ? null : he.ty;
+        }
         case Nk.N_EXPR_ARRAY:
         {
             if (n.child_count == 0) { return null; }
@@ -538,6 +549,8 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         }
         case Nk.N_EXPR_FIELD:
         {
+            long hv = -1; Enm* he = lw.enum_ctor_base(n.children[0], lw.dname(n), &hv);
+            if (he != null) { return he.ty; }
             AirTyp* b = lw.hint(n.children[0]);
             if (b != null && b.tag == ATYP_PTR) { b = b.args[0]; }
             char* f = lw.text(n); long ix = 0;
@@ -713,6 +726,144 @@ fn bool Low.is_str_t(Low* lw, AirTyp* t)
     if (t == null || t.tag != ATYP_NOMINAL) { return false; }
     for (usz i = 0; i < lw.nfat; i++) { if (lw.fats[i].is_str && seq(lw.fats[i].ty.name, t.name)) { return true; } }
     return false;
+}
+
+
+// ── enums ─────────────────────────────────────────────────────────────────
+fn char* Low.dname(Low* lw, Node* n)   // a declaration's own name (variants: the first child is a payload TYPE)
+{
+    if (n != null && lw.it != null && n.name_id != 0) { char* t = lw.it.text(n.name_id); if (t != null && t[0] != 0) { return t; } }
+    return lw.text(n);
+}
+// 8-byte words a value of this type occupies inside an enum payload (an over-approximation, never less than its size)
+fn usz Low.words(Low* lw, AirTyp* t)
+{
+    if (t == null) { return 1; }
+    switch (t.tag)
+    {
+        case ATYP_UNIT: return 0;
+        case ATYP_ARRAY: return (usz)t.ival * lw.words(t.args[0]);
+        case ATYP_TUPLE: { usz w = 0; for (usz i = 0; i < t.arg_count; i++) { w += lw.words(t.args[i]); } return w; }
+        case ATYP_NOMINAL:
+        {
+            AirDecl* d = lw.data_of(t);
+            if (d == null || d.ctor_count == 0) { return 1; }
+            usz w = 0; AirCtorDecl* c = d.ctors[0];
+            for (usz i = 0; i < c.field_count; i++) { w += lw.words(c.fields[i].ty); }
+            return w;
+        }
+        default:
+            if (air_ll::ty_is_int(t) && air_ll::ty_bits(t) > 64) { return (usz)((air_ll::ty_bits(t) + 63) / 64); }
+            return 1;
+    }
+}
+fn Enm* Low.enum_for(Low* lw, Node* decl)
+{
+    for (usz i = 0; i < lw.nen; i++) { if (lw.ens[i].decl == decl) { return &lw.ens[i]; } }
+    if (lw.nen >= 64) { lw.unsup(decl, "more than 64 enum types"); return null; }
+    Enm* e = &lw.ens[lw.nen]; lw.nen++;
+    e.decl = decl; e.nv = 0; e.words = 1;
+    char* base = lw.dname(decl); if (base == null) { base = "Enum"; }
+    char* nm = lw.dup(base); int k = 1;
+    while (true)
+    {
+        bool clash = false;
+        for (usz i = 0; i + 1 < lw.nen; i++) { if (seq(lw.ens[i].name, nm)) { clash = true; } }
+        for (usz i = 0; i < lw.nst; i++) { if (seq(lw.sts[i].name, nm)) { clash = true; } }
+        if (!clash) { break; }
+        char[160] b; k++; snprintf(&b[0], 160, "%s.%d", base, k); nm = lw.dup(&b[0]);
+    }
+    e.name = nm; e.ty = lw.nominal(nm);
+    for (usz i = 0; i < decl.child_count; i++)
+    {
+        Node* vn = decl.children[i];
+        if (vn == null || vn.kind != Nk.N_DECL_VARIANT) { continue; }
+        if (e.nv >= 32) { lw.unsup(decl, "enum with more than 32 variants"); return null; }
+        VarI* vi = &e.v[e.nv]; e.nv++;
+        vi.name = lw.dname(vn); vi.decl = vn; vi.nf = 0;
+        usz off = 0;
+        for (usz j = 0; j < vn.child_count; j++)
+        {
+            Node* tn = vn.children[j]; if (tn == null || !pfront_core::is_type(tn.kind)) { continue; }
+            if (vi.nf >= 8) { lw.unsup(vn, "variant with more than 8 payload fields"); return null; }
+            AirTyp* ft = lw.ty(tn); if (ft == null) { return null; }
+            vi.ft[vi.nf] = ft; vi.off[vi.nf] = off; vi.nf++;
+            off += lw.words(ft);
+        }
+        if (off > e.words) { e.words = off; }
+    }
+    AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, nm);
+    AirCtorDecl* c = air_ir::air_mk_ctor_decl(lw.a, nm);
+    c.result_ty = e.ty; d.add_ctor(c);
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("tag"), lw.m.t_i64, AMULT_UNR));
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("payload"), air_ir::air_mk_typ_array(lw.a, lw.m.t_i64, (long)e.words), AMULT_UNR));
+    lw.m.add_decl(d);
+    return e;
+}
+fn Enm* Low.enum_of_ty(Low* lw, AirTyp* t)
+{
+    if (t == null || t.tag != ATYP_NOMINAL) { return null; }
+    for (usz i = 0; i < lw.nen; i++) { if (seq(lw.ens[i].name, t.name)) { return &lw.ens[i]; } }
+    return null;
+}
+fn long Low.variant_index(Low* lw, Enm* e, char* name, Node* decl)
+{
+    for (usz i = 0; i < e.nv; i++) { if ((decl != null && e.v[i].decl == decl) || (name != null && seq(e.v[i].name, name))) { return (long)i; } }
+    return -1;
+}
+// typed pointer to payload field `i` of variant `vi` inside the enum stored at `slot`
+fn Vx Low.payload_ptr(Low* lw, Vx slot, Enm* e, usz vi, usz i)
+{
+    Vx[3] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int(1, lw.m.t_i32); ix[2] = lw.lit_int((long)e.v[vi].off[i], lw.m.t_i64);
+    Vx g = lw.gep(slot.p, e.ty, &ix[0], 3, lw.m.t_i64);
+    return lw.coerce(g, lw.ptr(e.v[vi].ft[i]));
+}
+fn Vx Low.variant_value(Low* lw, Enm* e, usz vi, Node** argn, usz na, Node* at)
+{
+    VarI* v = &e.v[vi];
+    if (na != v.nf) { lw.err(at, "wrong number of payload values for the variant", v.name); return lw.unit(); }
+    Vx[8] av;
+    for (usz i = 0; i < na; i++) { av[i] = lw.expr(argn[i], v.ft[i]); av[i] = lw.coerce_arg(argn[i], av[i], v.ft[i]); }
+    if (!lw.live()) { return lw.unit(); }
+    Vx slot = lw.alloca_(e.ty);
+    Vx[2] ti; ti[0] = lw.lit_int(0, lw.m.t_i64); ti[1] = lw.lit_int(0, lw.m.t_i32);
+    Vx tg = lw.gep(slot.p, e.ty, &ti[0], 2, lw.m.t_i64);
+    lw.store(tg.p, lw.lit_int((long)vi, lw.m.t_i64));
+    for (usz i = 0; i < na; i++)
+    {
+        if (lw.is_unit_t(v.ft[i])) { continue; }
+        Vx pp = lw.payload_ptr(slot, e, vi, i);
+        lw.store(pp.p, av[i]);
+    }
+    return lw.load(slot.p, e.ty);
+}
+// `E.V` / `E.V(args)`: the base names an enum
+fn Enm* Low.enum_ctor_base(Low* lw, Node* base, char* name, long* vi)
+{
+    if (base == null || base.resolved == null || base.resolved.kind != Nk.N_DECL_ENUM) { return null; }
+    Enm* e = lw.enum_for(base.resolved); if (e == null) { return null; }
+    long k = lw.variant_index(e, name, null);
+    if (k < 0) { return null; }
+    *vi = k; return e;
+}
+// pattern on an enum scrutinee: test the tag, then match the payload fields
+fn bool Low.pat_variant(Low* lw, Enm* e, usz vi, Node** subs, usz nsub, Vx v, usz fail)
+{
+    Vx tag = lw.field_of(v, "tag", 0, lw.m.t_i64);
+    Vx eq = lw.binop(ABIN_EQ, tag, lw.lit_int((long)vi, lw.m.t_i64));
+    usz ok = lw.blk("pat.ok");
+    lw.t_cond(eq, ok, fail); lw.cur = ok;
+    if (nsub == 0) { return true; }
+    VarI* vr = &e.v[vi];
+    Vx slot = lw.alloca_(e.ty);
+    lw.store(slot.p, v);
+    for (usz i = 0; i < nsub && i < vr.nf; i++)
+    {
+        Vx pp = lw.payload_ptr(slot, e, vi, i);
+        Vx val = lw.load(pp.p, vr.ft[i]);
+        if (!lw.pat(subs[i], val, fail)) { return false; }
+    }
+    return true;
 }
 
 // ── expressions ────────────────────────────────────────────────────────────
@@ -1023,6 +1174,8 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             Pl p;
             if (n.kind == Nk.N_EXPR_FIELD && n.child_count > 0)
             {
+                long evi = -1; Enm* ee = lw.enum_ctor_base(n.children[0], lw.dname(n), &evi);   // `E.B`
+                if (ee != null) { return lw.variant_value(ee, (usz)evi, null, 0, n); }
                 AirTyp* abt = lw.hint(n.children[0]); char* af = lw.text(n);
                 if (abt != null && abt.tag == ATYP_ARRAY && af != null && seq(af, "len")) { return lw.lit_int(abt.ival, lw.m.t_i64); }
             }
@@ -1050,6 +1203,13 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         }
         case Nk.N_EXPR_STRUCT_LIT: return lw.struct_lit(n);
         case Nk.N_EXPR_ARRAY: return lw.array_lit(n, want);
+        case Nk.N_EXPR_METHOD:
+        {
+            long vi = -1; char* mn = lw.dname(n);
+            Enm* e = n.child_count > 0 ? lw.enum_ctor_base(n.children[0], mn, &vi) : null;
+            if (e == null) { lw.unsup(n, "method call"); return lw.unit(); }
+            return lw.variant_value(e, (usz)vi, &n.children[1], n.child_count - 1, n);
+        }
         case Nk.N_EXPR_TUPLE:
         {
             AirTyp* wt = (want != null && want.tag == ATYP_TUPLE) ? want : null;
@@ -1573,6 +1733,42 @@ fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
             }
             return true;
         }
+        case Nk.N_PAT_VARIANT: case Nk.N_PAT_STRUCT:
+        {
+            Enm* e = lw.enum_of_ty(v.t);
+            Node*[8] subs; usz ns = 0;
+            if (e != null && p.kind == Nk.N_PAT_VARIANT)
+            {
+                long vi = lw.variant_index(e, lw.dname(p), p.resolved);
+                if (vi < 0) { lw.err(p, "pattern names no variant of the scrutinee's enum", lw.dname(p)); return false; }
+                for (usz i = 0; i < p.child_count && ns < 8; i++) { Node* c = p.children[i]; if (c != null && pfront_core::is_pattern(c.kind)) { subs[ns] = c; ns++; } }
+                return lw.pat_variant(e, (usz)vi, &subs[0], ns, v, fail);
+            }
+            if (e != null)    // `{ A: a }` / `{ B }` on an enum
+            {
+                for (usz i = 0; i < p.child_count; i++)
+                {
+                    Node* f = p.children[i]; if (f == null || f.kind != Nk.N_PAT_FIELD) { continue; }
+                    long vi = lw.variant_index(e, lw.dname(f), null);
+                    if (vi < 0) { lw.err(f, "pattern names no variant of the scrutinee's enum", lw.dname(f)); return false; }
+                    if (e.v[(usz)vi].nf > 0 && f.child_count > 0) { subs[0] = f.children[0]; ns = 1; }
+                    return lw.pat_variant(e, (usz)vi, &subs[0], ns, v, fail);
+                }
+                lw.unsup(p, "enum struct-pattern without a variant"); return false;
+            }
+            AirDecl* sd = lw.data_of(v.t);   // struct pattern
+            if (sd == null || sd.ctor_count != 1) { lw.unsup(p, "struct pattern against this type"); return false; }
+            for (usz i = 0; i < p.child_count; i++)
+            {
+                Node* f = p.children[i]; if (f == null || f.kind != Nk.N_PAT_FIELD) { continue; }
+                char* fnm = lw.dname(f); long k = -1;
+                AirTyp* ft = fnm == null ? null : lw.field_ty(v.t, fnm, &k);
+                if (ft == null) { lw.err(f, "field is not declared", fnm); return false; }
+                Vx fv = lw.field_of(v, fnm, k, ft);
+                if (f.child_count > 0 && f.children[0] != null) { if (!lw.pat(f.children[0], fv, fail)) { return false; } }
+            }
+            return true;
+        }
         default:
             lw.unsup(p, "pattern"); return false;
     }
@@ -1843,6 +2039,7 @@ fn int emit_low_program(Node** roots, usz root_count, pfront_core::Interner* it,
     lw.vars = (VarB*)calloc(MAXVAR, VarB::size); lw.nvars = 0;
     lw.names = (char**)calloc(MAXNM, 8); lw.nnames = 0;
     lw.nfat = 0; lw.unchecked = 0;
+    lw.ens = (Enm*)calloc(64, Enm::size); lw.nen = 0;
     lw.errors = 0; lw.fn_errors = 0; lw.fns_ok = 0; lw.fail_fn = 0; lw.cur = NOBLK;
     Node* mn = null;
     for (usz i = 0; i < root_count && mn == null; i++) { mn = find_main(roots[i], it); }
