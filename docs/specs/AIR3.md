@@ -60,6 +60,7 @@ The low profile defines these (anything else is dropped by the producer, never i
 | `attr section "x"` | `def`, `global` | `section "x"` | `#section(".text.boot")` |
 | `attr align N` (power of two) | `def`, `global` | `align N` | `#align(64)` |
 | `attr packed` | `data` | `type <{ … }>` (also for constant initialisers) | `#packed` |
+| `attr thread_local` | `global mut` | `thread_local global` (a worker thread gets its own zero/initial copy; `tls01`, native only) | `#thread_local` |
 | `attr naked` | `def` | `naked`: no prologue/epilogue; the body must be inline asm plus a non-returning end | `#naked` |
 | `attr noinline` / `attr inline` / `attr cold` | `def` | `noinline` / `alwaysinline` / `cold` | `#noinline`, `#inline`, `#cold` |
 

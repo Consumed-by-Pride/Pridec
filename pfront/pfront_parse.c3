@@ -4618,7 +4618,7 @@ fn Node* Parser.parse_fn_decl(Parser* p, bool is_pub)
          Skipped here, after the INDENT, so both spellings work and
          neither needs its own rule.
         */
-        p.skip_trailing_attrs(); p.attach_ext(n);
+        if (indented) { p.skip_trailing_attrs(); p.attach_ext(n); }   // (an unindented `#attr` here belongs to the NEXT declaration)
         p.skip_newlines();
 
         /*

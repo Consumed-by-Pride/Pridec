@@ -1054,6 +1054,7 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
     if (decl_has_attr(d, "inline") && !decl_has_attr(d, "noinline")) { hdr.put(" alwaysinline"); }
     if (decl_has_attr(d, "cold"))     { hdr.put(" cold"); }
     if (decl_has_attr(d, "packed"))   { l.err("packed applies to data types", d.name); }
+    if (decl_has_attr(d, "thread_local")) { l.err("thread_local applies to globals", d.name); }
     { char* sec = decl_attr_str(d, "section"); if (sec != null) { hdr.put(" section \""); hdr.put(sec); hdr.putc('"'); } }
     { long al = decl_attr_int(d, "align"); if (al > 0) { hdr.put(" align "); hdr.int_(al); } }
     hdr.put(" {\n");
@@ -1192,10 +1193,12 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
                 l.fn_name = d.name;
                 if (!ty_low(d.ret_ty, 0)) { l.err("global type is not part of the low profile", d.name); }
                 body.name('@', d.name);
-                if (d.is_extern && d.g_init == null) { body.put(" = external "); body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); l.global_attrs(&body, d); body.putc('\n'); }
+                bool tls = decl_has_attr(d, "thread_local");
+                if (tls && !d.g_mut) { l.err("thread_local applies to mutable globals", d.name); }
+                if (d.is_extern && d.g_init == null) { body.put(" = external "); if (tls) { body.put("thread_local "); } body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); l.global_attrs(&body, d); body.putc('\n'); }
                 else
                 {
-                    body.put(" = "); body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); body.putc(' ');
+                    body.put(" = "); if (tls) { body.put("thread_local "); } body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); body.putc(' ');
                     if (d.g_init == null) { body.put("zeroinitializer"); }
                     else
                     {

@@ -1,0 +1,20 @@
+-- EXIT: 5
+-- thread_local: a worker thread writes its own copy; the main thread's copy is unchanged after pthread_join (native only: wasm32 TLS needs the threads proposal)
+fn pthread_create : (*i64, *u8, *u8, *u8) -> i64 #extern("pthread_create")
+fn pthread_join : (i64, *u8) -> i64 #extern("pthread_join")
+
+#thread_local
+let mut TL : i64 = 0i64
+
+fn worker : *u8 -> *u8
+  | (a) ->
+      TL = 100i64
+      a
+
+fn main : () -> i64
+  | () ->
+      TL = 5i64
+      let mut tid : i64 = 0i64
+      let r = pthread_create(&tid, 0 as *u8, worker as ptr, 0 as *u8)
+      let j = pthread_join(tid, 0 as *u8)
+      TL + r + j

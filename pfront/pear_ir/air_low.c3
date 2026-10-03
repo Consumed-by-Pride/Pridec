@@ -239,7 +239,7 @@ fn void Low.copy_attrs(Low* lw, AirDecl* ad, Node* src)
             if (!ok || v <= 0 || (v & (v - 1)) != 0) { continue; }
             air_ir::air_add_attr(ad, lw.dup("align"), null, v, true);
         }
-        else if (seq(nn, "packed") || seq(nn, "naked") || seq(nn, "noinline") || seq(nn, "inline") || seq(nn, "cold"))
+        else if (seq(nn, "packed") || seq(nn, "thread_local") || seq(nn, "naked") || seq(nn, "noinline") || seq(nn, "inline") || seq(nn, "cold"))
         {
             air_ir::air_add_attr(ad, lw.dup(nn), null, 0, false);
         }
