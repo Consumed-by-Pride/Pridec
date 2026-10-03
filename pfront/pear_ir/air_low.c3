@@ -413,6 +413,13 @@ fn Vx Low.gep(Low* lw, AirPrd* base, AirTyp* src, Vx* idx, usz ni, AirTyp* resul
     for (usz i = 0; i < ni; i++) { p.add_sub(idx[i].p); }
     return lw.let_(p, lw.ptr(result_pointee), "_g");
 }
+// sizeof(T): the producer's own `ty` IS the measured type (the result is always usz), so no let_() annotation
+fn Vx Low.sizeof_(Low* lw, AirTyp* t)
+{
+    Ins* i = lw.push(I_LET); if (i == null) { return lw.unit(); }
+    i.name = lw.fresh("_sz"); i.a = air_ir::air_mk_sizeof(lw.a, t);
+    return lw.vref(i.name, lw.m.t_usz);
+}
 fn Vx Low.alloca_(Low* lw, AirTyp* t)
 {
     AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_ALLOCA; p.ty_arg = t;
@@ -722,6 +729,7 @@ fn AirTyp* Low.alloc_elem(Low* lw, Node* n, Node** count)
         return lw.ty(t.children[0]);
     }
     if (pfront_core::is_type(t.kind)) { return lw.ty(t); }
+    if (t.kind == Nk.N_EXPR_IDENT && t.resolved != null && t.resolved.kind == Nk.N_DECL_STRUCT) { return lw.struct_ty(t.resolved); }   // `alloc Grid`
     return null;
 }
 
@@ -1008,6 +1016,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         }
         case Nk.N_STMT_EXPR: return n.child_count > 0 ? lw.expr(n.children[0], null) : lw.unit();
         case Nk.N_DECL_LET: lw.let_decl(n); return lw.unit();
+        case Nk.N_DECL_FN: return lw.unit();   // a nested fn is a top-level def of its own (it captures nothing); reached through its call sites
         case Nk.N_STMT_ASSIGN: case Nk.N_EXPR_ASSIGN: case Nk.N_STMT_COMPOUND_ASSIGN: lw.assign(n); return lw.unit();
         case Nk.N_EXPR_INDEX: case Nk.N_EXPR_FIELD: case Nk.N_EXPR_DEREF:
         {
@@ -1069,8 +1078,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         {
             AirTyp* t = n.child_count > 0 ? lw.ty(n.children[0]) : lw.ty(n.type_ann);
             if (t == null) { return lw.unit(); }
-            AirPrd* p = air_ir::air_mk_sizeof(lw.a, t);
-            return lw.let_(p, lw.m.t_usz, "_sz");
+            return lw.sizeof_(t);
         }
         case Nk.N_EXPR_SYSCALL:
         {
@@ -1114,7 +1122,7 @@ fn Vx Low.alloc(Low* lw, Node* n)
     AirTyp* el = lw.alloc_elem(n, &cnt);
     if (el == null) { lw.unsup(n, "alloc of this type"); return lw.unit(); }
     Vx count = cnt == null ? lw.lit_int(1, lw.m.t_i64) : lw.coerce(lw.expr(cnt, lw.m.t_i64), lw.m.t_i64);
-    Vx esz = lw.let_(air_ir::air_mk_sizeof(lw.a, el), lw.m.t_usz, "_sz");
+    Vx esz = lw.sizeof_(el);
     Vx esz64 = lw.coerce(esz, lw.m.t_i64);
     Vx bytes = lw.binop(ABIN_MUL, count, esz64);
     Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
