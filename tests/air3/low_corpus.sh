@@ -20,7 +20,7 @@ while [ $# -gt 0 ]; do case "$1" in -v) V=1;; --tsv) TSV="$2"; shift;; *) files+
 W=tmp/low-corpus; rm -rf "$W"; mkdir -p "$W"
 declare -A cnt; : > "$W/rows.tsv"
 expect_of() { grep -m1 '^-- EXPECT:' "$1" | sed 's/^-- EXPECT: //'; }
-exit_of()   { v=$(grep -m1 '^-- EXIT:' "$1" | sed 's/^-- EXIT: *//'); printf '%s' "${v:-0}"; }
+exit_of()   { v=$(grep -m1 '^-- LOW-EXIT:' "$1" | sed 's/^-- LOW-EXIT: *//'); [ -z "$v" ] && v=$(grep -m1 '^-- EXIT:' "$1" | sed 's/^-- EXIT: *//'); printf '%s' "${v:-0}"; }   # LOW-EXIT: where PEAR1 deviates from the spec (defer is function-scoped)
 for f in "${files[@]}"; do
     [ -f "$f" ] || continue
     id=$(echo "${f#tests/exec/}" | sed 's/\.pie$//; s#/#_#g')

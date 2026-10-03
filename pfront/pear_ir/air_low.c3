@@ -367,9 +367,10 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
         }
         case Nk.N_TY_ARRAY:
         {
-            if (t.child_count < 2 || t.children[1] == null || t.children[1].kind != Nk.N_EXPR_INT) { lw.unsup(t, "array type without a constant length"); return null; }
+            long alen = 0;
+            if (t.child_count < 2 || !lw.const_int(t.children[1], &alen) || alen < 0) { lw.unsup(t, "array type without a constant length"); return null; }
             AirTyp* el = lw.ty(t.children[0]);
-            return el == null ? null : air_ir::air_mk_typ_array(lw.a, el, (long)t.children[1].p.ival);
+            return el == null ? null : air_ir::air_mk_typ_array(lw.a, el, alen);
         }
         case Nk.N_TY_TUPLE:
         {
@@ -730,11 +731,25 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
             long hv = -1; Enm* he = n.child_count > 0 ? lw.enum_ctor_base(n.children[0], lw.dname(n), &hv) : null;
             return he == null ? null : he.ty;
         }
+        case Nk.N_EXPR_QUOTE:
+        {
+            AirTyp* qr = n.child_count > 0 ? lw.hint_or_lit(n.children[0]) : null;
+            return qr == null ? null : lw.clo_ty(null, 0, qr);
+        }
+        case Nk.N_EXPR_SPLICE:
+        case Nk.N_EXPR_EVAL:
+        {
+            AirTyp* qc = n.child_count > 0 ? lw.hint(n.children[0]) : null;
+            CloI* qi = qc == null ? null : lw.clo_of(qc);
+            return qi == null ? null : qi.ret;
+        }
         case Nk.N_EXPR_ARRAY:
         {
             if (n.child_count == 0) { return null; }
             AirTyp* e0 = lw.hint(n.children[0]);
-            return e0 == null ? null : air_ir::air_mk_typ_array(lw.a, e0, (long)n.child_count);
+            long hc = (long)n.child_count;
+            if (n.p.aux == 8 && !lw.const_int(n.children[1], &hc)) { return null; }
+            return e0 == null ? null : air_ir::air_mk_typ_array(lw.a, e0, hc);
         }
         case Nk.N_EXPR_IDENT:
         {
@@ -764,7 +779,7 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         {
             Tk op = (Tk)n.p.op;
             if (op == Tk.TOKEN_EQEQ || op == Tk.TOKEN_NEQ || op == Tk.TOKEN_LT || op == Tk.TOKEN_GT || op == Tk.TOKEN_LTEQ || op == Tk.TOKEN_GTEQ
-                || op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_PIPEPIPE) { return lw.m.t_bool; }
+                || op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_PIPEPIPE || op == Tk.TOKEN_KW_AND || op == Tk.TOKEN_KW_OR) { return lw.m.t_bool; }
             AirTyp* l = lw.hint(n.children[0]);
             if (l != null) { return l; }
             return lw.hint(n.children[1]);
@@ -788,6 +803,11 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
             long hv = -1; Enm* he = lw.enum_ctor_base(n.children[0], lw.dname(n), &hv);
             if (he != null) { return he.ty; }
             AirTyp* b = lw.hint(n.children[0]);
+            if (b != null && b.tag == ATYP_TUPLE && n.p.aux == 1)
+            {
+                long hti = (long)n.p.ival;
+                return hti < (long)b.arg_count ? b.args[hti] : null;
+            }
             if (b != null && b.tag == ATYP_PTR) { b = b.args[0]; }
             char* f = lw.text(n); long ix = 0;
             return b == null || f == null ? null : lw.field_ty(b, f, &ix);
@@ -828,6 +848,10 @@ fn GlInfo* Low.global_for(Low* lw, Node* d)
     for (usz i = 0; i < lw.ngl; i++) { if (lw.gls[i].decl == d) { return &lw.gls[i]; } }
     if (lw.ngl >= MAXGL) { lw.unsup(d, "more than 1024 globals"); return null; }
     AirTyp* t = lw.static_ty(d);
+    if (t == null)
+    {
+        for (usz i = 0; i < d.child_count && t == null; i++) { Node* c = d.children[i]; if (c != null && pfront_core::is_expr(c.kind)) { t = lw.hint_or_lit(c); } }
+    }
     if (t == null) { lw.unsup(d, "global without a declared type"); return null; }
     char* base = lw.text(d); if (base == null) { base = "g"; }
     char* nm = lw.dup(base); int k = 1;
@@ -940,8 +964,72 @@ fn void Low.bounds(Low* lw, Vx i, Vx len)
     lw.cur = bad; lw.t_end(T_TRAP);
     lw.cur = ok;
 }
+// integer constant expressions: literals, `const` names, + - * / << and parentheses of those
+fn bool Low.const_int(Low* lw, Node* n, long* out)
+{
+    if (n == null) { return false; }
+    if (n.kind == Nk.N_EXPR_INT) { *out = (long)n.p.ival; return true; }
+    if (n.kind == Nk.N_EXPR_IDENT && n.resolved != null && n.resolved.kind == Nk.N_DECL_CONST)
+    {
+        for (usz i = 0; i < n.resolved.child_count; i++) { Node* c = n.resolved.children[i]; if (c != null && pfront_core::is_expr(c.kind)) { return lw.const_int(c, out); } }
+        return false;
+    }
+    if (n.kind == Nk.N_EXPR_BINARY && n.child_count == 2)
+    {
+        long a = 0; long b = 0;
+        if (!lw.const_int(n.children[0], &a) || !lw.const_int(n.children[1], &b)) { return false; }
+        switch ((Tk)n.p.op)
+        {
+            case Tk.TOKEN_PLUS: *out = a + b; return true;
+            case Tk.TOKEN_MINUS: *out = a - b; return true;
+            case Tk.TOKEN_STAR: *out = a * b; return true;
+            case Tk.TOKEN_SLASH: if (b == 0) { return false; } *out = a / b; return true;
+            case Tk.TOKEN_LSHIFT: *out = a << b; return true;
+            default: return false;
+        }
+    }
+    return false;
+}
+// `[v; n]`: fill a stack array in place (a loop for large n); returns the slot
+fn Vx Low.repeat_slot(Low* lw, Node* n, AirTyp* want, AirTyp** aty)
+{
+    long cnt = 0;
+    if (n.child_count < 2 || !lw.const_int(n.children[1], &cnt) || cnt < 0) { lw.err(n, "array repeat count must be a constant", null); return lw.unit(); }
+    AirTyp* el = (want != null && want.tag == ATYP_ARRAY) ? want.args[0] : null;
+    Vx v = lw.expr(n.children[0], el);
+    if (el == null) { el = v.t; } else { v = lw.coerce_arg(n.children[0], v, el); }
+    if (!lw.live() || el == null) { return lw.unit(); }
+    AirTyp* at = air_ir::air_mk_typ_array(lw.a, el, cnt);
+    *aty = at;
+    Vx slot = lw.alloca_(at);
+    if (cnt == 0) { return slot; }
+    Vx ix = lw.alloca_(lw.m.t_i64); lw.store(ix.p, lw.lit_int(0, lw.m.t_i64));
+    usz head = lw.blk("rep.head"); usz body = lw.blk("rep.body"); usz exit = lw.blk("rep.exit");
+    lw.t_jump0(head); lw.cur = head;
+    Vx i = lw.load(ix.p, lw.m.t_i64);
+    Vx more = lw.binop(ABIN_LT, i, lw.lit_int(cnt, lw.m.t_i64));
+    lw.t_cond(more, body, exit);
+    lw.cur = body;
+    Vx[2] gi; gi[0] = lw.lit_int(0, lw.m.t_i64); gi[1] = i;
+    Vx ep = lw.gep(slot.p, at, &gi[0], 2, el);
+    lw.store(ep.p, v);
+    lw.store(ix.p, lw.binop(ABIN_ADD, i, lw.lit_int(1, lw.m.t_i64)));
+    lw.t_jump0(head);
+    lw.cur = exit;
+    return slot;
+}
 fn Vx Low.array_lit(Low* lw, Node* n, AirTyp* want)
 {
+    if (n.p.aux == 8)   // the repeat form
+    {
+        AirTyp* rat = null; Vx sl = lw.repeat_slot(n, want, &rat);
+        if (!lw.live() || rat == null) { return lw.unit(); }
+        if (rat.ival > 64) { lw.err(n, "array value with more than 64 elements: bind it with `let` (it is filled in place)", null); return lw.unit(); }
+        Vx lv = lw.load(sl.p, rat);
+        AirTyp* wf = (want != null && want.tag != ATYP_ARRAY) ? lw.fat_elem(want) : null;
+        if (wf != null && !lw.is_str_t(want)) { return lw.array_to_slice(lv, want); }
+        return lv;
+    }
     AirTyp* el = null; AirTyp* sl = null;
     if (want != null && want.tag == ATYP_ARRAY) { el = want.args[0]; }
     else if (want != null) { AirTyp* fe = lw.fat_elem(want); if (fe != null && !lw.is_str_t(want)) { el = fe; sl = want; } }
@@ -1542,6 +1630,11 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
 {
     if (a.t == null || air_ll::ty_eq(a.t, want)) { return a; }
     if (a.p != null && a.p.tag == APRD_INT && air_ll::ty_is_int(want)) { return lw.lit_int(a.p.ival, want); }
+    if (a.p != null && a.p.tag == APRD_INT && want.tag == ATYP_PTR && air_ll::ty_is_int(a.t))   // the literal `0` as a pointer is null (a constant-folded `0 as *T`)
+    {
+        if (a.p.ival == 0) { AirPrd* np1 = air_ir::air_mk_prd_null(lw.a); np1.ty = want; Vx nr1; nr1.p = np1; nr1.t = want; return nr1; }
+        return lw.coerce(lw.lit_int(a.p.ival, lw.m.t_usz), want);
+    }
     Enm* ue = lw.enum_of_ty(want);
     if (ue != null && ue.nm > 0)   // a member flows into its union
     {
@@ -1589,6 +1682,11 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             AirTyp* h = lw.hint(n.children[0]);
             // literals take the target type directly; everything else is evaluated at its own type
             Node* c0 = n.children[0];
+            if (c0.kind == Nk.N_EXPR_INT && to.tag == ATYP_PTR)   // `0 as *T` is null; any other integer is an address
+            {
+                if (c0.p.ival == 0) { AirPrd* np0 = air_ir::air_mk_prd_null(lw.a); np0.ty = to; Vx nr; nr.p = np0; nr.t = to; return nr; }
+                return lw.coerce(lw.lit_int((long)c0.p.ival, lw.m.t_usz), to);
+            }
             bool lit0 = c0.kind == Nk.N_EXPR_INT || c0.kind == Nk.N_EXPR_FLOAT;
             Vx v = lw.expr(c0, lit0 ? to : h);
             Enm* ce = lw.enum_of_ty(v.t);
@@ -1630,6 +1728,15 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
                 if (ee != null) { return lw.variant_value(ee, (usz)evi, null, 0, n); }
                 AirTyp* abt = lw.hint(n.children[0]); char* af = lw.text(n);
                 if (abt != null && abt.tag == ATYP_ARRAY && af != null && seq(af, "len")) { return lw.lit_int(abt.ival, lw.m.t_i64); }
+                if (abt != null && abt.tag == ATYP_TUPLE && n.p.aux == 1)   // `t.0`
+                {
+                    long ti = (long)n.p.ival;
+                    if (ti >= (long)abt.arg_count) { lw.err(n, "tuple index out of range", null); return lw.unit(); }
+                    Vx tb = lw.expr(n.children[0], abt);
+                    Ins* pi = lw.push(I_PROJ); if (pi == null) { return lw.unit(); }
+                    pi.name = lw.fresh("_p"); pi.a = tb.p; pi.idx = ti;
+                    return lw.vref(pi.name, abt.args[ti]);
+                }
             }
             if (lw.place(n, &p)) { return lw.load(p.ptr, p.t); }
             if (n.kind == Nk.N_EXPR_FIELD && n.child_count > 0)
@@ -1660,6 +1767,20 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_EXPR_STRUCT_LIT: return lw.struct_lit(n, want);
         case Nk.N_EXPR_ARRAY: return lw.array_lit(n, want);
         case Nk.N_EXPR_LAMBDA: return lw.lambda(n, want);
+        case Nk.N_EXPR_QUOTE: return lw.lambda(n, want);
+        case Nk.N_EXPR_SPLICE:
+        case Nk.N_EXPR_EVAL:
+        {
+            // code is a delayed computation: splicing or running it calls it
+            if (n.child_count == 0) { return lw.unit(); }
+            Vx cv = lw.expr(n.children[0], null);
+            CloI* ci = lw.clo_of(cv.t);
+            if (ci == null || ci.np != 0) { lw.err(n, "splice/eval of something that is not code", null); return lw.unit(); }
+            Vx fp = lw.field_of(cv, "fn", 0, ci.fnty); Vx ep = lw.field_of(cv, "env", 1, lw.ptr(lw.m.t_u8));
+            Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+            ins.name = lw.fresh("_r"); ins.a = fp.p; ins.nargs = 1; ins.args[0] = ep.p;
+            Vx r = lw.vref(ins.name, ci.ret); lw.check_unw(); return r;
+        }
         case Nk.N_EXPR_PERFORM:
         {
             Node* eff = null; Node* op = null;
@@ -1667,6 +1788,18 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             return lw.perform_op(eff, op, n.child_count > 1 ? &n.children[1] : null, n.child_count - 1, n);
         }
         case Nk.N_EXPR_HANDLE: return lw.handle(n, want);
+        case Nk.N_EXPR_ASSERT:
+        {
+            if (n.child_count == 0) { return lw.unit(); }
+            Vx c = lw.expr(n.children[0], lw.m.t_bool);
+            if (!lw.live()) { return lw.unit(); }
+            usz okb = lw.blk("assert.ok"); usz bad = lw.blk("assert.fail");
+            lw.t_cond(c, okb, bad);
+            lw.cur = bad; lw.t_end(T_TRAP);
+            lw.cur = okb; return lw.unit();
+        }
+        case Nk.N_EXPR_POISON:   // an arbitrary value (a use of it is the program's undefined behaviour, which the optimiser may exploit)
+            return lw.zero_of(want != null ? want : lw.m.t_i64);
         case Nk.N_EXPR_RESUME: return lw.resume_do(n.child_count > 0 ? n.children[0] : null, n);
         case Nk.N_EXPR_METHOD:
         {
@@ -1909,14 +2042,68 @@ fn Vx Low.saturating(Low* lw, Node* n, bool add, AirTyp* want)
     ins.name = lw.fresh("_sat"); ins.a = air_ir::air_mk_var(lw.a, fnm); ins.nargs = 2; ins.args[0] = l.p; ins.args[1] = r.p;
     return lw.vref(ins.name, l.t);
 }
+// `x |> f`: application of a function (or function value) to x
+fn Vx Low.pipeline(Low* lw, Node* n, AirTyp* want)
+{
+    Node* f = n.children[1];
+    Node* cr = f.resolved;
+    if (cr != null && (cr.kind == Nk.N_DECL_FN || cr.kind == Nk.N_DECL_EXTERN_FN))
+    {
+        // call_to reads its arguments from children[1..]: build a call node on the stack-free arena copy
+        FnInfo* fi = lw.fn_for(cr); if (fi == null) { return lw.unit(); }
+        lw.queue(fi);
+        if (fi.np != 1) { lw.err(n, "`|>` needs a function of one argument", fi.name); return lw.unit(); }
+        Vx a = lw.expr(n.children[0], fi.pty[0]); a = lw.coerce_arg(n.children[0], a, fi.pty[0]);
+        if (!lw.live()) { return lw.unit(); }
+        Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+        ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, fi.name); ins.nargs = 1; ins.args[0] = a.p;
+        Vx r = lw.vref(ins.name, fi.ret);
+        if (!fi.ext) { lw.check_unw(); }
+        return r;
+    }
+    Vx cv = lw.expr(f, null); CloI* ci = lw.clo_of(cv.t);
+    if (ci == null || ci.np != 1) { lw.err(n, "`|>` needs a function of one argument", null); return lw.unit(); }
+    Vx a = lw.expr(n.children[0], ci.ps[0]); a = lw.coerce_arg(n.children[0], a, ci.ps[0]);
+    if (!lw.live()) { return lw.unit(); }
+    Vx fp = lw.field_of(cv, "fn", 0, ci.fnty); Vx ep = lw.field_of(cv, "env", 1, lw.ptr(lw.m.t_u8));
+    Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_r"); ins.a = fp.p; ins.nargs = 2; ins.args[0] = ep.p; ins.args[1] = a.p;
+    Vx r = lw.vref(ins.name, ci.ret); lw.check_unw(); return r;
+}
 fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
 {
     if (n.child_count < 2) { return lw.unit(); }
     Tk op = (Tk)n.p.op;
-    if (op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_PIPEPIPE) { return lw.shortcircuit(n, op == Tk.TOKEN_AMPAMP); }
+    if (op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_PIPEPIPE || op == Tk.TOKEN_KW_AND || op == Tk.TOKEN_KW_OR) { return lw.shortcircuit(n, op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_KW_AND); }
+    if (op == Tk.TOKEN_PIPELINE) { return lw.pipeline(n, want); }
     if (op == Tk.TOKEN_PLUS_PIPE || op == Tk.TOKEN_MINUS_PIPE) { return lw.saturating(n, op == Tk.TOKEN_PLUS_PIPE, want); }
     AirBinop b;
     if (!lw.binop_for(op, &b)) { lw.unsup(n, "binary operator"); return lw.unit(); }
+    if (op == Tk.TOKEN_PLUS || op == Tk.TOKEN_MINUS)   // pointer arithmetic: p + n / p - n advance by n elements; p - q is the element distance
+    {
+        AirTyp* lh = lw.hint(n.children[0]);
+        if (lh != null && lh.tag == ATYP_PTR)
+        {
+            AirTyp* el = lh.args[0];
+            Vx pl = lw.expr(n.children[0], lh);
+            AirTyp* rh = lw.hint(n.children[1]);
+            if (op == Tk.TOKEN_MINUS && rh != null && rh.tag == ATYP_PTR)
+            {
+                Vx pr = lw.expr(n.children[1], rh);
+                if (!lw.live()) { return lw.unit(); }
+                Vx li = lw.coerce(pl, lw.m.t_i64); Vx ri = lw.coerce(pr, lw.m.t_i64);
+                Vx bytes = lw.binop(ABIN_SUB, li, ri);
+                Vx esz = lw.coerce(lw.sizeof_(el), lw.m.t_i64);
+                return lw.binop(ABIN_DIV, bytes, esz);
+            }
+            Vx off = lw.expr(n.children[1], lw.m.t_i64);
+            if (off.t != null && !air_ll::ty_eq(off.t, lw.m.t_i64)) { off = lw.coerce(off, lw.m.t_i64); }
+            if (!lw.live()) { return lw.unit(); }
+            if (op == Tk.TOKEN_MINUS) { off = lw.binop(ABIN_SUB, lw.lit_int(0, lw.m.t_i64), off); }
+            Vx[1] gi; gi[0] = off;
+            return lw.gep(pl.p, el, &gi[0], 1, el);
+        }
+    }
     bool cmp = b == ABIN_EQ || b == ABIN_NEQ || b == ABIN_LT || b == ABIN_GT || b == ABIN_LE || b == ABIN_GE;
     bool shift = b == ABIN_SHL || b == ABIN_SHR;
     AirTyp* h = lw.hint(n.children[0]);
@@ -1991,6 +2178,12 @@ fn void Low.let_decl(Low* lw, Node* n)
     }
     AirTyp* declared = pat.type_ann != null ? lw.ty(pat.type_ann) : (n.type_ann != null ? lw.ty(n.type_ann) : null);
     if (pat.type_ann != null && declared == null) { return; }
+    if (init != null && init.kind == Nk.N_EXPR_ARRAY && init.p.aux == 8 && pat.kind == Nk.N_PAT_IDENT && (declared == null || declared.tag == ATYP_ARRAY))
+    {
+        AirTyp* rat = null; Vx sl = lw.repeat_slot(init, declared, &rat);   // `let a = [v; n]` fills the array in place
+        if (lw.live() && rat != null) { lw.bind_var(pat, sl.p, rat, true); }
+        return;
+    }
     Vx v;
     if (init != null) { v = lw.expr(init, declared); v = declared != null ? lw.coerce_arg(init, v, declared) : v; }
     else
@@ -2081,7 +2274,9 @@ fn Vx Low.if_(Low* lw, Node* n, AirTyp* want)
             {
                 if (ev.p != null && ev.p.tag == APRD_INT && air_ll::ty_is_int(tv.t)) { ev = lw.lit_int(ev.p.ival, tv.t); }
                 else if (tv.p != null && tv.p.tag == APRD_INT && air_ll::ty_is_int(ev.t)) { tv = lw.lit_int(tv.p.ival, ev.t); }
-                else if (lw.carries(tv.t) || lw.carries(ev.t)) { lw.err(n, "if branches have different types", null); return lw.unit(); }
+                else if (tv.p != null && tv.p.tag == APRD_INT && ev.t.tag == ATYP_PTR) { tv = lw.coerce_arg(n.children[1], tv, ev.t); }
+                else if (ev.p != null && ev.p.tag == APRD_INT && tv.t.tag == ATYP_PTR) { ev = lw.coerce_arg(n.children[2], ev, tv.t); }
+                else if (lw.carries(tv.t) || lw.carries(ev.t)) { char[200] tb2; usz tn2 = mang(tv.t, &tb2[0], 0, 100); tb2[tn2] = 0; char[100] eb2; usz en2 = mang(ev.t, &eb2[0], 0, 100); eb2[en2] = 0; char[320] mb2; snprintf(&mb2[0], 320, "%s vs %s", &tb2[0], &eb2[0]); lw.err(n, "if branches have different types", lw.dup(&mb2[0])); return lw.unit(); }
             }
             jt = tv.t;
         }
@@ -2202,6 +2397,10 @@ fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
         case Nk.N_PAT_IDENT:
         {
             if (lw.is_unit_t(v.t)) { return true; }
+            if ((p.flags & (pfront_core::NF_MUT | pfront_core::NF_ADDR_TAKEN)) != 0)   // `mut x` / `&x`: a stack slot
+            {
+                Vx sl = lw.alloca_(v.t); lw.store(sl.p, v); lw.bind_var(p, sl.p, v.t, true); return true;
+            }
             char* nm = lw.uname(lw.text(p));
             Ins* ins = lw.push(I_LET); if (ins == null) { return true; }
             ins.name = nm; ins.a = v.p; v.p.ty = v.t;
@@ -2321,8 +2520,19 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
         bool ok = true;
         if (tuple_pat && nscr != 1)
         {
-            if (pat.kind != Nk.N_PAT_TUPLE || pat.child_count != nscr) { lw.unsup(pat, "clause pattern shape"); return lw.unit(); }
-            for (usz i = 0; i < nscr && ok; i++) { ok = lw.pat(pat.children[i], scr[i], next); }
+            if (pat.kind == Nk.N_PAT_IDENT || pat.kind == Nk.N_PAT_WILDCARD)   // `t`: the whole argument tuple
+            {
+                AirTyp*[16] tts; for (usz i = 0; i < nscr && i < 16; i++) { tts[i] = scr[i].t; }
+                AirPrd* tp = air_ir::air_new_AirPrd(lw.a); tp.tag = APRD_TUPLE;
+                for (usz i = 0; i < nscr && i < 16; i++) { tp.add_sub(scr[i].p); }
+                Vx tv = lw.let_(tp, air_ir::air_mk_typ_tuple(lw.a, &tts[0], nscr), "_tu");
+                ok = lw.pat(pat, tv, next);
+            }
+            else
+            {
+                if (pat.kind != Nk.N_PAT_TUPLE || pat.child_count != nscr) { lw.unsup(pat, "clause pattern shape"); return lw.unit(); }
+                for (usz i = 0; i < nscr && ok; i++) { ok = lw.pat(pat.children[i], scr[i], next); }
+            }
         }
         else if (nscr == 0) { }
         else { ok = lw.pat(pat, scr[0], next); }
@@ -2334,7 +2544,8 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
             if (c.kind == Nk.N_GUARD) { guard = c; } else { body = c; }
         }
         bool irref = true;
-        if (tuple_pat && nscr != 1) { for (usz i = 0; i < nscr; i++) { if (!lw.irrefutable(pat.children[i])) { irref = false; } } }
+        if (tuple_pat && nscr != 1 && pat.kind != Nk.N_PAT_TUPLE) { irref = lw.irrefutable(pat); }
+        else if (tuple_pat && nscr != 1) { for (usz i = 0; i < nscr && i < pat.child_count; i++) { if (!lw.irrefutable(pat.children[i])) { irref = false; } } }
         else if (nscr > 0) { irref = lw.irrefutable(pat); }
         if (guard != null)
         {
@@ -2583,10 +2794,37 @@ fn void Low.collect_caps(Low* lw, Node* n, Node* lam, Cap* caps, usz* nc)
     }
     for (usz i = 0; i < n.child_count; i++) { lw.collect_caps(n.children[i], lam, caps, nc); }
 }
+// a type for an expression whose only type information is its literals (an untyped literal is i64 / f64)
+fn AirTyp* Low.hint_or_lit(Low* lw, Node* n)
+{
+    if (n == null) { return null; }
+    AirTyp* h = lw.hint(n); if (h != null) { return h; }
+    switch (n.kind)
+    {
+        case Nk.N_EXPR_INT: return lw.m.t_i64;
+        case Nk.N_EXPR_FLOAT: return lw.m.t_f64;
+        case Nk.N_EXPR_BOOL: return lw.m.t_bool;
+        case Nk.N_EXPR_BINARY:
+        {
+            Tk op = (Tk)n.p.op;
+            if (op == Tk.TOKEN_EQEQ || op == Tk.TOKEN_NEQ || op == Tk.TOKEN_LT || op == Tk.TOKEN_GT || op == Tk.TOKEN_LTEQ || op == Tk.TOKEN_GTEQ) { return lw.m.t_bool; }
+            return n.child_count > 0 ? lw.hint_or_lit(n.children[0]) : null;
+        }
+        default:
+            if (n.child_count == 1 && n.kind == Nk.N_EXPR_SPLICE) { return lw.hint_or_lit(n.children[0]); }
+            return null;
+    }
+}
 fn bool Low.lam_sig(Low* lw, Node* n, AirTyp* want, AirTyp** ps, usz* np, AirTyp** ret)
 {
     CloI* wc = lw.clo_of(want);
     *np = 0;
+    if (n.kind == Nk.N_EXPR_QUOTE)   // `quote e` is the delayed computation `fn () -> T { e }`
+    {
+        *ret = (wc != null && wc.np == 0) ? wc.ret : (n.child_count > 0 ? lw.hint_or_lit(n.children[0]) : null);
+        if (*ret == null) { lw.err(n, "cannot determine the type of the quoted code", null); return false; }
+        return true;
+    }
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* c = n.children[i]; if (c == null || c.kind != Nk.N_DECL_PARAM) { continue; }
@@ -2783,6 +3021,16 @@ fn bool Low.op_sig(Low* lw, Node* op, AirTyp** ps, usz* np, AirTyp** ret)
             continue;
         }
         if (c.kind == Nk.N_TY_UNIT && *np == 0) { continue; }
+        if (c.kind == Nk.N_TY_TUPLE && *np == 0)   // `(A, B) -> R`: several parameters
+        {
+            for (usz k = 0; k < c.child_count; k++)
+            {
+                AirTyp* tk = lw.ty(c.children[k]); if (tk == null) { return false; }
+                if (*np >= 7) { lw.unsup(op, "effect operation with more than 7 parameters"); return false; }
+                ps[*np] = tk; *np = *np + 1;
+            }
+            continue;
+        }
         if (!pfront_core::is_type(c.kind)) { continue; }
         AirTyp* t = lw.ty(c); if (t == null) { return false; }
         if (*np >= 7) { lw.unsup(op, "effect operation with more than 7 parameters"); return false; }
