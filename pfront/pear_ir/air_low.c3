@@ -2791,6 +2791,19 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             if (t == null) { return lw.unit(); }
             return lw.sizeof_(t);
         }
+        case Nk.N_EXPR_OFFSETOF:   // offset_of(T, field): the address of the field in a T at address 0, as a number (the target's own layout)
+        {
+            AirTyp* t = lw.ty(n.type_ann); if (t == null) { return lw.unit(); }
+            if (n.p.sptr == null || n.p.slen == 0 || n.p.slen > 120) { lw.err(n, "offset_of needs a field name", null); return lw.unit(); }
+            char[128] fb; for (usz i = 0; i < n.p.slen; i++) { fb[i] = n.p.sptr[i]; } fb[n.p.slen] = 0;
+            long k = -1; AirTyp* ft = lw.field_ty(t, &fb[0], &k);
+            if (ft == null || k < 0) { lw.err(n, "offset_of: the type has no such field", lw.dup(&fb[0])); return lw.unit(); }
+            AirPrd* z = air_ir::air_mk_prd_null(lw.a); z.ty = lw.ptr(t);
+            Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int(k, lw.m.t_i32);
+            Vx g = lw.gep(z, t, &ix[0], 2, ft);
+            if (!lw.live()) { return lw.unit(); }
+            return lw.coerce(g, lw.m.t_usz);
+        }
         case Nk.N_EXPR_SYSCALL:
         {
             if (n.child_count == 0 || n.child_count > 7) { lw.err(n, "syscall needs 1 to 7 operands", null); return lw.unit(); }
@@ -3889,10 +3902,20 @@ fn bool Low.irrefutable(Low* lw, Node* p)
 // arms: clause/match-arm nodes (pattern, [guard], body); scrutinees: one value per tuple slot
 fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want, bool tuple_pat)
 {
+    // the per-arm exit lists: on the stack for the usual match, on the heap beyond 64 arms (a 4096-clause function is legal)
+    usz[64] sb; Vx[64] sv;
+    if (narms <= 64) { return lw.arms_in(arms, narms, scr, nscr, want, tuple_pat, &sb[0], &sv[0]); }
+    usz* hb = mem::new_array(usz, (sz)narms); Vx* hv = mem::new_array(Vx, (sz)narms);
+    Vx r = lw.arms_in(arms, narms, scr, nscr, want, tuple_pat, hb, hv);
+    mem::free(hb); mem::free(hv);
+    return r;
+}
+fn Vx Low.arms_in(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want, bool tuple_pat, usz* end_blk, Vx* end_val)
+{
     char* pn = null; AirTyp* jt = null; bool carry_known = false; bool carry = false;
     usz jb = lw.blk("m.join");
     // results are collected while arms are lowered; the join parameter is added once the type is known
-    usz[64] end_blk; Vx[64] end_val; usz nend = 0;
+    usz nend = 0;
     bool exhaustive = false;
     for (usz ai = 0; ai < narms; ai++)
     {
@@ -3941,7 +3964,7 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
         if (lw.fn_errors > 0) { return lw.unit(); }
         if (lw.live())
         {
-            if (nend >= 64) { lw.unsup(arm, "more than 64 arms"); return lw.unit(); }
+            if (nend >= narms) { lw.unsup(arm, "arm exit list overflow"); return lw.unit(); }
             end_blk[nend] = lw.cur; end_val[nend] = bv; nend++;
             if (!carry_known) { carry_known = true; jt = bv.t; carry = lw.carries(bv.t); }
             lw.cur = NOBLK;
