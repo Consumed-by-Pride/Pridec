@@ -35,7 +35,14 @@ Header: `air 3.0 Main "src";`. A file is a list of declarations; the syntax is t
   plain functions get a `.clo` adapter, raw code pointers and externs an `ind.<clo>` adapter;
 * **algebraic effects** are lowered: one global `hop.E.op` cell per operation holding the innermost handler
   closure, a `Frame.N` per `handle`, and an unwinding flag `@__unw` checked after calls (tail-resumptive and
-  aborting arms);
+  aborting arms; a `return(x)` arm is applied to the body's value where the handle completes). When an arm
+  resumes in NON-tail position the handle is lowered with a fiber: `Frame.N` also holds the fiber, a request
+  record and the arm environments; the cell holds a *yielder* (`<fn>.yldN`: store the arguments + operation
+  number, set `@__hreq` = handler id, call `__pride_fiber_yield`), the handled body is a thunk
+  (`<fn>.bodyN`, the fiber entry) and a *driver* (`<fn>.driveN`) resumes the fiber, runs the arm on the handler's
+  stack when it yields (`resume k v` = store v, call the driver again), forwards requests aimed at an outer
+  handler by yielding its own fiber, and releases the fiber (`__pride_fiber_release`) when the body finishes or
+  the arm does not resume. One-shot (a second resume traps); needs `runtime/compiler_rt.c` (native only);
 * variadic C calls: `declare … varargs`; `syscall` is the `syscall` command (≤ 7 operands).
 
 ## Systems primitives (OS / concurrency)

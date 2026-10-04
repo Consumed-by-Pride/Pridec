@@ -618,8 +618,8 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
         }
         case Nk.N_PAT_TUPLE:
         {
-            AirPat*[16] subs; usz n = 0;
-            for (usz i = 0; i < p.child_count && i < 16; i++)
+            AirPat*[64] subs; usz n = 0;
+            for (usz i = 0; i < p.child_count && i < 64; i++)
             {
                 subs[n] = lr.pat_node(p.children[i]);
                 n = n + 1;
@@ -630,8 +630,8 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
         {
             char* vnm = node_text(p, lr.it);
             if (vnm == null) vnm = (char*)"_V";
-            AirPat*[16] subs; usz n = 0;
-            for (usz i = 0; i < p.child_count && i < 16; i++)
+            AirPat*[64] subs; usz n = 0;
+            for (usz i = 0; i < p.child_count && i < 64; i++)
             {
                 subs[n] = lr.pat_node(p.children[i]);
                 n = n + 1;
@@ -640,14 +640,14 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
         }
         case Nk.N_PAT_ARRAY:
         {
-            AirPat*[16] subs; usz n = 0;
-            for (usz i = 0; i < p.child_count && i < 16; i++)
+            AirPat*[64] subs; usz n = 0;
+            for (usz i = 0; i < p.child_count && i < 64; i++)
             {
                 subs[n] = lr.pat_node(p.children[i]);
                 n = n + 1;
             }
             AirPat* pp = air_ir::air_mk_pat(lr.arena, APAT_ARRAY);
-            for (usz i = 0; i < n && i < 16; i++) { pp.sub[i] = subs[i]; pp.sub_count++; }
+            for (usz i = 0; i < n && i < 64; i++) { pp.sub[i] = subs[i]; pp.sub_count++; }
             return pp;
         }
         default: return lr.mod.pat_wild;
@@ -709,8 +709,8 @@ fn AirPrd* AirLower.prd(AirLower* lr, Node* n)
         }
         case Nk.N_EXPR_TUPLE:
         {
-            AirPrd*[16] s; usz n2 = 0;
-            for (usz i = 0; i < n.child_count && i < 16; i++)
+            AirPrd*[64] s; usz n2 = 0;
+            for (usz i = 0; i < n.child_count && i < 64; i++)
             {
                 s[n2] = lr.prd(n.children[i]);
                 n2 = n2 + 1;
@@ -720,8 +720,8 @@ fn AirPrd* AirLower.prd(AirLower* lr, Node* n)
         }
         case Nk.N_EXPR_ARRAY:
         {
-            AirPrd*[16] s; usz n2 = 0;
-            for (usz i = 0; i < n.child_count && i < 16; i++)
+            AirPrd*[64] s; usz n2 = 0;
+            for (usz i = 0; i < n.child_count && i < 64; i++)
             {
                 s[n2] = lr.prd(n.children[i]);
                 n2 = n2 + 1;
@@ -781,8 +781,8 @@ fn AirPrd* AirLower.lambda_prd(AirLower* lr, Node* n)
 
 fn AirPrd* AirLower.struct_lit_prd(AirLower* lr, Node* n)
 {
-    AirFieldInit*[16] inits; usz ic = 0;
-    for (usz i = 0; i < n.child_count && i < 16; i++)
+    AirFieldInit*[64] inits; usz ic = 0;
+    for (usz i = 0; i < n.child_count && i < 64; i++)
     {
         Node* c = n.children[i];
         if (c == null) continue;
@@ -811,29 +811,29 @@ fn AirPrd* AirLower.struct_lit_prd(AirLower* lr, Node* n)
     // x = 40 }` is legal), so the backend can lay them out sequentially. The
     // `_fN` markers (the type name and bare positional values) stay in front.
     Node* sdecl = lr.struct_decl_of(n);
-    AirFieldInit*[16] ordered;
-    for (usz i = 0; i < 16; i++) { ordered[i] = null; }
+    AirFieldInit*[65] ordered;
+    for (usz i = 0; i < 65; i++) { ordered[i] = null; }
     usz ordered_n = 0;
-    for (usz i = 0; i < ic && i < 16; i++)
+    for (usz i = 0; i < ic && i < 64; i++)
     {
         AirFieldInit* fi = inits[i];
         if (fi == null) continue;
         if (fi.name == null || fi.name[0] == '_' || sdecl == null)
         {
-            if (ordered_n < 16) { ordered[ordered_n] = fi; ordered_n++; }
+            if (ordered_n < 65) { ordered[ordered_n] = fi; ordered_n++; }
             lr.total_decl = lr.total_decl;   // (no-op keeps the branch shape)
             continue;
         }
         long oi = lr.struct_field_index(sdecl, fi.name);
-        if (oi < 0 || oi > 14 || (usz)oi + 1 >= 16) { if (ordered_n < 16) { ordered[ordered_n] = fi; ordered_n++; } continue; }
-        if (ordered[(usz)oi + 1] != null) { if (ordered_n < 16) { ordered[ordered_n] = fi; ordered_n++; } continue; }
+        if (oi < 0 || oi > 62 || (usz)oi + 1 >= 65) { if (ordered_n < 65) { ordered[ordered_n] = fi; ordered_n++; } continue; }
+        if (ordered[(usz)oi + 1] != null) { if (ordered_n < 65) { ordered[ordered_n] = fi; ordered_n++; } continue; }
         ordered[(usz)oi + 1] = fi;
     }
-    for (usz i = 0; i < 16; i++)
+    for (usz i = 0; i < 65; i++)
     {
         AirFieldInit* fi = ordered[i];
         if (fi == null) continue;
-        if (rec.rec_init_count < 16) { rec.rec_inits[rec.rec_init_count] = fi; rec.rec_init_count++; }
+        rec.push_rec(fi);
     }
     lr.total_prd++;
     return rec;
@@ -1936,10 +1936,10 @@ fn Node* AirLower.struct_decl_of(AirLower* lr, Node* n)
 
 fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
 {
-    AirFieldInit*[16] inits; usz ic = 0;
+    AirFieldInit*[64] inits; usz ic = 0;
     AirCmd* binds = null;
     lr.scope.enter();
-    for (usz i = 0; i < n.child_count && i < 16; i++)
+    for (usz i = 0; i < n.child_count && i < 64; i++)
     {
         Node* c = n.children[i];
         if (c == null) continue;
@@ -1993,10 +1993,9 @@ fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
     AirPrd* rec = air_ir::air_new_AirPrd(lr.arena);
     rec.tag = APRD_RECORD;
     rec.rec_init_count = 0;
-    for (usz i = 0; i < ic && i < 16; i++)
+    for (usz i = 0; i < ic && i < 64; i++)
     {
-        rec.rec_inits[rec.rec_init_count] = inits[i];
-        rec.rec_init_count = rec.rec_init_count + 1;
+        rec.push_rec(inits[i]);
     }
     lr.total_prd++;
     AirCmd* fin = lr.cut(rec, k);
@@ -2989,8 +2988,8 @@ fn AirCmd* AirLower.prim_cmd(AirLower* lr, Node* n, AirCmdTag tag, AirCns* k)
     }
     else if (tag == ACMD_ATOMIC) { c.atomic_op = n.p.op; c.atomic_order = (int)n.p.ival; }
     // Operands: value nodes are used directly; anything else is bound first, left to right.
-    Node*[17] ops; AirPrd*[17] ps; char*[17] names; usz oc = 0;
-    for (usz i = first; i < n.child_count && oc < 17; i++)
+    Node*[65] ops; AirPrd*[65] ps; char*[65] names; usz oc = 0;
+    for (usz i = first; i < n.child_count && oc < 65; i++)
     {
         if (n.children[i] == null) { continue; }
         ops[oc] = n.children[i]; oc++;
@@ -3007,7 +3006,7 @@ fn AirCmd* AirLower.prim_cmd(AirLower* lr, Node* n, AirCmdTag tag, AirCns* k)
         if (oc > 0) { c.prd = ps[0]; at = 1; }
         else { c.prd = air_ir::air_mk_int(lr.arena, 0); }
     }
-    for (usz i = at; i < oc && c.prd_count < 16; i++) { c.prds[c.prd_count] = ps[i]; c.prd_count++; }
+    for (usz i = at; i < oc && c.prd_count < 64; i++) { c.prds[c.prd_count] = ps[i]; c.prd_count++; }
     AirCmd* out = c;
     for (usz i = oc; i > 0; i--)
     {
@@ -3046,10 +3045,10 @@ fn AirCmd* AirLower.perform_op(AirLower* lr, char* op, Node** args, usz argc, Ai
     if (op == null) op = (char*)"op";
     char* op2 = lr.dup(op);
     AirPrd* payload = lr.mod.p_unit;
-    AirPrd*[16] av; usz ac = 0;
+    AirPrd*[64] av; usz ac = 0;
     AirCmd* binds = null;
     lr.scope.enter();
-    for (usz i = 0; i < argc && ac < 16; i++)
+    for (usz i = 0; i < argc && ac < 64; i++)
     {
         Node* a = args[i];
         if (a == null) continue;

@@ -1059,6 +1059,17 @@ fn Node* Parser.parse_type_atom(Parser* p)
                 }
                 return cur;
             }
+            // `dyn Shape`: a trait object (data pointer + vtable) for the interface Shape; the node names the interface, aux 77 marks it
+            if (t.len == 3 && t.start[0] == 'd' && t.start[1] == 'y' && t.start[2] == 'n' && (p.cur().type == Tk.TOKEN_IDENT || p.cur().type == Tk.TOKEN_TYPEVAR))
+            {
+                Tok it = p.advance();
+                Node* dn = p.mk_at(Nk.N_TY_NAME, it);
+                dn.name_id = p.intern_tok(it);
+                dn.p.sptr = it.start;
+                dn.p.slen = it.len;
+                dn.p.aux = 77;
+                return dn;
+            }
             Node* n = p.mk_at(Nk.N_TY_NAME, t);
             n.name_id = p.intern_tok(t);
             n.p.sptr = t.start;

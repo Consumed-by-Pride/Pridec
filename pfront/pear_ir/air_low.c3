@@ -49,7 +49,7 @@ const usz NOBLK  = 0xFFFFFFFF;
 enum InsK : int { I_LET, I_STORE, I_CALL, I_FIELD, I_PROJ, I_SYS, I_ATOMIC, I_FENCE, I_ASM }
 struct Ins
 {
-    InsK k; char* name; AirPrd* a; AirPrd* b; AirPrd*[16] args; usz nargs; char* fld; long idx;
+    InsK k; char* name; AirPrd* a; AirPrd* b; AirPrd*[MAXA] args; usz nargs; char* fld; long idx;
     int aop; int aord; bool vol; AirTyp* rty; char* text; char* cons; int dialect;   // atomic / fence / asm / volatile store
 }
 enum TermK : int { T_NONE, T_RET, T_JUMP, T_COND, T_TRAP, T_UNREACH }
@@ -61,25 +61,27 @@ struct Blk
 }
 struct Vx { AirPrd* p; AirTyp* t; }
 struct Pl { AirPrd* ptr; AirTyp* t; }
-struct VarB { Node* decl; AirPrd* p; AirTyp* t; bool slot; }
+struct VarB { Node* decl; AirPrd* p; AirTyp* t; bool slot; bool lit; }
 struct LoopF { usz brk; usz cont; }
 struct Cap { Node* decl; AirTyp* t; bool by_ref; AirPrd* sp; }
 // a `defer`: function-scoped, registered by setting its flag, replayed (in reverse order) before every return
-struct DeferR { Node* node; AirPrd* flag; Cap[8] snap; usz nsnap; }
+struct DeferR { Node* node; AirPrd* flag; Cap[MAXC] snap; usz nsnap; }
 struct FnInfo
 {
-    Node* decl; char* name; AirTyp* ret; AirTyp*[16] pty; usz np; AirTyp* fnty; bool ext; bool queued; bool seen; bool variadic;
-    bool is_arm; long hnd; usz arm_j; bool is_lam; bool is_ind; bool is_adapt; FnInfo* adapt; Cap[16] caps; usz ncaps; AirTyp* envty;
+    Node* decl; char* name; AirTyp* ret; AirTyp*[MAXA] pty; usz np; AirTyp* fnty; bool ext; bool queued; bool seen; bool variadic;
+    bool is_arm; long hnd; usz arm_j; bool is_thk; bool is_yld; bool is_drv; bool is_ret; bool is_lam; bool is_ind; bool is_adapt; bool is_dyn; AirTyp* dself; FnInfo* adapt; Cap[MAXC] caps; usz ncaps; AirTyp* envty;
     TSub[MAXTP] ts; usz nts;
 }
 // a function VALUE is the record { fn: ptr, env: ptr(u8) }; `fn` takes the environment as its first argument
-struct CloI { AirTyp* ty; AirTyp* fnty; AirTyp*[16] ps; usz np; AirTyp* ret; }
+struct CloI { AirTyp* ty; AirTyp* fnty; AirTyp*[MAXA] ps; usz np; AirTyp* ret; }
 // generics are monomorphised: an instance is keyed by its declaration and the concrete type arguments
 struct TSub { Node* tp; AirTyp* t; }
 struct StInfo { Node* decl; char* name; AirTyp* ty; AirTyp*[MAXTP] targs; usz nt; }
 // an untagged `union` is a block of words; every field is a typed view of offset 0
 struct UniI { Node* decl; AirTyp* ty; char*[8] fnames; AirTyp*[8] ft; usz nf; usz words; }
 struct Fat { AirTyp* elem; AirTyp* ty; bool is_str; }
+// `dyn I`: a trait object {data: ptr(u8), vt: ptr(u8)}; the vtable is a constant array of thunk addresses, one per interface method
+struct DynI { Node* iface; AirTyp* ty; }
 // an enum is the explicit record { tag: i64, payload: [words x i64] }; every payload field sits at its own
 // 8-byte word offset and is stored/loaded through a typed pointer (the layout is decided HERE, not by the consumer)
 struct VarI { char* name; Node* decl; AirTyp*[8] ft; usz nf; usz[8] off; }
@@ -90,9 +92,15 @@ struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; 
 // the handler's result slot and raises the unwinding flag `__unw` (= the handler id), and every call site checks
 // the flag and unwinds (jump to the enclosing handler exit, or return).  Non-tail / multi-shot resumption needs
 // continuations and is reported as unsupported.
-struct HndI { usz id; AirTyp* frame; AirTyp* th; usz nops; char*[8] g; AirTyp*[8] hty; AirTyp*[8] cty; }
-struct ArmCx { Node* kdecl; AirPrd* flag; AirPrd* rv; AirTyp* opret; AirTyp* th; bool on; }
+struct HndI { usz id; AirTyp* frame; AirTyp* th; usz nops; char*[8] g; AirTyp*[8] hty; AirTyp*[8] cty;
+    // fiber mode (an arm resumes in non-tail position): the handled computation runs on its own fiber, the arms on the handler's stack
+    bool fib; AirTyp* bt; usz f_bres; usz f_fib; usz f_st; usz f_live; usz f_gen; usz f_op; usz[10] f_env; usz[8] f_arg; usz[8] f_rv; usz[8] np; AirTyp*[8] rty;
+    Node* retarm; FnInfo*[8] fy; FnInfo*[8] farm; FnInfo* fret; FnInfo* fdrv; FnInfo* fthk; }
+struct ArmCx { Node* kdecl; AirPrd* flag; AirPrd* rv; AirTyp* opret; AirTyp* th; bool on; bool fib; AirPrd* frame; AirPrd* kgen; usz hix; usz j; }
 const usz MAXTP = 8;   // type parameters of one generic function / data type
+const usz MAXA = 64;    // parameters / arguments / tuple elements of one function, call or tuple
+const usz MAXA1 = 65;
+const usz MAXC = 64;    // variables one closure captures
 struct GlInfo { Node* decl; char* name; AirTyp* ty; bool is_ext; }
 
 struct Low
@@ -110,6 +118,7 @@ struct Low
     int errors; int fn_errors; int fns_ok; int fail_fn; Node* entry_decl;
     bool uses_alloc;
     Fat[48] fats; usz nfat;
+    DynI[24] dyns; usz ndyn;
     Enm* ens; usz nen;
     CloI* clos; usz nclo; usz nlam;
     DeferR[16] defers; usz ndefer; bool in_replay;
@@ -118,6 +127,7 @@ struct Low
     UniI[32] unis; usz nuni;
     HndI[256] hnds; usz nhnd; ArmCx arm; usz[16] hx; AirTyp*[16] hxt; usz nhx; bool eff_on; bool unw_made; char*[64] hopn; AirTyp*[64] hopt; usz nhop;
     Node* ty_root;
+    Node*[64] litd; AirTyp*[64] litt; usz nlit; bool lit_retry; bool lit_final;   // variables initialised with an unsuffixed literal: their type is decided by their first typed use (a function is lowered again)
     int unchecked; bool discard; bool if_discard; bool blk_discard;
 }
 
@@ -143,6 +153,26 @@ fn void Low.err(Low* lw, Node* n, char* what, char* who)
     Node* at = n != null ? n : lw.cur_node;
     printf("air-low: error: %d:%d: in `%s`: %s%s%s\n", at != null ? at.line : 0, at != null ? at.col : 0,
            lw.cur_fn != null ? lw.cur_fn : "?", what, who != null ? ": " : "", who != null ? who : "");
+}
+// ── untyped literal variables ──
+// `let mut total = 0` has no type of its own: the first use that fixes it (`total + i` with an i32, `return total` from an i32
+// function, `total = x`) decides.  The function is lowered once with the default (i64 / f64); a mismatch at such a variable is
+// recorded (silently) and the function is lowered again with the recorded type.
+fn AirTyp* Low.lit_lookup(Low* lw, Node* decl)
+{
+    for (usz i = 0; i < lw.nlit; i++) { if (lw.litd[i] == decl) { return lw.litt[i]; } }
+    return null;
+}
+fn bool Low.lit_note(Low* lw, Node* operand, AirTyp* t)
+{
+    if (lw.lit_final || lw.fn_errors > 0 || operand == null || operand.kind != Nk.N_EXPR_IDENT || operand.resolved == null || t == null) { return false; }
+    VarB* v = lw.find_var(operand.resolved);
+    if (v == null || !v.lit || v.t == null || air_ll::ty_eq(v.t, t)) { return false; }
+    bool same_class = (air_ll::ty_is_int(v.t) && air_ll::ty_is_int(t)) || (air_ll::ty_is_float(v.t) && air_ll::ty_is_float(t));
+    if (!same_class || lw.lit_lookup(operand.resolved) != null || lw.nlit >= 64) { return false; }
+    lw.litd[lw.nlit] = operand.resolved; lw.litt[lw.nlit] = t; lw.nlit++;
+    lw.lit_retry = true; lw.fn_errors++;
+    return true;
 }
 fn void Low.unsup(Low* lw, Node* n, char* what)
 {
@@ -361,6 +391,13 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
         case Nk.N_TY_NAME: case Nk.N_TY_PATH:
         {
             char* nm = air_types::air_node_text(t, lw.it);
+            if (t.kind == Nk.N_TY_NAME && t.p.aux == 77)   // `dyn Shape`
+            {
+                Node* di = t.resolved;
+                if (di == null || di.kind != Nk.N_DECL_INTERFACE) { di = lw.iface_named(nm); }
+                if (di == null) { lw.err(t, "dyn needs an interface", nm); return null; }
+                return lw.dyn_ty(di);
+            }
             if (nm != null && seq(nm, "str")) { return lw.fat_ty(null, true); }
             if (nm != null && seq(nm, "ptr")) { return lw.ptr(lw.m.t_u8); }   // the untyped pointer
             if (nm != null)
@@ -428,13 +465,13 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
         }
         case Nk.N_TY_TUPLE:
         {
-            AirTyp*[16] ts; usz n = 0;
-            for (usz i = 0; i < t.child_count; i++) { if (n >= 16) { lw.unsup(t, "a tuple type with more than 16 elements"); return null; } AirTyp* e = lw.ty(t.children[i]); if (e == null) { return null; } ts[n] = e; n++; }
+            AirTyp*[MAXA] ts; usz n = 0;
+            for (usz i = 0; i < t.child_count; i++) { if (n >= MAXA) { lw.unsup(t, "a tuple type with more than 64 elements"); return null; } AirTyp* e = lw.ty(t.children[i]); if (e == null) { return null; } ts[n] = e; n++; }
             return air_ir::air_mk_typ_tuple(lw.a, &ts[0], n);
         }
         case Nk.N_TY_FN:
         {
-            AirTyp*[16] ps; usz np; AirTyp* rt;
+            AirTyp*[MAXA] ps; usz np; AirTyp* rt;
             if (!lw.sig_of(t, &ps[0], &np, &rt)) { return null; }
             return lw.clo_ty(&ps[0], np, rt);   // a function-typed value is a closure record
         }
@@ -455,14 +492,14 @@ fn bool Low.sig_of(Low* lw, Node* tf, AirTyp** ps, usz* np, AirTyp** rt)
     *np = 0;
     if (cc > 2)   // `fn(a, b) -> r`: the parameters are the leading children
     {
-        for (usz i = 0; i + 1 < cc; i++) { if (*np >= 16) { lw.unsup(tf, "a function type with more than 16 parameters"); return false; } AirTyp* e = lw.ty(tf.children[i]); if (e == null) { return false; } ps[*np] = e; *np = *np + 1; }
+        for (usz i = 0; i + 1 < cc; i++) { if (*np >= MAXA) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; } AirTyp* e = lw.ty(tf.children[i]); if (e == null) { return false; } ps[*np] = e; *np = *np + 1; }
     }
     else if (dom.kind == Nk.N_TY_UNIT) { }
     else if (dom.kind == Nk.N_TY_TUPLE)
     {
         for (usz i = 0; i < dom.child_count; i++)
         {
-            if (*np >= 16 && !(dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count)) { lw.unsup(tf, "a function type with more than 16 parameters"); return false; }
+            if (*np >= MAXA && !(dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count)) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; }
             if (dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count) { continue; }   // the trailing `...` of a variadic extern
             AirTyp* e = lw.ty(dom.children[i]); if (e == null) { return false; }
             ps[*np] = e; *np = *np + 1;
@@ -501,8 +538,8 @@ fn FnInfo* Low.fn_inst(Low* lw, Node* d, AirTyp** targs, usz nt)
 // pick the instance a call refers to: infer the type arguments by unifying the declared parameter types with the arguments
 fn FnInfo* Low.callee_fn(Low* lw, Node* call, Node* cr)
 {
-    Node*[17] ar; usz nar = 0;
-    for (usz i = 1; i < call.child_count && nar < 16; i++) { ar[nar] = call.children[i]; nar++; }
+    Node*[MAXA1] ar; usz nar = 0;
+    for (usz i = 1; i < call.child_count && nar < MAXA; i++) { ar[nar] = call.children[i]; nar++; }
     return lw.callee_fn_a(call, cr, &ar[0], nar);
 }
 fn FnInfo* Low.callee_fn_a(Low* lw, Node* call, Node* cr, Node** args, usz nargs)
@@ -601,7 +638,7 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
             if (tn == null && c.child_count > 0 && c.children[0] != null) { tn = c.children[0].type_ann; }
             if (tn == null && c.child_count > 0 && c.children[0] != null && c.children[0].kind == Nk.N_PAT_WILDCARD) { continue; }   // `main(_)`: no parameter
             AirTyp* pt = lw.ty(tn); if (pt == null) { lw.nfn--; return null; }
-            if (f.np >= 16) { lw.unsup(d, "a function with more than 16 parameters"); lw.nfn--; return null; }
+            if (f.np >= MAXA) { lw.unsup(d, "a function with more than 64 parameters"); lw.nfn--; return null; }
             f.pty[f.np] = pt; f.np++;
         }
         Node* rn = d.type_ann;
@@ -759,7 +796,7 @@ fn void Low.t_end(Low* lw, TermK k)
 fn void Low.bind_var(Low* lw, Node* decl, AirPrd* p, AirTyp* t, bool slot)
 {
     if (lw.nvars >= MAXVAR) { lw.unsup(decl, "more than 8192 locals in one function"); return; }
-    lw.vars[lw.nvars].decl = decl; lw.vars[lw.nvars].p = p; lw.vars[lw.nvars].t = t; lw.vars[lw.nvars].slot = slot; lw.nvars++;
+    lw.vars[lw.nvars].decl = decl; lw.vars[lw.nvars].p = p; lw.vars[lw.nvars].t = t; lw.vars[lw.nvars].slot = slot; lw.vars[lw.nvars].lit = false; lw.nvars++;
 }
 fn VarB* Low.find_var(Low* lw, Node* decl)
 {
@@ -798,13 +835,13 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         case Nk.N_EXPR_STRING: return lw.ptr(lw.m.t_u8);
         case Nk.N_EXPR_LAMBDA:
         {
-            AirTyp*[16] hps; usz hnp = 0; AirTyp* hret = null;
+            AirTyp*[MAXA] hps; usz hnp = 0; AirTyp* hret = null;
             for (usz i = 0; i < n.child_count; i++)
             {
                 Node* c = n.children[i]; if (c == null || c.kind != Nk.N_DECL_PARAM) { continue; }
                 Node* pat = c.child_count > 0 ? c.children[0] : null;
                 Node* tn = c.type_ann != null ? c.type_ann : (pat != null ? pat.type_ann : null);
-                AirTyp* pt = tn == null ? null : lw.ty_quiet(tn); if (pt == null || hnp >= 15) { return null; }
+                AirTyp* pt = tn == null ? null : lw.ty_quiet(tn); if (pt == null || hnp >= MAXA - 1) { return null; }
                 hps[hnp] = pt; hnp++;
             }
             hret = n.type_ann == null ? null : lw.ty_quiet(n.type_ann); if (hret == null) { return null; }
@@ -812,7 +849,7 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         }
         case Nk.N_EXPR_PERFORM:
         {
-            Node* eff = null; Node* op = null; AirTyp*[16] ps; usz np = 0; AirTyp* ret = null;
+            Node* eff = null; Node* op = null; AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
             if (n.child_count == 0 || !lw.eff_path(n.children[0], &eff, &op)) { return null; }
             return lw.op_sig(op, &ps[0], &np, &ret) ? ret : null;
         }
@@ -821,7 +858,7 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         {
             if (n.child_count > 0 && n.children[0] != null && n.children[0].resolved != null && n.children[0].resolved.kind == Nk.N_DECL_EFFECT)
             {
-                Node* op = lw.effect_op(n.children[0].resolved, lw.dname(n)); AirTyp*[16] ps; usz np = 0; AirTyp* ret = null;
+                Node* op = lw.effect_op(n.children[0].resolved, lw.dname(n)); AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
                 return (op != null && lw.op_sig(op, &ps[0], &np, &ret)) ? ret : null;
             }
             Node* mcr = n.resolved;
@@ -832,11 +869,12 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
                 else { int se = lw.errors; int sfe = lw.fn_errors; mf = lw.callee_fn(n, mcr); if (mf == null) { lw.errors = se; lw.fn_errors = sfe; } }
                 return mf == null ? null : mf.ret;
             }
+            { DynI* dh = n.child_count > 0 ? lw.dyn_recv(n.children[0]) : null; if (dh != null) { return lw.dyn_ret(dh, lw.dname(n)); } }
             Node* hm = lw.method_target(n);
             if (hm != null)
             {
-                Node*[17] har; usz nhar = 0;
-                for (usz i = 0; i < n.child_count && nhar < 16; i++) { har[nhar] = n.children[i]; nhar++; }
+                Node*[MAXA1] har; usz nhar = 0;
+                for (usz i = 0; i < n.child_count && nhar < MAXA; i++) { har[nhar] = n.children[i]; nhar++; }
                 int se2 = lw.errors; int sfe2 = lw.fn_errors;
                 FnInfo* hf = lw.callee_fn_a(n, hm, &har[0], nhar);
                 if (hf == null) { lw.errors = se2; lw.fn_errors = sfe2; }
@@ -894,6 +932,12 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
             if (n.child_count == 0) { return null; }
             Node* cr = n.children[0].resolved;
             if (cr == null && n.children[0].kind == Nk.N_EXPR_IDENT) { cr = lw.fn_by_name(lw.text(n.children[0])); }
+            if (cr != null && cr.kind == Nk.N_DECL_FN && lw.is_iface_fn(cr))
+            {
+                DynI* dh = n.child_count > 1 ? lw.dyn_recv(n.children[1]) : null;
+                if (dh != null) { return lw.dyn_ret(dh, lw.text(cr)); }
+                cr = lw.iface_impl(n, cr); if (cr == null) { return null; }
+            }
             if (cr != null && (cr.kind == Nk.N_DECL_FN || cr.kind == Nk.N_DECL_EXTERN_FN))
             {
                 Node*[MAXTP] htp; FnInfo* f = null;
@@ -959,8 +1003,8 @@ fn AirTyp* Low.hint(Low* lw, Node* n)
         case Nk.N_BLOCK: return n.child_count > 0 ? lw.hint(n.children[n.child_count - 1]) : lw.m.t_unit;
         case Nk.N_EXPR_TUPLE:
         {
-            if (n.child_count == 0 || n.child_count > 16) { return null; }
-            AirTyp*[16] hts;
+            if (n.child_count == 0 || n.child_count > MAXA) { return null; }
+            AirTyp*[MAXA] hts;
             for (usz i = 0; i < n.child_count; i++) { hts[i] = lw.hint(n.children[i]); if (hts[i] == null) { return null; } }
             return air_ir::air_mk_typ_tuple(lw.a, &hts[0], n.child_count);
         }
@@ -1113,7 +1157,7 @@ fn Vx Low.mk_fat(Low* lw, AirTyp* ft, Vx ptr, Vx len0)
     AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_RECORD;
     AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("ptr"); f0.value = ptr.p;
     AirFieldInit* f1 = air_ir::air_new_AirFieldInit(lw.a); f1.name = lw.dup("len"); f1.value = len.p;
-    p.rec_inits[0] = f0; p.rec_inits[1] = f1; p.rec_init_count = 2;
+    p.push_rec(f0); p.push_rec(f1);
     return lw.let_(p, ft, "_fat");
 }
 fn Vx Low.field_of(Low* lw, Vx v, char* f, long k, AirTyp* t)
@@ -1277,7 +1321,8 @@ fn AirTyp* Low.union_ty(Low* lw, Node* decl)
     u.ty = lw.nominal(nm);
     for (usz i = 0; i < decl.child_count; i++)
     {
-        Node* f = decl.children[i]; if (f == null || f.kind != Nk.N_DECL_FIELD || u.nf >= 8) { continue; }
+        Node* f = decl.children[i]; if (f == null || f.kind != Nk.N_DECL_FIELD) { continue; }
+        if (u.nf >= 8) { lw.unsup(decl, "union with more than 8 fields"); return null; }
         AirTyp* ft = lw.ty(f.type_ann); if (ft == null) { return null; }
         u.fnames[u.nf] = lw.dup(lw.text(f)); u.ft[u.nf] = ft; u.nf++;
         usz w = lw.words(ft); if (w > u.words) { u.words = w; }
@@ -1311,7 +1356,7 @@ fn Vx Low.union_lit(Low* lw, Node* n, Node* r)
     for (usz i = 0; i < u.words; i++) { AirPrd* zi = air_ir::air_mk_int(lw.a, 0); zi.ty = lw.m.t_i64; z.add_sub(zi); }
     Vx zv = lw.let_(z, air_ir::air_mk_typ_array(lw.a, lw.m.t_i64, (long)u.words), "_z");
     Vx zr; AirPrd* rec = air_ir::air_new_AirPrd(lw.a); rec.tag = APRD_RECORD;
-    AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("bits"); f0.value = zv.p; rec.rec_inits[0] = f0; rec.rec_init_count = 1;
+    AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("bits"); f0.value = zv.p; rec.push_rec(f0);
     zr = lw.let_(rec, ut, "_u0");
     lw.store(slot.p, zr);
     for (usz i = 0; i < n.child_count; i++)
@@ -1419,7 +1464,7 @@ fn Vx Low.variant_value(Low* lw, Enm* e, usz vi, Node** argn, usz na, Node* at)
 {
     VarI* v = &e.v[vi];
     if (na != v.nf) { lw.err(at, "wrong number of payload values for the variant", v.name); return lw.unit(); }
-    Vx[8] av;
+    Vx[MAXA] av;
     for (usz i = 0; i < na; i++) { av[i] = lw.expr(argn[i], v.ft[i]); av[i] = lw.coerce_arg(argn[i], av[i], v.ft[i]); }
     return lw.variant_pack(e, vi, &av[0], na);
 }
@@ -1631,7 +1676,15 @@ fn VarB* Low.find_var_named(Low* lw, Node* id)
     }
     return null;
 }
-fn Vx Low.read_var(Low* lw, Node* id)
+// `let origin = 0` at the top level, never reassigned and without a type: a literal constant that takes the type of each use
+fn Node* Low.lit_global_init(Low* lw, Node* r)
+{
+    if (r == null || r.kind != Nk.N_DECL_LET || r.child_count < 2 || r.type_ann != null || (r.flags & pfront_core::NF_MUT) != 0) { return null; }
+    Node* pat = r.children[0]; Node* init = r.children[1];
+    if (pat == null || pat.kind != Nk.N_PAT_IDENT || pat.type_ann != null || (pat.flags & (pfront_core::NF_MUT | pfront_core::NF_ADDR_TAKEN)) != 0 || (r.flags & pfront_core::NF_ADDR_TAKEN) != 0) { return null; }
+    return lw.is_lit_init(init) ? init : null;
+}
+fn Vx Low.read_var(Low* lw, Node* id, AirTyp* want)
 {
     Node* r = id.resolved;
     VarB* v = lw.find_var(r);
@@ -1654,6 +1707,7 @@ fn Vx Low.read_var(Low* lw, Node* id)
         for (usz i = 0; i < r.child_count; i++) { Node* c = r.children[i]; if (c != null && pfront_core::is_expr(c.kind)) { init = c; } }
         if (init != null) { return lw.expr(init, r.type_ann != null ? lw.ty_quiet(r.type_ann) : null); }
     }
+    if (r != null && r.kind == Nk.N_DECL_LET) { Node* li = lw.lit_global_init(r); if (li != null) { return lw.expr(li, want); } }
     if (r != null && (r.kind == Nk.N_DECL_STATIC || r.kind == Nk.N_DECL_LET))   // a top-level `let` is a global
     {
         GlInfo* g = lw.global_for(r);
@@ -1940,16 +1994,16 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
             Node* r = e.resolved; if (r == null && e.child_count > 0) { r = e.children[0].resolved; }
             if (r == null || r.kind != Nk.N_DECL_STRUCT || t.tag != ATYP_NOMINAL) { return null; }
             AirDecl* d = lw.data_of(t); if (d == null || d.ctor_count != 1) { return null; }
-            AirCtorDecl* c = d.ctors[0]; if (c.field_count > 16) { return null; }
-            AirPrd*[16] vals; bool[16] seen;
-            for (usz i = 0; i < 16; i++) { seen[i] = false; vals[i] = null; }
+            AirCtorDecl* c = d.ctors[0]; if (c.field_count > MAXA) { return null; }
+            AirPrd*[MAXA] vals; bool[MAXA] seen;
+            for (usz i = 0; i < MAXA; i++) { seen[i] = false; vals[i] = null; }
             for (usz i = 0; i < e.child_count; i++)
             {
                 Node* fi = e.children[i];
                 if (fi == null || fi.kind != Nk.N_EXPR_FIELD_INIT) { continue; }
                 char* fnm = lw.text(fi); long k = -1;
                 AirTyp* ft = fnm == null ? null : lw.field_ty(t, fnm, &k);
-                if (ft == null || k < 0 || k >= 16 || fi.child_count == 0) { return null; }
+                if (ft == null || k < 0 || k >= (long)MAXA || fi.child_count == 0) { return null; }
                 AirPrd* v = lw.const_init(fi.children[0], ft); if (v == null) { return null; }
                 vals[(usz)k] = v; seen[(usz)k] = true;
             }
@@ -1959,13 +2013,13 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
                 if (!seen[i]) { return null; }
                 AirFieldInit* fi = air_ir::air_new_AirFieldInit(lw.a);
                 fi.name = c.fields[i].name; fi.value = vals[i];
-                p.rec_inits[p.rec_init_count] = fi; p.rec_init_count++;
+                p.push_rec(fi);
             }
             return p;
         }
         case Nk.N_EXPR_TUPLE:
         {
-            if (t.tag != ATYP_TUPLE || t.arg_count != e.child_count || e.child_count > 16) { return null; }
+            if (t.tag != ATYP_TUPLE || t.arg_count != e.child_count || e.child_count > MAXA) { return null; }
             AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_TUPLE; p.ty = t;
             for (usz i = 0; i < e.child_count; i++)
             {
@@ -2054,6 +2108,263 @@ fn Node* Low.fn_by_name(Low* lw, char* nm)
 }
 // ── interfaces: `impl I for T` methods are resolved statically (every generic body is instantiated per type, so a method
 // call has one target); there is no dynamic dispatch / dictionary yet ──
+// ── `dyn I`: dynamic dispatch through a vtable ──
+fn Node* Low.iface_named(Low* lw, char* nm)
+{
+    if (nm == null) { return null; }
+    for (usz r = 0; r < lw.nroots; r++)
+    {
+        Node* root = lw.roots[r]; if (root == null) { continue; }
+        for (usz i = 0; i < root.child_count; i++)
+        {
+            Node* c = root.children[i];
+            if (c != null && c.kind == Nk.N_DECL_INTERFACE) { char* cn = lw.text(c); if (cn != null && seq(cn, nm)) { return c; } }
+        }
+    }
+    return null;
+}
+fn AirTyp* Low.dyn_ty(Low* lw, Node* iface)
+{
+    for (usz i = 0; i < lw.ndyn; i++) { if (lw.dyns[i].iface == iface) { return lw.dyns[i].ty; } }
+    if (lw.ndyn >= 24) { lw.unsup(iface, "more than 24 dyn interface types"); return null; }
+    char[200] b; snprintf(&b[0], 200, "dyn.%s", lw.text(iface));
+    char* name = lw.dup(&b[0]);
+    AirTyp* t = lw.nominal(name);
+    lw.dyns[lw.ndyn].iface = iface; lw.dyns[lw.ndyn].ty = t; lw.ndyn++;
+    AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, name);
+    AirCtorDecl* c = air_ir::air_mk_ctor_decl(lw.a, name);
+    c.result_ty = t;
+    d.add_ctor(c);
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("data"), lw.ptr(lw.m.t_u8), AMULT_UNR));
+    c.add_field(air_ir::air_mk_field(lw.a, lw.dup("vt"), lw.ptr(lw.m.t_u8), AMULT_UNR));
+    lw.m.add_decl(d);
+    return t;
+}
+fn DynI* Low.dyn_of(Low* lw, AirTyp* t)
+{
+    if (t == null || t.tag != ATYP_NOMINAL) { return null; }
+    for (usz i = 0; i < lw.ndyn; i++) { if (lw.dyns[i].ty == t || seq(lw.dyns[i].ty.name, t.name)) { return &lw.dyns[i]; } }
+    return null;
+}
+// the dyn type of an expression's receiver (null when it is not a trait object)
+fn DynI* Low.dyn_recv(Low* lw, Node* rv)
+{
+    if (rv == null) { return null; }
+    int se = lw.errors; int sfe = lw.fn_errors;
+    AirTyp* t = lw.hint(rv);
+    lw.errors = se; lw.fn_errors = sfe;
+    return lw.dyn_of(t);
+}
+fn bool Low.mentions_self(Low* lw, Node* t)
+{
+    if (t == null) { return false; }
+    if (t.kind == Nk.N_TY_SELF) { return true; }
+    if (t.kind == Nk.N_TY_NAME) { char* nm = air_types::air_node_text(t, lw.it); return nm != null && seq(nm, "Self"); }
+    for (usz i = 0; i < t.child_count; i++) { if (lw.mentions_self(t.children[i])) { return true; } }
+    return false;
+}
+fn Node* Low.dyn_method(Low* lw, Node* iface, char* nm, usz* idx)
+{
+    usz k = 0;
+    for (usz i = 0; i < iface.child_count; i++)
+    {
+        Node* m = iface.children[i]; if (m == null || m.kind != Nk.N_DECL_FN) { continue; }
+        char* mn = lw.text(m);
+        if (mn != null && nm != null && seq(mn, nm)) { *idx = k; return m; }
+        k++;
+    }
+    return null;
+}
+fn usz Low.dyn_nmethods(Low* lw, Node* iface)
+{
+    usz k = 0;
+    for (usz i = 0; i < iface.child_count; i++) { Node* m = iface.children[i]; if (m != null && m.kind == Nk.N_DECL_FN) { k++; } }
+    return k;
+}
+// the signature of a method as seen through the trait object: the receiver is `Self`, `*Self` or `&Self`; nothing else may mention Self
+fn bool Low.dyn_sig(Low* lw, Node* m, AirTyp** ps, usz* np, AirTyp** rt)
+{
+    Node* tf = m.type_ann;
+    if (tf == null || tf.kind != Nk.N_TY_FN || tf.child_count < 2) { lw.err(m, "interface method without a signature", lw.text(m)); return false; }
+    usz cc = tf.child_count;
+    if (cc > 0 && tf.children[cc - 1] != null && tf.children[cc - 1].kind == Nk.N_TY_EFFECT_ROW) { cc--; }
+    Node* dom = tf.children[0];
+    Node* recv = dom.kind == Nk.N_TY_TUPLE ? (dom.child_count > 0 ? dom.children[0] : null) : dom;
+    if (recv == null || !lw.mentions_self(recv)) { lw.err(m, "a method without a Self receiver cannot be called through dyn", lw.text(m)); return false; }
+    *np = 0;
+    if (dom.kind == Nk.N_TY_TUPLE)
+    {
+        for (usz i = 1; i < dom.child_count; i++)
+        {
+            if (lw.mentions_self(dom.children[i])) { lw.err(m, "a method that takes Self besides the receiver cannot be called through dyn", lw.text(m)); return false; }
+            if (*np >= MAXA - 1) { lw.unsup(m, "dyn method with more than 63 parameters"); return false; }
+            AirTyp* e = lw.ty(dom.children[i]); if (e == null) { return false; }
+            ps[*np] = e; *np = *np + 1;
+        }
+    }
+    Node* rn = tf.children[cc - 1];
+    if (lw.mentions_self(rn)) { lw.err(m, "a method that returns Self cannot be called through dyn", lw.text(m)); return false; }
+    AirTyp* r = lw.ty(rn); if (r == null) { return false; }
+    *rt = r;
+    return true;
+}
+fn AirTyp* Low.dyn_ret(Low* lw, DynI* di, char* mname)
+{
+    usz k = 0; Node* m = lw.dyn_method(di.iface, mname, &k); if (m == null) { return null; }
+    AirTyp*[MAXA] ps; usz np = 0; AirTyp* rt = null;
+    int se = lw.errors; int sfe = lw.fn_errors;
+    bool ok = lw.dyn_sig(m, &ps[0], &np, &rt);
+    lw.errors = se; lw.fn_errors = sfe;
+    return ok ? rt : null;
+}
+// the thunk the vtable holds for one method of T: (data: ptr, args..) -> ret; it loads the receiver and calls T's impl
+fn FnInfo* Low.dyn_thunk(Low* lw, Node* iface, Node* m, AirTyp* t, Node* at)
+{
+    Node* im = lw.impl_method(t, lw.text(m));
+    if (im == null) { lw.err(at, "this type does not implement the interface method", lw.text(m)); return null; }
+    AirTyp*[MAXA] ps; usz np = 0; AirTyp* rt = null;
+    if (!lw.dyn_sig(m, &ps[0], &np, &rt)) { return null; }
+    FnInfo* tg = lw.fn_for(im); if (tg == null) { return null; }
+    AirTyp* pt = lw.ptr(t);
+    bool by_ptr = tg.np >= 1 && air_ll::ty_eq(tg.pty[0], pt);
+    if (tg.np != np + 1 || !(by_ptr || air_ll::ty_eq(tg.pty[0], t)) || !air_ll::ty_eq(tg.ret, rt)) { lw.err(at, "the impl's signature differs from the interface's (needed to build the vtable)", lw.text(m)); return null; }
+    for (usz i = 0; i < np; i++) { if (!air_ll::ty_eq(tg.pty[i + 1], ps[i])) { lw.err(at, "the impl's signature differs from the interface's (needed to build the vtable)", lw.text(m)); return null; } }
+    char[240] b; usz n = (usz)snprintf(&b[0], 240, "dynthunk.%s.%s.", lw.text(iface), lw.text(m)); mang(t, &b[0], n, 240);
+    for (usz i = 0; i < lw.nfn; i++) { if (lw.fns[i].is_dyn && seq(lw.fns[i].name, &b[0])) { return &lw.fns[i]; } }
+    if (lw.nfn >= MAXFN) { lw.unsup(null, "more than 4096 functions"); return null; }
+    lw.queue(tg);
+    FnInfo* f = &lw.fns[lw.nfn]; lw.nfn++;
+    f.name = lw.dup(&b[0]); f.is_dyn = true; f.adapt = tg; f.dself = t; f.decl = null;
+    f.np = np + 1; f.pty[0] = lw.ptr(lw.m.t_u8);
+    for (usz i = 0; i < np; i++) { f.pty[i + 1] = ps[i]; }
+    f.ret = rt; f.fnty = lw.arrow(&f.pty[0], f.np, f.ret);
+    lw.queue(f);
+    return f;
+}
+fn void Low.lower_dynthunk(Low* lw, FnInfo* f)
+{
+    lw.cur_fn = f.name; lw.fn_errors = 0; lw.cur_node = null;
+    lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nhx = 0; lw.arm.on = false; lw.nnames = 0; lw.tmpn = 0;
+    lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
+    usz entry = lw.blk("entry"); lw.cur = entry;
+    AirBinder*[MAXA] pb; Vx[MAXA] pv;
+    for (usz i = 0; i < f.np; i++)
+    {
+        char* pnm = lw.fresh("a");
+        pb[i] = air_ir::air_mk_binder(lw.a, pnm, f.pty[i], AMULT_UNR);
+        pv[i] = lw.vref(pnm, f.pty[i]);
+    }
+    AirTyp* pt = lw.ptr(f.dself);
+    Vx sp = lw.coerce(pv[0], pt);
+    Vx recv = air_ll::ty_eq(f.adapt.pty[0], f.dself) ? lw.load(sp.p, f.dself) : sp;
+    Ins* ins = lw.push(I_CALL);
+    ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, f.adapt.name); ins.nargs = f.np;
+    ins.args[0] = recv.p;
+    for (usz i = 1; i < f.np; i++) { ins.args[i] = pv[i].p; }
+    Vx r = lw.vref(ins.name, f.ret);
+    if (f.ret.tag == ATYP_BOTTOM) { lw.t_end(T_UNREACH); } else { lw.finish_ret(r, null); }
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
+    ad.is_pub = false;
+    for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
+    ad.ret_ty = f.ret; ad.def_body = lw.assemble();
+    lw.m.add_decl(ad); lw.fns_ok++;
+}
+// the constant vtable of (interface, T): one thunk address per method, in declaration order
+fn char* Low.dyn_vtable(Low* lw, DynI* di, AirTyp* t, Node* at)
+{
+    char[240] b; usz n = (usz)snprintf(&b[0], 240, "vt.%s.", lw.text(di.iface)); mang(t, &b[0], n, 240);
+    char* nm = lw.dup(&b[0]);
+    for (usz i = 0; i < lw.ngl; i++) { if (seq(lw.gls[i].name, nm)) { return nm; } }
+    usz nm_ = lw.dyn_nmethods(di.iface);
+    if (nm_ == 0 || nm_ > 64) { lw.err(at, "a dyn interface needs 1 to 64 methods", lw.text(di.iface)); return null; }
+    if (lw.ngl >= MAXGL) { lw.unsup(null, "more than 1024 globals"); return null; }
+    AirTyp* pu8 = lw.ptr(lw.m.t_u8);
+    AirTyp* at_ = air_ir::air_mk_typ_array(lw.a, pu8, (long)nm_);
+    AirPrd* init = air_ir::air_new_AirPrd(lw.a); init.tag = APRD_ARRAY; init.ty = at_;
+    for (usz i = 0; i < di.iface.child_count; i++)
+    {
+        Node* m = di.iface.children[i]; if (m == null || m.kind != Nk.N_DECL_FN) { continue; }
+        FnInfo* th = lw.dyn_thunk(di.iface, m, t, at); if (th == null) { return null; }
+        AirPrd* v = air_ir::air_mk_var(lw.a, th.name); v.ty = pu8;
+        init.push_sub(v);
+    }
+    GlInfo* g = &lw.gls[lw.ngl]; g.decl = null; g.name = nm; g.ty = at_; lw.ngl++;
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_GLOBAL, nm); ad.ret_ty = at_; ad.g_mut = false; ad.g_init = init;
+    lw.m.add_decl(ad);
+    return nm;
+}
+// a pointer to a concrete T becomes the trait object {data, vtable of T}
+fn Vx Low.to_dyn(Low* lw, Vx a, DynI* di, Node* at)
+{
+    if (a.t == null || air_ll::ty_eq(a.t, di.ty)) { return a; }
+    if (a.t.tag != ATYP_PTR || a.t.args[0] == null || (air_ll::ty_is_int(a.t.args[0]) && air_ll::ty_bits(a.t.args[0]) == 8))
+    { lw.err(at, "a dyn value is made from a pointer to a concrete type (write &x)", lw.text(di.iface)); return lw.unit(); }
+    AirTyp* t = a.t.args[0];
+    char* vt = lw.dyn_vtable(di, t, at); if (vt == null) { return lw.unit(); }
+    if (!lw.live()) { return lw.unit(); }
+    AirTyp* pu8 = lw.ptr(lw.m.t_u8);
+    Vx data = lw.coerce(a, pu8);
+    AirTyp* at_ = air_ir::air_mk_typ_array(lw.a, pu8, (long)lw.dyn_nmethods(di.iface));
+    Vx vg = lw.gptr(vt, at_); Vx vp = lw.coerce(vg, pu8);
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_RECORD;
+    AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("data"); f0.value = data.p;
+    AirFieldInit* f1 = air_ir::air_new_AirFieldInit(lw.a); f1.name = lw.dup("vt"); f1.value = vp.p;
+    p.push_rec(f0); p.push_rec(f1);
+    return lw.let_(p, di.ty, "_dyn");
+}
+// d.m(args): load the thunk from the vtable and call it with the data pointer
+fn Vx Low.dyn_call(Low* lw, Node* n, Node* recv, Node** args, usz nargs, DynI* di, char* mname)
+{
+    usz k = 0; Node* m = lw.dyn_method(di.iface, mname, &k);
+    if (m == null) { lw.err(n, "the interface has no such method", mname); return lw.unit(); }
+    AirTyp*[MAXA] ps; usz np = 0; AirTyp* rt = null;
+    if (!lw.dyn_sig(m, &ps[0], &np, &rt)) { return lw.unit(); }
+    if (nargs == 1 && np == 0 && args[0] != null && args[0].kind == Nk.N_EXPR_UNIT) { nargs = 0; }
+    if (nargs != np) { lw.err(n, "wrong number of arguments", mname); return lw.unit(); }
+    Vx d = lw.expr(recv, di.ty);
+    Vx[MAXA] av;
+    for (usz i = 0; i < np; i++) { av[i] = lw.expr(args[i], ps[i]); av[i] = lw.coerce_arg(args[i], av[i], ps[i]); }
+    if (!lw.live()) { return lw.unit(); }
+    AirTyp* pu8 = lw.ptr(lw.m.t_u8);
+    Vx data = lw.field_of(d, "data", 0, pu8); Vx vt = lw.field_of(d, "vt", 1, pu8);
+    Vx vtp = lw.coerce(vt, lw.ptr(pu8));
+    Vx[1] ix; ix[0] = lw.lit_int((long)k, lw.m.t_i64);
+    Vx slot = lw.gep(vtp.p, pu8, &ix[0], 1, pu8);
+    Vx code = lw.load(slot.p, pu8);
+    AirTyp*[MAXA1] fps; fps[0] = pu8; for (usz i = 0; i < np; i++) { fps[i + 1] = ps[i]; }
+    AirTyp* fty = lw.arrow(&fps[0], np + 1, rt);
+    Vx fp = lw.coerce(code, fty);
+    Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_r"); ins.a = fp.p; ins.nargs = np + 1; ins.args[0] = data.p;
+    for (usz i = 0; i < np; i++) { ins.args[i + 1] = av[i].p; }
+    Vx r = lw.vref(ins.name, rt);
+    if (rt.tag == ATYP_BOTTOM) { lw.t_end(T_UNREACH); } else { lw.check_unw(); }
+    return r;
+}
+// the impl method that `m(x, ..)` (a call node) dispatches to, chosen by the type of its first argument
+fn Node* Low.iface_impl(Low* lw, Node* call, Node* ifn)
+{
+    if (call.child_count < 2 || call.children[1] == null) { return null; }
+    int se = lw.errors; int sfe = lw.fn_errors;
+    AirTyp* rt = lw.hint(call.children[1]);
+    lw.errors = se; lw.fn_errors = sfe;
+    return rt == null ? null : lw.impl_method(rt, lw.text(ifn));
+}
+// is `d` a method declaration inside an `interface`?
+fn bool Low.is_iface_fn(Low* lw, Node* d)
+{
+    for (usz r = 0; r < lw.nroots; r++)
+    {
+        Node* root = lw.roots[r]; if (root == null) { continue; }
+        for (usz i = 0; i < root.child_count; i++)
+        {
+            Node* it = root.children[i];
+            if (it == null || it.kind != Nk.N_DECL_INTERFACE) { continue; }
+            for (usz j = 0; j < it.child_count; j++) { if (it.children[j] == d) { return true; } }
+        }
+    }
+    return false;
+}
 fn Node* Low.impl_target(Low* lw, Node* im)
 {
     Node* tg = null;
@@ -2101,8 +2412,8 @@ fn Node* Low.method_target(Low* lw, Node* n)
 }
 fn Vx Low.call_method(Low* lw, Node* n, Node* m, AirTyp* want)
 {
-    Node*[17] ar; usz nar = 0;
-    for (usz i = 0; i < n.child_count && nar < 16; i++) { ar[nar] = n.children[i]; nar++; }   // the receiver is the first argument
+    Node*[MAXA1] ar; usz nar = 0;
+    for (usz i = 0; i < n.child_count && nar < MAXA; i++) { ar[nar] = n.children[i]; nar++; }   // the receiver is the first argument
     return lw.call_to_a(n, m, &ar[0], nar, want);
 }
 fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
@@ -2112,6 +2423,15 @@ fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
     if (lw.arm.on && lw.arm.kdecl != null && lw.is_resume(n, lw.arm.kdecl)) { return lw.resume_do(n.child_count > 1 ? n.children[1] : null, n); }
     Node* cr = cal.resolved;
     if (cr == null && cal.kind == Nk.N_EXPR_IDENT) { cr = lw.fn_by_name(lw.text(cal)); }
+    if (cr != null && cr.kind == Nk.N_DECL_FN && lw.is_iface_fn(cr))
+    {
+        // `area(x)` for an interface method: the same as `x.area()`; the receiver's type picks the impl
+        if (n.child_count < 2 || n.children[1] == null) { lw.unsup(n, "interface method called with no receiver (the first argument selects the impl)"); return lw.unit(); }
+        { DynI* dd = lw.dyn_recv(n.children[1]); if (dd != null) { return lw.dyn_call(n, n.children[1], &n.children[2], n.child_count - 2, dd, lw.text(cr)); } }
+        Node* im = lw.iface_impl(n, cr);
+        if (im == null) { lw.err(n, "no impl of this interface method for the type of the first argument", lw.text(cr)); return lw.unit(); }
+        return lw.call_to(n, im, want);
+    }
     if (cr == null || !(cr.kind == Nk.N_DECL_FN || cr.kind == Nk.N_DECL_EXTERN_FN))
     {
         // a call through a function VALUE (a closure record)
@@ -2125,8 +2445,8 @@ fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
 // a call whose callee declaration is known; `n.children[1..]` are the arguments (a call node or a `Module.fn(..)` method node)
 fn Vx Low.call_to(Low* lw, Node* n, Node* cr, AirTyp* want)
 {
-    Node*[17] ar; usz nar = 0;
-    for (usz i = 1; i < n.child_count && nar < 16; i++) { ar[nar] = n.children[i]; nar++; }
+    Node*[MAXA1] ar; usz nar = 0;
+    for (usz i = 1; i < n.child_count && nar < MAXA; i++) { ar[nar] = n.children[i]; nar++; }
     return lw.call_to_a(n, cr, &ar[0], nar, want);
 }
 fn Vx Low.call_to_a(Low* lw, Node* n, Node* cr, Node** args, usz nargs, AirTyp* want)
@@ -2138,8 +2458,8 @@ fn Vx Low.call_to_a(Low* lw, Node* n, Node* cr, Node** args, usz nargs, AirTyp* 
     // a single `()` argument means no arguments
     if (na == 1 && f.np == 0) { na = 0; }
     if (na != f.np && !(f.variadic && na >= f.np)) { lw.err(n, "wrong number of arguments", f.name); return lw.unit(); }
-    Vx[16] av;
-    for (usz i = 0; i < na && i < 16; i++)
+    Vx[MAXA] av;
+    for (usz i = 0; i < na && i < MAXA; i++)
     {
         AirTyp* pt = i < f.np ? f.pty[i] : null;
         Vx a = lw.expr(args[i], pt);
@@ -2157,8 +2477,8 @@ fn Vx Low.call_to_a(Low* lw, Node* n, Node* cr, Node** args, usz nargs, AirTyp* 
     }
     Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
     ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, f.name); ins.nargs = na;
-    for (usz i = 0; i < na && i < 16; i++) { ins.args[i] = av[i].p; }
-    if (na > 16) { lw.unsup(n, "call with more than 16 arguments"); }
+    for (usz i = 0; i < na && i < MAXA; i++) { ins.args[i] = av[i].p; }
+    if (na > MAXA) { lw.unsup(n, "call with more than 64 arguments"); }
     Vx r = lw.vref(ins.name, f.ret);
     if (f.ret.tag == ATYP_BOTTOM) { lw.t_end(T_UNREACH); }
     else if (!f.ext) { lw.check_unw(); }
@@ -2185,6 +2505,7 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
         }
     }
     if (a.t.tag == ATYP_ARROW && lw.clo_of(want) != null) { return lw.to_clo(a, want, at); }
+    { DynI* dw = lw.dyn_of(want); if (dw != null) { return lw.to_dyn(a, dw, at); } }
     if (a.t.tag == ATYP_ARRAY && lw.fat_elem(want) != null && !lw.is_str_t(want) && air_ll::ty_eq(a.t.args[0], lw.fat_elem(want))) {
         Pl pl;   // an array that has an address decays to a slice that ALIASES it
         if (at != null && (at.kind == Nk.N_EXPR_IDENT || at.kind == Nk.N_EXPR_FIELD || at.kind == Nk.N_EXPR_INDEX || at.kind == Nk.N_EXPR_DEREF)
@@ -2200,6 +2521,7 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
     if (air_ll::ty_is_int(a.t) && air_ll::ty_is_int(want) && air_ll::ty_bits(a.t) < air_ll::ty_bits(want)
         && (air_ll::ty_is_signed(a.t) == air_ll::ty_is_signed(want) || !air_ll::ty_is_signed(a.t)))
     { return lw.cast(a, want); }
+    if (lw.lit_note(at, want)) { return a; }
     { char[200] lb; usz ln = mang(a.t, &lb[0], 0, 90); lb[ln] = 0; char[100] rb; usz rn = mang(want, &rb[0], 0, 90); rb[rn] = 0; char[320] mb; snprintf(&mb[0], 320, "%s given, %s wanted", &lb[0], &rb[0]); lw.err(at, "argument type differs from the parameter type", lw.dup(&mb[0])); }
     return a;
 }
@@ -2215,7 +2537,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_EXPR_INT: case Nk.N_EXPR_FLOAT: case Nk.N_EXPR_BOOL: case Nk.N_EXPR_CHAR: case Nk.N_EXPR_UNIT:
         case Nk.N_EXPR_NULL: case Nk.N_EXPR_STRING: case Nk.N_EXPR_BYTES:
             return lw.lit(n, want);
-        case Nk.N_EXPR_IDENT: return lw.read_var(n);
+        case Nk.N_EXPR_IDENT: return lw.read_var(n, want);
         case Nk.N_BLOCK: lw.blk_discard = dsc || (want != null && !lw.carries(want)); return lw.block(n, want);
         case Nk.N_EXPR_BINARY: return lw.binary(n, want);
         case Nk.N_EXPR_UNARY: return lw.unary(n, want);
@@ -2234,6 +2556,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             }
             bool lit0 = c0.kind == Nk.N_EXPR_INT || c0.kind == Nk.N_EXPR_FLOAT;
             Vx v = lw.expr(c0, lit0 ? to : h);
+            { DynI* dcast = lw.dyn_of(to); if (dcast != null) { return lw.to_dyn(v, dcast, n); } }
             Enm* ce = lw.enum_of_ty(v.t);
             if (ce != null && ce.nm > 0) { return lw.union_cast(v, to, ce); }
             if (v.t != null && v.t.tag == ATYP_ARRAY && to.tag == ATYP_PTR)   // an array decays to the address of its storage (a stack slot of this function)
@@ -2382,6 +2705,7 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
                 return lw.perform_op(eff, op, &n.children[1], n.child_count - 1, n);
             }
             if (n.resolved != null && (n.resolved.kind == Nk.N_DECL_FN || n.resolved.kind == Nk.N_DECL_EXTERN_FN)) { return lw.call_to(n, n.resolved, want); }   // `module.fn(args)`
+            { DynI* dm = n.child_count > 0 ? lw.dyn_recv(n.children[0]) : null; if (dm != null) { return lw.dyn_call(n, n.children[0], &n.children[1], n.child_count - 1, dm, lw.dname(n)); } }
             Node* imm = lw.method_target(n);
             if (imm != null) { return lw.call_method(n, imm, want); }   // `value.method(args)` through an `impl`
             long vi = -1; char* mn = lw.dname(n);
@@ -2394,8 +2718,8 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             AirTyp* wt = (want != null && want.tag == ATYP_TUPLE) ? want : null;
             if (n.child_count == 0) { return lw.unit(); }
             AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_TUPLE;
-            AirTyp*[16] ts;
-            for (usz i = 0; i < n.child_count && i < 16; i++)
+            AirTyp*[MAXA] ts;
+            for (usz i = 0; i < n.child_count && i < MAXA; i++)
             {
                 Vx e = lw.expr(n.children[i], wt != null && i < wt.arg_count ? wt.args[i] : null);
                 ts[i] = e.t; p.add_sub(e.p);
@@ -2541,7 +2865,7 @@ fn Vx Low.struct_lit(Low* lw, Node* n, AirTyp* want)
         if (!seen[i]) { lw.err(n, "field is not initialised", c.fields[i].name); return lw.unit(); }
         AirFieldInit* fi = air_ir::air_new_AirFieldInit(lw.a);
         fi.name = c.fields[i].name; fi.value = vals[i].p;
-        p.rec_inits[p.rec_init_count] = fi; p.rec_init_count++;
+        p.push_rec(fi);
     }
     return lw.let_(p, st, "_rec");
 }
@@ -2705,6 +3029,7 @@ fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
         else if (l.p != null && l.p.tag == APRD_INT && air_ll::ty_is_int(r.t)) { l = lw.lit_int(l.p.ival, r.t); }
         else if (l.t.tag == ATYP_PTR && r.p != null && r.p.tag == APRD_NULL) { r = lw.coerce(r, l.t); }
         else if (shift && air_ll::ty_is_int(l.t) && air_ll::ty_is_int(r.t)) { r = lw.coerce(r, l.t); }
+        else if (lw.lit_note(n.children[0], r.t) || lw.lit_note(n.children[1], l.t)) { return lw.unit(); }
         else { char[200] lb; usz ln = mang(l.t, &lb[0], 0, 90); lb[ln] = 0; char[100] rb; usz rn = mang(r.t, &rb[0], 0, 90); rb[rn] = 0; char[320] mb; snprintf(&mb[0], 320, "%s vs %s", &lb[0], &rb[0]); lw.err(n, "operands have different types", lw.dup(&mb[0])); return lw.unit(); }
     }
     if (!lw.live()) { return lw.unit(); }
@@ -2854,8 +3179,19 @@ fn void Low.let_decl(Low* lw, Node* n)
         lw.pat(pat, dv, bad);
         return;
     }
+    if (pat.type_ann != null && pat.type_ann.kind == Nk.N_TY_NAME)   // a `Rewrite` value exists at compile time only: the theory layer applied it at every `e |> rules` site
+    {
+        char* tn = lw.text(pat.type_ann);
+        if (tn != null && seq(tn, "Rewrite")) { return; }
+    }
     AirTyp* declared = pat.type_ann != null ? lw.ty(pat.type_ann) : (n.type_ann != null ? lw.ty(n.type_ann) : null);
     if (pat.type_ann != null && declared == null) { return; }
+    bool litinit = false;
+    if (declared == null && init != null && pat.kind == Nk.N_PAT_IDENT && lw.is_lit_init(init))
+    {
+        litinit = true;
+        AirTyp* lt = lw.lit_lookup(pat); if (lt != null) { declared = lt; }
+    }
     if (init != null && init.kind == Nk.N_EXPR_ARRAY && init.p.aux == 8 && pat.kind == Nk.N_PAT_IDENT && (declared == null || declared.tag == ATYP_ARRAY))
     {
         AirTyp* rat = null; Vx sl = lw.repeat_slot(init, declared, &rat);   // `let a = [v; n]` fills the array in place
@@ -2883,13 +3219,25 @@ fn void Low.let_decl(Low* lw, Node* n)
         if (s.p != null && s.p.tag == APRD_VAR) { s.p = air_ir::air_mk_var(lw.a, s.p.name); }
         if (v.p != null) { lw.store(s.p, v); }
         lw.bind_var(pat, s.p, t, true);
+        if (litinit) { VarB* vb = lw.find_var(pat); if (vb != null) { vb.lit = true; } }
         return;
     }
     // immutable: an SSA name
-    if (v.p != null && v.p.tag == APRD_VAR) { lw.bind_var(pat, v.p, t, false); return; }
+    if (v.p != null && v.p.tag == APRD_VAR) { lw.bind_var(pat, v.p, t, false); if (litinit) { VarB* vb = lw.find_var(pat); if (vb != null) { vb.lit = true; } } return; }
     Ins* ins = lw.push(I_LET); if (ins == null) { return; }
     ins.name = nm; ins.a = v.p; v.p.ty = t;
     lw.bind_var(pat, air_ir::air_mk_var(lw.a, nm), t, false);
+    if (litinit) { VarB* vb = lw.find_var(pat); if (vb != null) { vb.lit = true; } }
+}
+// an initialiser whose type is only a default: an unsuffixed number (possibly negated)
+fn bool Low.is_lit_init(Low* lw, Node* e)
+{
+    if (e == null) { return false; }
+    if (e.kind == Nk.N_EXPR_UNARY && e.child_count == 1 && (Tk)e.p.op == Tk.TOKEN_MINUS) { return lw.is_lit_init(e.children[0]); }
+    if (e.kind == Nk.N_EXPR_IDENT && e.resolved != null && e.resolved.kind == Nk.N_DECL_LET && e.resolved != lw.cur_node) { return lw.lit_global_init(e.resolved) != null; }
+    if (e.kind != Nk.N_EXPR_INT && e.kind != Nk.N_EXPR_FLOAT) { return false; }
+    if (e.kind == Nk.N_EXPR_FLOAT) { return true; }   // a float literal has no width suffix
+    return lw.hint(e) == null;
 }
 
 fn void Low.assign(Low* lw, Node* n)
@@ -2908,6 +3256,7 @@ fn void Low.assign(Low* lw, Node* n)
         Vx cur = vol ? lw.load_v(p.ptr, p.t) : lw.load(p.ptr, p.t);
         bool shift = b == ABIN_SHL || b == ABIN_SHR;
         Vx r = lw.expr(n.children[1], p.t);
+        if (!shift && r.t != null && !air_ll::ty_eq(r.t, p.t) && !(r.p != null && r.p.tag == APRD_INT) && lw.lit_note(n.children[0], r.t)) { return; }
         if (shift) { r = lw.coerce(r, p.t); }
         else { r = lw.coerce_arg(n.children[1], r, p.t); }
         if (!lw.live()) { return; }
@@ -2916,6 +3265,7 @@ fn void Low.assign(Low* lw, Node* n)
         return;
     }
     Vx v = lw.expr(n.children[1], p.t);
+    if (v.t != null && !air_ll::ty_eq(v.t, p.t) && !(v.p != null && v.p.tag == APRD_INT) && lw.lit_note(n.children[0], v.t)) { return; }
     v = lw.coerce_arg(n.children[1], v, p.t);
     if (!lw.live()) { return; }
     if (vol) { lw.store_v(p.ptr, v); } else { lw.store(p.ptr, v); }
@@ -3453,9 +3803,9 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
         {
             if (pat.kind == Nk.N_PAT_IDENT || pat.kind == Nk.N_PAT_WILDCARD)   // `t`: the whole argument tuple
             {
-                AirTyp*[16] tts; for (usz i = 0; i < nscr && i < 16; i++) { tts[i] = scr[i].t; }
+                AirTyp*[MAXA] tts; for (usz i = 0; i < nscr && i < MAXA; i++) { tts[i] = scr[i].t; }
                 AirPrd* tp = air_ir::air_new_AirPrd(lw.a); tp.tag = APRD_TUPLE;
-                for (usz i = 0; i < nscr && i < 16; i++) { tp.add_sub(scr[i].p); }
+                for (usz i = 0; i < nscr && i < MAXA; i++) { tp.add_sub(scr[i].p); }
                 Vx tv = lw.let_(tp, air_ir::air_mk_typ_tuple(lw.a, &tts[0], nscr), "_tu");
                 ok = lw.pat(pat, tv, next);
             }
@@ -3570,10 +3920,10 @@ fn void Low.register_defer(Low* lw, Node* n)
     if (d == null) { lw.unsup(n, "defer in this position"); return; }
     if (!lw.live()) { return; }
     // SSA values the body mentions are copied now (they may not dominate the exits); memory slots are read at replay
-    Cap[16] caps; usz nc = 0;
+    Cap[MAXC] caps; usz nc = 0;
     for (usz i = 0; i < n.child_count; i++) { lw.collect_caps(n.children[i], n, &caps[0], &nc); }
     d.nsnap = 0;
-    for (usz i = 0; i < nc && d.nsnap < 8; i++)
+    for (usz i = 0; i < nc && d.nsnap < MAXC; i++)
     {
         if (caps[i].by_ref) { continue; }
         VarB* v = lw.find_var(caps[i].decl); if (v == null) { continue; }
@@ -3635,15 +3985,16 @@ fn AirTyp* Low.clo_ty(Low* lw, AirTyp** ps, usz np, AirTyp* ret)
         if (same) { return c.ty; }
     }
     if (lw.nclo >= 128) { lw.unsup(null, "more than 128 function types"); return null; }
-    if (np > 7) { lw.unsup(null, "function value with more than 7 parameters"); return null; }
-    char[260] nm; usz n = (usz)snprintf(&nm[0], 260, "Fn.");
-    for (usz j = 0; j < np; j++) { n = mang(ps[j], &nm[0], n, 260); n += (usz)snprintf(&nm[0] + n, (usz)(260 - n), "."); }
-    n += (usz)snprintf(&nm[0] + n, (usz)(260 - n), ">"); mang(ret, &nm[0], n, 260);
+    if (np >= MAXA) { lw.unsup(null, "function value with more than 63 parameters"); return null; }
+    char[1200] nm; usz n = (usz)snprintf(&nm[0], 1200, "Fn.");
+    for (usz j = 0; j < np; j++) { n = mang(ps[j], &nm[0], n, 1200); n += (usz)snprintf(&nm[0] + n, (usz)(1200 - n), "."); }
+    n += (usz)snprintf(&nm[0] + n, (usz)(1200 - n), ">"); n = mang(ret, &nm[0], n, 1200);
+    if (n + 40 >= 1200) { n = 1100; snprintf(&nm[0] + n, 100, ".#%d", (int)lw.nclo); }   // a name too long to spell stays unique
     char* name = lw.dup(&nm[0]);
     AirTyp* t = lw.nominal(name);
     CloI* c = &lw.clos[lw.nclo]; lw.nclo++;
     c.ty = t; c.np = np; c.ret = ret;
-    AirTyp*[16] fps; fps[0] = lw.ptr(lw.m.t_u8);
+    AirTyp*[MAXA1] fps; fps[0] = lw.ptr(lw.m.t_u8);
     for (usz j = 0; j < np; j++) { c.ps[j] = ps[j]; fps[j + 1] = ps[j]; }
     c.fnty = lw.arrow(&fps[0], np + 1, ret);
     AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, name);
@@ -3665,7 +4016,7 @@ fn Vx Low.mk_clo(Low* lw, AirTyp* cty, AirPrd* fnp, AirPrd* envp)
     AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_RECORD;
     AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("fn"); f0.value = fnp;
     AirFieldInit* f1 = air_ir::air_new_AirFieldInit(lw.a); f1.name = lw.dup("env"); f1.value = envp;
-    p.rec_inits[0] = f0; p.rec_inits[1] = f1; p.rec_init_count = 2;
+    p.push_rec(f0); p.push_rec(f1);
     return lw.let_(p, cty, "_clo");
 }
 fn Vx Low.null_env(Low* lw)
@@ -3720,7 +4071,8 @@ fn void Low.collect_caps(Low* lw, Node* n, Node* lam, Cap* caps, usz* nc)
         {
             bool have = false;
             for (usz i = 0; i < *nc; i++) { if (caps[i].decl == n.resolved) { have = true; } }
-            if (!have && *nc < 16) { caps[*nc].decl = n.resolved; caps[*nc].t = v.t; caps[*nc].by_ref = v.slot; *nc = *nc + 1; }
+            if (!have && *nc >= MAXC) { lw.err(n, "more than 64 captured variables in one closure / defer", null); }
+            if (!have && *nc < MAXC) { caps[*nc].decl = n.resolved; caps[*nc].t = v.t; caps[*nc].by_ref = v.slot; *nc = *nc + 1; }
         }
     }
     for (usz i = 0; i < n.child_count; i++) { lw.collect_caps(n.children[i], lam, caps, nc); }
@@ -3763,7 +4115,7 @@ fn bool Low.lam_sig(Low* lw, Node* n, AirTyp* want, AirTyp** ps, usz* np, AirTyp
         Node* tn = c.type_ann != null ? c.type_ann : (pat != null ? pat.type_ann : null);
         AirTyp* pt = tn != null ? lw.ty(tn) : ((wc != null && *np < wc.np) ? wc.ps[*np] : null);
         if (pt == null) { lw.err(c, "lambda parameter needs a type", null); return false; }
-        if (*np >= 15) { lw.unsup(n, "lambda with more than 15 parameters"); return false; }
+        if (*np >= MAXA - 1) { lw.unsup(n, "lambda with more than 63 parameters"); return false; }
         ps[*np] = pt; *np = *np + 1;
     }
     *ret = n.type_ann != null ? lw.ty(n.type_ann) : (wc != null ? wc.ret : null);
@@ -3790,7 +4142,7 @@ fn Vx Low.heap_box(Low* lw, AirTyp* t)
 }
 fn Vx Low.lambda(Low* lw, Node* n, AirTyp* want)
 {
-    AirTyp*[16] ps; usz np = 0; AirTyp* ret = null;
+    AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
     if (!lw.lam_sig(n, want, &ps[0], &np, &ret)) { return lw.unit(); }
     AirTyp* cty = lw.clo_ty(&ps[0], np, ret); if (cty == null) { return lw.unit(); }
     if (lw.nfn >= MAXFN) { lw.unsup(n, "more than 4096 functions"); return lw.unit(); }
@@ -3852,7 +4204,7 @@ fn Vx Low.call_clo(Low* lw, Node* n, Vx c, CloI* ci)
     usz na = n.child_count - 1;
     if (na == 1 && ci.np == 0) { na = 0; }
     if (na != ci.np) { lw.err(n, "wrong number of arguments for a function value", null); return lw.unit(); }
-    Vx[8] av;
+    Vx[MAXA] av;
     for (usz i = 0; i < na; i++) { av[i] = lw.expr(n.children[i + 1], ci.ps[i]); av[i] = lw.coerce_arg(n.children[i + 1], av[i], ci.ps[i]); }
     if (!lw.live()) { return lw.unit(); }
     Vx fp = lw.field_of(c, "fn", 0, ci.fnty); Vx ep = lw.field_of(c, "env", 1, lw.ptr(lw.m.t_u8));
@@ -3871,7 +4223,7 @@ fn void Low.lower_lambda(Low* lw, FnInfo* f)
     lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
     usz entry = lw.blk("entry"); lw.cur = entry;
     lw.scan_defers(n, n);
-    AirBinder*[16] pb; Vx[16] pv;
+    AirBinder*[MAXA] pb; Vx[MAXA] pv;
     for (usz i = 0; i < f.np; i++)
     {
         char* pnm = lw.fresh("a");
@@ -3942,7 +4294,7 @@ fn void Low.lower_ind(Low* lw, FnInfo* f)
     lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nhx = 0; lw.arm.on = false; lw.nnames = 0; lw.tmpn = 0;
     lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
     usz entry = lw.blk("entry"); lw.cur = entry;
-    AirBinder*[16] pb; Vx[16] pv;
+    AirBinder*[MAXA] pb; Vx[MAXA] pv;
     for (usz i = 0; i < f.np; i++)
     {
         char* pnm = lw.fresh("a");
@@ -3968,7 +4320,7 @@ fn void Low.lower_adapter(Low* lw, FnInfo* f)
     lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nhx = 0; lw.arm.on = false; lw.nnames = 0; lw.tmpn = 0;
     lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
     usz entry = lw.blk("entry"); lw.cur = entry;
-    AirBinder*[16] pb; Vx[16] pv;
+    AirBinder*[MAXA] pb; Vx[MAXA] pv;
     for (usz i = 0; i < f.np; i++)
     {
         char* pnm = lw.fresh("a");
@@ -4037,14 +4389,14 @@ fn bool Low.op_sig(Low* lw, Node* op, AirTyp** ps, usz* np, AirTyp** ret)
             for (usz k = 0; k < c.child_count; k++)
             {
                 AirTyp* tk = lw.ty(c.children[k]); if (tk == null) { return false; }
-                if (*np >= 15) { lw.unsup(op, "effect operation with more than 15 parameters"); return false; }
+                if (*np >= MAXA - 1) { lw.unsup(op, "effect operation with more than 63 parameters"); return false; }
                 ps[*np] = tk; *np = *np + 1;
             }
             continue;
         }
         if (!pfront_core::is_type(c.kind)) { continue; }
         AirTyp* t = lw.ty(c); if (t == null) { return false; }
-        if (*np >= 15) { lw.unsup(op, "effect operation with more than 15 parameters"); return false; }
+        if (*np >= MAXA - 1) { lw.unsup(op, "effect operation with more than 63 parameters"); return false; }
         ps[*np] = t; *np = *np + 1;
     }
     return true;
@@ -4124,18 +4476,18 @@ fn Vx Low.mk_hop(Low* lw, AirTyp* hty, AirPrd* fnp, AirPrd* envp, long on)
     AirFieldInit* f0 = air_ir::air_new_AirFieldInit(lw.a); f0.name = lw.dup("fn"); f0.value = fnp;
     AirFieldInit* f1 = air_ir::air_new_AirFieldInit(lw.a); f1.name = lw.dup("env"); f1.value = envp;
     AirFieldInit* f2 = air_ir::air_new_AirFieldInit(lw.a); f2.name = lw.dup("on"); f2.value = lw.lit_int(on, lw.m.t_i64).p;
-    p.rec_inits[0] = f0; p.rec_inits[1] = f1; p.rec_inits[2] = f2; p.rec_init_count = 3;
+    p.push_rec(f0); p.push_rec(f1); p.push_rec(f2);
     return lw.let_(p, hty, "_hop");
 }
 fn Vx Low.perform_op(Low* lw, Node* eff, Node* op, Node** args, usz na, Node* at)
 {
-    AirTyp*[16] ps; usz np = 0; AirTyp* ret = null;
+    AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
     if (!lw.op_sig(op, &ps[0], &np, &ret)) { return lw.unit(); }
     if (na == 1 && np == 0) { na = 0; }
     if (na != np) { lw.err(at, "wrong number of arguments for the effect operation", lw.dname(op)); return lw.unit(); }
     AirTyp* cty = lw.clo_ty(&ps[0], np, ret); if (cty == null) { return lw.unit(); }
     CloI* ci = lw.clo_of(cty); AirTyp* hty = lw.hop_ty(cty); if (hty == null) { return lw.unit(); }
-    Vx[8] av;
+    Vx[MAXA] av;
     for (usz i = 0; i < na; i++) { av[i] = lw.expr(args[i], ps[i]); av[i] = lw.coerce_arg(args[i], av[i], ps[i]); }
     if (!lw.live()) { return lw.unit(); }
     char* g = lw.hop_global(lw.dname(eff), lw.dname(op), hty);
@@ -4176,6 +4528,31 @@ fn Vx Low.resume_do(Low* lw, Node* arg, Node* at)
             return r;
         }
         lw.err(at, "resume outside a handler arm", null); return lw.unit();
+    }
+    if (lw.arm.fib)   // non-tail resumption: store the answer, run the continuation (the driver), its result is the value of the resume
+    {
+        HndI* h = &lw.hnds[lw.arm.hix]; usz j = lw.arm.j; AirTyp* i64t = lw.m.t_i64;
+        Vx v = lw.unit(); bool hv = false;
+        if (arg != null)
+        {
+            v = lw.expr(arg, lw.arm.opret);
+            if (lw.carries(lw.arm.opret)) { v = lw.coerce_arg(arg, v, lw.arm.opret); hv = true; }
+        }
+        if (!lw.live()) { return lw.unit(); }
+        Vx frame; frame.p = lw.arm.frame; frame.t = lw.ptr(h.frame);
+        Vx gp = lw.hfield(frame, h, h.f_gen, i64t); Vx g0 = lw.load(gp.p, i64t); Vx kg = lw.load(lw.arm.kgen, i64t);
+        Vx fresh = lw.binop(ABIN_EQ, g0, kg);
+        usz go = lw.blk("resume"); usz bad = lw.blk("resumed_twice");
+        lw.t_cond(fresh, go, bad);
+        lw.cur = bad; lw.t_end(T_TRAP);   // one-shot continuations: a second resume (or one after a later request) traps
+        lw.cur = go;
+        lw.store(gp.p, lw.binop(ABIN_ADD, g0, lw.lit_int(1, i64t)));
+        if (hv) { lw.store(lw.hfield(frame, h, h.f_rv[j], lw.arm.opret).p, v); }
+        Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+        ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, h.fdrv.name); ins.nargs = 1; ins.args[0] = frame.p;
+        Vx r = lw.vref(ins.name, h.th);
+        lw.check_unw();
+        return r;
     }
     if (arg != null)
     {
@@ -4240,16 +4617,27 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     if (lw.nhnd >= 256) { lw.unsup(n, "more than 256 handle expressions"); return lw.unit(); }
     HndI* h = &lw.hnds[lw.nhnd]; h.id = lw.nhnd + 1; lw.nhnd++;
     h.th = th; h.nops = 0;
-    Node*[8] arms; Node*[8] ops; Node*[8] effs;
+    Node*[8] arms; Node*[8] ops; Node*[8] effs; Node* retarm = null;
     for (usz i = 1; i < n.child_count; i++)
     {
         Node* arm = n.children[i]; if (arm == null) { continue; }
         Node* op = arm.resolved;
-        if (op == null || op.kind != Nk.N_DECL_EFFECT_OP) { lw.unsup(arm, "handler arm that is not an effect operation (return arm)"); return lw.unit(); }
+        if ((op == null || op.kind != Nk.N_DECL_EFFECT_OP) && lw.is_ret_arm(arm))   // `| return(x) -> e`: applied to the value of the handled computation
+        {
+            if (retarm != null) { lw.err(arm, "two return arms", null); return lw.unit(); }
+            retarm = arm; continue;
+        }
+        if (op == null || op.kind != Nk.N_DECL_EFFECT_OP) { lw.unsup(arm, "handler arm that is neither an effect operation nor a return arm"); return lw.unit(); }
         if (h.nops >= 8) { lw.unsup(n, "handler with more than 8 operations"); return lw.unit(); }
         for (usz j = 0; j < h.nops; j++) { if (ops[j] == op) { lw.err(arm, "two arms for one operation", null); return lw.unit(); } }
         arms[h.nops] = arm; ops[h.nops] = op; effs[h.nops] = op.parent; h.nops++;
     }
+    // the value of the handled computation: the handle's own type unless a return arm maps it
+    AirTyp* bt = th;
+    if (retarm != null) { AirTyp* hb = lw.hint(body); if (hb != null) { bt = hb; } }
+    bool fibm = false;
+    for (usz j = 0; j < h.nops; j++) { if (!lw.arm_tail(arms[j], ops[j])) { fibm = true; } }
+    if (fibm) { return lw.handle_fib(h, n, body, bt, &arms[0], &ops[0], &effs[0], retarm); }
     // one frame on this function's stack: the displaced handler cells and the result slot
     char[64] fnm; snprintf(&fnm[0], 64, "Frame.%d", (int)h.id);
     h.frame = lw.nominal(lw.dup(&fnm[0]));
@@ -4258,7 +4646,7 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     FnInfo*[8] afs;
     for (usz j = 0; j < h.nops; j++)
     {
-        AirTyp*[16] ps; usz np = 0; AirTyp* ret = null;
+        AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
         if (!lw.op_sig(ops[j], &ps[0], &np, &ret)) { return lw.unit(); }
         AirTyp* cty = lw.clo_ty(&ps[0], np, ret); if (cty == null) { return lw.unit(); }
         h.cty[j] = cty; h.hty[j] = lw.hop_ty(cty);
@@ -4281,7 +4669,7 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     for (usz j = 0; j < h.nops; j++)
     {
         Node* arm = arms[j]; Node* op = ops[j];
-        AirTyp*[16] ps; usz np = 0; AirTyp* ret = null; lw.op_sig(op, &ps[0], &np, &ret);
+        AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null; lw.op_sig(op, &ps[0], &np, &ret);
         if (lw.nfn >= MAXFN) { lw.unsup(n, "more than 4096 functions"); return lw.unit(); }
         FnInfo* f = &lw.fns[lw.nfn]; lw.nfn++; lw.nlam++;
         char[200] b; snprintf(&b[0], 200, "%s.arm%d", lw.cur_fn, (int)lw.nlam);
@@ -4329,15 +4717,15 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     // the handled computation, with an exit block for abort-unwinding
     usz hx = lw.blk("hexit");
     char* hpn = lw.fresh("_hx");
-    lw.blks[hx].pnames[0] = hpn; lw.blks[hx].ptys[0] = th; lw.blks[hx].np = lw.carries(th) ? 1 : 0;
+    lw.blks[hx].pnames[0] = hpn; lw.blks[hx].ptys[0] = bt; lw.blks[hx].np = lw.carries(bt) ? 1 : 0;
     if (lw.nhx >= 16) { lw.unsup(n, "handle nested deeper than 16 in one function"); return lw.unit(); }
-    lw.hx[lw.nhx] = hx; lw.hxt[lw.nhx] = th; lw.nhx++;
-    Vx bv = lw.expr(body, th);
+    lw.hx[lw.nhx] = hx; lw.hxt[lw.nhx] = bt; lw.nhx++;
+    Vx bv = lw.expr(body, bt);
     lw.nhx--;
     if (lw.live())
     {
-        bv = lw.coerce_arg(body, bv, th);
-        if (lw.carries(th)) { Vx[1] a; a[0] = bv; lw.t_jump(hx, &a[0], 1); } else { lw.t_jump0(hx); }
+        bv = lw.coerce_arg(body, bv, bt);
+        if (lw.carries(bt)) { Vx[1] a; a[0] = bv; lw.t_jump(hx, &a[0], 1); } else { lw.t_jump0(hx); }
     }
     if (lw.blks[hx].npred == 0) { lw.cur = NOBLK; return lw.unit(); }
     lw.cur = hx;
@@ -4348,7 +4736,7 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
         Vx pv = lw.load(slotp.p, h.hty[j]);
         Vx gp = lw.gptr(h.g[j], h.hty[j]); lw.store(gp.p, pv);
     }
-    Vx hval = lw.vref(hpn, th);
+    Vx hval = lw.vref(hpn, bt);
     Vx up = lw.gptr(lw.unw_global(), lw.m.t_i64);
     Vx u = lw.load(up.p, lw.m.t_i64);
     Vx mine = lw.binop(ABIN_EQ, u, lw.lit_int((long)h.id, lw.m.t_i64));
@@ -4367,11 +4755,494 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     }
     else { lw.t_jump0(done); }
     lw.cur = pass;
-    if (lw.carries(th)) { Vx[1] a; a[0] = hval; lw.t_jump(done, &a[0], 1); } else { lw.t_jump0(done); }
+    if (retarm != null)   // the handled computation finished: the return arm maps its value (outside the handler, like the op arms)
+    {
+        Node* rp = null; Node* rb = null; lw.ret_arm_parts(retarm, &rp, &rb);
+        if (rp != null) { lw.pat(rp, hval, NOBLK); }
+        Vx rv2 = rb != null ? lw.expr(rb, th) : lw.unit();
+        if (lw.live())
+        {
+            if (lw.carries(th)) { rv2 = lw.coerce_arg(rb, rv2, th); Vx[1] a; a[0] = rv2; lw.t_jump(done, &a[0], 1); } else { lw.t_jump0(done); }
+        }
+    }
+    else if (lw.carries(th)) { Vx[1] a; a[0] = hval; lw.t_jump(done, &a[0], 1); } else { lw.t_jump0(done); }
     lw.cur = done;
     Vx res = lw.carries(th) ? lw.vref(dpn, th) : lw.unit();
     lw.check_unw();   // an abort aimed at an enclosing handler continues to unwind
     return res;
+}
+// ── handlers whose arm resumes in NON-TAIL position (`(resume k v) + 1`, resume inside a loop, code after the resume) ──
+// The handled computation runs on its OWN FIBER (runtime/compiler_rt.c: __pride_fiber_spawn / _resume / _yield / _release).
+// A `perform` calls the per-operation cell as before, but the cell now holds a YIELDER: it stores the arguments and the operation
+// number in the handler's frame, raises `__hreq` (= the handler id) and yields the fiber.  The handler's DRIVER function resumes the
+// fiber; when the fiber yields it runs the arm on the handler's own stack (outside the handler: deep semantics), and `resume k v`
+// inside the arm stores v, then calls the driver again (the continuation's result is the value of `resume`).  A request aimed at an
+// OUTER handler passes through the driver (it yields its own fiber and, when answered, resumes the inner fiber).  An arm that does
+// not resume ABORTS the computation: its value is the handle's value and the fiber is released.  One-shot: a second `resume` of the
+// same continuation traps.  Needs the fiber runtime: native targets that link compiler_rt (not wasm32 / freestanding).
+fn bool Low.is_ret_marker(Low* lw, Node* c)
+{
+    if (c == null || c.kind != Nk.N_PAT_IDENT) { return false; }
+    char* t = lw.text(c); return t != null && seq(t, "return");
+}
+fn bool Low.is_ret_arm(Low* lw, Node* arm)
+{
+    if (arm == null || arm.kind != Nk.N_HANDLER_ARM) { return false; }
+    for (usz i = 0; i < arm.child_count; i++) { if (arm.children[i] != null && arm.children[i].kind == Nk.N_MODULE_PATH) { return false; } }
+    for (usz i = 0; i < arm.child_count; i++)
+    {
+        Node* c = arm.children[i]; if (c == null) { continue; }
+        if (pfront_core::is_pattern(c.kind)) { return lw.is_ret_marker(c); }
+        return false;
+    }
+    return false;
+}
+// the binder of the return arm and its body
+fn void Low.ret_arm_parts(Low* lw, Node* arm, Node** pat, Node** body)
+{
+    *pat = null; *body = null; bool first = true;
+    for (usz i = 0; i < arm.child_count; i++)
+    {
+        Node* c = arm.children[i]; if (c == null) { continue; }
+        if (pfront_core::is_pattern(c.kind))
+        {
+            if (first && lw.is_ret_marker(c)) { first = false; continue; }
+            first = false; if (*pat == null) { *pat = c; }
+            continue;
+        }
+        *body = c;
+    }
+}
+// payload binders / continuation binder / body of an operation arm
+fn void Low.arm_parts(Low* lw, Node* arm, usz nargs, Node** pats, usz* npat, Node** kdecl, Node** body, Node** bodyseq)
+{
+    *npat = 0; *body = null; *bodyseq = null; *kdecl = null;
+    for (usz i = 0; i < arm.child_count; i++)
+    {
+        Node* c = arm.children[i]; if (c == null) { continue; }
+        if (c.kind == Nk.N_MODULE_PATH || c.kind == Nk.N_EXPR_PATH) { continue; }
+        if (pfront_core::is_pattern(c.kind)) { if (*npat < 8) { pats[*npat] = c; *npat = *npat + 1; } continue; }
+        if (*body != null) { *bodyseq = *body; }
+        *body = c;
+    }
+    if (*npat > nargs) { *kdecl = pats[*npat - 1]; }
+}
+fn bool Low.arm_tail(Low* lw, Node* arm, Node* op)
+{
+    AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
+    if (!lw.op_sig(op, &ps[0], &np, &ret)) { return true; }
+    Node*[8] pats; usz npat = 0; Node* kdecl = null; Node* body = null; Node* bodyseq = null;
+    lw.arm_parts(arm, np, &pats[0], &npat, &kdecl, &body, &bodyseq);
+    if (body == null) { return true; }
+    return lw.tail_ok(body, kdecl, true) && (bodyseq == null || lw.tail_ok(bodyseq, kdecl, false));
+}
+// `return` / `defer` in a handled body that runs on a fiber would leave the thunk, not the function that wrote them
+fn bool Low.has_ctl(Low* lw, Node* n)
+{
+    if (n == null) { return false; }
+    if (n.kind == Nk.N_STMT_RETURN || n.kind == Nk.N_STMT_DEFER) { return true; }
+    if (n.kind == Nk.N_EXPR_LAMBDA || n.kind == Nk.N_DECL_FN) { return false; }
+    for (usz i = 0; i < n.child_count; i++) { if (lw.has_ctl(n.children[i])) { return true; } }
+    return false;
+}
+fn char* Low.hreq_global(Low* lw)
+{
+    for (usz i = 0; i < lw.ngl; i++) { if (seq(lw.gls[i].name, "__hreq")) { return "__hreq"; } }
+    if (lw.ngl >= MAXGL) { lw.unsup(null, "more than 1024 globals"); return "__hreq"; }
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_GLOBAL, "__hreq"); ad.ret_ty = lw.m.t_i64; ad.g_mut = true;
+    ad.g_init = air_ir::air_mk_int(lw.a, 0); ad.g_init.ty = lw.m.t_i64;
+    lw.m.add_decl(ad);
+    GlInfo* g = &lw.gls[lw.ngl]; g.decl = null; g.name = "__hreq"; g.ty = lw.m.t_i64; lw.ngl++;
+    return "__hreq";
+}
+fn Vx Low.hfield(Low* lw, Vx frame, HndI* h, usz idx, AirTyp* t)
+{
+    Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int((long)idx, lw.m.t_i32);
+    return lw.gep(frame.p, h.frame, &ix[0], 2, t);
+}
+fn Vx Low.null_ptr(Low* lw)
+{
+    AirTyp* pu = lw.ptr(lw.m.t_u8); AirPrd* np_ = air_ir::air_mk_prd_null(lw.a); np_.ty = pu;
+    Vx r; r.p = np_; r.t = pu; return r;
+}
+fn Vx Low.call_rt(Low* lw, char* nm, Vx* args, usz n, AirTyp* ret)
+{
+    if (!lw.live()) { return lw.unit(); }
+    Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, nm); ins.nargs = n;
+    for (usz i = 0; i < n; i++) { ins.args[i] = args[i].p; }
+    return lw.vref(ins.name, ret);
+}
+fn char* Low.rt_decl(Low* lw, char* nm, usz np, AirTyp* ret)
+{
+    AirTyp* pu = lw.ptr(lw.m.t_u8); AirTyp*[2] ps; ps[0] = pu; ps[1] = pu;
+    return lw.intrinsic(nm, &ps[0], np, ret);
+}
+fn FnInfo* Low.new_gfn(Low* lw, char* stem, usz hid, long hn)
+{
+    if (lw.nfn >= MAXFN) { lw.unsup(null, "more than 4096 functions"); return null; }
+    FnInfo* f = &lw.fns[lw.nfn]; lw.nfn++; lw.nlam++;
+    char[200] b; snprintf(&b[0], 200, "%s.%s%d", lw.cur_fn, stem, (int)lw.nlam);
+    f.name = lw.dup(&b[0]); f.is_lam = true; f.hnd = hn; f.decl = null; (void)hid;
+    return f;
+}
+// the environment of a generated function: the captured variables of `scope` and the handler frame
+fn void Low.mk_genv(Low* lw, FnInfo* f, Node* scope, HndI* h)
+{
+    lw.collect_caps(scope, scope, &f.caps[0], &f.ncaps);
+    char[200] en; snprintf(&en[0], 200, "Env.%s", f.name);
+    char* ename = lw.dup(&en[0]);
+    f.envty = lw.nominal(ename);
+    AirDecl* d = air_ir::air_mk_decl(lw.a, ADECL_DATA, ename);
+    AirCtorDecl* cd = air_ir::air_mk_ctor_decl(lw.a, ename); cd.result_ty = f.envty; d.add_ctor(cd);
+    for (usz i = 0; i < f.ncaps; i++)
+    {
+        char[40] fnm2; snprintf(&fnm2[0], 40, "c%d", (int)i);
+        AirTyp* ft = f.caps[i].by_ref ? lw.ptr(f.caps[i].t) : f.caps[i].t;
+        cd.add_field(air_ir::air_mk_field(lw.a, lw.dup(&fnm2[0]), ft, AMULT_UNR));
+    }
+    cd.add_field(air_ir::air_mk_field(lw.a, lw.dup("frame"), lw.ptr(h.frame), AMULT_UNR));
+    lw.m.add_decl(d);
+}
+fn Vx Low.fill_genv(Low* lw, FnInfo* f, Vx fslot, HndI* h)
+{
+    Vx eslot = lw.alloca_(f.envty);
+    for (usz i = 0; i < f.ncaps; i++)
+    {
+        VarB* v = lw.find_var(f.caps[i].decl);
+        Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int((long)i, lw.m.t_i32);
+        AirTyp* ft = f.caps[i].by_ref ? lw.ptr(f.caps[i].t) : f.caps[i].t;
+        Vx g = lw.gep(eslot.p, f.envty, &ix[0], 2, ft);
+        Vx val; val.p = v.p; val.t = v.t;
+        if (f.caps[i].by_ref) { val.t = lw.ptr(v.t); }
+        lw.store(g.p, val);
+    }
+    Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int((long)f.ncaps, lw.m.t_i32);
+    Vx g = lw.gep(eslot.p, f.envty, &ix[0], 2, lw.ptr(h.frame));
+    lw.store(g.p, fslot);
+    return lw.coerce(eslot, lw.ptr(lw.m.t_u8));
+}
+fn Vx Low.load_genv(Low* lw, FnInfo* f, HndI* h, Vx envp)
+{
+    Vx ep = lw.coerce(envp, lw.ptr(f.envty));
+    for (usz i = 0; i < f.ncaps; i++)
+    {
+        Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int((long)i, lw.m.t_i32);
+        AirTyp* ft = f.caps[i].by_ref ? lw.ptr(f.caps[i].t) : f.caps[i].t;
+        Vx g = lw.gep(ep.p, f.envty, &ix[0], 2, ft);
+        Vx val = lw.load(g.p, ft);
+        lw.bind_var(f.caps[i].decl, val.p, f.caps[i].t, f.caps[i].by_ref);
+    }
+    Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int((long)f.ncaps, lw.m.t_i32);
+    Vx g = lw.gep(ep.p, f.envty, &ix[0], 2, lw.ptr(h.frame));
+    return lw.load(g.p, lw.ptr(h.frame));
+}
+fn void Low.gfn_begin(Low* lw, FnInfo* f, Node* at)
+{
+    lw.cur_fn = f.name; lw.fn_errors = 0; lw.cur_node = at;
+    lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nnames = 0; lw.tmpn = 0; lw.unchecked = 0; lw.nhx = 0; lw.arm.on = false;
+    lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
+    usz entry = lw.blk("entry"); lw.cur = entry;
+}
+fn void Low.gfn_end(Low* lw, FnInfo* f, AirBinder** pb)
+{
+    if (lw.fn_errors > 0) { lw.fail_fn++; return; }
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
+    ad.is_pub = false;
+    for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
+    ad.ret_ty = f.ret; ad.def_body = lw.assemble();
+    lw.m.add_decl(ad); lw.fns_ok++;
+}
+fn void Low.fib_release(Low* lw, Vx frame, HndI* h)
+{
+    AirTyp* pu = lw.ptr(lw.m.t_u8);
+    Vx lp = lw.hfield(frame, h, h.f_live, lw.m.t_i64); Vx lv = lw.load(lp.p, lw.m.t_i64);
+    Vx nz = lw.binop(ABIN_NEQ, lv, lw.lit_int(0, lw.m.t_i64));
+    usz rel = lw.blk("frel"); usz keep = lw.blk("fkeep");
+    lw.t_cond(nz, rel, keep);
+    lw.cur = rel;
+    lw.store(lp.p, lw.lit_int(0, lw.m.t_i64));
+    Vx fp = lw.hfield(frame, h, h.f_fib, pu); Vx fv = lw.load(fp.p, pu);
+    Vx[1] ra; ra[0] = fv; lw.call_rt("__pride_fiber_release", &ra[0], 1, lw.m.t_unit);
+    lw.t_jump0(keep);
+    lw.cur = keep;
+}
+fn Vx Low.handle_fib(Low* lw, HndI* h, Node* n, Node* body, AirTyp* bt, Node** arms, Node** ops, Node** effs, Node* retarm)
+{
+    if (lw.has_ctl(body)) { lw.unsup(n, "`return` / `defer` inside a handle body whose arms resume in non-tail position"); return lw.unit(); }
+    AirTyp* th = h.th; AirTyp* pu = lw.ptr(lw.m.t_u8); AirTyp* i64t = lw.m.t_i64;
+    h.fib = true; h.bt = bt; h.retarm = retarm;
+    char[64] fnm; snprintf(&fnm[0], 64, "Frame.%d", (int)h.id);
+    h.frame = lw.nominal(lw.dup(&fnm[0]));
+    AirDecl* fd = air_ir::air_mk_decl(lw.a, ADECL_DATA, h.frame.name);
+    AirCtorDecl* fc = air_ir::air_mk_ctor_decl(lw.a, h.frame.name); fc.result_ty = h.frame; fd.add_ctor(fc);
+    AirTyp*[8][MAXA] pty2;
+    usz fi = 0;
+    for (usz j = 0; j < h.nops; j++)
+    {
+        AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
+        if (!lw.op_sig(ops[j], &ps[0], &np, &ret)) { return lw.unit(); }
+        AirTyp* cty = lw.clo_ty(&ps[0], np, ret); if (cty == null) { return lw.unit(); }
+        h.cty[j] = cty; h.hty[j] = lw.hop_ty(cty);
+        h.g[j] = lw.hop_global(lw.dname(effs[j]), lw.dname(ops[j]), h.hty[j]);
+        h.np[j] = np; h.rty[j] = ret;
+        for (usz i = 0; i < np; i++) { pty2[j][i] = ps[i]; }
+        char[16] pn; snprintf(&pn[0], 16, "prev%d", (int)j);
+        fc.add_field(air_ir::air_mk_field(lw.a, lw.dup(&pn[0]), h.hty[j], AMULT_UNR)); fi++;
+    }
+    fc.add_field(air_ir::air_mk_field(lw.a, lw.dup("res"), lw.carries(th) ? th : i64t, AMULT_UNR)); fi++;
+    h.f_bres = fi; fc.add_field(air_ir::air_mk_field(lw.a, lw.dup("bres"), lw.carries(bt) ? bt : i64t, AMULT_UNR)); fi++;
+    h.f_fib = fi; fc.add_field(air_ir::air_mk_field(lw.a, lw.dup("fib"), pu, AMULT_UNR)); fi++;
+    h.f_st = fi; fc.add_field(air_ir::air_mk_field(lw.a, lw.dup("st"), i64t, AMULT_UNR)); fi++;
+    h.f_live = fi; fc.add_field(air_ir::air_mk_field(lw.a, lw.dup("live"), i64t, AMULT_UNR)); fi++;
+    h.f_gen = fi; fc.add_field(air_ir::air_mk_field(lw.a, lw.dup("gen"), i64t, AMULT_UNR)); fi++;
+    h.f_op = fi; fc.add_field(air_ir::air_mk_field(lw.a, lw.dup("op"), i64t, AMULT_UNR)); fi++;
+    usz nenv = h.nops + (retarm != null ? (usz)1 : (usz)0);
+    for (usz j = 0; j <= nenv; j++)   // the last slot holds the fiber body's environment: the runtime hands the FIRST resume's argument to the entry function
+    {
+        char[16] en; snprintf(&en[0], 16, "env%d", (int)j);
+        h.f_env[j] = fi; fc.add_field(air_ir::air_mk_field(lw.a, lw.dup(&en[0]), pu, AMULT_UNR)); fi++;
+    }
+    for (usz j = 0; j < h.nops; j++)
+    {
+        h.f_arg[j] = fi;
+        for (usz i = 0; i < h.np[j]; i++)
+        {
+            char[24] an; snprintf(&an[0], 24, "a%d_%d", (int)j, (int)i);
+            fc.add_field(air_ir::air_mk_field(lw.a, lw.dup(&an[0]), pty2[j][i], AMULT_UNR)); fi++;
+        }
+        char[16] rn; snprintf(&rn[0], 16, "rv%d", (int)j);
+        h.f_rv[j] = fi; fc.add_field(air_ir::air_mk_field(lw.a, lw.dup(&rn[0]), lw.carries(h.rty[j]) ? h.rty[j] : i64t, AMULT_UNR)); fi++;
+    }
+    if (fi > 60) { lw.unsup(n, "handler whose operations have more than 60 parameters in total (non-tail resumption)"); return lw.unit(); }
+    lw.m.add_decl(fd);
+    // generated functions
+    for (usz j = 0; j < h.nops; j++)
+    {
+        FnInfo* f = lw.new_gfn("arm", h.id, (long)(h.id - 1)); if (f == null) { return lw.unit(); }
+        f.is_arm = true; f.arm_j = j; f.decl = arms[j];
+        f.np = h.np[j] + 1; f.pty[0] = pu; for (usz i = 0; i < h.np[j]; i++) { f.pty[i + 1] = pty2[j][i]; }
+        f.ret = th; f.fnty = lw.arrow(&f.pty[0], f.np, f.ret);
+        lw.mk_genv(f, arms[j], h);
+        h.farm[j] = f;
+        FnInfo* y = lw.new_gfn("yld", h.id, (long)(h.id - 1)); if (y == null) { return lw.unit(); }
+        y.is_yld = true; y.arm_j = j;
+        y.np = h.np[j] + 1; y.pty[0] = pu; for (usz i = 0; i < h.np[j]; i++) { y.pty[i + 1] = pty2[j][i]; }
+        y.ret = h.rty[j]; y.fnty = lw.arrow(&y.pty[0], y.np, y.ret);
+        h.fy[j] = y;
+    }
+    if (retarm != null)
+    {
+        FnInfo* f = lw.new_gfn("ret", h.id, (long)(h.id - 1)); if (f == null) { return lw.unit(); }
+        f.is_arm = true; f.is_ret = true; f.arm_j = h.nops; f.decl = retarm;
+        f.pty[0] = pu; f.np = 1; if (lw.carries(bt)) { f.pty[1] = bt; f.np = 2; }
+        f.ret = th; f.fnty = lw.arrow(&f.pty[0], f.np, f.ret);
+        lw.mk_genv(f, retarm, h);
+        h.fret = f;
+    }
+    FnInfo* tk = lw.new_gfn("body", h.id, (long)(h.id - 1)); if (tk == null) { return lw.unit(); }
+    tk.is_thk = true; tk.decl = body; tk.np = 1; tk.pty[0] = pu; tk.ret = pu; tk.fnty = lw.arrow(&tk.pty[0], 1, pu);
+    lw.mk_genv(tk, body, h);
+    h.fthk = tk;
+    FnInfo* dr = lw.new_gfn("drive", h.id, (long)(h.id - 1)); if (dr == null) { return lw.unit(); }
+    dr.is_drv = true; dr.np = 1; dr.pty[0] = lw.ptr(h.frame); dr.ret = th; dr.fnty = lw.arrow(&dr.pty[0], 1, th);
+    h.fdrv = dr;
+    for (usz j = 0; j < h.nops; j++) { lw.queue(h.farm[j]); lw.queue(h.fy[j]); }
+    if (h.fret != null) { lw.queue(h.fret); }
+    lw.queue(tk); lw.queue(dr);
+    lw.rt_decl("__pride_fiber_spawn", 2, pu); lw.rt_decl("__pride_fiber_resume", 2, pu);
+    lw.rt_decl("__pride_fiber_yield", 1, pu); lw.rt_decl("__pride_fiber_release", 1, lw.m.t_unit);
+    lw.hreq_global();
+    if (!lw.live()) { return lw.unit(); }
+    // at the handle expression: the frame, the displaced cells, the environments, the fiber
+    Vx fslot = lw.alloca_(h.frame);
+    for (usz j = 0; j < h.nops; j++)
+    {
+        Vx gp = lw.gptr(h.g[j], h.hty[j]); Vx cur = lw.load(gp.p, h.hty[j]);
+        Vx slotp = lw.hfield(fslot, h, j, h.hty[j]);
+        lw.store(slotp.p, cur);
+    }
+    lw.store(lw.hfield(fslot, h, h.f_st, i64t).p, lw.lit_int(0, i64t));
+    lw.store(lw.hfield(fslot, h, h.f_live, i64t).p, lw.lit_int(1, i64t));
+    lw.store(lw.hfield(fslot, h, h.f_gen, i64t).p, lw.lit_int(0, i64t));
+    lw.store(lw.hfield(fslot, h, h.f_op, i64t).p, lw.lit_int(0, i64t));
+    for (usz j = 0; j < h.nops; j++) { Vx ev = lw.fill_genv(h.farm[j], fslot, h); lw.store(lw.hfield(fslot, h, h.f_env[j], pu).p, ev); }
+    if (retarm != null) { Vx ev = lw.fill_genv(h.fret, fslot, h); lw.store(lw.hfield(fslot, h, h.f_env[h.nops], pu).p, ev); }
+    Vx tenv = lw.fill_genv(tk, fslot, h);
+    lw.store(lw.hfield(fslot, h, h.f_env[nenv], pu).p, tenv);
+    Vx tfn; tfn.p = air_ir::air_mk_var(lw.a, tk.name); tfn.t = tk.fnty;
+    Vx tfp = lw.coerce(tfn, pu);
+    Vx[2] sa; sa[0] = tfp; sa[1] = tenv;
+    Vx fib = lw.call_rt("__pride_fiber_spawn", &sa[0], 2, pu);
+    lw.store(lw.hfield(fslot, h, h.f_fib, pu).p, fib);
+    Ins* ins = lw.push(I_CALL); if (ins == null) { return lw.unit(); }
+    ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, dr.name); ins.nargs = 1; ins.args[0] = fslot.p;
+    Vx r = lw.vref(ins.name, th);
+    lw.check_unw();
+    return r;
+}
+// the handled computation, as the fiber's entry function: runs the body, parks its value in the frame, marks the fiber done
+fn void Low.lower_thunk(Low* lw, FnInfo* f)
+{
+    HndI* h = &lw.hnds[f.hnd]; Node* body = f.decl;
+    lw.gfn_begin(f, body);
+    AirBinder*[1] pb; char* pnm = lw.fresh("a");
+    pb[0] = air_ir::air_mk_binder(lw.a, pnm, f.pty[0], AMULT_UNR);
+    Vx ev = lw.vref(pnm, f.pty[0]);
+    Vx frame = lw.load_genv(f, h, ev);
+    Vx bv = lw.expr(body, h.bt);
+    if (lw.live())
+    {
+        if (lw.carries(h.bt)) { bv = lw.coerce_arg(body, bv, h.bt); lw.store(lw.hfield(frame, h, h.f_bres, h.bt).p, bv); }
+        lw.store(lw.hfield(frame, h, h.f_st, lw.m.t_i64).p, lw.lit_int(1, lw.m.t_i64));
+        lw.t_ret(lw.null_ptr());
+    }
+    lw.gfn_end(f, &pb[0]);
+}
+// the YIELDER installed in a handled operation's cell: hand the request to the driver, wait for the answer
+fn void Low.lower_yielder(Low* lw, FnInfo* f)
+{
+    HndI* h = &lw.hnds[f.hnd]; usz j = f.arm_j; AirTyp* i64t = lw.m.t_i64; AirTyp* pu = lw.ptr(lw.m.t_u8);
+    lw.gfn_begin(f, null);
+    AirBinder*[MAXA] pb; Vx[MAXA] pv;
+    for (usz i = 0; i < f.np; i++)
+    {
+        char* pnm = lw.fresh("a");
+        pb[i] = air_ir::air_mk_binder(lw.a, pnm, f.pty[i], AMULT_UNR);
+        pv[i] = lw.vref(pnm, f.pty[i]);
+    }
+    Vx frame = lw.coerce(pv[0], lw.ptr(h.frame));
+    for (usz i = 0; i < h.np[j]; i++) { lw.store(lw.hfield(frame, h, h.f_arg[j] + i, f.pty[i + 1]).p, pv[i + 1]); }
+    lw.store(lw.hfield(frame, h, h.f_op, i64t).p, lw.lit_int((long)j, i64t));
+    Vx gp = lw.hfield(frame, h, h.f_gen, i64t); Vx g0 = lw.load(gp.p, i64t);
+    lw.store(gp.p, lw.binop(ABIN_ADD, g0, lw.lit_int(1, i64t)));
+    Vx hq = lw.gptr(lw.hreq_global(), i64t); lw.store(hq.p, lw.lit_int((long)h.id, i64t));
+    Vx[1] ya; ya[0] = lw.null_ptr(); lw.call_rt("__pride_fiber_yield", &ya[0], 1, pu);
+    if (lw.carries(f.ret)) { Vx rv = lw.load(lw.hfield(frame, h, h.f_rv[j], f.ret).p, f.ret); lw.t_ret(rv); } else { lw.t_ret(lw.unit()); }
+    lw.gfn_end(f, &pb[0]);
+}
+// the DRIVER: resume the fiber until it finishes or asks for something this handler answers
+fn void Low.lower_drive(Low* lw, FnInfo* f)
+{
+    HndI* h = &lw.hnds[f.hnd]; AirTyp* th = h.th; AirTyp* pu = lw.ptr(lw.m.t_u8); AirTyp* i64t = lw.m.t_i64;
+    lw.gfn_begin(f, null);
+    AirBinder*[1] pb; char* pnm = lw.fresh("a");
+    pb[0] = air_ir::air_mk_binder(lw.a, pnm, f.pty[0], AMULT_UNR);
+    Vx frame = lw.vref(pnm, f.pty[0]);
+    usz loop = lw.blk("dloop"); lw.t_jump0(loop); lw.cur = loop;
+    for (usz j = 0; j < h.nops; j++)   // the handled operations answer through their yielders while the fiber runs
+    {
+        Vx fe = lw.coerce(frame, pu);
+        Vx hv = lw.mk_hop(h.hty[j], air_ir::air_mk_var(lw.a, h.fy[j].name), fe.p, 1);
+        Vx gp = lw.gptr(h.g[j], h.hty[j]); lw.store(gp.p, hv);
+    }
+    Vx fv = lw.load(lw.hfield(frame, h, h.f_fib, pu).p, pu);
+    usz nenv = h.nops + (h.retarm != null ? (usz)1 : (usz)0);
+    Vx te = lw.load(lw.hfield(frame, h, h.f_env[nenv], pu).p, pu);
+    Vx[2] ra; ra[0] = fv; ra[1] = te; lw.call_rt("__pride_fiber_resume", &ra[0], 2, pu);
+    for (usz j = 0; j < h.nops; j++)   // outside the handler again: what it displaced
+    {
+        Vx pvv = lw.load(lw.hfield(frame, h, j, h.hty[j]).p, h.hty[j]);
+        Vx gp = lw.gptr(h.g[j], h.hty[j]); lw.store(gp.p, pvv);
+    }
+    Vx st = lw.load(lw.hfield(frame, h, h.f_st, i64t).p, i64t);
+    Vx isdone = lw.binop(ABIN_NEQ, st, lw.lit_int(0, i64t));
+    usz dn = lw.blk("fdone"); usz rq = lw.blk("freq");
+    lw.t_cond(isdone, dn, rq);
+    lw.cur = dn;
+    {
+        Vx up = lw.gptr(lw.unw_global(), i64t); Vx u = lw.load(up.p, i64t);
+        Vx raised = lw.binop(ABIN_NEQ, u, lw.lit_int(0, i64t));
+        usz ab = lw.blk("faborted"); usz ok = lw.blk("fok");
+        lw.t_cond(raised, ab, ok);
+        lw.cur = ab; lw.fib_release(frame, h); lw.t_ret(lw.zero_of(th));   // another handler's abort unwound the body: its caller continues unwinding
+        lw.cur = ok; lw.fib_release(frame, h);
+        Vx x = lw.carries(h.bt) ? lw.load(lw.hfield(frame, h, h.f_bres, h.bt).p, h.bt) : lw.unit();
+        if (h.fret != null)
+        {
+            Vx re = lw.load(lw.hfield(frame, h, h.f_env[h.nops], pu).p, pu);
+            Ins* ins = lw.push(I_CALL); if (ins == null) { return; }
+            ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, h.fret.name); ins.args[0] = re.p; ins.nargs = 1;
+            if (lw.carries(h.bt)) { ins.args[1] = x.p; ins.nargs = 2; }
+            Vx r = lw.vref(ins.name, th);
+            lw.t_ret(r);
+        }
+        else { lw.t_ret(x); }
+    }
+    lw.cur = rq;
+    Vx hr = lw.load(lw.gptr(lw.hreq_global(), i64t).p, i64t);
+    Vx own = lw.binop(ABIN_EQ, hr, lw.lit_int((long)h.id, i64t));
+    usz mine = lw.blk("fmine"); usz fwd = lw.blk("fforward");
+    lw.t_cond(own, mine, fwd);
+    lw.cur = fwd;   // a request for an outer handler: pass it up on our own fiber, then go on with the inner one
+    { Vx[1] ya; ya[0] = lw.null_ptr(); lw.call_rt("__pride_fiber_yield", &ya[0], 1, pu); lw.t_jump0(loop); }
+    lw.cur = mine;
+    Vx opv = lw.load(lw.hfield(frame, h, h.f_op, i64t).p, i64t);
+    for (usz j = 0; j < h.nops; j++)
+    {
+        usz bj = 0; usz nx = 0;
+        if (j + 1 < h.nops)
+        {
+            Vx isj = lw.binop(ABIN_EQ, opv, lw.lit_int((long)j, i64t));
+            bj = lw.blk("farm"); nx = lw.blk("fnext");
+            lw.t_cond(isj, bj, nx); lw.cur = bj;
+        }
+        Vx ev = lw.load(lw.hfield(frame, h, h.f_env[j], pu).p, pu);
+        // the arguments are loaded before the call (the frame is rewritten by a nested resume)
+        Vx[MAXA] av;
+        for (usz i = 0; i < h.np[j]; i++) { av[i] = lw.load(lw.hfield(frame, h, h.f_arg[j] + i, h.farm[j].pty[i + 1]).p, h.farm[j].pty[i + 1]); }
+        Ins* ci = lw.push(I_CALL); if (ci == null) { return; }
+        ci.name = lw.fresh("_r"); ci.a = air_ir::air_mk_var(lw.a, h.farm[j].name); ci.nargs = h.np[j] + 1; ci.args[0] = ev.p;
+        for (usz i = 0; i < h.np[j]; i++) { ci.args[i + 1] = av[i].p; }
+        Vx r = lw.vref(ci.name, th);
+        lw.fib_release(frame, h);   // an arm that did not resume abandoned the computation
+        lw.t_ret(r);
+        if (j + 1 < h.nops) { lw.cur = nx; }
+    }
+    lw.gfn_end(f, &pb[0]);
+}
+
+fn void Low.lower_arm_fib(Low* lw, FnInfo* f)
+{
+    HndI* h = &lw.hnds[f.hnd]; Node* arm = f.decl; AirTyp* th = h.th;
+    lw.gfn_begin(f, arm);
+    AirBinder*[MAXA] pb; Vx[MAXA] pv;
+    for (usz i = 0; i < f.np; i++)
+    {
+        char* pnm = lw.fresh("a");
+        pb[i] = air_ir::air_mk_binder(lw.a, pnm, f.pty[i], AMULT_UNR);
+        pv[i] = lw.vref(pnm, f.pty[i]);
+    }
+    Vx frame = lw.load_genv(f, h, pv[0]);
+    Node* body = null;
+    if (f.is_ret)
+    {
+        Node* rp = null; lw.ret_arm_parts(arm, &rp, &body);
+        if (rp != null) { lw.pat(rp, f.np > 1 ? pv[1] : lw.unit(), NOBLK); }
+    }
+    else
+    {
+        Node*[8] pats; usz npat = 0; Node* kdecl = null; Node* bodyseq = null;
+        usz nargs = h.np[f.arm_j];
+        lw.arm_parts(arm, nargs, &pats[0], &npat, &kdecl, &body, &bodyseq);
+        for (usz i = 0; i < nargs && i < npat; i++) { lw.pat(pats[i], pv[i + 1], NOBLK); }
+        lw.arm.kdecl = kdecl; lw.arm.fib = true; lw.arm.frame = frame.p; lw.arm.hix = (usz)f.hnd; lw.arm.j = f.arm_j;
+        lw.arm.opret = h.rty[f.arm_j]; lw.arm.th = th;
+        Vx ks = lw.alloca_(lw.m.t_i64);
+        Vx g0 = lw.load(lw.hfield(frame, h, h.f_gen, lw.m.t_i64).p, lw.m.t_i64);
+        lw.store(ks.p, g0); lw.arm.kgen = ks.p;
+        lw.arm.on = true;
+        if (bodyseq != null) { lw.expr(bodyseq, null); }
+    }
+    Vx bv = lw.unit();
+    if (body == null) { lw.unsup(arm, "handler arm without a body"); }
+    else { bv = lw.expr(body, th); }
+    lw.arm.on = false; lw.arm.fib = false;
+    if (lw.live())
+    {
+        if (lw.carries(th)) { Vx c = lw.coerce_arg(body, bv, th); lw.t_ret(c); } else { lw.t_ret(lw.unit()); }
+    }
+    lw.gfn_end(f, &pb[0]);
 }
 // the code of one handler arm: runs in the context OUTSIDE its handler (deep handlers)
 fn void Low.lower_arm(Low* lw, FnInfo* f)
@@ -4381,7 +5252,7 @@ fn void Low.lower_arm(Low* lw, FnInfo* f)
     lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nnames = 0; lw.tmpn = 0; lw.unchecked = 0; lw.nhx = 0;
     lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
     usz entry = lw.blk("entry"); lw.cur = entry;
-    AirBinder*[16] pb; Vx[16] pv;
+    AirBinder*[MAXA] pb; Vx[MAXA] pv;
     for (usz i = 0; i < f.np; i++)
     {
         char* pnm = lw.fresh("a");
@@ -4468,10 +5339,29 @@ fn void Low.lower_arm(Low* lw, FnInfo* f)
 
 fn void Low.lower_fn(Low* lw, FnInfo* f)
 {
+    lw.nlit = 0; lw.lit_final = false;
+    for (int att = 0; att < 6; att++)
+    {
+        lw.lit_retry = false; usz nfn0 = lw.nfn; int fb = lw.fail_fn; int e0 = lw.errors;
+        if (att == 5) { lw.lit_final = true; }
+        lw.lower_fn1(f);
+        if (!lw.lit_retry) { break; }
+        lw.fail_fn = fb; lw.errors = e0;   // the discarded attempt is no failure; the lambdas / arms it created are rebuilt by the next one
+        for (usz k = nfn0; k < lw.nfn; k++) { if (lw.fns[k].is_lam) { lw.fns[k].queued = false; } }
+    }
+    lw.lit_final = false;
+}
+fn void Low.lower_fn1(Low* lw, FnInfo* f)
+{
+    if (f.is_thk) { lw.lower_thunk(f); return; }
+    if (f.is_yld) { lw.lower_yielder(f); return; }
+    if (f.is_drv) { lw.lower_drive(f); return; }
+    if (f.is_arm && lw.hnds[f.hnd].fib) { lw.lower_arm_fib(f); return; }
     if (f.is_arm) { lw.lower_arm(f); return; }
     if (f.is_lam) { lw.lower_lambda(f); return; }
     if (f.is_ind) { lw.lower_ind(f); return; }
     if (f.is_adapt) { lw.lower_adapter(f); return; }
+    if (f.is_dyn) { lw.lower_dynthunk(f); return; }
     Node* d = f.decl;
     lw.ntsub = 0; for (usz j = 0; j < f.nts; j++) { lw.tsub_push(f.ts[j].tp, f.ts[j].t); }
     lw.cur_fn = f.name; lw.fn_errors = 0; lw.cur_node = d;
@@ -4482,8 +5372,8 @@ fn void Low.lower_fn(Low* lw, FnInfo* f)
     lw.norm_modfields(d, 0);
     lw.scan_defers(d, d);
     // parameters
-    AirBinder*[16] pb;
-    Vx[16] pv;
+    AirBinder*[MAXA] pb;
+    Vx[MAXA] pv;
     for (usz i = 0; i < f.np; i++)
     {
         char* pnm = lw.fresh("a");

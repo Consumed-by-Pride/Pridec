@@ -86,7 +86,8 @@ if L.LLVMTargetMachineEmitToFile(tm, mod, obj.encode(), 1, ctypes.byref(err)):
     sys.exit("ll-exe: codegen: " + (err.value or b"?").decode())
 if "--emit-obj" in args: sys.exit(0)
 if "--ld-script" in args:   # bare metal: no libc, no crt, no OS -- the linker script places the sections and names the entry
-    r = subprocess.run(["ld", "-nostdlib", "-static", "-T", opt_of("--ld-script"), obj, "-o", out], capture_output=True, text=True)
+    _m32 = ["-m", "elf_i386"] if want_triple and want_triple.startswith((b"i386", b"i486", b"i586", b"i686")) else []   # a 32-bit kernel image
+    r = subprocess.run(["ld"] + _m32 + ["-nostdlib", "-static", "-T", opt_of("--ld-script"), obj, "-o", out], capture_output=True, text=True)
     os.unlink(obj)
     if r.returncode: sys.exit("ll-exe: link: " + r.stderr)
     sys.exit(0)

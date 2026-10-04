@@ -1,0 +1,19 @@
+-- EXIT: 68
+-- the io_uring handler keeps its requests by value in a Vec as well (40-byte AsyncRequest records, grown past the first reallocation)
+use os.linux
+use vec.vec
+use effect_async.driver
+use effect_async.uring_handler
+
+fn main : () -> i64
+  | () ->
+      let mut h = uring_handler.uring_handler_new(8u32)
+      let buf = os.linux.malloc(64i64)
+      let mut k = 0i64
+      while k < 20i64
+        uring_handler.uring_handler_submit_read(&h, k, buf, 10i64 + k)
+        k = k + 1i64
+      let last = vec.vec_get(&h.suspended, 19i64) as *driver.AsyncRequest
+      let n = vec.vec_len(&h.suspended) + last.len + last.fd
+      uring_handler.uring_handler_destroy(&h)
+      n

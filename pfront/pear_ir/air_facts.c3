@@ -100,7 +100,7 @@ fn ulong FactScan.prd(FactScan* s, air_ir::AirPrd* p, int depth)
         case APRD_RECORD:
         {
             ulong mask = 0;
-            for (usz i = 0; i < p.rec_init_count && i < 16; i++)
+            for (usz i = 0; i < p.rec_init_count; i++)
             {
                 if (p.rec_inits[i] != null) { mask |= s.prd(p.rec_inits[i].value, depth + 1); }
             }
@@ -185,7 +185,7 @@ fn void FactScan.cns(FactScan* s, air_ir::AirCns* k, ulong incoming, char* calle
             air_ir::AirCns* at = k.tag == air_ir::AirCnsTag.ACNS_CALL ? k.tail : k;
             usz pos = 0;
             ulong returned = 0;
-            while (at != null && at.tag == air_ir::AirCnsTag.ACNS_STACK && pos < 16)
+            while (at != null && at.tag == air_ir::AirCnsTag.ACNS_STACK && pos < 64)
             {
                 ulong arg = s.prd(at.prd, depth + 1);
                 if (target == null || pos >= target.param_count || target.params[pos] == null
@@ -240,7 +240,7 @@ fn void FactScan.cmd(FactScan* s, air_ir::AirCmd* c, int depth)
             // A system call may write any memory and may retain any pointer operand.
             s.writes = true;
             ulong sm = s.prd(c.prd, depth + 1);
-            for (usz i = 0; i < c.prd_count && i < 16; i++) { sm |= s.prd(c.prds[i], depth + 1); }
+            for (usz i = 0; i < c.prd_count && i < 64; i++) { sm |= s.prd(c.prds[i], depth + 1); }
             s.escaped |= sm | s.control;
             s.cns(c.cns, 0, null, depth + 1);
             return;
@@ -261,7 +261,7 @@ fn bool screen(air_ir::AirModule* mod, air_ir::AirDecl* d)
     {
         changed = d.memory_readonly;
         d.memory_readonly = false; d.fact_state = air_ir::AirFactState.AFACT_UNKNOWN;
-        for (usz i = 0; i < d.param_count && i < 16; i++)
+        for (usz i = 0; i < d.param_count && i < 64; i++)
         {
             if (d.params[i] != null) { changed |= d.params[i].no_capture; d.params[i].no_capture = false; }
         }

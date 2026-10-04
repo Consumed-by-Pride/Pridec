@@ -34,6 +34,11 @@ if [ "$(uname -m)" = x86_64 ] && command -v ld >/dev/null && command -v readelf 
     out=$(bash tests/air3/bare.sh 2>&1 | tail -3); echo "bare:   $out"
     case "$out" in *"kernel image: PASS"*) ;; *) echo "FAIL: bare-metal kernel image"; fail=1;; esac
 fi
+# a real kernel (tests/air3/prog_os/mini_os.pie, i386 Multiboot) booted in QEMU: serial console, IDT + PIC + PIT interrupts, int 0x80, dyn dispatch
+if [ "$(uname -m)" = x86_64 ] && command -v ld >/dev/null; then
+    out=$(bash tests/air3/boot.sh 2>&1 | head -1); echo "boot:   $out"
+    case "$out" in *"booted PRIDE-OS in QEMU: PASS"*|*"SKIPPED the run"*) ;; *) echo "FAIL: PRIDE-OS boot"; fail=1;; esac
+fi
 # the same .air, built for wasm32-wasi (LLVM wasm backend + zig's wasm-ld/wasi-libc + runtime/wasi/pride_rt.c) and RUN under wasmtime
 export PATH="$PATH:$HOME/.local/bin"
 if python3 -c "import ziglang, wasmtime" 2>/dev/null; then

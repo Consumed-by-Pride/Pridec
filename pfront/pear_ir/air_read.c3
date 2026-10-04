@@ -294,7 +294,7 @@ fn AirTyp* Rd.typ(Rd* r)
         {
             while (!r.failed)
             {
-                if (t.arg_count >= 16) { r.fail("more than 16 type arguments"); return null; }
+                if (t.arg_count >= 64) { r.fail("more than 64 type arguments"); return null; }
                 AirTyp* x = r.typ();
                 t.args[t.arg_count] = x; t.arg_count++;
                 if (r.eat_p(',')) { continue; }
@@ -347,7 +347,7 @@ fn usz Rd.binder_list(Rd* r, AirBinder** out, usz cap)
     {
         while (!r.failed)
         {
-            if (n >= cap) { r.fail("too many binders (limit 16)"); return n; }
+            if (n >= cap) { r.fail("too many binders"); return n; }
             out[n] = r.binder(); n++;
             if (r.eat_p(',')) { continue; }
             break;
@@ -364,7 +364,7 @@ fn usz Rd.name_list(Rd* r, char** out, usz cap)
     {
         while (!r.failed)
         {
-            if (n >= cap) { r.fail("too many names (limit 16)"); return n; }
+            if (n >= cap) { r.fail("too many names"); return n; }
             out[n] = r.name(); n++;
             if (r.eat_p(',')) { continue; }
             break;
@@ -414,7 +414,7 @@ fn AirPat* Rd.pat(Rd* r)
         {
             while (!r.failed)
             {
-                if (p.sub_count >= 16) { r.fail("more than 16 sub-patterns"); return null; }
+                if (p.sub_count >= 64) { r.fail("more than 64 sub-patterns"); return null; }
                 p.sub[p.sub_count] = r.pat(); p.sub_count++;
                 if (r.eat_p(',')) { continue; }
                 break;
@@ -432,7 +432,7 @@ fn AirPat* Rd.pat(Rd* r)
         {
             while (!r.failed)
             {
-                if (p.field_count >= 16) { r.fail("more than 16 record-pattern fields"); return null; }
+                if (p.field_count >= 64) { r.fail("more than 64 record-pattern fields"); return null; }
                 AirFieldInit* f = air_ir::air_new_AirFieldInit(a);
                 f.name = r.name();
                 p.fields[p.field_count] = f; p.field_count++;
@@ -454,7 +454,7 @@ fn AirPat* Rd.pat(Rd* r)
             {
                 while (!r.failed)
                 {
-                    if (p.sub_count >= 16) { r.fail("more than 16 sub-patterns"); return null; }
+                    if (p.sub_count >= 64) { r.fail("more than 64 sub-patterns"); return null; }
                     p.sub[p.sub_count] = r.pat(); p.sub_count++;
                     if (r.eat_p(',')) { continue; }
                     break;
@@ -631,11 +631,10 @@ fn AirPrd* Rd.prd_core(Rd* r)
         {
             while (!r.failed)
             {
-                if (p.rec_init_count >= 16) { r.fail("more than 16 record fields"); return null; }
-                AirFieldInit* f = air_ir::air_new_AirFieldInit(a);
+                                AirFieldInit* f = air_ir::air_new_AirFieldInit(a);
                 f.name = r.name(); r.expect_p('=');
                 f.value = r.prd();
-                p.rec_inits[p.rec_init_count] = f; p.rec_init_count++;
+                p.push_rec(f);
                 if (r.eat_p(',')) { continue; }
                 break;
             }
@@ -1245,7 +1244,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         d.fact_state = facts ? AFACT_AST_FINAL : AFACT_UNKNOWN;   // claims are candidates, always
         r.typarams(d);
-        d.param_count = r.binder_list(&d.params[0], 16);
+        d.param_count = r.binder_list(&d.params[0], 64);
         if (r.eat_p(':')) { d.ret_ty = r.typ(); }
         if (r.eat_p('=')) { d.def_body = r.cmd(); }
         r.expect_p(';');

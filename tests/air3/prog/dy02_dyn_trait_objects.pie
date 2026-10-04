@@ -1,0 +1,26 @@
+-- EXIT: 69
+-- dyn Shape: trait objects (data pointer + vtable), a heterogeneous array, dispatch through the vtable, extra arguments
+interface Shape
+  fn area : Self -> i64
+  fn grow : (Self, i64) -> i64
+struct Sq { s: i64; }
+struct Rect { w: i64; h: i64; }
+impl Shape for Sq
+  fn area : Self -> i64 | q -> q.s * q.s
+  fn grow : (Self, i64) -> i64 | (q, k) -> (q.s + k) * (q.s + k)
+impl Shape for Rect
+  fn area : Rect -> i64 | r -> r.w * r.h
+  fn grow : (Self, i64) -> i64 | (r, k) -> (r.w + k) * r.h
+fn total : (dyn Shape, dyn Shape) -> i64
+  | (a, b) -> a.area() + area(b)
+fn main : () -> i64
+  | () ->
+      let q = Sq { s: 3 }
+      let r = Rect { w: 2, h: 5 }
+      let shapes : [dyn Shape; 2] = [&q as dyn Shape, &r as dyn Shape]
+      let mut sum = 0
+      let mut i = 0
+      while i < 2
+        sum = sum + shapes[i].area() + shapes[i].grow(1)
+        i = i + 1
+      sum + total(&q, &r)

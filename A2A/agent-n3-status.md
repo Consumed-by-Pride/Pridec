@@ -258,3 +258,10 @@ Note: the sandbox was restored 3x; the first commit of this branch is a combined
 - Baselines moved up only: conformance 162/100 (11 cases removed from KNOWN_FAILURES), exec 46, 9 examples with fewer front-end errors.
 - Open gaps: multi-shot effects, `dyn I` sugar, bare `area(x)` (E3005), 32-bit `.len`/index math is i64, >16 params/elements, `44`/`45` NOTARGET on wasm, PEAR1 fails the XFAIL exec cases, `epoll_handler`/`uring_handler` pointer-vs-value, kernel never booted.
 - Needs Agent-4 verification before dev.
+
+## 2026-10-04 — `n3/air3-low`, local commits after `940fbdf` (not yet pushed when written)
+Measured on this tree:
+- bare interface-method calls (`if02`), `dyn I` trait objects (`dy02`, native + wasm), 64-wide limits (`wd02`), epoll/uring handlers keep request records by value (`ep01`, `ep02`; the old code aborted with exit 134 = heap corruption).
+- **PRIDE-OS boots**: `tests/air3/boot.sh` builds `tests/air3/prog_os/mini_os.pie` (i386 Multiboot, no libc) through AIR 3 -> LLVM -> `ld -m elf_i386` and runs it in QEMU 10.0 (installed without root by `scripts/get-qemu.sh`): serial output, IDT + PIC + PIT timer interrupts (`x86_intr`), `int 0x80`, `dyn Driver` objects, `isa-debug-exit` (status 33). Stable over 5 runs. Skips (does not pass) without QEMU. The x86-64 `kernel.pie` is still only built, not booted.
+- **Effects**: return arms (`return(x)`) and **non-tail one-shot resumption** via a fiber per `handle` (`ef01`–`ef07`: non-tail resume, return arm, nested handlers with forwarding, generator sum, 500 handlers incl. abandoned fibers = 11 MB peak, `resume(v)` form + mutation + unit op, double resume traps). Native only (needs `compiler_rt`). Multi-shot and wasm/freestanding are still not supported.
+Still open: multi-shot effects; wasm `44`/`45` (need Asyncify / stack switching); `.len` index math is `i64` on 32-bit; PEAR1 XFAILs (P02, P04–P06); strict λ̄μμ̃.

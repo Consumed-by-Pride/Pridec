@@ -1,0 +1,20 @@
+-- EXIT: 227
+-- `resume(v)` (the call-like form) next to `k v`; an arm that mutates a captured variable; a unit-valued operation; a return arm that reads that variable.
+-- computation: v = Ask = 42; Tell(84) sets log_val = 84; the value is 42 + 100 = 142; return arm: 142 + 84 = 226; the Ask arm adds 1 after resuming: 227.
+effect Ask
+  op ask : () -> i64
+effect Tell
+  op tell : i64 -> ()
+fn computation : () -> i64 ! [Ask, Tell]
+  | () ->
+      let v = perform Ask.ask()
+      perform Tell.tell(v * 2i64)
+      v + 100i64
+fn main : () -> i64
+  | () ->
+      let mut log_val : i64 = 0i64
+      let r : i64 = handle computation()
+        | Ask.ask() -> (resume(42i64)) + 1i64
+        | Tell.tell(msg) -> log_val = msg; resume(())
+        | return(x) -> x + log_val
+      r

@@ -775,11 +775,11 @@ fn void Ll.emit_ret(Ll* l, AirPrd* p)
 fn void Ll.emit_call(Ll* l, AirPrd* callee, AirCns* k, AirCmd** next_out, char** bind_out)
 {
     Val f = l.prd(callee);
-    Val[16] args; usz na = 0;
+    Val[64] args; usz na = 0;
     AirCns* cur = k.tail;
     while (cur != null && cur.tag == ACNS_STACK)
     {
-        if (na >= 16) { l.err("call with more than 16 arguments", null); return; }
+        if (na >= 64) { l.err("call with more than 64 arguments", null); return; }
         args[na] = l.prd(cur.prd); na++; cur = cur.tail;
     }
     if (cur == null || cur.tag != ACNS_COMU) { l.err("call result must be bound with `comu`", null); return; }

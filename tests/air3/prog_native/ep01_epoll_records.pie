@@ -1,0 +1,26 @@
+-- EXIT: 56
+-- the epoll handler keeps its suspended requests BY VALUE in a Vec (it used to push a pointer and copy 16 of its 56 bytes)
+use os.linux
+use vec.vec
+use effect_async.driver
+use effect_async.epoll_handler
+
+fn main : () -> i64
+  | () ->
+      let mut h = epoll_handler.epoll_handler_new(8i64)
+      let fds = os.linux.malloc(8i64)
+      os.linux.pipe(fds)
+      let rfd = *(fds as *i32)
+      let wfd = *((fds as i64 + 4i64) as *i32)
+      os.linux.write(wfd, "hello", 5i64)
+      let buf = os.linux.malloc(16i64)
+      epoll_handler.epoll_handler_submit(&h, rfd as i64, buf, 16i64, driver.ASYNC_OP_READ)
+      let mut k = 0i64
+      while k < 40i64
+        epoll_handler.epoll_handler_submit(&h, -1i64, buf, 16i64, driver.ASYNC_OP_READ)
+        k = k + 1i64
+      let resumed = epoll_handler.epoll_handler_step(&h, 0i64)
+      let first = vec.vec_get(&h.suspended, 0i64) as *epoll_handler.SuspendedContinuation
+      let n = first.res_val + resumed * 10i64 + vec.vec_len(&h.suspended)
+      epoll_handler.epoll_handler_destroy(&h)
+      n

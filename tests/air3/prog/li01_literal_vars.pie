@@ -1,0 +1,52 @@
+-- EXIT: 97
+-- A variable initialised with an unsuffixed literal takes the type of its first typed use (here: i32 / u8 / f32), not a default i64 / f64.
+-- a top-level `let base = 3` is a literal constant: each use gives it the type it needs
+let base = 3
+fn sum_to : i32 -> i32
+  | n ->
+      let mut total = 0
+      for i in 0..n
+        total = total + i
+      total
+fn from_param : i32 -> i32
+  | n ->
+      let mut t = 0
+      t = n
+      t + 1
+fn pass_on : (u8, u8) -> u8
+  | (a, b) -> a + b
+fn bytes : () -> u8
+  | () ->
+      let x = 7
+      let y = 8
+      pass_on(x, y)
+fn scale : f32 -> f32
+  | v ->
+      let mut acc = 0.0
+      acc = acc + v
+      acc * 2.0
+fn compound : i32 -> i32
+  | n ->
+      let mut c = 5
+      c += n
+      c
+fn g1 : i32 -> i32
+  | n -> n + base
+fn g2 : u8 -> u8
+  | b -> b * base
+fn g3 : i32 -> i32
+  | n ->
+      let mut z = base
+      z = z + n
+      z
+fn main : () -> i32
+  | () ->
+      let a = sum_to(5)            -- 10
+      let b = from_param(9)        -- 10
+      let c = bytes() as i32       -- 15
+      let d = scale(2.5) as i32    -- 5
+      let e = compound(25)         -- 30
+      let f = g1(4)                -- 7
+      let g = g2(5) as i32         -- 15
+      let h = g3(2)                -- 5
+      a + b + c + d + e + f + g + h   -- 97

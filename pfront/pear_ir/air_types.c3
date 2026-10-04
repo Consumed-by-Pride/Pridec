@@ -75,8 +75,8 @@ fn AirTyp* air_translate_typ(AirModule* m, PNode* t, pfront_core::Interner* it, 
             return air_ir::air_mk_typ_slice(a, elem);
         }
         case Nk.N_TY_TUPLE: {
-            AirTyp*[16] subs; usz n=0;
-            for (usz i=0; i<t.child_count&&i<16; i++){subs[n]=air_translate_typ(m,t.children[i],it,depth+1); n++;}
+            AirTyp*[64] subs; usz n=0;
+            for (usz i=0; i<t.child_count&&i<64; i++){subs[n]=air_translate_typ(m,t.children[i],it,depth+1); n++;}
             return air_ir::air_mk_typ_tuple(a, &subs[0], n);
         }
         case Nk.N_TY_FN: {
@@ -84,8 +84,8 @@ fn AirTyp* air_translate_typ(AirModule* m, PNode* t, pfront_core::Interner* it, 
             AirTyp* ret = air_translate_typ(m, t.children[t.child_count-1], it, depth+1);
             if (t.child_count==1) return air_ir::air_mk_typ_arrow(a,m.t_unit,ret);
             if (t.child_count==2){AirTyp* d=air_translate_typ(m,t.children[0],it,depth+1); return air_ir::air_mk_typ_arrow(a,d,ret);}
-            AirTyp*[16] ds; usz dn=0;
-            for(usz i=0;i+1<t.child_count&&dn<16;i++){ds[dn]=air_translate_typ(m,t.children[i],it,depth+1);dn++;}
+            AirTyp*[64] ds; usz dn=0;
+            for(usz i=0;i+1<t.child_count&&dn<64;i++){ds[dn]=air_translate_typ(m,t.children[i],it,depth+1);dn++;}
             AirTyp* dom=air_ir::air_mk_typ_tuple(a,&ds[0],dn); return air_ir::air_mk_typ_arrow(a,dom,ret);
         }
         case Nk.N_TY_NAME: case Nk.N_TY_PATH: {

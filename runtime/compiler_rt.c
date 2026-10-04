@@ -866,6 +866,13 @@ void* __pride_fiber_yield(void* arg) {
     return fib->yield_val;
 }
 
+/* Free a fiber that finished or was abandoned (its handler arm did not resume it).  The caller is NOT running on that fiber. */
+void __pride_fiber_release(PrideFiber* fib) {
+    if (fib == NULL) return;
+    if (fib->stack) pride_free(fib->stack, PRIDE_FIBER_STACK_SIZE);
+    pride_free(fib, sizeof(PrideFiber));
+}
+
 #define PRIDE_MAX_PROMPTS 64
 
 typedef struct PridePromptMarker {

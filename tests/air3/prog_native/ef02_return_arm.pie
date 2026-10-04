@@ -1,0 +1,12 @@
+-- EXIT: 35
+-- A return arm maps the value of the handled computation: ask(1) + ask(2) = 10 + 20 = 30, the return arm adds 5.
+-- Every operation arm resumes in tail position, so this is the plain (fiber-free) handler path.
+effect Ask
+  ask : i64 -> i64
+fn body : () -> i64 ! [Ask]
+  | () -> Ask.ask(1) + Ask.ask(2)
+fn main : () -> i64
+  | () ->
+      handle body()
+        | Ask.ask n k -> k (n * 10)
+        | return(x) -> x + 5

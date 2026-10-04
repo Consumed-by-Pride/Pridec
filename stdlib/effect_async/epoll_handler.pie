@@ -68,23 +68,14 @@ fn epoll_handler_new : i64 -> EpollEffectHandler
   | max_events ->
     EpollEffectHandler {
       react:     native_epoll_new(max_events),
-      suspended: vec.vec_new(16i64),
+      suspended: vec.vec_new(56i64),   -- the Vec stores SuspendedContinuation records by value (7 words)
       next_id:   1i64
     }
 
 fn epoll_handler_destroy : *EpollEffectHandler -> ()
   | h ->
     if h != null then {
-      let mut i : i64 = 0i64;
-      let len = vec.vec_len(&h.suspended);
-      while true do {
-        if i >= len then {
-          break;
-        };
-        os.linux.free(vec.vec_get(&h.suspended, i));
-        i = i + 1i64;
-      };
-      vec.vec_destroy(&h.suspended);
+      vec.vec_destroy(&h.suspended);   -- the records live inside the Vec's buffer: nothing else to free
       native_epoll_destroy(&h.react);
     } else {
       ()
@@ -95,15 +86,8 @@ fn epoll_handler_submit : (*EpollEffectHandler, i64, ptr, i64, i64) -> i64
     if h != null then {
       let id = h.next_id;
       h.next_id = h.next_id + 1i64;
-      let c = os.linux.malloc(56i64) as *SuspendedContinuation;
-      c.req_id   = id;
-      c.fd       = fd;
-      c.op_kind  = op_kind;
-      c.buf      = buf;
-      c.len      = len;
-      c.res_val  = 0i64;
-      c.is_ready = false;
-      vec.vec_push(&h.suspended, c as ptr);
+      let mut c = SuspendedContinuation { req_id: id, fd: fd, op_kind: op_kind, buf: buf, len: len, res_val: 0i64, is_ready: false };
+      vec.vec_push(&h.suspended, &c as ptr);   -- copies the 56-byte record into the Vec
       if fd >= 0i64 then {
         native_epoll_add(&h.react, fd, 1u32);
       } else {

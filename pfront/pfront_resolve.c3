@@ -54,6 +54,9 @@ const usz MAX_MODULES  = 1024;
 const usz MAX_ROOTS    = 16;
 const usz MAX_SCOPES   = 512;
 const usz PATH_MAX_LEN = 1024;
+const usz MAX_IFACE_FNS = 4096;
+Node*[MAX_IFACE_FNS] g_iface_fns;   // every interface method declaration seen so far (the bare-call fallback `m(x)` for `x.m()`)
+usz g_iface_nfns = 0;
 
 // ── Loader ──────────────────────────────────────────────────────────────────
 struct Loader
@@ -526,6 +529,11 @@ fn void Resolver.pop_scope(Resolver* r)
     if (r.scopes != null) { r.scopes = r.scopes.parent; }
 }
 
+fn Node* Resolver.iface_method_named(Resolver* r, uint name_id)
+{
+    for (usz i = 0; i < g_iface_nfns; i++) { if (g_iface_fns[i].name_id == name_id) { return g_iface_fns[i]; } }
+    return null;
+}
 fn Sym* Resolver.declare(Resolver* r, uint name_id, pfront_core::SymKind k,
                          int ns, Node* decl, bool is_pub)
 {
@@ -673,7 +681,16 @@ fn void Resolver.hoist_one(Resolver* r, Node* d)
             }
         }
         case N_DECL_INTERFACE:
+        {
             r.declare(d.name_id, pfront_core::SymKind.SYM_INTERFACE, pfront_core::NS_TYPE, d, pub);
+            // the interface's methods can be called as `m(x, ..)` as well as `x.m(..)`; remember them for the fallback
+            for (usz i = 0; i < d.child_count; i++)
+            {
+                Node* m = d.children[i];
+                if (m != null && m.kind == Nk.N_DECL_FN && m.name_id != 0 && g_iface_nfns < MAX_IFACE_FNS)
+                { g_iface_fns[g_iface_nfns] = m; g_iface_nfns = g_iface_nfns + 1; }
+            }
+        }
         case N_DECL_CONST:
         case N_DECL_STATIC:
             r.declare(d.name_id, pfront_core::SymKind.SYM_VALUE, pfront_core::NS_VALUE, d, pub);
@@ -1660,6 +1677,15 @@ fn void Resolver.resolve_expr_inner(Resolver* r, Node* e)
                     r.builtin_hits = r.builtin_hits + 1;
                 }
                 if (s.decl != null) { s.decl.flags = s.decl.flags | pfront_core::NF_USED; }
+            }
+            else if (r.iface_method_named(e.name_id) != null)
+            {
+                // `area(x)` where `area` is an interface method: bound to the interface's declaration, lowered as `x.area()`
+                Node* im = r.iface_method_named(e.name_id);
+                e.resolved = im;
+                e.flags = e.flags | pfront_core::NF_RESOLVED;
+                r.resolved_count = r.resolved_count + 1;
+                im.flags = im.flags | pfront_core::NF_USED;
             }
             else
             {
