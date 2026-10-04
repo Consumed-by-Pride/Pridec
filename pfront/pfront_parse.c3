@@ -1005,6 +1005,27 @@ fn Node* Parser.parse_type_postfix(Parser* p)
     return base;
 }
 
+// inside parentheses an arrow belongs to the type: `A -> B [! row]` after an already parsed `first` makes the function type
+fn Node* Parser.arrow_tail(Parser* p, Node* first)
+{
+    if (!(p.check(Tk.TOKEN_ARROW) || p.check(Tk.TOKEN_ARROW_ASCII))) { return first; }
+    Tok ar = p.advance();
+    Node* ret = p.parse_type_with_arrow();
+    Node* fnty = p.mk_at(Nk.N_TY_FN, ar);
+    p.add(fnty, first);
+    if (ret != null)
+    {
+        Node* rw = p.mk_at(Nk.N_TY_CONSTRAINT, ar);
+        p.add(rw, ret);
+        p.add(fnty, rw);
+    }
+    if (p.check(Tk.TOKEN_BANG))
+    {
+        Node* row = p.parse_effect_row();
+        if (row != null) { p.add(fnty, row); }
+    }
+    return fnty;
+}
 fn Node* Parser.parse_type_atom(Parser* p)
 {
     Tok t = p.cur();
@@ -1014,10 +1035,40 @@ fn Node* Parser.parse_type_atom(Parser* p)
         case TOKEN_TYPEVAR:
         {
             p.advance();
+            // `Tensor<T; d1, d2, ...>` is a ranked array: the nested fixed arrays [[T; dk] ...; d1]
+            if (t.len == 6 && t.start[0] == 'T' && t.start[1] == 'e' && t.start[2] == 'n' && t.start[3] == 's' && t.start[4] == 'o' && t.start[5] == 'r' && p.check(Tk.TOKEN_LT))
+            {
+                p.advance();
+                Node* elem = p.parse_type();
+                p.expect(Tk.TOKEN_SEMI, 1013, "expected ';' and the dimensions after the element type of a Tensor");
+                Node*[8] dims; usz nd = 0;
+                while (nd < 8)
+                {
+                    dims[nd] = p.parse_expr_prec(7);
+                    nd++;
+                    if (!p.accept(Tk.TOKEN_COMMA)) { break; }
+                }
+                p.expect(Tk.TOKEN_GT, 1010, "expected '>' to close the Tensor type");
+                Node* cur = elem;
+                for (usz di = nd; di > 0; di--)
+                {
+                    Node* arr = p.mk_at(Nk.N_TY_ARRAY, t);
+                    p.add(arr, cur);
+                    p.add(arr, dims[di - 1]);
+                    cur = arr;
+                }
+                return cur;
+            }
             Node* n = p.mk_at(Nk.N_TY_NAME, t);
             n.name_id = p.intern_tok(t);
             n.p.sptr = t.start;
             n.p.slen = t.len;
+            // `Str` is the capitalised spelling of the primitive `str` (tests/exec/24, 35 write it that way)
+            if (t.len == 3 && t.start[0] == 'S' && t.start[1] == 't' && t.start[2] == 'r')
+            {
+                n.name_id = p.interner.intern("str", 3);
+                n.p.sptr = "str";
+            }
             return n;
         }
         case TOKEN_WILDCARD:
@@ -1086,6 +1137,8 @@ fn Node* Parser.parse_type_atom(Parser* p)
             }
 
             Node* first = p.parse_type();
+            bool had_arrow = p.check(Tk.TOKEN_ARROW) || p.check(Tk.TOKEN_ARROW_ASCII);
+            first = p.arrow_tail(first);   // `(A -> B)` is a function type; `(A -> B, C)` has it as one component of a tuple
             if (p.check(Tk.TOKEN_COMMA))
             {
                 Node* tup = p.mk_at(Nk.N_TY_TUPLE, t);
@@ -1101,7 +1154,7 @@ fn Node* Parser.parse_type_atom(Parser* p)
                         p.add(tup, p.mk_at(Nk.N_TY_INFER, el));
                         break;
                     }
-                    p.add(tup, p.parse_type());
+                    p.add(tup, p.arrow_tail(p.parse_type()));
                 }
                 p.expect(Tk.TOKEN_RPAREN, 1012, "expected ')' to close tuple type");
                 return tup;
@@ -1119,25 +1172,10 @@ fn Node* Parser.parse_type_atom(Parser* p)
              path, so downstream sees one representation of a function
              type rather than three.
             */
-            if (p.check(Tk.TOKEN_ARROW) || p.check(Tk.TOKEN_ARROW_ASCII))
+            if (had_arrow)
             {
-                Tok ar = p.advance();
-                Node* ret = p.parse_type_with_arrow();
-                Node* fnty = p.mk_at(Nk.N_TY_FN, ar);
-                p.add(fnty, first);
-                if (ret != null)
-                {
-                    Node* rw = p.mk_at(Nk.N_TY_CONSTRAINT, ar);
-                    p.add(rw, ret);
-                    p.add(fnty, rw);
-                }
-                if (p.check(Tk.TOKEN_BANG))
-                {
-                    Node* row = p.parse_effect_row();
-                    if (row != null) { p.add(fnty, row); }
-                }
                 p.expect(Tk.TOKEN_RPAREN, 1012, "expected ')' after parenthesised function type");
-                return fnty;
+                return first;
             }
             p.expect(Tk.TOKEN_RPAREN, 1012, "expected ')' after parenthesised type");
             return first;
@@ -1719,7 +1757,8 @@ fn int infix_prec(Tk t)
         case TOKEN_PERCENT:
         case TOKEN_STAR_QUESTION:
         case TOKEN_STAR_PERCENT:
-        case TOKEN_STAR_PIPE:     return 13;
+        case TOKEN_STAR_PIPE:
+        case TOKEN_AT:            return 13;   // `a @ b`: matrix/vector product of ranked arrays
         case TOKEN_KW_AS:         return 14;
         /*
          0 means "not an infix operator" and is load-bearing: callers loop
@@ -2700,6 +2739,21 @@ fn Node* Parser.parse_primary(Parser* p)
                 p.no_struct_lit = saved;
                 return tup;
             }
+            if (p.check(Tk.TOKEN_SEMI))   // `(a; b; c)`: a sequence, its value is the last expression
+            {
+                Node* seq = p.mk_at(Nk.N_BLOCK, t);
+                p.add(seq, first);
+                while (p.accept(Tk.TOKEN_SEMI))
+                {
+                    p.skip_layout();
+                    if (p.check(Tk.TOKEN_RPAREN)) { break; }
+                    p.add(seq, p.parse_expr());
+                    p.skip_layout();
+                }
+                p.expect(Tk.TOKEN_RPAREN, 1041, "expected ')' to close a sequence");
+                p.no_struct_lit = saved;
+                return seq;
+            }
             p.expect(Tk.TOKEN_RPAREN, 1041, "expected ')' after expression");
             p.no_struct_lit = saved;
             return first;
@@ -2709,6 +2763,24 @@ fn Node* Parser.parse_primary(Parser* p)
         {
             p.advance();
             Node* arr = p.mk_at(Nk.N_EXPR_ARRAY, t);
+            if (p.check(Tk.TOKEN_PIPE))   // `[| a, b |]`: a ranked (tensor) literal -- an array literal; nest them for more ranks
+            {
+                p.advance();
+                bool sv_np = p.no_pipe_infix; bool sv_sl = p.no_struct_lit;
+                p.no_pipe_infix = true; p.no_struct_lit = false;
+                p.skip_layout();
+                while (!p.check(Tk.TOKEN_PIPE) && !p.at_end())
+                {
+                    p.add(arr, p.parse_expr());
+                    p.skip_layout();
+                    if (!p.accept(Tk.TOKEN_COMMA)) { break; }
+                    p.skip_layout();
+                }
+                p.no_pipe_infix = sv_np; p.no_struct_lit = sv_sl;
+                p.expect(Tk.TOKEN_PIPE, 1042, "expected '|]' to close a tensor literal");
+                p.expect(Tk.TOKEN_RBRACK, 1042, "expected '|]' to close a tensor literal");
+                return arr;
+            }
             bool saved = p.no_struct_lit;
             p.no_struct_lit = false;
             p.skip_layout();
@@ -2829,6 +2901,15 @@ fn Node* Parser.parse_primary(Parser* p)
             // same rule as TOKEN_KW_TAIL and TOKEN_KW_HANDLE: a staging
             // block is followed by a level or a body, never by a token that
             // closes or separates the enclosing expression.
+            // `stage y + 10`: an expression directly after `stage` (an identifier that is not
+            // the soft keyword `then`, or a float/string literal) is the spec's stage passthrough: it evaluates as the bare expression.
+            // An identifier right after an identifier is not valid in any other reading.
+            Tok nx1 = p.peek(1);
+            if ((nx1.type == Tk.TOKEN_IDENT && !tok_is_then(nx1)) || nx1.type == Tk.TOKEN_LIT_FLOAT || nx1.type == Tk.TOKEN_LIT_STRING)
+            {
+                p.advance();
+                return p.parse_expr();   // unwrapped: the operand runs at the enclosing stage (no quote node, no stage-escape)
+            }
             if (!tok_starts_stage_body(p.peek(1).type))
             {
                 p.advance();
@@ -3574,6 +3655,7 @@ fn Node* Parser.parse_match(Parser* p)
     bool braced = p.accept(Tk.TOKEN_LBRACE);
     p.skip_layout();
     bool indented = p.accept(Tk.TOKEN_INDENT);
+    bool arms_deeper = false;   // arms deeper than the statement: the lexer opened a level for the first `|` without an INDENT token
     p.skip_newlines();
     while (true)
     {
@@ -3619,6 +3701,7 @@ fn Node* Parser.parse_match(Parser* p)
             if (!p.check(Tk.TOKEN_PIPE)) { break; }
         }
         Tok bar = p.advance();
+        if (n.child_count == 1 && !indented && !braced && bar.col - 1 > p.stmt_indent) { arms_deeper = true; }   // see parse_handle
         Node* arm = p.mk_at(Nk.N_MATCH_ARM, bar);
         bool sv = p.in_fn_sig;
         p.in_fn_sig = false;
@@ -3673,6 +3756,7 @@ fn Node* Parser.parse_match(Parser* p)
         p.skip_newlines();
     }
     if (indented) { while (p.accept(Tk.TOKEN_DEDENT)) {} }
+    else if (arms_deeper && p.check(Tk.TOKEN_DEDENT)) { p.advance(); }   // the matching DEDENT, or the statements after the match leave their block
     if (braced) { p.skip_layout(); p.expect(Tk.TOKEN_RBRACE, 1062, "expected '}' to close match"); }
     if (n.child_count < 2)
     {
@@ -3691,10 +3775,12 @@ fn Node* Parser.parse_handle(Parser* p)
     p.no_pipe_infix = true;
     p.add(n, p.parse_block_or_expr());
     p.no_pipe_infix = saved_pipe;
+    bool arms_deeper = false;   // the first arm's `|` sits deeper than the statement: the lexer opened a level for it without an INDENT token
     p.skip_layout();
     while (p.check(Tk.TOKEN_PIPE))
     {
         Tok bar = p.advance();
+        if (n.child_count == 1 && bar.col - 1 > p.stmt_indent) { arms_deeper = true; }
         Node* arm = p.mk_at(Nk.N_HANDLER_ARM, bar);
         // Effect.op args -> body
         Tok en = p.cur();
@@ -3752,6 +3838,8 @@ fn Node* Parser.parse_handle(Parser* p)
         if (p.peek(look).col < bar.col) { break; }
         p.skip_layout();
     }
+    // ...and the DEDENT that closes that level comes after the last arm: take it, or the statements after the handler leave the enclosing block
+    if (arms_deeper && p.check(Tk.TOKEN_DEDENT)) { p.advance(); }
     return n;
 }
 

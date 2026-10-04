@@ -2655,6 +2655,7 @@ fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
     Tk op = (Tk)n.p.op;
     if (op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_PIPEPIPE || op == Tk.TOKEN_KW_AND || op == Tk.TOKEN_KW_OR) { return lw.shortcircuit(n, op == Tk.TOKEN_AMPAMP || op == Tk.TOKEN_KW_AND); }
     if (op == Tk.TOKEN_PIPELINE) { return lw.pipeline(n, want); }
+    if (op == Tk.TOKEN_AT) { return lw.matmul(n); }
     if (op == Tk.TOKEN_PLUS_PIPE || op == Tk.TOKEN_MINUS_PIPE) { return lw.saturating(n, op == Tk.TOKEN_PLUS_PIPE, want); }
     AirBinop b;
     if (!lw.binop_for(op, &b)) { lw.unsup(n, "binary operator"); return lw.unit(); }
@@ -2700,6 +2701,93 @@ fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
     }
     if (!lw.live()) { return lw.unit(); }
     return lw.binop(b, l, r);
+}
+
+// `a @ b` on ranked arrays: vector . vector -> scalar, matrix @ vector -> vector, matrix @ matrix -> matrix.
+// Both operands are stored to stack slots; three counted loops (i over rows, j over columns, k over the shared
+// dimension) accumulate into the result slot. The shapes are checked here, at lowering time.
+fn Vx Low.mm_zero(Low* lw, AirTyp* e)
+{
+    if (air_ll::ty_is_float(e)) { AirPrd* f = air_ir::air_mk_float(lw.a, 0.0); f.ty = e; Vx r; r.p = f; r.t = e; return r; }
+    return lw.lit_int(0, e);
+}
+// open a counted loop `slot` in 0..lim: returns the header block through *hd and the exit block through *ex; the body runs in the current block
+fn void Low.mm_loop_open(Low* lw, AirPrd* slot, long lim, usz* hd, usz* ex)
+{
+    AirTyp* i64t = lw.m.t_i64;
+    lw.store(slot, lw.lit_int(0, i64t));
+    *hd = lw.blk("mm.h"); usz body = lw.blk("mm.b"); *ex = lw.blk("mm.x");
+    lw.t_jump0(*hd);
+    lw.cur = *hd;
+    Vx iv = lw.load(slot, i64t);
+    Vx c = lw.binop(ABIN_LT, iv, lw.lit_int(lim, i64t));
+    lw.t_cond(c, body, *ex);
+    lw.cur = body;
+}
+fn void Low.mm_loop_close(Low* lw, AirPrd* slot, usz hd, usz ex)
+{
+    AirTyp* i64t = lw.m.t_i64;
+    Vx iv = lw.load(slot, i64t);
+    lw.store(slot, lw.binop(ABIN_ADD, iv, lw.lit_int(1, i64t)));
+    lw.t_jump0(hd);
+    lw.cur = ex;
+}
+fn Vx Low.matmul(Low* lw, Node* n)
+{
+    Vx l = lw.expr(n.children[0], lw.hint(n.children[0]));
+    Vx r = lw.expr(n.children[1], lw.hint(n.children[1]));
+    if (!lw.live()) { return lw.unit(); }
+    AirTyp* at = l.t; AirTyp* bt = r.t;
+    if (at == null || bt == null || at.tag != ATYP_ARRAY || bt.tag != ATYP_ARRAY) { lw.err(n, "`@` needs two ranked arrays (Tensor / [| |] values)", null); return lw.unit(); }
+    bool a2 = at.args[0].tag == ATYP_ARRAY; bool b2 = bt.args[0].tag == ATYP_ARRAY;
+    AirTyp* ea = a2 ? at.args[0].args[0] : at.args[0];
+    AirTyp* eb = b2 ? bt.args[0].args[0] : bt.args[0];
+    if ((a2 && at.args[0].args[0].tag == ATYP_ARRAY) || (b2 && bt.args[0].args[0].tag == ATYP_ARRAY)) { lw.err(n, "`@` supports rank 1 and rank 2 operands", null); return lw.unit(); }
+    if (!air_ll::ty_eq(ea, eb) || !(air_ll::ty_is_int(ea) || air_ll::ty_is_float(ea))) { lw.err(n, "`@` needs numeric operands of one element type", null); return lw.unit(); }
+    long dm = a2 ? at.ival : 1;
+    long dk = a2 ? at.args[0].ival : at.ival;
+    long dk2 = b2 ? bt.ival : bt.ival;
+    long dn = b2 ? bt.args[0].ival : 1;
+    if (dk != dk2) { lw.err(n, "`@`: the shared dimensions differ", null); return lw.unit(); }
+    AirTyp* i64t = lw.m.t_i64;
+    AirTyp* rty = ea;                                   // vector . vector
+    if (a2 && b2) { rty = air_ir::air_mk_typ_array(lw.a, air_ir::air_mk_typ_array(lw.a, ea, dn), dm); }
+    else if (a2) { rty = air_ir::air_mk_typ_array(lw.a, ea, dm); }
+    else if (b2) { lw.err(n, "`@`: vector @ matrix is not supported (transpose the matrix side)", null); return lw.unit(); }
+    Vx as_ = lw.alloca_(at); lw.store(as_.p, l);
+    Vx bs_ = lw.alloca_(bt); lw.store(bs_.p, r);
+    Vx cs_ = lw.alloca_(rty);
+    Vx is_ = lw.alloca_(i64t); Vx js_ = lw.alloca_(i64t); Vx ks_ = lw.alloca_(i64t);
+    Vx acc = lw.alloca_(ea);
+    usz ih; usz ix; lw.mm_loop_open(is_.p, dm, &ih, &ix);
+    usz jh; usz jx; lw.mm_loop_open(js_.p, dn, &jh, &jx);
+    lw.store(acc.p, lw.mm_zero(ea));
+    usz kh; usz kx; lw.mm_loop_open(ks_.p, dk, &kh, &kx);
+    {
+        Vx iv = lw.load(is_.p, i64t); Vx jv = lw.load(js_.p, i64t); Vx kv = lw.load(ks_.p, i64t);
+        Vx z = lw.lit_int(0, i64t);
+        Vx pa; Vx pb;
+        if (a2) { Vx[3] ix3; ix3[0] = z; ix3[1] = iv; ix3[2] = kv; pa = lw.gep(as_.p, at, &ix3[0], 3, ea); }
+        else { Vx[2] ix2; ix2[0] = z; ix2[1] = kv; pa = lw.gep(as_.p, at, &ix2[0], 2, ea); }
+        if (b2) { Vx[3] ix3; ix3[0] = z; ix3[1] = kv; ix3[2] = jv; pb = lw.gep(bs_.p, bt, &ix3[0], 3, ea); }
+        else { Vx[2] ix2; ix2[0] = z; ix2[1] = kv; pb = lw.gep(bs_.p, bt, &ix2[0], 2, ea); }
+        Vx x = lw.load(pa.p, ea); Vx y = lw.load(pb.p, ea);
+        Vx pr = lw.binop(ABIN_MUL, x, y);
+        Vx sum = lw.binop(ABIN_ADD, lw.load(acc.p, ea), pr);
+        lw.store(acc.p, sum);
+    }
+    lw.mm_loop_close(ks_.p, kh, kx);
+    {
+        Vx iv = lw.load(is_.p, i64t); Vx jv = lw.load(js_.p, i64t); Vx z = lw.lit_int(0, i64t);
+        Vx pc;
+        if (a2 && b2) { Vx[3] ix3; ix3[0] = z; ix3[1] = iv; ix3[2] = jv; pc = lw.gep(cs_.p, rty, &ix3[0], 3, ea); }
+        else if (a2) { Vx[2] ix2; ix2[0] = z; ix2[1] = iv; pc = lw.gep(cs_.p, rty, &ix2[0], 2, ea); }
+        else { pc.p = cs_.p; pc.t = lw.ptr(ea); }
+        lw.store(pc.p, lw.load(acc.p, ea));
+    }
+    lw.mm_loop_close(js_.p, jh, jx);
+    lw.mm_loop_close(is_.p, ih, ix);
+    return lw.load(cs_.p, rty);
 }
 
 // a && b / a || b: the right side runs only when needed; the result is a bool block parameter
