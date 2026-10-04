@@ -25,18 +25,66 @@ fn chacha20_destroy : *ChaCha20 -> ()
       os.linux.free(ctx.nonce as ptr)
     ctx.key = 0 as *u32; ctx.nonce = 0 as *u32
 
+fn chacha20_rotl : (u32, u64) -> u32
+  | (x, n) -> (x << n) | (x >> (32u64 - n))
+
+fn chacha20_qr : (*u32, i64, i64, i64, i64) -> ()
+  | (x, a, b, c, d) ->
+    x[a] = x[a] + x[b]; x[d] = chacha20_rotl(x[d] ^ x[a], 16u64)
+    x[c] = x[c] + x[d]; x[b] = chacha20_rotl(x[b] ^ x[c], 12u64)
+    x[a] = x[a] + x[b]; x[d] = chacha20_rotl(x[d] ^ x[a], 8u64)
+    x[c] = x[c] + x[d]; x[b] = chacha20_rotl(x[b] ^ x[c], 7u64)
+
+-- RFC 8439 section 2.3: one 64-byte keystream block for (key, counter, nonce) -> out (16 little-endian words)
+fn chacha20_block : (*ChaCha20, u32, *u32) -> ()
+  | (ctx, counter, out) ->
+    let st = os.linux.malloc(64i64) as *u32
+    st[0i64] = 1634760805u32; st[1i64] = 857760878u32; st[2i64] = 2036477234u32; st[3i64] = 1797285236u32
+    let mut i : i64 = 0i64
+    while i < 8i64
+      st[4i64 + i] = ctx.key[i]
+      i = i + 1i64
+    st[12i64] = counter
+    st[13i64] = ctx.nonce[0i64]; st[14i64] = ctx.nonce[1i64]; st[15i64] = ctx.nonce[2i64]
+    let mut j : i64 = 0i64
+    while j < 16i64
+      out[j] = st[j]
+      j = j + 1i64
+    let mut r : i64 = 0i64
+    while r < 10i64
+      chacha20_qr(out, 0i64, 4i64, 8i64, 12i64)
+      chacha20_qr(out, 1i64, 5i64, 9i64, 13i64)
+      chacha20_qr(out, 2i64, 6i64, 10i64, 14i64)
+      chacha20_qr(out, 3i64, 7i64, 11i64, 15i64)
+      chacha20_qr(out, 0i64, 5i64, 10i64, 15i64)
+      chacha20_qr(out, 1i64, 6i64, 11i64, 12i64)
+      chacha20_qr(out, 2i64, 7i64, 8i64, 13i64)
+      chacha20_qr(out, 3i64, 4i64, 9i64, 14i64)
+      r = r + 1i64
+    let mut k : i64 = 0i64
+    while k < 16i64
+      out[k] = out[k] + st[k]
+      k = k + 1i64
+    os.linux.free(st as ptr)
+
+-- XOR the data with the keystream starting at block `counter`; encrypt and decrypt are the same operation
 fn chacha20_crypt_slice : (*ChaCha20, ptr, i64, u32) -> ptr
   | (ctx, data, len, counter) ->
-    let out_buf = os.linux.malloc(len) as *u8
+    let out_buf = os.linux.malloc(len + 1i64) as *u8
     let in_buf  = data as *u8
-    let mut i : i64 = 0i64
-    let mut k_word = ctx.key[0i64] ^ ctx.nonce[0i64] ^ counter
-    while i < len
-      let byte_key = ((k_word >> ((i % 4i64) * 8i64)) & 0xFFu32) as u8
-      out_buf[i] = in_buf[i] ^ byte_key
-      if (i % 4i64) == 3i64
-        k_word = (k_word * 1664525u32) + 1013904223u32
-      i = i + 1i64
+    let ks = os.linux.malloc(64i64) as *u32
+    let ksb = ks as *u8
+    let mut ctr = counter
+    let mut off : i64 = 0i64
+    while off < len
+      chacha20_block(ctx, ctr, ks)
+      let mut i : i64 = 0i64
+      while i < 64i64 && off + i < len
+        out_buf[off + i] = in_buf[off + i] ^ ksb[i]
+        i = i + 1i64
+      ctr = ctr + 1u32
+      off = off + 64i64
+    os.linux.free(ks as ptr)
     out_buf as ptr
 
 fn chacha20_encrypt : (*ChaCha20, ptr, i64) -> ptr

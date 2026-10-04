@@ -1,0 +1,59 @@
+-- EXIT: 5
+-- stdlib executed: ChaCha20 against RFC 8439 section 2.4.2 and HMAC-SHA256 against RFC 4231 test case 2
+use os.linux
+use crypto.chacha20
+use crypto.hmac
+use crypto.sha256
+
+fn word : (ptr, i64) -> i64
+  | (d, o) ->
+    let b = d as *u8
+    ((b[o] as i64) << 24i64) | ((b[o + 1i64] as i64) << 16i64) | ((b[o + 2i64] as i64) << 8i64) | (b[o + 3i64] as i64)
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    -- RFC 8439 2.4.2: key 00 01 02 .. 1f, nonce 00 00 00 00 00 00 00 4a 00 00 00 00, counter 1
+    let key = os.linux.malloc(32i64) as *u8
+    let mut i : i64 = 0i64
+    while i < 32i64
+      key[i] = i as u8
+      i = i + 1i64
+    let nonce = os.linux.malloc(12i64) as *u8
+    i = 0i64
+    while i < 12i64
+      nonce[i] = 0u8
+      i = i + 1i64
+    nonce[7i64] = 74u8
+    let mut ctx = chacha20.chacha20_new(key as ptr, nonce as ptr)
+    let msg = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it." as ptr
+    let ct = chacha20.chacha20_encrypt(&ctx, msg, 114i64) as *u8
+    -- ciphertext starts 6e 2e 35 9a 25 68 f9 80 ... and ends ... 87 4d
+    if word(ct as ptr, 0i64) == 0x6e2e359ai64 && word(ct as ptr, 4i64) == 0x2568f980i64 && ct[112i64] == 135u8 && ct[113i64] == 77u8
+      n = n + 1i64
+    -- decrypting returns the plaintext
+    let pt = chacha20.chacha20_decrypt(&ctx, ct as ptr, 114i64) as *u8
+    if pt[0i64] == 76u8 && pt[113i64] == 46u8
+      n = n + 1i64
+    -- RFC 4231 case 2: key "Jefe", data "what do ya want for nothing?"
+    --   5bdcc146 bf60754e 6a042426 089575c7 5a003f08 9d273983 9dec58b9 64ec3843
+    let mut h = hmac.hmac_sha256_new("Jefe" as ptr, 4i64)
+    let mac = hmac.hmac_sha256_compute(&h, "what do ya want for nothing?" as ptr, 28i64)
+    if word(mac, 0i64) == 0x5bdcc146i64 && word(mac, 28i64) == 0x64ec3843i64
+      n = n + 1i64
+    -- a key longer than the block size is hashed first (RFC 4231 case 6: 131 bytes of 0xaa)
+    let big = os.linux.malloc(131i64) as *u8
+    i = 0i64
+    while i < 131i64
+      big[i] = 170u8
+      i = i + 1i64
+    let mut h2 = hmac.hmac_sha256_new(big as ptr, 131i64)
+    let mac2 = hmac.hmac_sha256_compute(&h2, "Test Using Larger Than Block-Size Key - Hash Key First" as ptr, 54i64)
+    --   60e43159 1ee0b67f ... (first word asserted)
+    if word(mac2, 0i64) == 0x60e43159i64
+      n = n + 1i64
+    -- the digest of a different message differs
+    let mac3 = hmac.hmac_sha256_compute(&h, "what do ya want for nothing!" as ptr, 28i64)
+    if word(mac3, 0i64) != word(mac, 0i64)
+      n = n + 1i64
+    n

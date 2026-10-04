@@ -1,0 +1,31 @@
+-- EXIT: 3
+-- stdlib executed: SHA-256 against the FIPS 180-4 / NIST vectors ("", "abc", and the 56-byte two-block message)
+use os.linux
+use crypto.sha256
+
+fn first_word : (ptr) -> i64
+  | (d) ->
+    let b = d as *u8
+    ((b[0i64] as i64) << 24i64) | ((b[1i64] as i64) << 16i64) | ((b[2i64] as i64) << 8i64) | (b[3i64] as i64)
+
+fn last_word : (ptr) -> i64
+  | (d) ->
+    let b = d as *u8
+    ((b[28i64] as i64) << 24i64) | ((b[29i64] as i64) << 16i64) | ((b[30i64] as i64) << 8i64) | (b[31i64] as i64)
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    -- "" = e3b0c442 98fc1c14 9afbf4c8 996fb924 27ae41e4 649b934c a495991b 7852b855
+    let d0 = sha256.sha256_hash_bytes("" as ptr, 0i64)
+    if first_word(d0) == 0xe3b0c442i64 && last_word(d0) == 0x7852b855i64
+      n = n + 1i64
+    -- "abc" = ba7816bf 8f01cfea 414140de 5dae2223 b00361a3 96177a9c b410ff61 f20015ad
+    let d1 = sha256.sha256_hash_bytes("abc" as ptr, 3i64)
+    if first_word(d1) == 0xba7816bfi64 && last_word(d1) == 0xf20015adi64
+      n = n + 1i64
+    -- "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq" = 248d6a61 d20638b8 e5c02693 0c3e6039 a33ce459 64ff2167 f6ecedd4 19db06c1
+    let d2 = sha256.sha256_hash_bytes("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq" as ptr, 56i64)
+    if first_word(d2) == 0x248d6a61i64 && last_word(d2) == 0x19db06c1i64
+      n = n + 1i64
+    n
