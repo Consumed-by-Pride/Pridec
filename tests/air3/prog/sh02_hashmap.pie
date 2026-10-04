@@ -1,0 +1,37 @@
+-- EXIT: 150
+-- stdlib executed: Robin Hood HashMap<i64,i64> with growth (16 -> 1024 buckets), overwrite, misses, negative keys
+-- (hm_hash wrapped to a negative number and `%` indexed outside the bucket array: heap corruption)
+use hash.map
+
+fn main : () -> i64
+  | () ->
+    let mut m = map.hm_new()
+    let mut i : i64 = 0i64
+    while i < 700i64
+      map.hm_insert(&m, i * 1000003i64 - 350000000i64, i * 2i64)
+      i = i + 1i64
+    -- overwrite 100 keys
+    let mut j : i64 = 0i64
+    while j < 100i64
+      map.hm_insert(&m, j * 1000003i64 - 350000000i64, 5i64)
+      j = j + 1i64
+    let mut sum : i64 = 0i64
+    let mut miss : i64 = 0i64
+    let mut k : i64 = 0i64
+    while k < 700i64
+      let (ok, v) = map.hm_get(&m, k * 1000003i64 - 350000000i64)
+      if ok
+        sum = sum + v
+      else
+        miss = miss + 1i64
+      k = k + 1i64
+    let (ok2, _) = map.hm_get(&m, 12345i64)
+    let mut r : i64 = 0i64
+    if !ok2
+      r = 1i64
+    -- 100 overwritten values of 5, 600 values 2*i for i in 100..699 = 2 * (sum 100..699 = 239700) = 479400; total 479900
+    -- len must stay 700
+    if sum == 479900i64 && miss == 0i64 && map.hm_len(&m) == 700i64
+      r = r + 149i64
+    map.hm_free(&m)
+    r

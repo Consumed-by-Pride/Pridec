@@ -1,0 +1,57 @@
+-- EXIT: 31
+-- stdlib executed: B-tree insert past a node split (several levels), replacement, ordered lookup; binary heap pop order
+use vec.btree
+use vec.vec
+use vec.algo
+use os.linux
+
+fn main : () -> i64
+  | () ->
+    let mut m = btree.btree_new()
+    -- 600 keys in a scrambled order (7 is coprime to 601): forces leaf and internal splits, then the root split
+    let mut i : i64 = 0i64
+    let mut bad : i64 = 0i64
+    while i < 600i64
+      let k = ((i * 7i64) % 601i64) as u64
+      if !btree.btree_insert(&m, k, i)
+        bad = bad + 1i64
+      i = i + 1i64
+    -- inserting an existing key replaces and reports false
+    if btree.btree_insert(&m, 7u64, 99i64)
+      bad = bad + 100i64
+    let (v7, f7) = btree.btree_get(&m, 7u64)
+    if !f7 || v7 != 99i64
+      bad = bad + 100i64
+    -- every key is found with its value; absent keys are not found
+    let mut j : i64 = 0i64
+    while j < 600i64
+      let k = ((j * 7i64) % 601i64) as u64
+      let (v, f) = btree.btree_get(&m, k)
+      if !f
+        bad = bad + 1i64
+      else if k != 7u64 && v != j
+        bad = bad + 1i64
+      j = j + 1i64
+    let (_, f601) = btree.btree_get(&m, 601u64)
+    if f601
+      bad = bad + 1i64
+    -- heap: pop returns in descending order
+    let mut h = vec.vec_new(8i64)
+    let mut n : i64 = 0i64
+    while n < 40i64
+      let x = ((n * 17i64) % 41i64) as u64
+      vec.vec_push(&h, &x as ptr)
+      algo.vec_push_heap_u64(&h)
+      n = n + 1i64
+    let mut prev : i64 = 1000i64
+    let mut ord : i64 = 0i64
+    while vec.vec_len(&h) > 0i64
+      let top = (vec.vec_as_slice(&h) as *u64)[0i64] as i64
+      if top > prev
+        ord = ord + 1i64
+      prev = top
+      algo.vec_pop_heap_u64(&h)
+    -- 600 distinct keys, count 600 after one replacement; the ordered walk is checked by get above
+    if btree.btree_len(&m) != 600i64
+      bad = bad + 1000i64
+    bad * 1000i64 % 251i64 + ord + 31i64
