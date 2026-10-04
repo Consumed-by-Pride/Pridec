@@ -1,0 +1,21 @@
+// EXIT: 50
+air 3.0 Main "attrs.pie";
+
+attr packed data H {
+  ctor H(a : i8, b : i64, c : i8) : nominal H;
+};
+
+attr section ".mydata" attr align 64 global TAB : nominal H = record{a = 3 : i8, b = 40 : i64, c = 4 : i8} : nominal H;
+
+attr noinline attr cold def pick(h : nominal H) : i64 =
+  <h | field b #1 · comu bb.
+    ret(bb)>;
+
+attr inline def one() : i64 = ret(10 : i64);
+
+def main() : i64 =
+  let t = load(TAB) : nominal H in
+    <pick | call · t · comu p.
+      <one | call · comu o.
+        let r = (add p o : i64) : i64 in
+          ret(r)>>;

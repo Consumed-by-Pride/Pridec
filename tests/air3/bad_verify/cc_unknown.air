@@ -1,0 +1,6 @@
+// ERROR: unknown calling convention
+air 3.0 Main "v.pie";
+
+attr callconv "stdcall9" def f() : i64 = ret(1 : i64);
+
+def main() : i64 = ret(0 : i64);

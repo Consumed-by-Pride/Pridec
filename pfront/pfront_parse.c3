@@ -5519,7 +5519,7 @@ fn void Parser.grab_attr(Parser* p)
             p.advance();
         }
     }
-    if (nm.type != Tk.TOKEN_KW_EXTERN) { pfront_core::pend_attr(nm.start, nm.len, ap, al, isstr); }
+    if (nm.type != Tk.TOKEN_KW_EXTERN || isstr) { pfront_core::pend_attr(nm.start, nm.len, ap, al, isstr); }   // (a leading `#extern("sym")` is recorded as an attribute; globals read it)
 }
 fn void Parser.skip_attributes(Parser* p)
 {

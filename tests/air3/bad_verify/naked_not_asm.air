@@ -1,0 +1,6 @@
+// ERROR: a naked function must be assembly
+air 3.0 Main "v.pie";
+
+attr naked def f() : unit = ret(unit);
+
+def main() : i64 = ret(0 : i64);

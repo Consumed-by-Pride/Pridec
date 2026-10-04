@@ -1,0 +1,6 @@
+// ERROR: align needs a power of two
+air 3.0 Main "v.pie";
+
+attr align 24 global mut G : i64 = 1 : i64;
+
+def main() : i64 = ret(0 : i64);

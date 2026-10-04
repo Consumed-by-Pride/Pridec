@@ -1,0 +1,5 @@
+// ERROR: falls off
+air 3.0 Main "x";
+def main() : i64 =
+  let a = 1 : i64 in
+    nop;

@@ -1,0 +1,17 @@
+// EXIT: 46
+air 3.0 Main "cc.pie";
+
+attr callconv "fast" def add3(a : i64, b : i64, c : i64) : i64 =
+  let s = (add a b : i64) : i64 in
+    let t = (add s c : i64) : i64 in
+      ret(t);
+
+attr callconv "preserve_most" def twice(x : i64) : i64 =
+  let t = (mul x 2 : i64) : i64 in
+    ret(t);
+
+def main() : i64 =
+  <add3 | call · 10 : i64 · 15 : i64 · 7 : i64 · comu s.
+    <twice | call · 7 : i64 · comu d.
+      let r = (add s d : i64) : i64 in
+        ret(r)>>;

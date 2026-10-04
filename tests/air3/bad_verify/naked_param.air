@@ -1,0 +1,6 @@
+// ERROR: a naked function has no parameters
+air 3.0 Main "v.pie";
+
+attr naked def f(x : i64) : unit = asm "nop" "~{memory}" : [unit]() · comu a. ret(unit);
+
+def main() : i64 = ret(0 : i64);

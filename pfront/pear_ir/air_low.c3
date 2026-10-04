@@ -92,7 +92,7 @@ struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; 
 // continuations and is reported as unsupported.
 struct HndI { usz id; AirTyp* frame; AirTyp* th; usz nops; char*[8] g; AirTyp*[8] hty; AirTyp*[8] cty; }
 struct ArmCx { Node* kdecl; AirPrd* flag; AirPrd* rv; AirTyp* opret; AirTyp* th; bool on; }
-struct GlInfo { Node* decl; char* name; AirTyp* ty; }
+struct GlInfo { Node* decl; char* name; AirTyp* ty; bool is_ext; }
 
 struct Low
 {
@@ -992,7 +992,29 @@ fn GlInfo* Low.global_for(Low* lw, Node* d)
     if (t == null) { lw.unsup(d, "global without a declared type"); return null; }
     char* base = lw.text(d); if (base == null) { base = "g"; }
     char* nm = lw.dup(base); int k = 1;
-    while (true)
+    // #extern("sym"): storage defined elsewhere (the linker, a linker script, C, the OS loader) under exactly that symbol, never renamed.
+    // #export("sym"): a definition under exactly that symbol (a kernel's `boot_info`, a vector table the loader looks up by name).
+    usz gesl = 0; char* gesp = pfront_core::ext_sym_of(d, &gesl);
+    char* gxsym = null;
+    {
+        char* an; usz anl; char* aa; usz aal; bool ais;
+        for (usz kk = 0; pfront_core::attr_at(d, kk, &an, &anl, &aa, &aal, &ais); kk++)
+        {
+            if (anl == 6 && an[0] == 'e' && an[1] == 'x' && an[2] == 'p' && an[3] == 'o' && an[4] == 'r' && an[5] == 't' && ais && aa != null && aal > 0 && aal < 199)
+            { char[200] xb; for (usz i = 0; i < aal; i++) { xb[i] = aa[i]; } xb[aal] = 0; gxsym = lw.dup(&xb[0]); }
+            if (anl == 6 && an[0] == 'e' && an[1] == 'x' && an[2] == 't' && an[3] == 'e' && an[4] == 'r' && an[5] == 'n' && ais && aa != null && aal > 0 && gesp == null) { gesp = aa; gesl = aal; }
+        }
+    }
+    bool g_ext = gesp != null && gesl > 0;
+    if (g_ext) { char[200] sb; usz kk = gesl < 199 ? gesl : 199; for (usz i = 0; i < kk; i++) { sb[i] = gesp[i]; } sb[kk] = 0; nm = lw.dup(&sb[0]); }
+    else if (gxsym != null) { nm = gxsym; }
+    bool g_dup = false;
+    if (g_ext || gxsym != null)
+    {
+        for (usz i = 0; i < lw.ngl; i++) { if (seq(lw.gls[i].name, nm)) { if (g_ext && lw.gls[i].is_ext) { g_dup = true; } else { lw.err(d, "two globals use the same symbol", nm); } } }
+        for (usz i = 0; i < lw.nfn; i++) { if (seq(lw.fns[i].name, nm) && !lw.fns[i].ext) { lw.err(d, "a global and a function use the same symbol", nm); } }
+    }
+    while (!g_ext && gxsym == null)
     {
         bool clash = false;
         for (usz i = 0; i < lw.ngl; i++) { if (seq(lw.gls[i].name, nm)) { clash = true; } }
@@ -1000,13 +1022,15 @@ fn GlInfo* Low.global_for(Low* lw, Node* d)
         if (!clash) { break; }
         char[160] b; k++; snprintf(&b[0], 160, "%s.%d", base, k); nm = lw.dup(&b[0]);
     }
-    GlInfo* g = &lw.gls[lw.ngl]; g.decl = d; g.name = nm; g.ty = t; lw.ngl++;
+    GlInfo* g = &lw.gls[lw.ngl]; g.decl = d; g.name = nm; g.ty = t; g.is_ext = g_ext; lw.ngl++;
+    if (g_dup) { return g; }   // a second declaration of one extern symbol is the same storage
     AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_GLOBAL, nm);
     lw.copy_attrs(ad, d);
-    ad.ret_ty = t; ad.g_mut = (d.flags & pfront_core::NF_MUT) != 0;
+    ad.ret_ty = t; ad.g_mut = (d.flags & pfront_core::NF_MUT) != 0; ad.is_extern = g_ext;
     // constant initialiser: a literal (anything else needs a run-time initialiser, not lowered yet)
     Node* init = null;
     for (usz i = 0; i < d.child_count; i++) { Node* c = d.children[i]; if (c != null && pfront_core::is_expr(c.kind)) { init = c; } }
+    if (init != null && g_ext) { lw.unsup(init, "an #extern global has no initialiser (its storage is defined elsewhere)"); init = null; }
     if (init != null)
     {
         Node* e = init;
@@ -1025,6 +1049,7 @@ fn GlInfo* Low.global_for(Low* lw, Node* d)
             else { lw.unsup(init, "global initialiser that is not a constant"); }
         }
     }
+    ad.is_pub = lw.visible(d, nm);
     lw.m.add_decl(ad);
     return g;
 }
@@ -3747,7 +3772,7 @@ fn void Low.lower_lambda(Low* lw, FnInfo* f)
     if (lw.live() && lw.fn_errors == 0) { lw.t_end(T_TRAP); }
     if (lw.fn_errors > 0) { lw.fail_fn++; return; }
     AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
-    ad.is_pub = true;
+    ad.is_pub = false;   // generated (lambda, adapter, handler arm): only referenced from inside the module
     for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
     ad.ret_ty = f.ret; ad.def_body = lw.assemble();
     lw.m.add_decl(ad); lw.fns_ok++;
@@ -3796,7 +3821,7 @@ fn void Low.lower_ind(Low* lw, FnInfo* f)
     Vx r = lw.vref(ins.name, f.ret);
     if (f.ret.tag == ATYP_BOTTOM) { lw.t_end(T_UNREACH); } else { lw.finish_ret(r, null); }
     AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
-    ad.is_pub = true;
+    ad.is_pub = false;   // generated (lambda, adapter, handler arm): only referenced from inside the module
     for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
     ad.ret_ty = f.ret; ad.def_body = lw.assemble();
     lw.m.add_decl(ad); lw.fns_ok++;
@@ -3820,7 +3845,7 @@ fn void Low.lower_adapter(Low* lw, FnInfo* f)
     Vx r = lw.vref(ins.name, f.ret);
     if (f.ret.tag == ATYP_BOTTOM) { lw.t_end(T_UNREACH); } else { lw.finish_ret(r, null); }
     AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
-    ad.is_pub = true;
+    ad.is_pub = false;   // generated (lambda, adapter, handler arm): only referenced from inside the module
     for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
     ad.ret_ty = f.ret; ad.def_body = lw.assemble();
     lw.m.add_decl(ad); lw.fns_ok++;
@@ -4299,7 +4324,7 @@ fn void Low.lower_arm(Low* lw, FnInfo* f)
     }
     if (lw.fn_errors > 0) { lw.fail_fn++; return; }
     AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
-    ad.is_pub = true;
+    ad.is_pub = false;   // generated (lambda, adapter, handler arm): only referenced from inside the module
     for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
     ad.ret_ty = f.ret; ad.def_body = lw.assemble();
     lw.m.add_decl(ad); lw.fns_ok++;
@@ -4365,7 +4390,7 @@ fn void Low.lower_fn(Low* lw, FnInfo* f)
     if (lw.live() && lw.fn_errors == 0) { lw.t_end(T_TRAP); }
     if (lw.fn_errors > 0) { lw.fail_fn++; return; }
     AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
-    ad.is_pub = true;
+    ad.is_pub = lw.visible(d, f.name);
     lw.copy_attrs(ad, d);
     for (usz i = 0; i < f.np; i++) { ad.add_param(pb[i]); }
     ad.ret_ty = f.ret;
@@ -4465,6 +4490,15 @@ fn Node* find_main(Node* root, pfront_core::Interner* it)
 }
 
 // does the declaration carry `#name`?
+// Visible to the linker: `pub`, `main`, `_start`, `#export`, `#used`, `#section` (a linker script names it), `#naked`, interrupt handlers and
+// externs. Everything else is only referenced from inside the module: `emit-ll --internalize` gives it `internal` linkage.
+// (A function or global that only assembly text names must be `pub` or `#used`.)
+fn bool Low.visible(Low* lw, Node* d, char* name)
+{
+    if ((d.flags & pfront_core::NF_PUB) != 0) { return true; }
+    if (name != null && (seq(name, "main") || seq(name, "_start"))) { return true; }
+    return node_has_attr(d, "export") || node_has_attr(d, "used") || node_has_attr(d, "section") || node_has_attr(d, "naked") || node_has_attr(d, "callconv");
+}
 fn bool node_has_attr(Node* d, char* want)
 {
     char* an; usz anl; char* aa; usz aal; bool ais;

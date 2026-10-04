@@ -1,0 +1,8 @@
+// ERROR: section/align apply to functions and globals
+air 3.0 Main "v.pie";
+
+attr section ".x" data P {
+  ctor P(a : i64) : nominal P;
+};
+
+def main() : i64 = ret(0 : i64);

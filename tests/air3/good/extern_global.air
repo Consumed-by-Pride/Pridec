@@ -1,0 +1,14 @@
+// EXIT: 3
+air 3.0 Main "eg.pie";
+
+extern global environ : ptr(u8);
+extern global __bss_start : u8;
+attr align 8 global mut counter : i64 = 2 : i64;
+
+def main() : i64 =
+  let p = environ in
+    let q = __bss_start in
+      let c = counter in
+        let v = load(c) : i64 in
+          let r = (add v 1 : i64) : i64 in
+            ret(r);

@@ -1,0 +1,52 @@
+// EXIT: 85
+air 3.0 Main "low2.pie";
+
+data Vec2 {
+  ctor Vec2(x : i64, y : i64) : nominal Vec2;
+};
+
+global mut counter : i64 = 5 : i64;
+
+def dot(a : nominal Vec2, b : nominal Vec2) : i64 =
+  <a | field x #0 · comu ax.
+    <b | field x #0 · comu bx.
+      <a | field y #1 · comu ay.
+        <b | field y #1 · comu by.
+          let p = (mul ax bx : i64) : i64 in
+            let q = (mul ay by : i64) : i64 in
+              let r = (add p q : i64) : i64 in
+                ret(r)>>>>;
+
+def sum_to(n : i64) : i64 =
+  seq {
+    label loop(i : i64, acc : i64).
+      let c = (le i n : bool) : bool in
+        if c then
+          let acc2 = (add acc i : i64) : i64 in
+            let i2 = (add i 1 : i64) : i64 in
+              jump loop(i2, acc2)
+        else
+          ret(acc);
+    let z = 0 : i64 in
+      let one = 1 : i64 in
+        jump loop(one, z)
+  };
+
+def main() : i64 =
+  let v = record{x = 3 : i64, y = 4 : i64} : nominal Vec2 in
+    <dot | call · v · v · comu d.
+      <sum_to | call · 10 : i64 · comu s.
+        let slot = alloca(i64) : ptr(i64) in
+          seq {
+            store(slot, s);
+            let cnt = counter in
+              let cur = load(cnt) : i64 in
+                let t = (add cur d : i64) : i64 in
+                  seq {
+                    store(cnt, t);
+                    let z = load(cnt) : i64 in
+                      let w = load(slot) : i64 in
+                        let o = (add z w : i64) : i64 in
+                          ret(o)
+                  }
+          }>>;

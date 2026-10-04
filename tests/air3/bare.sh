@@ -9,7 +9,7 @@ W=tmp/bare; rm -rf "$W"; mkdir -p "$W"
 fail=0; bad() { echo "FAIL: $*"; fail=1; }
 PFRONT_LOW_OUT=$W/k.low.air ./pfrontc tests/air3/prog_bare/kernel.pie --emit-air-low --quiet >/dev/null 2>&1; [ -f $W/k.low.air ] || bad "pfrontc: no .air"
 tmp/airtool verify-low $W/k.low.air >/dev/null 2>&1 || bad "verify-low"
-tmp/airtool emit-ll $W/k.low.air -o $W/k.ll --target=x86_64-unknown-none-elf --syscall=x86_64-linux >$W/e.log 2>&1 || bad "emit-ll: $(head -1 $W/e.log)"
+tmp/airtool emit-ll $W/k.low.air -o $W/k.ll --target=x86_64-unknown-none-elf --syscall=x86_64-linux --internalize >$W/e.log 2>&1 || bad "emit-ll: $(head -1 $W/e.log)"
 python3 scripts/ll-exe.py $W/k.ll -o $W/kernel.elf -O2 --features=-sse,-sse2,-mmx,+soft-float --reloc static --code-model kernel \
     --ld-script tests/air3/prog_bare/kernel.ld >$W/b.log 2>&1 || bad "ll-exe: $(head -2 $W/b.log | tr '\n' ' ')"
 if [ -f $W/kernel.elf ]; then
@@ -25,6 +25,11 @@ if [ -f $W/kernel.elf ]; then
     grep -q 'x86_intrcc void @"irq0"(ptr byval(%"IntFrame")' $W/k.ll || bad "irq0 is not an x86_intr function with a byval frame"
     for h in irq0 page_fault; do objdump -d $W/kernel.elf | awk "/<$h>:/,/iretq/" | grep -q iretq || bad "$h does not return with iretq"; done
     objdump -d $W/kernel.elf | awk '/<page_fault>:/,/iretq/' | grep -q 'add .*\$0x[0-9a-f]*,%rsp' || bad "page_fault does not drop the error code from the stack"
+    # linker-script symbols are extern globals (address only); #export names a definition's symbol
+    grep -q '@"__kernel_end" = external' $W/k.ll || bad "__kernel_end is not an external global"
+    ks=$(nm $W/kernel.elf | awk '$3=="__kernel_start"{print $1}'); ke=$(nm $W/kernel.elf | awk '$3=="__kernel_end"{print $1}')
+    [ "$ks" = 0000000000100000 ] && [ -n "$ke" ] && [ $((16#$ke)) -gt $((16#$ks)) ] || bad "linker symbols: start=$ks end=$ke"
+    nm $W/kernel.elf | awk '$3=="boot_info"{f=1} END{exit !f}' || bad "no boot_info symbol (#export on a global)"
     grep -q 'noredzone' $W/k.ll || bad "no noredzone attribute in the IR"
     objdump -d $W/kernel.elf | awk '/<timer_isr>:/,/ret/' | grep -q -- '-0x[0-9a-f]*(%rsp)' && bad "red zone used in timer_isr"
 fi

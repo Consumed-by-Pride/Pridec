@@ -35,7 +35,7 @@ for f in "${files[@]}"; do
     elif ! tmp/airtool verify-low "$low" >"$W/$id.v" 2>&1; then st=VERIFY; why=$(head -1 "$W/$id.v" | cut -c1-110)
     elif ! tmp/airtool verify "$low" >"$W/$id.v" 2>&1; then st=VERIFY; why="verify: $(head -1 "$W/$id.v" | cut -c1-100)"          # AIR-level well-formedness incl. V5 (no LLVM involved)
     elif ! tmp/airtool lint "$low" >"$W/$id.v" 2>&1; then st=VERIFY; why="lint: $(head -c 100 "$W/$id.v")"                    # every lint counter must be 0 for the low profile
-    elif ! tmp/airtool emit-ll "$low" -o "$W/$id.ll" $LLX >"$W/$id.e" 2>&1; then st=LLVM; why=$(head -1 "$W/$id.e" | cut -c1-110)
+    elif ! tmp/airtool emit-ll "$low" -o "$W/$id.ll" $LLX ${LOW_INTERNALIZE:+--internalize} >"$W/$id.e" 2>&1; then st=LLVM; why=$(head -1 "$W/$id.e" | cut -c1-110)
     elif [ $FS32 = 1 ] && ! python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id.exe" -O1 $EXX >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail' "$W/$id.b" | cut -c1-110)
     elif [ $I386 = 1 ] && [ $FS32 = 0 ] && ! { python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id" -O1 && python3 -m ziglang cc -target x86-linux-musl "$W/$id.o" -o "$W/$id.exe"; } >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail\|undefined' "$W/$id.b" | cut -c1-110)
     elif [ $WASM = 0 ] && [ $I386 = 0 ] && ! python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id.exe" $EXX >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail' "$W/$id.b" | cut -c1-110)

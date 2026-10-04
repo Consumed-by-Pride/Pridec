@@ -99,6 +99,16 @@ Bare metal (`tests/air3/bare.sh`): `tests/air3/prog_bare/kernel.pie` (naked `_st
 through asm, volatile VGA MMIO, naked ISR stub, `#noredzone`) is built for `x86_64-unknown-none-elf` with `-sse +soft-float`, the kernel code model and
 `kernel.ld`; the image is inspected (entry `0x100000`, no undefined symbol, GDT bytes, no SSE register), not run: there is no QEMU here.
 
+## Linkage, extern and exported globals
+
+* `pub` on a `def` / `global` marks it visible to the linker. The lowering sets `pub` for Pride `pub`, `main`, `_start`, `#export`, `#used`,
+  `#section`, `#naked` and `#callconv` items; lambdas, adapters, handler arms and effect cells are not `pub`. By default `emit-ll` keeps every symbol external;
+  `emit-ll --internalize` gives every non-`pub`, non-extern def and global (except `main`) `internal` linkage. A function that only assembly text names
+  must therefore be `pub` or `#used` (the kernel image does this for `kmain`/`timer_isr`). Gated: corpus results are identical with and without it.
+* `extern global [mut] NAME : T;` (no initialiser, V5 rejects one) declares storage defined elsewhere under exactly that symbol: libc's `environ`, a linker-script
+  symbol (`__kernel_end`: only its address is meaningful), a symbol defined in assembly. Pride: `#extern("sym") let [mut] X : T`. A second declaration of the
+  same symbol is the same storage. `#export("sym") let mut X : T = c` names a definition's symbol exactly.
+
 ## Verifier rule V5 (AIR level)
 
 `airtool verify` checks, for modules whose header says `air 3.0`, the low-profile rules that need no LLVM: attribute names, arguments and targets

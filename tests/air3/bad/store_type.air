@@ -1,0 +1,8 @@
+// ERROR: differs from the pointee
+air 3.0 Main "x";
+def main() : i64 =
+  let p = alloca(i64) : ptr(i64) in
+    seq {
+      store(p, 1 : i32);
+      ret(0 : i64)
+    };

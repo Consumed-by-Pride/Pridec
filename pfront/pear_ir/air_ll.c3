@@ -1034,6 +1034,8 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
     }
 }
 // LLVM memory ordering keyword; `failure` = 1 gives the cmpxchg failure ordering (never release/acq_rel)
+bool g_internalize = false;   // --internalize: a def or global that is not `pub` (and is not `main`) gets `internal` linkage, so LLVM can inline and drop it
+fn bool is_internal(AirDecl* d) { return g_internalize && !d.is_pub && !d.is_extern && d.name != null && !air_text::streq(d.name, "main") && !air_text::streq(d.name, "pride_main"); }
 int g_syscall_mode = 0;   // 0: call libc `syscall`; 1: x86-64 Linux inline `syscall` instruction
 fn char* llvm_order(int o, int failure)
 {
@@ -1098,7 +1100,7 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
     bool int_main = is_main && d.ret_ty != null && ty_is_int(d.ret_ty) && ty_bits(d.ret_ty) != 32;   // the C ABI entry returns i32 (a wasm32 `main` of another width has a different signature)
     bool wrap = is_main && (unit_main || int_main);
     Sb hdr; hdr.init();
-    hdr.put("define "); { char* cck = decl_cc(d); if (cck != null) { hdr.put(cck); hdr.putc(' '); } } l.ret_ty(&hdr, d.ret_ty); hdr.putc(' '); hdr.name('@', wrap ? "pride_main" : d.name); hdr.putc('(');
+    hdr.put("define "); if (is_internal(d)) { hdr.put("internal "); } { char* cck = decl_cc(d); if (cck != null) { hdr.put(cck); hdr.putc(' '); } } l.ret_ty(&hdr, d.ret_ty); hdr.putc(' '); hdr.name('@', wrap ? "pride_main" : d.name); hdr.putc('(');
     usz entry = l.new_block("entry", false);
     for (usz i = 0; i < d.param_count; i++)
     {
@@ -1267,7 +1269,7 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
                 if (d.is_extern && d.g_init == null) { body.put(" = external "); if (tls) { body.put("thread_local "); } body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); l.global_attrs(&body, d); body.putc('\n'); }
                 else
                 {
-                    body.put(" = "); if (tls) { body.put("thread_local "); } body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); body.putc(' ');
+                    body.put(" = "); if (is_internal(d)) { body.put("internal "); } if (tls) { body.put("thread_local "); } body.put(d.g_mut ? "global " : "constant "); l.ty(&body, d.ret_ty); body.putc(' ');
                     if (d.g_init == null) { body.put("zeroinitializer"); }
                     else
                     {

@@ -47,6 +47,11 @@ if python3 -c "import ziglang, wasmtime" 2>/dev/null; then
 else
     echo "wasm: SKIPPED (pip install --user ziglang wasmtime to enable the wasm32-wasi run)"
 fi
+# --internalize: every non-`pub` def/global gets internal linkage; results must be identical
+out=$(LOW_INTERNALIZE=1 bash tests/air3/low_corpus.sh 2>&1 | tail -1); echo "exec internalized: $out"
+case "$out" in *"NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: internalized exec corpus"; fail=1;; esac
+out=$(LOW_INTERNALIZE=1 bash tests/air3/low_corpus.sh tests/air3/prog/*.pie tests/air3/prog_native/*.pie 2>&1 | tail -1); echo "prog internalized: $out"
+case "$out" in *"FRONT=0 NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: internalized prog corpus"; fail=1;; esac
 out=$(bash tests/air3/low_corpus.sh 2>&1 | tail -1); echo "exec:   $out"
 pass=$(echo "$out" | sed -n 's/.*PASS=\([0-9]*\).*/\1/p')
 case "$out" in *"NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: exec corpus has lowering/verify/LLVM/wrong results"; fail=1;; esac

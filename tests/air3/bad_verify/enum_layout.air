@@ -1,0 +1,9 @@
+// ERROR: several constructors
+air 3.0 Main "v.pie";
+
+data E {
+  ctor A() : nominal E;
+  ctor B(x : i64) : nominal E;
+};
+
+def main() : i64 = ret(0 : i64);

@@ -55,6 +55,7 @@ fn vga_put : (i64, u16) -> ()
       ()
 
 #noredzone
+#used
 fn timer_isr : () -> ()
   | () ->
       TICKS = TICKS + 1i64
@@ -90,8 +91,23 @@ fn page_fault : (*IntFrame, u64) -> ()
       vga_put(2i64, 3925u16)
       ()
 
+-- storage the linker script defines: only its address means anything
+#extern("__kernel_start")
+let KSTART : u8
+#extern("__kernel_end")
+let KEND : u8
+
+-- a definition under a fixed symbol (a loader / debugger looks it up by name)
+#export("boot_info")
+#used
+let mut BOOT : i64 = 0
+
+-- named from assembly only: #used keeps it visible under --internalize
+#used
 fn kmain : () -> ()
   | () ->
+      let pb = &BOOT
+      volatile *pb = (&KEND as i64) - (&KSTART as i64)
       vga_put(0i64, 3919u16)
       let id = cpuid(0i32)
       if id == 0i64 then vga_put(1i64, 3921u16) else vga_put(1i64, 3922u16)

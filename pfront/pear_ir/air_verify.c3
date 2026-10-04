@@ -302,6 +302,8 @@ fn void Verify.low_decl(Verify* v, AirDecl* d)
         if (d.typaram_count > 0) { v.viol5("generic data in the low profile:", d.name); }
         if (d.ctor_count != 1) { v.viol5("data with several constructors (enum layout) in the low profile:", d.name); }
     }
+    if (is_glob && d.is_extern && d.g_init != null) { v.viol5("an extern global has no initialiser (its storage is defined elsewhere):", d.name); }
+    if (is_glob && d.ret_ty == null) { v.viol5("global without a type:", d.name); }
     bool has_inline = false; bool has_noinline = false;
     for (usz i = 0; i < d.attr_count; i++)
     {

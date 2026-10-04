@@ -1,0 +1,4 @@
+// ERROR: unbound variable
+air 3.0 Main "x";
+def main() : i64 =
+  ret(nope);

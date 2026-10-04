@@ -1,0 +1,4 @@
+// ERROR: not part of the low profile
+air 3.0 Main "x";
+def main() : i64 =
+  <lam(x : i64). <x | %ret> | %ret>;

@@ -1,0 +1,6 @@
+// ERROR: an x86_intr handler is
+air 3.0 Main "v.pie";
+
+attr callconv "x86_intr" def f(x : i64) : unit = ret(unit);
+
+def main() : i64 = ret(0 : i64);

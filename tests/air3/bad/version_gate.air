@@ -1,0 +1,5 @@
+// ERROR: need `air 3.0`
+air 2.2 Main "x";
+def main() : i64 =
+  let p = alloca(i64) : ptr(i64) in
+    ret(0 : i64);
