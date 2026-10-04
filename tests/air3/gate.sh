@@ -22,6 +22,10 @@ case "$out" in *"FRONT=0 NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: 
 if [ "$(uname -m)" = x86_64 ]; then
     out=$(bash tests/air3/low_corpus.sh --freestanding tests/air3/prog_fs/*.pie 2>&1 | tail -1); echo "freestanding: $out"
     case "$out" in *"FRONT=0 NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: air3 freestanding programs"; fail=1;; esac
+    out=$(bash tests/air3/low_corpus.sh --freestanding32 tests/air3/prog_fs32/*.pie 2>&1 | tail -1); echo "freestanding i386: $out"
+    case "$out" in *"FRONT=0 NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: air3 freestanding i386 programs"; fail=1;; esac
+    out=$(bash tests/air3/syscall_arch.sh 2>&1 | tail -2); echo "syscall: $out"
+    case "$out" in *"aarch64 riscv64): PASS"*) ;; *) echo "FAIL: syscall instruction per target"; fail=1;; esac
 fi
 # bare-metal kernel image (no OS): built and inspected, not run
 if [ "$(uname -m)" = x86_64 ] && command -v ld >/dev/null && command -v readelf >/dev/null; then

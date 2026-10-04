@@ -72,7 +72,8 @@ if want_triple:   # cross target: the module takes the target's triple and data 
     L.LLVMSetTarget.argtypes = [vp, cp]; L.LLVMSetTarget(mod, triple)
     L.LLVMCreateTargetDataLayout.restype = vp; L.LLVMCreateTargetDataLayout.argtypes = [vp]
     L.LLVMSetModuleDataLayout.argtypes = [vp, vp]; L.LLVMSetModuleDataLayout(mod, L.LLVMCreateTargetDataLayout(tm))
-    if "--emit-obj" not in args and "--ld-script" not in args: args.append("--emit-obj")
+    _fs32 = "--freestanding" in args and want_triple.startswith((b"i386", b"i486", b"i586", b"i686"))   # linked by the host ld in i386 mode below
+    if "--emit-obj" not in args and "--ld-script" not in args and not _fs32: args.append("--emit-obj")
 if lvl > 0:
     L.LLVMRunPasses.argtypes = [vp, cp, vp, vp]
     L.LLVMCreatePassBuilderOptions.restype = vp
@@ -86,6 +87,11 @@ if L.LLVMTargetMachineEmitToFile(tm, mod, obj.encode(), 1, ctypes.byref(err)):
 if "--emit-obj" in args: sys.exit(0)
 if "--ld-script" in args:   # bare metal: no libc, no crt, no OS -- the linker script places the sections and names the entry
     r = subprocess.run(["ld", "-nostdlib", "-static", "-T", opt_of("--ld-script"), obj, "-o", out], capture_output=True, text=True)
+    os.unlink(obj)
+    if r.returncode: sys.exit("ll-exe: link: " + r.stderr)
+    sys.exit(0)
+if "--freestanding" in args and want_triple and want_triple.startswith((b"i386", b"i486", b"i586", b"i686")):   # 32-bit x86, no libc: the host linker in i386 mode
+    r = subprocess.run(["ld", "-m", "elf_i386", "-nostdlib", "-static", "-e", "_start", obj, "-o", out], capture_output=True, text=True)
     os.unlink(obj)
     if r.returncode: sys.exit("ll-exe: link: " + r.stderr)
     sys.exit(0)

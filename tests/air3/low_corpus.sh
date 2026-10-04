@@ -16,7 +16,8 @@ cd "$(dirname "$0")/../.."
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 V=0; TSV=""; files=(); WASM=0; I386=0; FS=0; LLX=""; EXX=""
 export PATH="$PATH:$HOME/.local/bin"
-while [ $# -gt 0 ]; do case "$1" in -v) V=1;; --wasm) WASM=1; LLX="--target=wasm32-wasi";; --i386) I386=1; LLX="--target=i686-unknown-linux-musl";; --freestanding) FS=1; LLX="--syscall=x86_64-linux"; EXX="--freestanding";; --tsv) TSV="$2"; shift;; *) files+=("$1");; esac; shift; done
+FS32=0
+while [ $# -gt 0 ]; do case "$1" in -v) V=1;; --wasm) WASM=1; LLX="--target=wasm32-wasi";; --i386) I386=1; LLX="--target=i686-unknown-linux-musl";; --freestanding) FS=1; LLX="--syscall=x86_64-linux"; EXX="--freestanding";; --freestanding32) FS=1; FS32=1; I386=1; LLX="--target=i686-unknown-linux-gnu --syscall=i386-linux"; EXX="--freestanding";; --tsv) TSV="$2"; shift;; *) files+=("$1");; esac; shift; done
 [ ${#files[@]} = 0 ] && files=(tests/exec/*.pie tests/exec/pear/*.pie)
 W=tmp/low-corpus; rm -rf "$W"; mkdir -p "$W"
 declare -A cnt; : > "$W/rows.tsv"
@@ -35,7 +36,8 @@ for f in "${files[@]}"; do
     elif ! tmp/airtool verify "$low" >"$W/$id.v" 2>&1; then st=VERIFY; why="verify: $(head -1 "$W/$id.v" | cut -c1-100)"          # AIR-level well-formedness incl. V5 (no LLVM involved)
     elif ! tmp/airtool lint "$low" >"$W/$id.v" 2>&1; then st=VERIFY; why="lint: $(head -c 100 "$W/$id.v")"                    # every lint counter must be 0 for the low profile
     elif ! tmp/airtool emit-ll "$low" -o "$W/$id.ll" $LLX >"$W/$id.e" 2>&1; then st=LLVM; why=$(head -1 "$W/$id.e" | cut -c1-110)
-    elif [ $I386 = 1 ] && ! { python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id" -O1 && python3 -m ziglang cc -target x86-linux-musl "$W/$id.o" -o "$W/$id.exe"; } >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail\|undefined' "$W/$id.b" | cut -c1-110)
+    elif [ $FS32 = 1 ] && ! python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id.exe" -O1 $EXX >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail' "$W/$id.b" | cut -c1-110)
+    elif [ $I386 = 1 ] && [ $FS32 = 0 ] && ! { python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id" -O1 && python3 -m ziglang cc -target x86-linux-musl "$W/$id.o" -o "$W/$id.exe"; } >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail\|undefined' "$W/$id.b" | cut -c1-110)
     elif [ $WASM = 0 ] && [ $I386 = 0 ] && ! python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id.exe" $EXX >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail' "$W/$id.b" | cut -c1-110)
     elif [ $WASM = 1 ] && ! { python3 scripts/ll-exe.py "$W/$id.ll" -o "$W/$id" -O1 --triple wasm32-wasi && python3 -m ziglang cc -target wasm32-wasi "$W/$id.o" runtime/wasi/pride_rt.c -o "$W/$id.exe"; } >"$W/$id.b" 2>&1; then st=LLVM; why=$(grep -m1 -i 'error\|invalid\|fail\|undefined' "$W/$id.b" | cut -c1-110)
     else

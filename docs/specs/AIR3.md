@@ -71,7 +71,7 @@ Gated by `tests/air3/prog/at02_decl_attrs.pie`, `tests/air3/good/attrs_packed_se
 
 ## Freestanding
 
-`airtool emit-ll X.air --syscall=x86_64-linux` lowers `syscall(n, …)` (≤ 7 operands) to the x86-64 `syscall` instruction instead of a libc call;
+`airtool emit-ll X.air --syscall=T` with T ∈ `x86_64-linux`, `i386-linux` (`int $0x80`, operands truncated to i32, result sign-extended), `aarch64-linux` (`svc #0`, number in x8), `riscv64-linux` (`ecall`, number in a7) lowers `syscall(n, …)` (≤ 7 operands) to that target's instruction instead of a libc call (the number is the target's own: the program picks it; checked by `tests/air3/syscall_arch.sh` by the instruction bytes in the objects, and run for x86-64 and i386);
 `scripts/ll-exe.py --freestanding` links with `-nostdlib -static -Wl,-e,_start`. A program supplying its own `_start` (naked, asm that aligns the stack
 and calls a Pride function, see `fs02`) then runs with no libc and no crt. Gated (x86-64 hosts) by `tests/air3/prog_fs/`.
 

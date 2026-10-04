@@ -929,15 +929,35 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
                 for (usz i = 0; i < c.prd_count && na < 8; i++) { a[na] = l.prd(c.prds[i]); na++; }
                 for (usz i = 0; i < na; i++) { if (a[i].ty == null || a[i].ty.tag != ATYP_I64) { l.err("syscall operands must be i64", null); break; } }
                 char* r = l.fresh(); Sb* o = l.out();
-                if (g_syscall_mode == 1)   // x86-64 Linux: the instruction itself (rax = number, rdi rsi rdx r10 r8 r9 = arguments), no libc
+                if (g_syscall_mode >= 1)   // the target's own instruction, no libc: number + arguments in the Linux ABI's registers
                 {
-                    if (na > 7) { l.err("x86-64 syscall takes a number and at most 6 arguments", null); return; }
-                    static char*[7] regs = { "{rax}", "{rdi}", "{rsi}", "{rdx}", "{r10}", "{r8}", "{r9}" };
-                    o.put("  "); o.put(r); o.put(" = call i64 asm sideeffect \"syscall\", \"={rax}");
+                    char* insn; char* res; char* clob; char*[8] regs; usz maxn; bool w32 = false;
+                    switch (g_syscall_mode)
+                    {
+                        case 2: insn = "int $$0x80"; res = "{eax}"; clob = ",~{memory}"; w32 = true; maxn = 7;
+                                regs[0] = "{eax}"; regs[1] = "{ebx}"; regs[2] = "{ecx}"; regs[3] = "{edx}"; regs[4] = "{esi}"; regs[5] = "{edi}"; regs[6] = "{ebp}";
+                        case 3: insn = "svc #0"; res = "{x0}"; clob = ",~{memory}"; maxn = 7;
+                                regs[0] = "{x8}"; regs[1] = "{x0}"; regs[2] = "{x1}"; regs[3] = "{x2}"; regs[4] = "{x3}"; regs[5] = "{x4}"; regs[6] = "{x5}";
+                        case 4: insn = "ecall"; res = "{a0}"; clob = ",~{memory}"; maxn = 7;
+                                regs[0] = "{a7}"; regs[1] = "{a0}"; regs[2] = "{a1}"; regs[3] = "{a2}"; regs[4] = "{a3}"; regs[5] = "{a4}"; regs[6] = "{a5}";
+                        default: insn = "syscall"; res = "{rax}"; clob = ",~{rcx},~{r11},~{memory}"; maxn = 7;
+                                regs[0] = "{rax}"; regs[1] = "{rdi}"; regs[2] = "{rsi}"; regs[3] = "{rdx}"; regs[4] = "{r10}"; regs[5] = "{r8}"; regs[6] = "{r9}";
+                    }
+                    if (na > maxn) { l.err("a syscall takes a number and at most 6 arguments", null); return; }
+                    char*[8] ops;
+                    for (usz i = 0; i < na; i++)
+                    {
+                        ops[i] = a[i].op;
+                        if (w32) { ops[i] = l.fresh(); l.out().put("  "); l.out().put(ops[i]); l.out().put(" = trunc i64 "); l.out().put(a[i].op); l.out().put(" to i32\n"); }
+                    }
+                    o = l.out();
+                    char* rr = w32 ? l.fresh() : r;
+                    o.put("  "); o.put(rr); o.put(w32 ? " = call i32 asm sideeffect \"" : " = call i64 asm sideeffect \""); o.put(insn); o.put("\", \"="); o.put(res);
                     for (usz i = 0; i < na; i++) { o.putc(','); o.put(regs[i]); }
-                    o.put(",~{rcx},~{r11},~{memory}\"(");
-                    for (usz i = 0; i < na; i++) { if (i > 0) { o.put(", "); } o.put("i64 "); o.put(a[i].op); }
+                    o.put(clob); o.put("\"(");
+                    for (usz i = 0; i < na; i++) { if (i > 0) { o.put(", "); } o.put(w32 ? "i32 " : "i64 "); o.put(ops[i]); }
                     o.put(")\n");
+                    if (w32) { o.put("  "); o.put(r); o.put(" = sext i32 "); o.put(rr); o.put(" to i64\n"); }
                 }
                 else
                 {

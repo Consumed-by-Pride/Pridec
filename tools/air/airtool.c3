@@ -37,7 +37,10 @@ fn int main(String[] args)
     char* cmd = (char*)args[1].ptr;
     char* path = (char*)args[2].ptr;
     char* out = null;
-    for (usz ai = 3; ai < args.len; ai++) { if (eq((char*)args[ai].ptr, "--syscall=x86_64-linux")) { air_ll::g_syscall_mode = 1; } }   // emit-ll: `syscall` as the x86-64 Linux instruction (no libc)
+    for (usz ai = 3; ai < args.len; ai++) { if (eq((char*)args[ai].ptr, "--syscall=x86_64-linux")) { air_ll::g_syscall_mode = 1; }
+        if (eq((char*)args[ai].ptr, "--syscall=i386-linux")) { air_ll::g_syscall_mode = 2; }
+        if (eq((char*)args[ai].ptr, "--syscall=aarch64-linux")) { air_ll::g_syscall_mode = 3; }
+        if (eq((char*)args[ai].ptr, "--syscall=riscv64-linux")) { air_ll::g_syscall_mode = 4; } }   // emit-ll: `syscall` as the x86-64 Linux instruction (no libc)
     for (usz ai = 3; ai < args.len; ai++)   // emit-ll --target=TRIPLE: `target triple`, and usz/isz as wide as that target's pointer
     {
         char* ar = (char*)args[ai].ptr;
