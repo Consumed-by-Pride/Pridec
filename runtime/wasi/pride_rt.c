@@ -17,17 +17,18 @@
 #include <fcntl.h>
 #include <errno.h>
 
-void *pride_rt_malloc(long long n) { return malloc((size_t)n); }
+// size_t / ssize_t parameters are pointer-wide: the lowering declares these C functions with usz/isz (air_low.c3 c_abi_widths), i32 on wasm32
+void *pride_rt_malloc(size_t n) { return malloc(n); }
 void pride_rt_free(void *p) { free(p); }
-int pride_rt_write(int fd, const void *p, long long n) { return (int)write(fd, p, (size_t)n); }
-long long pride_rt_read(int fd, void *p, long long n) { return (long long)read(fd, p, (size_t)n); }
-void *pride_rt_calloc(long long a, long long b) { return calloc((size_t)a, (size_t)b); }
-void *pride_rt_realloc(void *p, long long n) { return realloc(p, (size_t)n); }
-void *pride_rt_memcpy(void *d, const void *s, long long n) { return memcpy(d, s, (size_t)n); }
-void *pride_rt_memmove(void *d, const void *s, long long n) { return memmove(d, s, (size_t)n); }
-void *pride_rt_memset(void *d, int c, long long n) { return memset(d, c, (size_t)n); }
-int pride_rt_memcmp(const void *a, const void *b, long long n) { return memcmp(a, b, (size_t)n); }
-long long pride_rt_strlen(const char *s) { return (long long)strlen(s); }
+ssize_t pride_rt_write(int fd, const void *p, size_t n) { return write(fd, p, n); }
+ssize_t pride_rt_read(int fd, void *p, size_t n) { return read(fd, p, n); }
+void *pride_rt_calloc(size_t a, size_t b) { return calloc(a, b); }
+void *pride_rt_realloc(void *p, size_t n) { return realloc(p, n); }
+void *pride_rt_memcpy(void *d, const void *s, size_t n) { return memcpy(d, s, n); }
+void *pride_rt_memmove(void *d, const void *s, size_t n) { return memmove(d, s, n); }
+void *pride_rt_memset(void *d, int c, size_t n) { return memset(d, c, n); }
+int pride_rt_memcmp(const void *a, const void *b, size_t n) { return memcmp(a, b, n); }
+size_t pride_rt_strlen(const char *s) { return strlen(s); }
 int pride_rt_strcmp(const char *a, const char *b) { return strcmp(a, b); }
 int pride_rt_close(int fd) { return close(fd); }
 void pride_rt_exit(int c) { exit(c); }
