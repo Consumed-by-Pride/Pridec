@@ -55,9 +55,9 @@ struct Ins
 enum TermK : int { T_NONE, T_RET, T_JUMP, T_COND, T_TRAP, T_UNREACH }
 struct Blk
 {
-    char* name; char*[8] pnames; AirTyp*[8] ptys; usz np;
+    char* name; char*[MAXPHI] pnames; AirTyp*[MAXPHI] ptys; usz np;
     Ins* ins; usz ni; usz cap;
-    TermK tk; AirPrd* tp; char*[8] jargs; usz nj; usz t1; usz t2; usz npred;
+    TermK tk; AirPrd* tp; char*[MAXPHI] jargs; usz nj; usz t1; usz t2; usz npred;
 }
 struct Vx { AirPrd* p; AirTyp* t; }
 struct Pl { AirPrd* ptr; AirTyp* t; }
@@ -78,29 +78,31 @@ struct CloI { AirTyp* ty; AirTyp* fnty; AirTyp*[MAXA] ps; usz np; AirTyp* ret; }
 struct TSub { Node* tp; AirTyp* t; }
 struct StInfo { Node* decl; char* name; AirTyp* ty; AirTyp*[MAXTP] targs; usz nt; }
 // an untagged `union` is a block of words; every field is a typed view of offset 0
-struct UniI { Node* decl; AirTyp* ty; char*[8] fnames; AirTyp*[8] ft; usz nf; usz words; }
+struct UniI { Node* decl; AirTyp* ty; char*[MAXA] fnames; AirTyp*[MAXA] ft; usz nf; usz words; }
 struct Fat { AirTyp* elem; AirTyp* ty; bool is_str; }
 // `dyn I`: a trait object {data: ptr(u8), vt: ptr(u8)}; the vtable is a constant array of thunk addresses, one per interface method
 struct DynI { Node* iface; AirTyp* ty; }
 // an enum is the explicit record { tag: i64, payload: [words x i64] }; every payload field sits at its own
 // 8-byte word offset and is stored/loaded through a typed pointer (the layout is decided HERE, not by the consumer)
-struct VarI { char* name; Node* decl; AirTyp*[8] ft; usz nf; usz[8] off; }
-struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; AirTyp*[8] um; usz nm; }   // nm > 0: a set-theoretic union `A ∪ B` (variants are its members)
+struct VarI { char* name; Node* decl; AirTyp*[MAXA] ft; usz nf; usz[MAXA] off; }
+struct Enm { Node* decl; char* name; AirTyp* ty; VarI[256] v; usz nv; usz words; AirTyp*[MAXA] um; usz nm; }   // nm > 0: a set-theoretic union `A ∪ B` (variants are its members)
 // effect handlers: a handler arm is a closure installed in the per-operation global `hop.E.op` for the dynamic
 // extent of the `handle` body.  A `perform` calls the installed closure.  An arm that resumes in tail position
 // returns the resumption value to the perform site; an arm that does not resume ABORTS: it stores its value into
 // the handler's result slot and raises the unwinding flag `__unw` (= the handler id), and every call site checks
 // the flag and unwinds (jump to the enclosing handler exit, or return).  Non-tail / multi-shot resumption needs
 // continuations and is reported as unsupported.
-struct HndI { usz id; AirTyp* frame; AirTyp* th; usz nops; char*[8] g; AirTyp*[8] hty; AirTyp*[8] cty;
+struct HndI { usz id; AirTyp* frame; AirTyp* th; usz nops; char*[MAXOPS] g; AirTyp*[MAXOPS] hty; AirTyp*[MAXOPS] cty;
     // fiber mode (an arm resumes in non-tail position): the handled computation runs on its own fiber, the arms on the handler's stack
-    bool fib; AirTyp* bt; usz f_bres; usz f_fib; usz f_st; usz f_live; usz f_gen; usz f_op; usz[10] f_env; usz[8] f_arg; usz[8] f_rv; usz[8] np; AirTyp*[8] rty;
-    Node* retarm; FnInfo*[8] fy; FnInfo*[8] farm; FnInfo* fret; FnInfo* fdrv; FnInfo* fthk; }
+    bool fib; AirTyp* bt; usz f_bres; usz f_fib; usz f_st; usz f_live; usz f_gen; usz f_op; usz[10] f_env; usz[MAXA] f_arg; usz[MAXA] f_rv; usz[MAXA] np; AirTyp*[MAXA] rty;
+    Node* retarm; FnInfo*[MAXOPS] fy; FnInfo*[MAXOPS] farm; FnInfo* fret; FnInfo* fdrv; FnInfo* fthk; }
 struct ArmCx { Node* kdecl; AirPrd* flag; AirPrd* rv; AirTyp* opret; AirTyp* th; bool on; bool fib; AirPrd* frame; AirPrd* kgen; usz hix; usz j; }
-const usz MAXTP = 8;   // type parameters of one generic function / data type
-const usz MAXA = 64;    // parameters / arguments / tuple elements of one function, call or tuple
+const usz MAXTP = 8;    // type parameters of one generic function / data type
+const usz MAXA = 64;    // parameters / arguments / tuple elements of one function, call or tuple; also phi args per block
 const usz MAXA1 = 65;
 const usz MAXC = 64;    // variables one closure captures
+const usz MAXOPS = 64;  // operations per effect handler
+const usz MAXPHI = MAXA;
 struct GlInfo { Node* decl; char* name; AirTyp* ty; bool is_ext; }
 
 struct Low
@@ -112,7 +114,7 @@ struct Low
     GlInfo* gls; usz ngl;
     Blk* blks; usz nb; usz cur;
     VarB* vars; usz nvars;
-    LoopF[64] loops; usz nloops;
+    LoopF[256] loops; usz nloops;
     char** names; usz nnames; usz tmpn; usz lbln;
     AirTyp* ret_ty; char* cur_fn; Node* cur_node;
     int errors; int fn_errors; int fns_ok; int fail_fn; Node* entry_decl;
@@ -121,8 +123,8 @@ struct Low
     DynI[24] dyns; usz ndyn;
     Enm* ens; usz nen;
     CloI* clos; usz nclo; usz nlam;
-    DeferR[16] defers; usz ndefer; bool in_replay;
-    TSub[64] tsub; usz ntsub;
+    DeferR[64] defers; usz ndefer; bool in_replay;
+    TSub[128] tsub; usz ntsub;
     Node** roots; usz nroots;
     UniI[32] unis; usz nuni;
     HndI[256] hnds; usz nhnd; ArmCx arm; usz[16] hx; AirTyp*[16] hxt; usz nhx; bool eff_on; bool unw_made; char*[64] hopn; AirTyp*[64] hopt; usz nhop;
@@ -772,11 +774,12 @@ fn void Low.t_ret(Low* lw, Vx v)
 fn void Low.t_jump(Low* lw, usz to, Vx* args, usz n)
 {
     if (lw.cur == NOBLK) { return; }
-    char*[8] names;
-    for (usz i = 0; i < n && i < 8; i++) { names[i] = lw.name_of(args[i]); }
+    char*[MAXPHI] names;
+    for (usz i = 0; i < n && i < MAXPHI; i++) { names[i] = lw.name_of(args[i]); }
     Blk* b = &lw.blks[lw.cur];
     b.tk = T_JUMP; b.t1 = to; b.nj = n;
-    for (usz i = 0; i < n && i < 8; i++) { b.jargs[i] = names[i]; }
+    for (usz i = 0; i < n && i < MAXPHI; i++) { b.jargs[i] = names[i]; }
+    if (n > MAXPHI) { lw.err(null, "jump carries too many arguments", (char*)0); }
     lw.mark_pred(to); lw.cur = NOBLK;
 }
 fn void Low.t_jump0(Low* lw, usz to) { Vx[1] none; lw.t_jump(to, &none[0], 0); }
@@ -5380,7 +5383,7 @@ fn void Low.lower_fn1(Low* lw, FnInfo* f)
         pb[i] = air_ir::air_mk_binder(lw.a, pnm, f.pty[i], AMULT_UNR);
         pv[i] = lw.vref(pnm, f.pty[i]);
     }
-    Node*[256] arms; usz narms = 0;
+    Node*[1024] arms; usz narms = 0;
     Node* single_body = null;
     for (usz i = 0; i < d.child_count; i++)
     {
