@@ -17,22 +17,22 @@ struct IrBlock
 
 fn ir_block_new : (i64, ptr) -> *IrBlock
   | (id, name_cstr) ->
-    let b = os.linux.malloc(64i64) as *IrBlock
+    let b = os.linux.malloc(sizeof(IrBlock) as i64) as *IrBlock
     b.id     = id
     b.name   = string.string_from_cstr(name_cstr)
-    b.instrs = vec.vec_new(16i64)
-    b.preds  = vec.vec_new(4i64)
-    b.succs  = vec.vec_new(4i64)
+    b.instrs = vec.vec_new(8i64)
+    b.preds  = vec.vec_new(8i64)
+    b.succs  = vec.vec_new(8i64)
     b
 
 fn ir_block_append : (*IrBlock, *instr.IrInstr) -> ()
-  | (blk, inst) -> vec.vec_push(&blk.instrs, inst as ptr)
+  | (blk, inst) -> vec.vec_push_ptr(&blk.instrs, inst as ptr)
 
 fn ir_block_terminator : *IrBlock -> *instr.IrInstr
   | blk ->
     let len = vec.vec_len(&blk.instrs)
     if len == 0i64 then 0 as *instr.IrInstr
-    else vec.vec_get(&blk.instrs, len - 1i64) as *instr.IrInstr
+    else vec.vec_get_ptr(&blk.instrs, len - 1i64) as *instr.IrInstr
 
 fn ir_block_destroy : *IrBlock -> ()
   | blk ->
@@ -42,7 +42,7 @@ fn ir_block_destroy : *IrBlock -> ()
       let mut i : i64 = 0i64
       let len = vec.vec_len(&blk.instrs)
       while i < len
-        instr.ir_instr_destroy(vec.vec_get(&blk.instrs, i) as *instr.IrInstr)
+        instr.ir_instr_destroy(vec.vec_get_ptr(&blk.instrs, i) as *instr.IrInstr)
         i = i + 1i64
       vec.vec_destroy(&blk.instrs)
       vec.vec_destroy(&blk.preds)

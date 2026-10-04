@@ -743,7 +743,7 @@ fn multimap_push : (*HashMap, ptr, i64) -> ()
       let v = existing as *mem.Vec
       mem.vec_push(v, &value)
     else
-      let v = os.linux.malloc(64i64) as *mem.Vec
+      let v = os.linux.malloc(sizeof(mem.Vec) as i64) as *mem.Vec
       v[0i64] = mem.vec_new(8i64)
       mem.vec_push(v, &value)
       hashmap_set(m, key, v as i64)
@@ -828,7 +828,7 @@ fn lru_put : (*LruCache, ptr, i64) -> ()
       let klen = os.linux.strlen(key) as i64
       let kdup = os.linux.malloc(klen + 1i64) as *u8
       os.linux.memcpy(kdup as ptr, key, klen as u64); kdup[klen] = 0u8
-      let node = os.linux.malloc(48i64) as *LruNode
+      let node = os.linux.malloc(sizeof(LruNode) as i64) as *LruNode
       node.key = kdup; node.value = value
       node.prev = 0 as *LruNode; node.next = 0 as *LruNode
       lru_push_front(c, node)

@@ -1,0 +1,103 @@
+-- EXIT: 18
+-- stdlib executed: the compiler-IR library (ir.types / value / instr / block / func / module), opt.dce, graph.dfg
+-- (the IR containers pushed object addresses into Vecs of 4-16 byte slots and read them back as objects; block/func/module/value/type were
+--  malloc'd smaller than their sizeof)   each passing check adds one; 18 checks
+use ir.types
+use ir.value
+use ir.instr
+use ir.block
+use ir.func
+use ir.module
+use opt.dce
+use graph.dfg
+use vec.vec
+
+fn ok : (bool) -> i64 | (c) -> if c then 1i64 else 0i64
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    -- types: struct { i8, i32, i64 } is laid out 1 + pad 3, 4, 8 = 16, aligned to 8
+    let i8t = types.ir_type_new_int(8i64)
+    let i32t = types.ir_type_new_int(32i64)
+    let i64t = types.ir_type_new_int(64i64)
+    let st = types.ir_type_new_struct("S" as ptr)
+    types.ir_type_add_field(st, i8t)
+    types.ir_type_add_field(st, i32t)
+    types.ir_type_add_field(st, i64t)
+    n = n + ok(types.ir_type_sizeof(st) == 16i64 && types.ir_type_alignof(st) == 8i64)
+    let arr = types.ir_type_new_array(st, 5i64)
+    n = n + ok(types.ir_type_sizeof(arr) == 80i64)
+    let un = types.ir_type_new_union("U" as ptr, false)
+    types.ir_type_add_field(un, i8t)
+    types.ir_type_add_field(un, i64t)
+    n = n + ok(types.ir_type_sizeof(un) == 8i64)
+    -- module / function / blocks / instructions
+    let m = module.ir_module_new("m" as ptr)
+    let f = func.ir_func_new("main" as ptr, 0 as *types.IrFnType, false)
+    module.ir_module_add_func(m, f)
+    let b0 = block.ir_block_new(0i64, "entry" as ptr)
+    let b1 = block.ir_block_new(1i64, "exit" as ptr)
+    func.ir_func_add_block(f, b0)
+    func.ir_func_add_block(f, b1)
+    n = n + ok(func.ir_func_entry_block(f) == b0)
+    n = n + ok(vec.vec_len(&m.functions) == 1i64 && vec.vec_get_ptr(&m.functions, 0i64) as i64 == f as i64)
+    let c40 = value.ir_value_new_int(1i64, i32t, 40i64)
+    let c2 = value.ir_value_new_int(2i64, i32t, 2i64)
+    let add = instr.ir_instr_new(10i64, instr.OP_ADD, i32t)
+    instr.ir_instr_add_operand(add, c40)
+    instr.ir_instr_add_operand(add, c2)
+    let junk1 = instr.ir_instr_new(11i64, instr.OP_MUL, i32t)
+    let junk2 = instr.ir_instr_new(12i64, instr.OP_SUB, i32t)
+    let ret = instr.ir_instr_new(13i64, instr.OP_RET, i32t)
+    instr.ir_instr_add_operand(ret, c40)
+    block.ir_block_append(b0, junk1)
+    block.ir_block_append(b0, add)
+    block.ir_block_append(b0, junk2)
+    block.ir_block_append(b0, ret)
+    let x1 = instr.ir_instr_new(20i64, instr.OP_BR, i32t)
+    block.ir_block_append(b1, x1)
+    n = n + ok(vec.vec_len(&b0.instrs) == 4i64 && vec.vec_len(&b1.instrs) == 1i64)
+    n = n + ok(block.ir_block_terminator(b0) == ret && block.ir_block_terminator(b1) == x1)
+    n = n + ok(vec.vec_len(&add.operands) == 2i64)
+    let o0 = vec.vec_get_ptr(&add.operands, 0i64) as *value.IrValue
+    let o1 = vec.vec_get_ptr(&add.operands, 1i64) as *value.IrValue
+    n = n + ok(o0.int_val == 40i64 && o1.int_val == 2i64 && o0.kind == value.VAL_KIND_CONST_INT)
+    -- dead code elimination: the two marked instructions go, the others keep their order and contents
+    junk1.is_dead = true
+    junk2.is_dead = true
+    n = n + ok(dce.opt_dce_function(f) == 2i64)
+    n = n + ok(vec.vec_len(&b0.instrs) == 2i64)
+    let k0 = vec.vec_get_ptr(&b0.instrs, 0i64) as *instr.IrInstr
+    let k1 = vec.vec_get_ptr(&b0.instrs, 1i64) as *instr.IrInstr
+    n = n + ok(k0.opcode == instr.OP_ADD && k1.opcode == instr.OP_RET && k0.id == 10i64 && k1.id == 13i64)
+    n = n + ok(dce.opt_dce_function(f) == 0i64)
+    -- build more blocks than the initial vector capacity: nothing may move or get lost
+    let mut i : i64 = 2i64
+    while i < 30i64
+      func.ir_func_add_block(f, block.ir_block_new(i, "b" as ptr))
+      i = i + 1i64
+    n = n + ok(vec.vec_len(&f.blocks) == 30i64)
+    let b17 = vec.vec_get_ptr(&f.blocks, 17i64) as *block.IrBlock
+    n = n + ok(b17.id == 17i64 && func.ir_func_entry_block(f) == b0 && b0.id == 0i64)
+    module.ir_module_destroy(m)
+    -- dataflow graph: 0 -> 1 -> 3, 0 -> 2 -> 3 ; topological order must put 0 first and 3 last
+    let mut g = dfg.dfg_new()
+    let n0 = dfg.dfg_add_node(&g, 1i64)
+    let n1 = dfg.dfg_add_node(&g, 2i64)
+    let n2 = dfg.dfg_add_node(&g, 3i64)
+    let n3 = dfg.dfg_add_node(&g, 4i64)
+    dfg.dfg_add_edge(&g, n0, n1)
+    dfg.dfg_add_edge(&g, n0, n2)
+    dfg.dfg_add_edge(&g, n1, n3)
+    dfg.dfg_add_edge(&g, n2, n3)
+    let mut order = dfg.dfg_topo_sort(&g)
+    n = n + ok(vec.vec_len(&order) == 4i64)
+    let t0 = (vec.vec_get(&order, 0i64) as *i64)[0i64]
+    let t3 = (vec.vec_get(&order, 3i64) as *i64)[0i64]
+    n = n + ok(t0 == 0i64 && t3 == 3i64)
+    let tn3 = vec.vec_get_ptr(&g.nodes, 3i64) as *dfg.DfgNode
+    n = n + ok(tn3.in_degree == 2i64 && tn3.op_code == 4i64)
+    vec.vec_destroy(&order)
+    dfg.dfg_destroy(&g)
+    n

@@ -20,7 +20,7 @@ struct BTreeMap
 
 fn btree_node_new : bool -> *BTreeNode
   | is_leaf ->
-    let node = os.linux.malloc(40i64) as *BTreeNode
+    let node = os.linux.malloc(sizeof(BTreeNode) as i64) as *BTreeNode
     node.keys     = os.linux.malloc((2i64 * BTREE_ORDER - 1i64) * 8i64) as *u64
     node.values   = os.linux.malloc((2i64 * BTREE_ORDER - 1i64) * 8i64) as *i64
     node.children = if is_leaf then 0 as *ptr else os.linux.malloc((2i64 * BTREE_ORDER) * 8i64) as *ptr

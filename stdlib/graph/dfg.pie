@@ -20,19 +20,19 @@ struct DataflowGraph
   edges : vec.Vec
 
 fn dfg_new : () -> DataflowGraph
-  | () -> DataflowGraph { nodes: vec.vec_new(16i64), edges: vec.vec_new(32i64) }
+  | () -> DataflowGraph { nodes: vec.vec_new(8i64), edges: vec.vec_new(8i64) }
 
 fn dfg_destroy : *DataflowGraph -> ()
   | g ->
     let mut i : i64 = 0i64
     let nlen = vec.vec_len(&g.nodes)
     while i < nlen
-      os.linux.free(vec.vec_get(&g.nodes, i))
+      os.linux.free(vec.vec_get_ptr(&g.nodes, i))
       i = i + 1i64
     i = 0i64
     let elen = vec.vec_len(&g.edges)
     while i < elen
-      os.linux.free(vec.vec_get(&g.edges, i))
+      os.linux.free(vec.vec_get_ptr(&g.edges, i))
       i = i + 1i64
     vec.vec_destroy(&g.nodes)
     vec.vec_destroy(&g.edges)
@@ -40,31 +40,31 @@ fn dfg_destroy : *DataflowGraph -> ()
 fn dfg_add_node : (*DataflowGraph, i64) -> i64
   | (g, op_code) ->
     let id = vec.vec_len(&g.nodes)
-    let n = os.linux.malloc(24i64) as *DfgNode
+    let n = os.linux.malloc(sizeof(DfgNode) as i64) as *DfgNode
     n.id        = id
     n.op_code   = op_code
     n.in_degree = 0i64
-    vec.vec_push(&g.nodes, n as ptr)
+    vec.vec_push_ptr(&g.nodes, n as ptr)
     id
 
 fn dfg_add_edge : (*DataflowGraph, i64, i64) -> ()
   | (g, from_id, to_id) ->
-    let e = os.linux.malloc(16i64) as *DfgEdge
+    let e = os.linux.malloc(sizeof(DfgEdge) as i64) as *DfgEdge
     e.from_id = from_id
     e.to_id   = to_id
-    vec.vec_push(&g.edges, e as ptr)
+    vec.vec_push_ptr(&g.edges, e as ptr)
     if to_id >= 0i64 && to_id < vec.vec_len(&g.nodes)
-      let n = vec.vec_get(&g.nodes, to_id) as *DfgNode
+      let n = vec.vec_get_ptr(&g.nodes, to_id) as *DfgNode
       n.in_degree = n.in_degree + 1i64
 
 fn dfg_topo_sort : *DataflowGraph -> vec.Vec
   | g ->
-    let mut out = vec.vec_new(16i64)
+    let mut out = vec.vec_new(8i64)   -- topo order: node ids, pushed by address (8-byte elements)
     let n_nodes = vec.vec_len(&g.nodes)
     let degrees = os.linux.malloc(n_nodes * 8i64) as *i64
     let mut i : i64 = 0i64
     while i < n_nodes
-      let n = vec.vec_get(&g.nodes, i) as *DfgNode
+      let n = vec.vec_get_ptr(&g.nodes, i) as *DfgNode
       degrees[i] = n.in_degree
       i = i + 1i64
 
@@ -81,7 +81,7 @@ fn dfg_topo_sort : *DataflowGraph -> vec.Vec
           let mut j : i64 = 0i64
           let n_edges = vec.vec_len(&g.edges)
           while j < n_edges
-            let e = vec.vec_get(&g.edges, j) as *DfgEdge
+            let e = vec.vec_get_ptr(&g.edges, j) as *DfgEdge
             if e.from_id == i && e.to_id >= 0i64 && e.to_id < n_nodes
               degrees[e.to_id] = degrees[e.to_id] - 1i64
             j = j + 1i64

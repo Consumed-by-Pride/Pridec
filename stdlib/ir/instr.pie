@@ -40,17 +40,17 @@ struct IrInstr
 
 fn ir_instr_new : (i64, i64, *types.IrType) -> *IrInstr
   | (id, opcode, res_ty) ->
-    let i = os.linux.malloc(48i64) as *IrInstr
+    let i = os.linux.malloc(sizeof(IrInstr) as i64) as *IrInstr
     i.id       = id
     i.opcode   = opcode
     i.res_type = res_ty
-    i.operands = vec.vec_new(4i64)
+    i.operands = vec.vec_new(8i64)
     i.pred_cmp = 0i64
     i.is_dead  = false
     i
 
 fn ir_instr_add_operand : (*IrInstr, *value.IrValue) -> ()
-  | (instr, val) -> vec.vec_push(&instr.operands, val as ptr)
+  | (instr, val) -> vec.vec_push_ptr(&instr.operands, val as ptr)
 
 fn ir_instr_destroy : *IrInstr -> ()
   | instr ->

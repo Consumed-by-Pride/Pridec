@@ -80,6 +80,19 @@ fn vec_push : (*Vec, ptr) -> ()
     os.linux.memcpy(dst, val_ptr, elem_sz as u64)
     v.len = v.len + 1i64
 
+-- A Vec of POINTERS (create it with vec_new(8)).  vec_push copies sizeof(element) bytes from the address it is given, so pushing a
+-- heap object's own address copies the object's first bytes, not the pointer: use these two for vectors of owned/shared objects.
+fn vec_push_ptr : (*Vec, ptr) -> ()
+  | (v, p) ->
+    let mut cell : i64 = p as i64     -- 8 bytes on every target (the slot is 8 bytes; a 32-bit pointer is the low half)
+    vec_push(v, &cell as ptr)
+
+-- the pointer stored at index i (null when out of range)
+fn vec_get_ptr : (*Vec, i64) -> ptr
+  | (v, idx) ->
+    let slot = vec_get(v, idx)
+    if slot as i64 == 0i64 then 0 as ptr else (slot as *ptr)[0i64]
+
 fn vec_pop : (*Vec, ptr) -> bool
   | (v, out_ptr) ->
     if v.len == 0i64 then false

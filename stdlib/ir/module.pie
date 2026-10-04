@@ -16,15 +16,15 @@ struct IrModule
 
 fn ir_module_new : ptr -> *IrModule
   | name_cstr ->
-    let m = os.linux.malloc(48i64) as *IrModule
+    let m = os.linux.malloc(sizeof(IrModule) as i64) as *IrModule
     m.name      = string.string_from_cstr(name_cstr)
-    m.functions = vec.vec_new(16i64)
-    m.globals   = vec.vec_new(16i64)
-    m.types     = vec.vec_new(16i64)
+    m.functions = vec.vec_new(8i64)
+    m.globals   = vec.vec_new(8i64)
+    m.types     = vec.vec_new(8i64)
     m
 
 fn ir_module_add_func : (*IrModule, *func.IrFunction) -> ()
-  | (m, fn_ptr) -> vec.vec_push(&m.functions, fn_ptr as ptr)
+  | (m, fn_ptr) -> vec.vec_push_ptr(&m.functions, fn_ptr as ptr)
 
 fn ir_module_destroy : *IrModule -> ()
   | m ->
@@ -34,7 +34,7 @@ fn ir_module_destroy : *IrModule -> ()
       let mut i : i64 = 0i64
       let flen = vec.vec_len(&m.functions)
       while i < flen
-        func.ir_func_destroy(vec.vec_get(&m.functions, i) as *func.IrFunction)
+        func.ir_func_destroy(vec.vec_get_ptr(&m.functions, i) as *func.IrFunction)
         i = i + 1i64
       vec.vec_destroy(&m.functions)
       vec.vec_destroy(&m.globals)
