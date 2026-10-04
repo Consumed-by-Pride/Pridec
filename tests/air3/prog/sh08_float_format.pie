@@ -1,0 +1,55 @@
+-- EXIT: 25
+-- stdlib executed: float -> text (exact decimal expansion, half-even rounding, shortest round-trip), f64 and f32; each exact match adds one
+-- (the old Ryu code printed 0.1 as "0.0e+00": it read `v as u64`, a value conversion, and its tables were not real)
+use os.linux
+use fmt.float
+use fmt
+
+fn same : (*u8, i64, ptr) -> i64
+  | (buf, n, want) ->
+    let w = want as *u8
+    let mut i : i64 = 0i64
+    let mut ok : i64 = 1i64
+    while i < n
+      if w[i] != buf[i]
+        ok = 0i64
+      i = i + 1i64
+    if w[n] != 0u8
+      ok = 0i64
+    ok
+
+fn main : () -> i64
+  | () ->
+    let buf = os.linux.malloc(512i64) as *u8
+    let mut n : i64 = 0i64
+    -- shortest
+    n = n + same(buf, float.f64_to_shortest(0.1f64, buf), "0.1" as ptr)
+    n = n + same(buf, float.f64_to_shortest(1.5f64, buf), "1.5" as ptr)
+    n = n + same(buf, float.f64_to_shortest(123456.789f64, buf), "123456.789" as ptr)
+    n = n + same(buf, float.f64_to_shortest(100.0f64, buf), "100.0" as ptr)
+    n = n + same(buf, float.f64_to_shortest(0.3333333333333333f64, buf), "0.3333333333333333" as ptr)
+    n = n + same(buf, float.f64_to_shortest(1e22f64, buf), "1e+22" as ptr)
+    n = n + same(buf, float.f64_to_shortest(5e-324f64, buf), "5e-324" as ptr)
+    n = n + same(buf, float.f64_to_shortest(-2.5f64, buf), "-2.5" as ptr)
+    n = n + same(buf, float.f64_to_shortest(0.0f64, buf), "0.0" as ptr)
+    n = n + same(buf, float.f64_to_shortest(1.7976931348623157e308f64, buf), "1.7976931348623157e+308" as ptr)
+    -- fixed precision (exact value, half to even: 0.5 -> 0, 2.5 -> 2, 0.125 -> 0.12)
+    n = n + same(buf, float.f64_fmt_fixed(0.6666666666666666f64, 3i32, buf), "0.667" as ptr)
+    n = n + same(buf, float.f64_fmt_fixed(1234.5678f64, 2i32, buf), "1234.57" as ptr)
+    n = n + same(buf, float.f64_fmt_fixed(0.5f64, 0i32, buf), "0" as ptr)
+    n = n + same(buf, float.f64_fmt_fixed(2.5f64, 0i32, buf), "2" as ptr)
+    n = n + same(buf, float.f64_fmt_fixed(0.125f64, 2i32, buf), "0.12" as ptr)
+    n = n + same(buf, float.f64_fmt_fixed(0.1f64, 20i32, buf), "0.10000000000000000555" as ptr)
+    -- scientific and general
+    n = n + same(buf, float.f64_fmt_sci(12345.678f64, 3i32, buf, false), "1.235e+04" as ptr)
+    n = n + same(buf, float.f64_fmt_sci(0.0f64, 2i32, buf, false), "0.00e+00" as ptr)
+    n = n + same(buf, float.f64_fmt_gen(0.0001234f64, 4i32, buf, false), "0.0001234" as ptr)
+    n = n + same(buf, float.f64_fmt_gen(123456789.0f64, 4i32, buf, false), "1.235e+08" as ptr)
+    n = n + same(buf, float.f64_fmt_gen(100.0f64, 6i32, buf, false), "100" as ptr)
+    -- f32 uses the shortest digits of the f32 itself
+    n = n + same(buf, float.f32_to_shortest(0.1f32, buf), "0.1" as ptr)
+    n = n + same(buf, float.f32_to_shortest(16777216.0f32, buf), "16777216.0" as ptr)
+    -- bit access: 1.0 is 0x3FF0000000000000, and the round trip returns the value
+    n = n + (if fmt.f64_bits(1.0f64) == 4607182418800017408u64 then 1i64 else 0i64)
+    n = n + (if fmt.f64_from_bits(4609434218613702656u64) == 1.5f64 then 1i64 else 0i64)
+    n

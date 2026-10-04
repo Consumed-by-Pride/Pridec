@@ -3,584 +3,444 @@ mod fmt.float
 use os.linux
 use fmt.parse_float.common
 
--- Ryu algorithm: float → shortest round-trip decimal string.
--- Daniel Ryu, "Ryū: Fast Float-to-String Conversion" (PLDI 2018)
--- https://dl.acm.org/doi/10.1145/3192366.3192369
+-- float -> decimal text.
+--
+-- Exact conversion, not an approximation: the double is expanded into its exact decimal digits (a multi-precision decimal, at most 767
+-- significant digits for a double), then rounded.  Fixed/scientific precision rounds that exact decimal half-to-even (the same answers as C's
+-- printf("%.Nf")), and the shortest form is the shortest digit string that still reads back as the same double (the interval test of
+-- Steele-White / Go's strconv roundShortest).  The earlier Ryu code was never usable (its tables were not real, `v as u64` converted the value
+-- instead of reading its bits, so 0.1 printed as 0.0e+00), and it is removed rather than patched.
 
--- §1  RYU TABLES FOR F64
--- Pre-computed ceil(log2(5^k)) and floor(log2(5^k)) used in the binary-to-decimal
--- conversion. The tables encode the 128-bit powers of 5 needed by the algorithm.
--- We store lo/hi pairs as in the Eisel-Lemire table (same format, different range).
+struct Dec
+  d    : *u8     -- digits as ASCII '0'..'9'
+  nd   : i64     -- number of digits in use (no trailing zeros)
+  dp   : i64     -- decimal point position: value = 0.d1d2d3... * 10^dp
 
--- double_pow5_inv_bitcount = 125 (invariant of the algorithm)
--- double_pow5_bitcount = 125
--- Tables cover indices 0..325 (powers 5^0 through 5^325)
+fn fd_new : () -> Dec
+  | () -> Dec { d: os.linux.malloc(800i64) as *u8, nd: 0i64, dp: 0i64 }
 
--- Rather than embedding all 326 entries inline (huge), we compute them on demand
--- via a compact generator. The key insight: 5^k mod 2^128 follows a simple recurrence.
+fn fd_free : *Dec -> ()
+  | a ->
+    os.linux.free(a.d as ptr)
+    a.d = 0 as *u8; a.nd = 0i64; a.dp = 0i64
 
-let ryu_pow5_inited : bool = false
-let ryu_pow5_lo     : *u64 = 0 as *u64   -- 326 entries
-let ryu_pow5_hi     : *u64 = 0 as *u64
-let ryu_pow5inv_lo  : *u64 = 0 as *u64   -- 292 entries
-let ryu_pow5inv_hi  : *u64 = 0 as *u64
+fn fd_trim : *Dec -> ()
+  | a ->
+    while a.nd > 0i64 && a.d[a.nd - 1i64] == 48u8
+      a.nd = a.nd - 1i64
+    if a.nd == 0i64
+      a.dp = 0i64
 
-fn ryu_init_tables : () -> ()
-  | () ->
-    if ryu_pow5_inited then ()
-    else
-      ryu_pow5_lo    = os.linux.malloc(326i64 * 8i64) as *u64
-      ryu_pow5_hi    = os.linux.malloc(326i64 * 8i64) as *u64
-      ryu_pow5inv_lo = os.linux.malloc(292i64 * 8i64) as *u64
-      ryu_pow5inv_hi = os.linux.malloc(292i64 * 8i64) as *u64
-
-      -- Generate pow5[k] = 5^k as 128-bit LE pair
-      let mut lo : u64 = 1u64; let mut hi : u64 = 0u64
-      let mut i : i64 = 0i64
-      while i <= 325i64
-        ryu_pow5_lo[i] = lo; ryu_pow5_hi[i] = hi
-        -- multiply (lo,hi) by 5
-        let new_lo = lo *% 5u64
-        let carry  = if new_lo < lo then 1u64 else 0u64   -- overflow
-        -- actually proper 128×scalar: need to track carry correctly
-        let mid = common.u128_mul(lo, 5u64)
-        let hi_contrib = hi *% 5u64
-        lo = mid.lo; hi = mid.hi +% hi_contrib
-        i = i + 1i64
-
-      -- Generate pow5inv[k] = floor(5^-k × 2^(floor(log2(5^k))+125+1)) + 1
-      -- Approximation: pow5inv[k] ≈ ceil(2^(2*125) / 5^k)
-      -- We use a bignum division approach. Simplified: seed from known values.
-      -- Seed with pow5inv[0] = 2^125 = (1 << 125) — fits in 128 bits
-      -- lo = 2^61 (the low 64 bits of 2^125), hi = 2^61
-      -- Actually 2^125: lo = 0, hi = 2^61
-      let inv_lo : u64 = 0u64
-      let inv_hi : u64 = 1u64 << 61u64   -- 2^61 (= 2^125 >> 64)
-      let mut ilo = inv_lo; let mut ihi = inv_hi
-      let mut j : i64 = 0i64
-      while j < 292i64
-        ryu_pow5inv_lo[j] = ilo; ryu_pow5inv_hi[j] = ihi
-        -- divide (ilo,ihi) by 5: (ilo,ihi) = (ilo,ihi) / 5 + 1
-        -- Implement 128-bit division by 5
-        let hi_rem = ihi % 5u64
-        let new_ihi = ihi / 5u64
-        let low_combined = (hi_rem << 32u64) | (ilo >> 32u64)
-        let mid_q = low_combined / 5u64
-        let mid_rem = low_combined % 5u64
-        let low_combined2 = (mid_rem << 32u64) | (ilo & 0xFFFFFFFFu64)
-        let new_ilo = (mid_q << 32u64) | (low_combined2 / 5u64)
-        ilo = new_ilo; ihi = new_ihi
-        -- add 1 for ceiling
-        ilo = ilo +% 1u64
-        if ilo == 0u64 then ihi = ihi +% 1u64
-        j = j + 1i64
-
-      ryu_pow5_inited = true
-
--- §2  RYU UTILITY FUNCTIONS
-
--- Count decimal digits in a u64 (Ryu uses this for output formatting)
-fn ryu_dec_len : u64 -> i32
-  | v ->
-    if v >= 1000000000000000000u64 then 19i32
-    else if v >= 100000000000000000u64 then 18i32
-    else if v >= 10000000000000000u64 then 17i32
-    else if v >= 1000000000000000u64 then 16i32
-    else if v >= 100000000000000u64 then 15i32
-    else if v >= 10000000000000u64 then 14i32
-    else if v >= 1000000000000u64 then 13i32
-    else if v >= 100000000000u64 then 12i32
-    else if v >= 10000000000u64 then 11i32
-    else if v >= 1000000000u64 then 10i32
-    else if v >= 100000000u64 then 9i32
-    else if v >= 10000000u64 then 8i32
-    else if v >= 1000000u64 then 7i32
-    else if v >= 100000u64 then 6i32
-    else if v >= 10000u64 then 5i32
-    else if v >= 1000u64 then 4i32
-    else if v >= 100u64 then 3i32
-    else if v >= 10u64 then 2i32
-    else 1i32
-
--- floor(log2(5^e)) for e in [0, 325]
-fn ryu_log2_pow5 : i32 -> i32
-  | e ->
-    -- Approximation: floor(e * log2(5)) = floor(e * 2.32193...)
-    -- = floor(e * 1217 / 524) accurate for e in [0, 325]
-    (e as i64 * 1217i64 / 524i64) as i32
-
--- floor(log2(10^e)) for e in [0..22]
-fn ryu_log2_pow10 : i32 -> i32
-  | e -> (e as i64 * 3321928i64 / 1000000i64) as i32
-
--- ceil(log5(2^e)) — used for exponent range calculation
-fn ryu_log5_pow2 : i32 -> i32
-  | e -> (e as i64 * 225799i64 / 524288i64) as i32
-
--- ceil(log5(2^e + 1)) approximation
-fn ryu_log5_pow2_plus1 : i32 -> i32
-  | e -> (e as i64 * 225799i64 / 524288i64 + 1i64) as i32
-
--- Number of zero digits to skip (trailing zeros suppression)
-fn ryu_pow10_zeros : (u64, i32) -> i32
-  | (v, count) ->
-    if count == 0i32 then 0i32
-    else
-      let mut c = 0i32; let mut vv = v
-      while c < count && vv % 10u64 == 0u64 then vv = vv / 10u64; c = c + 1i32
-      c
-
--- §3  BINARY-TO-DECIMAL CONVERSION (Ryu core)
--- Given IEEE-754 f64 bits, produce (mantissa, exponent) for shortest decimal.
-
-struct RyuResult
-  mantissa : u64
-  exponent : i32
-
-fn ryu_binary_to_decimal_f64 : u64 -> RyuResult
-  | (bits) ->
-    ryu_init_tables()
-    -- Decode IEEE-754
-    let ieee_mant = bits & 0x000FFFFFFFFFFFFu64
-    let ieee_exp  = ((bits >> 52u64) & 0x7FFu64) as i32
-
-    let (m2, e2, is_subnormal) =
-      if ieee_exp == 0i32
-        -- subnormal
-        (ieee_mant, 1i32 - 1023i32 - 52i32, true)
-      else
-        -- normal: add implicit leading bit
-        (ieee_mant | (1u64 << 52u64), ieee_exp - 1023i32 - 52i32, false)
-
-    -- Determine the interval [ml, mu] in which the correct decimal lies
-    -- Whether the mantissa is even matters for boundary exclusion
-    let even = (m2 & 1u64) == 0u64
-    let accepts_lower = even
-    let accepts_upper = even
-
-    -- Compute [ml, mr] = [m2 - 1, m2 + 1] scaled into the appropriate power of 2
-    let mut ml = 2u64 *% m2 -% 1u64
-    let mut mr = 2u64 *% m2 +% 1u64
-    let mut mm = 2u64 *% m2
-
-    -- e2 is the binary exponent. We need to find q such that 10^q divides
-    -- [ml × 2^e2, mr × 2^e2] and the result is the shortest decimal.
-    -- Step 3: Convert to decimal power base.
-    -- Use the Ryu log approximations to find q = floor(e2 * log10(2))
-    -- Accurate formula: floor(e2 * 78913 / 2^18) for |e2| < 1500
-    let e2_abs = if e2 >= 0i32 then e2 else -e2
-    let log_approx = (e2 as i64 * 78913i64) >> 18i64
-    let q : i32 = if e2 >= 0i32 then log_approx as i32 else log_approx as i32 - 1i32
-
-    let abs_e2 = if e2 < 0i32 then -e2 else e2
-    let q : i32 =
-      if e2 >= 0i32 then
-        -- multiply by 2^e2, find number of digits
-        ryu_log5_pow2(abs_e2) as i32
-      else
-        -- divide by 2^(-e2)
-        -(ryu_log5_pow2_plus1(abs_e2) as i32)
-
-    -- Perform the actual multiplication using our pow5 tables
-    -- vr = m2 × 2^e2 × 5^(-q) = m2 × 2^(e2 - q × log2(5)) (approximately)
-    -- We use the pre-computed tables to get the exact result.
-
-    let vr : u64 =
-      if e2 >= 0i32
-        let pow_idx = if q >= 326i32 then 325i32 else q
-        let p_lo = ryu_pow5_lo[pow_idx as i64]
-        let p_hi = ryu_pow5_hi[pow_idx as i64]
-        -- vr = m2 * 5^q >> (some shift)
-        let prod = common.u128_mul(m2, p_lo)
-        let prod_hi = common.u128_mul(m2, p_hi)
-        let combined_hi = prod.hi +% prod_hi.lo
-        let shift = ryu_log2_pow5(q) - 63i32
-        if shift >= 0i32 && shift < 64i32 then combined_hi >> shift as u64
-        else if shift < 0i32 then combined_hi << (-shift) as u64
-        else 0u64
-      else
-        let neg_q = -q
-        let pow_idx = if neg_q >= 292i32 then 291i32 else neg_q
-        let p_lo = ryu_pow5inv_lo[pow_idx as i64]
-        let p_hi = ryu_pow5inv_hi[pow_idx as i64]
-        let prod = common.u128_mul(m2, p_lo)
-        let prod_hi = common.u128_mul(m2, p_hi)
-        let combined_hi = prod.hi +% prod_hi.lo
-        let shift = -ryu_log2_pow5(-q) - 63i32 + 125i32
-        if shift >= 0i32 && shift < 64i32 then combined_hi >> shift as u64
-        else combined_hi
-
-    RyuResult { mantissa: vr, exponent: q + ryu_dec_len(vr) - 1i32 }
-
--- §4  FLOAT → STRING FORMATTERS
-
--- Write f64 in shortest scientific notation into buf.
--- Returns length. buf must be >= 32 bytes.
-fn f64_to_shortest_sci : (f64, *u8) -> i64
-  | (v, buf) ->
-    let bits = v as u64
-    let neg = (bits >> 63u64) != 0u64
-    let ieee_exp = ((bits >> 52u64) & 0x7FFu64) as i32
-    let ieee_mant = bits & 0x000FFFFFFFFFFFFu64
-
-    -- Special cases
-    if ieee_exp == 0x7FFi32
-      if ieee_mant != 0u64   -- NaN
-        buf[0i64]=110u8; buf[1i64]=97u8; buf[2i64]=110u8; 3i64
-      else  -- Inf
-        let mut n : i64 = 0i64
-        if neg then buf[n]=45u8; n=n+1i64
-        buf[n]=105u8; buf[n+1i64]=110u8; buf[n+2i64]=102u8; n+3i64
-    else if ieee_exp == 0i32 && ieee_mant == 0u64
-      -- Zero
-      let mut n : i64 = 0i64
-      if neg then buf[n]=45u8; n=n+1i64
-      buf[n]=48u8; buf[n+1i64]=46u8; buf[n+2i64]=48u8; buf[n+3i64]=101u8
-      buf[n+4i64]=43u8; buf[n+5i64]=48u8; buf[n+6i64]=48u8; n+7i64
-    else
-      let rr = ryu_binary_to_decimal_f64(bits & 0x7FFFFFFFFFFFFFFFu64)
-      let mantissa = rr.mantissa
-      let exp10    = rr.exponent
-      let ndig = ryu_dec_len(mantissa) as i64
-
-      let mut n : i64 = 0i64
-      if neg then buf[n]=45u8; n=n+1i64
-
-      -- Write mantissa digits: d.ddddd (first digit, dot, rest)
-      let tmp : *u8 = os.linux.malloc(24i64) as *u8
-      let mut m = mantissa; let mut ti : i64 = ndig - 1i64
-      while ti >= 0i64
-        tmp[ti] = (48u64 + m % 10u64) as u8
-        m = m / 10u64; ti = ti - 1i64
-
-      buf[n] = tmp[0i64]; n = n + 1i64
-      if ndig > 1i64
-        buf[n] = 46u8; n = n + 1i64
-        let mut di : i64 = 1i64
-        while di < ndig then buf[n] = tmp[di]; n=n+1i64; di=di+1i64
-
-      os.linux.free(tmp as ptr)
-
-      -- Exponent
-      buf[n] = 101u8; n = n + 1i64   -- 'e'
-      let exp_val = exp10
-      if exp_val >= 0i32
-        buf[n] = 43u8; n = n + 1i64
-      else
-        buf[n] = 45u8; n = n + 1i64
-      let abs_exp = if exp_val < 0i32 then -exp_val else exp_val
-      if abs_exp < 10i32 then buf[n]=48u8; n=n+1i64
-      let en = ryu_write_u32(abs_exp as u32, (buf as i64+n) as *u8)
-      n + en
-
--- Write f64 in shortest decimal notation into buf.
--- Uses scientific notation if exp < -4 or exp >= 17 (like Python default).
-fn f64_to_shortest : (f64, *u8) -> i64
-  | (v, buf) ->
-    let bits = v as u64
-    let ieee_exp = ((bits >> 52u64) & 0x7FFu64) as i32
-    let ieee_mant = bits & 0x000FFFFFFFFFFFFu64
-    let neg = (bits >> 63u64) != 0u64
-
-    if ieee_exp == 0x7FFi32 || (ieee_exp == 0i32 && ieee_mant == 0u64)
-      f64_to_shortest_sci(v, buf)
-    else
-      let rr = ryu_binary_to_decimal_f64(bits & 0x7FFFFFFFFFFFFFFFu64)
-      let exp10 = rr.exponent
-
-      if exp10 >= -4i32 && exp10 < 17i32
-        -- Fixed notation
-        f64_to_fixed_ryu(v, rr, buf)
-      else
-        f64_to_shortest_sci(v, buf)
-
--- Write f64 in fixed notation using pre-computed Ryu result
-fn f64_to_fixed_ryu : (f64, RyuResult, *u8) -> i64
-  | (v, rr, buf) ->
-    let bits = v as u64
-    let neg = (bits >> 63u64) != 0u64
-    let mantissa = rr.mantissa
-    let exp10    = rr.exponent
-    let ndig = ryu_dec_len(mantissa) as i64
-
+fn fd_assign : (*Dec, u64) -> ()
+  | (a, v) ->
+    let tmp = os.linux.malloc(24i64) as *u8
     let mut n : i64 = 0i64
-    if neg then buf[n]=45u8; n=n+1i64
-
-    let tmp : *u8 = os.linux.malloc(24i64) as *u8
-    let mut m = mantissa; let mut ti : i64 = ndig - 1i64
-    while ti >= 0i64
-      tmp[ti] = (48u64 + m % 10u64) as u8
-      m = m / 10u64; ti = ti - 1i64
-
-    -- decimal_point is at position exp10 + 1 from the left
-    let dp_pos = exp10 + 1i32   -- index in output where dot goes
-
-    if dp_pos <= 0i32
-      -- value < 1: write 0.000...digits
-      buf[n]=48u8; n=n+1i64; buf[n]=46u8; n=n+1i64
-      let zeros = -dp_pos
-      let mut zi : i32 = 0i32
-      while zi < zeros then buf[n]=48u8; n=n+1i64; zi=zi+1i32
-      let mut di : i64 = 0i64
-      while di < ndig then buf[n]=tmp[di]; n=n+1i64; di=di+1i64
-    else if dp_pos >= ndig as i32
-      -- value >= 10^ndig: integer, no fractional part
-      let mut di : i64 = 0i64
-      while di < ndig then buf[n]=tmp[di]; n=n+1i64; di=di+1i64
-      let trail_zeros = dp_pos as i64 - ndig
-      let mut zi : i64 = 0i64
-      while zi < trail_zeros then buf[n]=48u8; n=n+1i64; zi=zi+1i64
-    else
-      -- mix of integer and fractional digits
-      let mut di : i64 = 0i64
-      while di < dp_pos as i64 then buf[n]=tmp[di]; n=n+1i64; di=di+1i64
-      buf[n]=46u8; n=n+1i64
-      while di < ndig then buf[n]=tmp[di]; n=n+1i64; di=di+1i64
-
+    let mut x = v
+    while x > 0u64
+      tmp[n] = (48u64 + x % 10u64) as u8
+      n = n + 1i64
+      x = x / 10u64
+    let mut i : i64 = 0i64
+    while i < n
+      a.d[i] = tmp[n - 1i64 - i]
+      i = i + 1i64
+    a.nd = n; a.dp = n
     os.linux.free(tmp as ptr)
+    fd_trim(a)
+
+-- multiply by 2^k (k <= 50): the digits move right by 17 places, are computed from the least significant end, then leading zeros are stripped
+fn fd_left_shift : (*Dec, u64) -> ()
+  | (a, k) ->
+    if a.nd == 0i64 then ()
+    else
+      let extra : i64 = 17i64
+      let mut n : u64 = 0u64
+      let mut i : i64 = a.nd - 1i64
+      while i >= 0i64
+        n = n + (((a.d[i] - 48u8) as u64) << k)
+        a.d[i + extra] = (48u64 + n % 10u64) as u8
+        n = n / 10u64
+        i = i - 1i64
+      let mut j : i64 = extra - 1i64
+      while j >= 0i64
+        a.d[j] = (48u64 + n % 10u64) as u8
+        n = n / 10u64
+        j = j - 1i64
+      a.nd = a.nd + extra; a.dp = a.dp + extra
+      let mut z : i64 = 0i64
+      while z < a.nd - 1i64 && a.d[z] == 48u8
+        z = z + 1i64
+      if z > 0i64
+        os.linux.memmove(a.d as ptr, (a.d as i64 + z) as ptr, (a.nd - z) as u64)
+        a.nd = a.nd - z; a.dp = a.dp - z
+      fd_trim(a)
+
+-- divide by 2^k (k <= 60), truncating nothing: the decimal expansion of x / 2^k is finite
+fn fd_right_shift : (*Dec, u64) -> ()
+  | (a, k) ->
+    let mut r : i64 = 0i64
+    let mut w : i64 = 0i64
+    let mut n : u64 = 0u64
+    let mut empty = false
+    while (n >> k) == 0u64 && !empty
+      if r >= a.nd
+        if n == 0u64
+          a.nd = 0i64; a.dp = 0i64
+          empty = true
+        else
+          while (n >> k) == 0u64
+            n = n * 10u64
+            r = r + 1i64
+          break
+      else
+        n = n * 10u64 + ((a.d[r] - 48u8) as u64)
+        r = r + 1i64
+    if !empty
+      a.dp = a.dp - (r - 1i64)
+      let mask = (1u64 << k) - 1u64
+      while r < a.nd
+        let dig = n >> k
+        n = n & mask
+        a.d[w] = (48u64 + dig) as u8
+        w = w + 1i64
+        n = n * 10u64 + ((a.d[r] - 48u8) as u64)
+        r = r + 1i64
+      while n > 0u64
+        let dig = n >> k
+        n = n & mask
+        if w < 790i64
+          a.d[w] = (48u64 + dig) as u8
+          w = w + 1i64
+        n = n * 10u64
+      a.nd = w
+      fd_trim(a)
+
+fn fd_shift : (*Dec, i64) -> ()
+  | (a, k0) ->
+    if a.nd == 0i64 then ()
+    else
+      let mut k = k0
+      if k > 0i64
+        while k > 50i64
+          fd_left_shift(a, 50u64)
+          k = k - 50i64
+        fd_left_shift(a, k as u64)
+      else if k < 0i64
+        while k < -60i64
+          fd_right_shift(a, 60u64)
+          k = k + 60i64
+        fd_right_shift(a, (-k) as u64)
+
+fn fd_should_round_up : (*Dec, i64) -> bool
+  | (a, nd) ->
+    if nd < 0i64 || nd >= a.nd then false
+    else if a.d[nd] == 53u8 && nd + 1i64 == a.nd
+      -- exactly halfway: round to even
+      nd > 0i64 && ((a.d[nd - 1i64] - 48u8) % 2u8) != 0u8
+    else
+      a.d[nd] >= 53u8
+
+fn fd_round_up : (*Dec, i64) -> ()
+  | (a, nd) ->
+    if nd < 0i64 || nd >= a.nd then ()
+    else
+      let mut i : i64 = nd - 1i64
+      let mut done = false
+      while i >= 0i64 && !done
+        if a.d[i] < 57u8
+          a.d[i] = a.d[i] + 1u8
+          a.nd = i + 1i64
+          done = true
+        i = i - 1i64
+      if !done
+        a.d[0i64] = 49u8
+        a.nd = 1i64
+        a.dp = a.dp + 1i64
+
+fn fd_round_down : (*Dec, i64) -> ()
+  | (a, nd) ->
+    if nd < 0i64 || nd >= a.nd then ()
+    else
+      a.nd = nd
+      fd_trim(a)
+
+fn fd_round : (*Dec, i64) -> ()
+  | (a, nd) ->
+    if nd < 0i64 || nd >= a.nd then ()
+    else if fd_should_round_up(a, nd) then fd_round_up(a, nd)
+    else fd_round_down(a, nd)
+
+-- Shortest digit string that reads back as the same value.  `a` holds the exact digits of mant * 2^(exp - mb); the neighbours' midpoints
+-- are the lower/upper bounds, and the digits are cut at the first place where rounding down or up still lands inside the interval.
+fn fd_round_shortest : (*Dec, u64, i64, i64, i64) -> ()
+  | (a, mant, exp, mb, minexp) ->
+    if a.nd == 0i64 then ()
+    else if exp > minexp && 332i64 * (a.dp - a.nd) >= 100i64 * (exp - mb) then ()   -- an integer already: the exact digits are the shortest
+    else
+      let mut upper = fd_new()
+      fd_assign(&upper, mant * 2u64 + 1u64)
+      fd_shift(&upper, exp - mb - 1i64)
+      -- the lower neighbour is closer when mant is a power of two (the binade below is twice as dense)
+      let mut mantlo : u64 = mant * 2u64 - 1u64
+      let mut explo : i64 = exp - 1i64
+      if mant > (1u64 << (mb as u64)) || exp == minexp
+        mantlo = mant - 1u64
+        explo = exp
+      let mut lower = fd_new()
+      fd_assign(&lower, mantlo * 2u64 + 1u64)
+      fd_shift(&lower, explo - mb - 1i64)
+      let inclusive = mant % 2u64 == 0u64
+      let mut upperdelta : i64 = 0i64
+      let mut ui : i64 = 0i64
+      let mut fin = false
+      while !fin
+        let mi = ui - upper.dp + a.dp
+        if mi >= a.nd
+          fin = true
+        else
+          let li = ui - upper.dp + lower.dp
+          let l = if li >= 0i64 && li < lower.nd then lower.d[li] else 48u8
+          let m = if mi >= 0i64 then a.d[mi] else 48u8
+          let u = if ui < upper.nd then upper.d[ui] else 48u8
+          let okdown = l != m || (inclusive && li + 1i64 == lower.nd)
+          if upperdelta == 0i64 && m + 1u8 < u
+            upperdelta = 2i64
+          else if upperdelta == 0i64 && m != u
+            upperdelta = 1i64
+          else if upperdelta == 1i64 && (m != 57u8 || u != 48u8)
+            upperdelta = 2i64
+          let okup = upperdelta > 0i64 && (inclusive || upperdelta > 1i64 || ui + 1i64 < upper.nd)
+          if okdown && okup
+            fd_round(a, mi + 1i64)
+            fin = true
+          else if okdown
+            fd_round_down(a, mi + 1i64)
+            fin = true
+          else if okup
+            fd_round_up(a, mi + 1i64)
+            fin = true
+          ui = ui + 1i64
+      fd_free(&upper)
+      fd_free(&lower)
+
+-- the bit pattern of a float (a value conversion `v as u64` is not a bitcast: read the stored bytes)
+fn fl_bits64 : f64 -> u64
+  | v ->
+    let mut t = v
+    (&t as *u64)[0i64]
+
+fn fl_bits32 : f32 -> u64
+  | v ->
+    let mut t = v
+    ((&t as *u32)[0i64]) as u64
+
+-- decode into exact decimal digits; returns kind (0 finite, 1 nan, 2 inf) + 16 if the sign bit is set
+fn fl_load : (*Dec, u64, i64, i64, i64, bool) -> i64
+  | (a, bits, mb, eb, bias, shortest) ->
+    let mant0 = bits & ((1u64 << (mb as u64)) - 1u64)
+    let ex0 = ((bits >> (mb as u64)) & ((1u64 << (eb as u64)) - 1u64)) as i64
+    let neg = (bits >> ((mb + eb) as u64)) != 0u64
+    let sgn : i64 = if neg then 16i64 else 0i64
+    if ex0 == (1i64 << eb) - 1i64
+      if mant0 != 0u64 then 1i64 + sgn else 2i64 + sgn
+    else
+      let mut mant = mant0
+      let mut exp = ex0
+      if ex0 == 0i64
+        exp = 1i64
+      else
+        mant = mant0 | (1u64 << (mb as u64))
+      exp = exp + bias
+      fd_assign(a, mant)
+      fd_shift(a, exp - mb)
+      if shortest
+        fd_round_shortest(a, mant, exp, mb, bias + 1i64)
+      sgn
+
+fn fl_put_exp : (i64, *u8, i64, bool) -> i64
+  | (ex0, buf, n0, upper) ->
+    let mut n = n0
+    buf[n] = if upper then 69u8 else 101u8
+    n = n + 1i64
+    let mut ex = ex0
+    if ex < 0i64
+      buf[n] = 45u8
+      ex = -ex
+    else
+      buf[n] = 43u8
+    n = n + 1i64
+    if ex < 10i64
+      buf[n] = 48u8; buf[n + 1i64] = (48i64 + ex) as u8
+      n + 2i64
+    else if ex < 100i64
+      buf[n] = (48i64 + ex / 10i64) as u8; buf[n + 1i64] = (48i64 + ex % 10i64) as u8
+      n + 2i64
+    else
+      buf[n] = (48i64 + ex / 100i64) as u8; buf[n + 1i64] = (48i64 + (ex / 10i64) % 10i64) as u8; buf[n + 2i64] = (48i64 + ex % 10i64) as u8
+      n + 3i64
+
+fn fl_fmt_e : (*Dec, i64, bool, *u8, i64) -> i64
+  | (a, prec, upper, buf, n0) ->
+    let mut n = n0
+    buf[n] = if a.nd == 0i64 then 48u8 else a.d[0i64]
+    n = n + 1i64
+    if prec > 0i64
+      buf[n] = 46u8
+      n = n + 1i64
+      let mut i : i64 = 1i64
+      let m = if a.nd < prec + 1i64 then a.nd else prec + 1i64
+      while i < m
+        buf[n] = a.d[i]
+        n = n + 1i64
+        i = i + 1i64
+      while i <= prec
+        buf[n] = 48u8
+        n = n + 1i64
+        i = i + 1i64
+    let ex = if a.nd == 0i64 then 0i64 else a.dp - 1i64
+    fl_put_exp(ex, buf, n, upper)
+
+fn fl_fmt_f : (*Dec, i64, *u8, i64) -> i64
+  | (a, prec, buf, n0) ->
+    let mut n = n0
+    if a.dp > 0i64
+      let mut m = a.dp
+      if a.nd < m then m = a.nd
+      let mut i : i64 = 0i64
+      while i < m
+        buf[n] = a.d[i]
+        n = n + 1i64
+        i = i + 1i64
+      while i < a.dp
+        buf[n] = 48u8
+        n = n + 1i64
+        i = i + 1i64
+    else
+      buf[n] = 48u8
+      n = n + 1i64
+    if prec > 0i64
+      buf[n] = 46u8
+      n = n + 1i64
+      let mut i2 : i64 = 0i64
+      while i2 < prec
+        let j = a.dp + i2
+        buf[n] = if j >= 0i64 && j < a.nd then a.d[j] else 48u8
+        n = n + 1i64
+        i2 = i2 + 1i64
     n
 
--- Write u32 decimal digits into buf, return count
-fn ryu_write_u32 : (u32, *u8) -> i64
-  | (v, buf) ->
-    if v == 0u32 then buf[0i64]=48u8; 1i64
+-- mode: 0 shortest (fixed unless the exponent is < -4 or >= 17, integers get ".0"), 1 shortest scientific, 2 fixed(prec), 3 scientific(prec), 4 general(prec)
+fn fl_format : (u64, i64, i64, i64, *u8, i64, i64, bool) -> i64
+  | (bits, mb, eb, bias, buf, mode, prec0, upper) ->
+    let mut a = fd_new()
+    let r = fl_load(&a, bits, mb, eb, bias, mode < 2i64)
+    let kind = r % 16i64
+    let neg = r >= 16i64
+    let mut n : i64 = 0i64
+    if kind == 1i64
+      buf[0i64] = 110u8; buf[1i64] = 97u8; buf[2i64] = 110u8
+      n = 3i64
     else
-      let mut n : i64 = 0i64; let mut vv = v
-      while vv > 0u32
-        buf[n] = (48u32 + vv % 10u32) as u8; n=n+1i64; vv = vv/10u32
-      let mut lo : i64 = 0i64; let mut hi = n-1i64
-      while lo < hi
-        let t=buf[lo]; buf[lo]=buf[hi]; buf[hi]=t; lo=lo+1i64; hi=hi-1i64
-      n
+      if neg
+        buf[n] = 45u8
+        n = n + 1i64
+      if kind == 2i64
+        buf[n] = 105u8; buf[n + 1i64] = 110u8; buf[n + 2i64] = 102u8
+        n = n + 3i64
+      else
+        let prec = if prec0 < 0i64 then 0i64 else prec0
+        if mode == 0i64
+          let x = a.dp - 1i64
+          if a.nd > 0i64 && (x < -4i64 || x >= 17i64)
+            n = fl_fmt_e(&a, a.nd - 1i64, upper, buf, n)
+          else
+            let fp = if a.nd > a.dp then a.nd - a.dp else 0i64
+            n = fl_fmt_f(&a, fp, buf, n)
+            if a.nd <= a.dp
+              buf[n] = 46u8; buf[n + 1i64] = 48u8
+              n = n + 2i64
+        else if mode == 1i64
+          n = fl_fmt_e(&a, if a.nd > 0i64 then a.nd - 1i64 else 0i64, upper, buf, n)
+        else if mode == 2i64
+          fd_round(&a, a.dp + prec)
+          n = fl_fmt_f(&a, prec, buf, n)
+        else if mode == 3i64
+          fd_round(&a, prec + 1i64)
+          n = fl_fmt_e(&a, prec, upper, buf, n)
+        else
+          let p = if prec0 < 1i64 then 1i64 else prec0
+          fd_round(&a, p)
+          let mut eprec = p
+          if eprec > a.nd && a.nd >= a.dp
+            eprec = a.nd
+          let x = a.dp - 1i64
+          if a.nd > 0i64 && (x < -4i64 || x >= eprec)
+            let mut pp = p
+            if pp > a.nd then pp = a.nd
+            n = fl_fmt_e(&a, pp - 1i64, upper, buf, n)
+          else
+            let fp = if a.nd > a.dp then a.nd - a.dp else 0i64
+            n = fl_fmt_f(&a, fp, buf, n)
+    fd_free(&a)
+    n
 
--- §5  FIXED PRECISION FORMATTERS (for %f/%e/%g with explicit precision)
+-- §4  PUBLIC FORMATTERS.  buf must hold 32 bytes (shortest, scientific, general) or 330 + precision bytes (fixed)
+fn f64_to_shortest_sci : (f64, *u8) -> i64
+  | (v, buf) -> fl_format(fl_bits64(v), 52i64, 11i64, -1023i64, buf, 1i64, 0i64, false)
 
--- Write f64 in fixed notation with exactly `prec` decimal places.
+fn f64_to_shortest : (f64, *u8) -> i64
+  | (v, buf) -> fl_format(fl_bits64(v), 52i64, 11i64, -1023i64, buf, 0i64, 0i64, false)
+
 fn f64_fmt_fixed : (f64, i32, *u8) -> i64
-  | (v, prec, buf) ->
-    let bits = v as u64
-    let neg = (bits >> 63u64) != 0u64
-    let abs_bits = bits & 0x7FFFFFFFFFFFFFFFu64
-    let ieee_exp = ((abs_bits >> 52u64) & 0x7FFu64) as i32
-    let ieee_mant = abs_bits & 0x000FFFFFFFFFFFFu64
+  | (v, prec, buf) -> fl_format(fl_bits64(v), 52i64, 11i64, -1023i64, buf, 2i64, prec as i64, false)
 
-    let mut n : i64 = 0i64
-    if ieee_exp == 0x7FFi32
-      if ieee_mant != 0u64
-        buf[0i64]=110u8; buf[1i64]=97u8; buf[2i64]=110u8; 3i64
-      else
-        if neg then buf[n]=45u8; n=n+1i64
-        buf[n]=105u8; buf[n+1i64]=110u8; buf[n+2i64]=102u8; n+3i64
-    else
-      if neg then buf[n]=45u8; n=n+1i64
-      let abs_v = abs_bits as f64   -- raw reinterpret to positive
-
-      -- Integer part
-      let int_part = abs_v as i64
-      let mut tmp : *u8 = os.linux.malloc(24i64) as *u8
-      let mut iv = int_part as u64
-      if iv == 0u64 then tmp[0i64]=48u8; n=n+1i64; buf[n-1i64]=48u8
-      else
-        let mut ilen : i64 = 0i64
-        while iv > 0u64 then tmp[ilen]=(48u64+iv%10u64) as u8; ilen=ilen+1i64; iv=iv/10u64
-        let mut lo2:i64=0i64; let mut hi2=ilen-1i64
-        while lo2<hi2 then let t=tmp[lo2];tmp[lo2]=tmp[hi2];tmp[hi2]=t; lo2=lo2+1i64; hi2=hi2-1i64
-        os.linux.memcpy((buf as i64+n) as ptr, tmp as ptr, ilen as u64); n=n+ilen
-      os.linux.free(tmp as ptr)
-
-      if prec > 0i32
-        buf[n]=46u8; n=n+1i64
-        let mut frac = abs_v - int_part as f64
-        let mut p : i32 = 0i32
-        while p < prec
-          frac=frac*10.0f64
-          let d=frac as i64
-          buf[n]=(48i64+d) as u8; n=n+1i64
-          frac=frac-d as f64; p=p+1i32
-      n
-
--- Write f64 in scientific notation with exactly `prec` decimal places.
 fn f64_fmt_sci : (f64, i32, *u8, bool) -> i64
-  | (v, prec, buf, upper_e) ->
-    let bits = v as u64
-    let neg = (bits >> 63u64) != 0u64
-    let abs_bits = bits & 0x7FFFFFFFFFFFFFFFu64
-    let ieee_exp = ((abs_bits >> 52u64) & 0x7FFu64) as i32
-    let ieee_mant = abs_bits & 0x000FFFFFFFFFFFFu64
-    let mut n : i64 = 0i64
+  | (v, prec, buf, upper) -> fl_format(fl_bits64(v), 52i64, 11i64, -1023i64, buf, 3i64, prec as i64, upper)
 
-    if ieee_exp == 0x7FFi32
-      if ieee_mant != 0u64 then buf[0i64]=110u8; buf[1i64]=97u8; buf[2i64]=110u8; 3i64
-      else
-        if neg then buf[n]=45u8; n=n+1i64
-        buf[n]=105u8; buf[n+1i64]=110u8; buf[n+2i64]=102u8; n+3i64
-    else if abs_bits == 0u64
-      if neg then buf[n]=45u8; n=n+1i64
-      buf[n]=48u8; n=n+1i64
-      if prec > 0i32
-        buf[n]=46u8; n=n+1i64
-        let mut p:i32=0i32; while p<prec then buf[n]=48u8; n=n+1i64; p=p+1i32
-      buf[n]=(if upper_e then 69u8 else 101u8); n=n+1i64
-      buf[n]=43u8; n=n+1i64; buf[n]=48u8; n=n+1i64; buf[n]=48u8; n+1i64
-    else
-      if neg then buf[n]=45u8; n=n+1i64
-      let abs_v = abs_bits as f64
-      let mut exp10 : i64 = 0i64
-      let mut mant = abs_v
-      if mant >= 10.0f64 then while mant>=10.0f64 then mant=mant/10.0f64; exp10=exp10+1i64
-      else if mant < 1.0f64 && mant > 0.0f64 then while mant<1.0f64 then mant=mant*10.0f64; exp10=exp10-1i64
-
-      let int_d = mant as i64
-      buf[n]=(48i64+int_d) as u8; n=n+1i64
-      if prec > 0i32
-        buf[n]=46u8; n=n+1i64
-        let mut frac=mant-int_d as f64; let mut p:i32=0i32
-        while p<prec
-          frac=frac*10.0f64; let d=frac as i64
-          buf[n]=(48i64+d) as u8; n=n+1i64; frac=frac-d as f64; p=p+1i32
-
-      buf[n]=(if upper_e then 69u8 else 101u8); n=n+1i64
-      if exp10>=0i64 then buf[n]=43u8 else buf[n]=45u8; n=n+1i64
-      let aexp=if exp10<0i64 then -exp10 else exp10
-      if aexp<10i64 then buf[n]=48u8; n=n+1i64
-      let en=ryu_write_u32(aexp as u32,(buf as i64+n) as *u8); n+en
-
--- Write f64 general (%g): shortest representation, switches between fixed and sci.
 fn f64_fmt_gen : (f64, i32, *u8, bool) -> i64
-  | (v, prec, buf, upper) ->
-    let bits = v as u64
-    let abs_bits = bits & 0x7FFFFFFFFFFFFFFFu64
-    let ieee_exp = ((abs_bits >> 52u64) & 0x7FFu64) as i32
-    if ieee_exp == 0x7FFi32 || abs_bits == 0u64
-      f64_fmt_sci(v, prec, buf, upper)
-    else
-      let actual_prec = if prec < 1i32 then 1i32 else prec
-      let rr = ryu_binary_to_decimal_f64(abs_bits)
-      let exp10 = rr.exponent
-      if exp10 >= -4i32 && exp10 < actual_prec
-        -- use fixed, with (actual_prec - 1 - exp10) digits after decimal
-        let frac_digits = actual_prec - 1i32 - exp10
-        let raw_n = f64_fmt_fixed(v, frac_digits, buf)
-        -- strip trailing zeros after decimal point
-        let mut n = raw_n
-        let mut has_dot = false; let mut di : i64 = 0i64
-        while di < n then if buf[di]==46u8 then has_dot=true; di=di+1i64
-        if has_dot
-          while n > 1i64 && buf[n-1i64]==48u8 then n=n-1i64
-          if buf[n-1i64]==46u8 then n=n-1i64
-        n
-      else
-        let sci_prec = actual_prec - 1i32
-        let raw_n = f64_fmt_sci(v, sci_prec, buf, upper)
-        -- strip trailing zeros in mantissa part of scientific notation
-        let mut n = raw_n
-        let mut e_pos : i64 = -1i64; let mut di : i64 = 0i64
-        while di < n then if buf[di]==101u8||buf[di]==69u8 then e_pos=di; di=di+1i64
-        if e_pos > 0i64
-          let mut m = e_pos
-          let mut has_dot2 = false; let mut di2:i64=0i64
-          while di2<m then if buf[di2]==46u8 then has_dot2=true; di2=di2+1i64
-          if has_dot2
-            while m>1i64 && buf[m-1i64]==48u8 then m=m-1i64
-            if buf[m-1i64]==46u8 then m=m-1i64
-          let tail = n - e_pos
-          os.linux.memmove((buf as i64+m) as ptr, (buf as i64+e_pos) as ptr, tail as u64)
-          m+tail
-        else raw_n
+  | (v, prec, buf, upper) -> fl_format(fl_bits64(v), 52i64, 11i64, -1023i64, buf, 4i64, prec as i64, upper)
 
--- §6  F32 VARIANTS
-
+-- f32: its own width (shortest digits of the f32, not of the widened f64: 0.1f32 is "0.1", not "0.10000000149011612")
 fn f32_to_shortest : (f32, *u8) -> i64
-  | (v, buf) -> f64_to_shortest(v as f64, buf)
+  | (v, buf) -> fl_format(fl_bits32(v), 23i64, 8i64, -127i64, buf, 0i64, 0i64, false)
 
 fn f32_fmt_fixed : (f32, i32, *u8) -> i64
-  | (v, prec, buf) -> f64_fmt_fixed(v as f64, prec, buf)
+  | (v, prec, buf) -> fl_format(fl_bits32(v), 23i64, 8i64, -127i64, buf, 2i64, prec as i64, false)
 
 fn f32_fmt_sci : (f32, i32, *u8, bool) -> i64
-  | (v, prec, buf, upper) -> f64_fmt_sci(v as f64, prec, buf, upper)
+  | (v, prec, buf, upper) -> fl_format(fl_bits32(v), 23i64, 8i64, -127i64, buf, 3i64, prec as i64, upper)
 
 fn f32_fmt_gen : (f32, i32, *u8, bool) -> i64
-  | (v, prec, buf, upper) -> f64_fmt_gen(v as f64, prec, buf, upper)
+  | (v, prec, buf, upper) -> fl_format(fl_bits32(v), 23i64, 8i64, -127i64, buf, 4i64, prec as i64, upper)
 
--- §7  PUBLIC API
--- Render f64 to heap-allocated string (caller must free).
-
+-- §5  Render to a heap-allocated NUL-terminated string (caller frees)
 fn f64_to_str_shortest : f64 -> *u8
   | v ->
     let buf : *u8 = os.linux.malloc(64i64) as *u8
     let n = f64_to_shortest(v, buf)
-    buf[n] = 0u8; buf
+    buf[n] = 0u8
+    buf
 
 fn f64_to_str_fixed : (f64, i32) -> *u8
   | (v, prec) ->
-    let buf : *u8 = os.linux.malloc(400i64) as *u8
+    let buf : *u8 = os.linux.malloc(400i64 + (prec as i64)) as *u8
     let n = f64_fmt_fixed(v, prec, buf)
-    buf[n] = 0u8; buf
+    buf[n] = 0u8
+    buf
 
 fn f64_to_str_sci : (f64, i32, bool) -> *u8
   | (v, prec, upper) ->
-    let buf : *u8 = os.linux.malloc(64i64) as *u8
+    let buf : *u8 = os.linux.malloc(64i64 + (prec as i64)) as *u8
     let n = f64_fmt_sci(v, prec, buf, upper)
-    buf[n] = 0u8; buf
+    buf[n] = 0u8
+    buf
 
 fn f64_to_str_gen : (f64, i32, bool) -> *u8
   | (v, prec, upper) ->
-    let buf : *u8 = os.linux.malloc(64i64) as *u8
+    let buf : *u8 = os.linux.malloc(400i64 + (prec as i64)) as *u8
     let n = f64_fmt_gen(v, prec, buf, upper)
-    buf[n] = 0u8; buf
-
--- §8  BACKEND64 TABLES — full precision powers of 10 for Ryu
--- Pride embeds full 616-entry tables for backend64 and 616-entry
--- inverse tables. We compute them lazily using multiply-based generation.
--- These are the core tables for correctly-rounded float→decimal conversion.
-
--- Double-precision Ryu requires two tables:
---   double_pow5_inv_bitcount = 125 bits of precision per entry
---   double_pow5_bitcount     = 125 bits of precision per entry
--- Each entry is a (hi64, lo64) pair representing a 128-bit fixed-point number.
--- Coverage: powers of 5 from 5^-342 to 5^308 (same as Eisel-Lemire table).
-
--- §9  GRISU2 FAST PATH (for cases where Ryu fails to terminate quickly)
--- Grisu2 is simpler and covers ~99.5% of doubles correctly in O(1).
--- Used as a fallback before the full Ryu algorithm kicks in.
-
-fn grisu2_f64 : (f64, *u8, *i32) -> i32
-  | (v, buf, dec_exp) ->
-    -- Attempt Grisu2. Returns digit count, sets dec_exp.
-    -- Returns -1 if Grisu2 cannot produce a correct result for this value.
-    let bits = v as u64
-    let ieee_exp = ((bits >> 52u64) & 0x7FFu64) as i32
-    let ieee_mant = bits & 0x000FFFFFFFFFFFFu64
-
-    if ieee_exp == 0x7FFi32 || (ieee_exp == 0i32 && ieee_mant == 0u64) then -1i32
-    else
-      -- Decode into (f, e) where v = f * 2^e
-      let (f, e) =
-        if ieee_exp == 0i32
-          (ieee_mant, 1i32 - 1023i32 - 52i32)   -- subnormal
-        else
-          (ieee_mant | (1u64 << 52u64), ieee_exp - 1023i32 - 52i32)
-
-      -- Boundaries: [f-delta, f+delta] × 2^e where delta = 0.5 ULP
-      let f_minus = if ieee_mant == 0u64 && ieee_exp > 1i32 then f *% 4u64 -% 1u64 else f *% 2u64 -% 1u64
-      let f_plus  = f *% 2u64 +% 1u64
-      let e2 = e - 1i32   -- shifted exponent for boundary representation
-
-      -- Find k such that 10^(k-1) <= v < 10^k
-      -- k = ceil(log10(v)) ≈ ceil(log2(v) * log10(2))
-      let log2_v = (63i32 - common_clz64_proxy(f)) + e
-      let k_approx = (log2_v as i64 * 30103i64 / 100000i64) as i32
-      let k = k_approx + 1i32
-
-      -- Scale boundaries into integer range
-      -- This is the simplified Grisu2 digit generation.
-      -- Full implementation requires careful 128-bit arithmetic.
-      -- We use the Ryu result if available, else produce 6 digits via sprintf.
-      let n = os.linux.snprintf(buf, 32u64, "%.17g" as ptr, v)
-      if n > 0i32
-        dec_exp[0i32] = k
-        n
-      else -1i32
+    buf[n] = 0u8
+    buf
 
 fn common_clz64_proxy : u64 -> i32
   | v ->

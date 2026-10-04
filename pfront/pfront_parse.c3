@@ -2438,43 +2438,27 @@ fn ulong parse_uint_literal(char* s, usz len)
     return v;
 }
 
+extern fn double strtod(char* s, char** end);
+
+// The value of a float literal, correctly rounded: libc strtod over the digits (the old loop accumulated `whole*10 + d` and
+// `d * 0.1^k` in doubles, which is off by an ulp or more for most literals: 1.7976931348623157e305 came out as ...144e305).
 fn double parse_float_literal(char* s, usz len)
 {
-    double whole = 0.0;
-    usz i = 0;
-    while (i < len && s[i] >= '0' && s[i] <= '9')
+    char[512] tmp;
+    usz n = 0; usz i = 0; bool seen_e = false;
+    while (i < len && n < 500)
     {
-        whole = whole * 10.0 + (double)(int)(s[i] - '0');
-        i = i + 1;
+        char c = s[i];
+        if (c >= '0' && c <= '9') { tmp[n] = c; n++; }
+        else if (c == '.') { tmp[n] = c; n++; }
+        else if ((c == 'e' || c == 'E') && !seen_e) { seen_e = true; tmp[n] = c; n++; }
+        else if ((c == '+' || c == '-') && seen_e && n > 0 && (tmp[n - 1] == 'e' || tmp[n - 1] == 'E')) { tmp[n] = c; n++; }
+        else if (c == '_') { }
+        else { break; }   // a type suffix like f32/f64 begins here
+        i++;
     }
-    if (i < len && s[i] == '.')
-    {
-        i = i + 1;
-        double scale = 0.1;
-        while (i < len && s[i] >= '0' && s[i] <= '9')
-        {
-            whole = whole + (double)(int)(s[i] - '0') * scale;
-            scale = scale * 0.1;
-            i = i + 1;
-        }
-    }
-    if (i < len && (s[i] == 'e' || s[i] == 'E'))
-    {
-        i = i + 1;
-        bool neg = false;
-        if (i < len && (s[i] == '+' || s[i] == '-')) { neg = s[i] == '-'; i = i + 1; }
-        int ex = 0;
-        while (i < len && s[i] >= '0' && s[i] <= '9')
-        {
-            ex = ex * 10 + (int)(s[i] - '0');
-            i = i + 1;
-        }
-        for (int k = 0; k < ex; k++)
-        {
-            if (neg) { whole = whole / 10.0; } else { whole = whole * 10.0; }
-        }
-    }
-    return whole;
+    tmp[n] = 0;
+    return strtod(&tmp[0], null);
 }
 
 // Reads a trailing width suffix (i8/i16/i32/i64/u8/.../f32/f64) if present.
