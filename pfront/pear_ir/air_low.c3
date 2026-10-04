@@ -55,9 +55,9 @@ struct Ins
 enum TermK : int { T_NONE, T_RET, T_JUMP, T_COND, T_TRAP, T_UNREACH }
 struct Blk
 {
-    char* name; char*[8] pnames; AirTyp*[8] ptys; usz np;
+    char* name; char*[16] pnames; AirTyp*[16] ptys; usz np;
     Ins* ins; usz ni; usz cap;
-    TermK tk; AirPrd* tp; char*[8] jargs; usz nj; usz t1; usz t2; usz npred;
+    TermK tk; AirPrd* tp; char*[16] jargs; usz nj; usz t1; usz t2; usz npred;
 }
 struct Vx { AirPrd* p; AirTyp* t; }
 struct Pl { AirPrd* ptr; AirTyp* t; }
@@ -78,26 +78,26 @@ struct CloI { AirTyp* ty; AirTyp* fnty; AirTyp*[MAXA] ps; usz np; AirTyp* ret; }
 struct TSub { Node* tp; AirTyp* t; }
 struct StInfo { Node* decl; char* name; AirTyp* ty; AirTyp*[MAXTP] targs; usz nt; }
 // an untagged `union` is a block of words; every field is a typed view of offset 0
-struct UniI { Node* decl; AirTyp* ty; char*[8] fnames; AirTyp*[8] ft; usz nf; usz words; }
+struct UniI { Node* decl; AirTyp* ty; char*[16] fnames; AirTyp*[16] ft; usz nf; usz words; }
 struct Fat { AirTyp* elem; AirTyp* ty; bool is_str; }
 // `dyn I`: a trait object {data: ptr(u8), vt: ptr(u8)}; the vtable is a constant array of thunk addresses, one per interface method
 struct DynI { Node* iface; AirTyp* ty; }
 // an enum is the explicit record { tag: i64, payload: [words x i64] }; every payload field sits at its own
 // 8-byte word offset and is stored/loaded through a typed pointer (the layout is decided HERE, not by the consumer)
-struct VarI { char* name; Node* decl; AirTyp*[8] ft; usz nf; usz[8] off; }
-struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; AirTyp*[8] um; usz nm; }   // nm > 0: a set-theoretic union `A ∪ B` (variants are its members)
+struct VarI { char* name; Node* decl; AirTyp*[16] ft; usz nf; usz[16] off; }
+struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; AirTyp*[16] um; usz nm; }   // nm > 0: a set-theoretic union `A ∪ B` (variants are its members)
 // effect handlers: a handler arm is a closure installed in the per-operation global `hop.E.op` for the dynamic
 // extent of the `handle` body.  A `perform` calls the installed closure.  An arm that resumes in tail position
 // returns the resumption value to the perform site; an arm that does not resume ABORTS: it stores its value into
 // the handler's result slot and raises the unwinding flag `__unw` (= the handler id), and every call site checks
 // the flag and unwinds (jump to the enclosing handler exit, or return).  Non-tail / multi-shot resumption needs
 // continuations and is reported as unsupported.
-struct HndI { usz id; AirTyp* frame; AirTyp* th; usz nops; char*[8] g; AirTyp*[8] hty; AirTyp*[8] cty;
+struct HndI { usz id; AirTyp* frame; AirTyp* th; usz nops; char*[16] g; AirTyp*[16] hty; AirTyp*[16] cty;
     // fiber mode (an arm resumes in non-tail position): the handled computation runs on its own fiber, the arms on the handler's stack
-    bool fib; AirTyp* bt; usz f_bres; usz f_fib; usz f_st; usz f_live; usz f_gen; usz f_op; usz[10] f_env; usz[8] f_arg; usz[8] f_rv; usz[8] np; AirTyp*[8] rty;
-    Node* retarm; FnInfo*[8] fy; FnInfo*[8] farm; FnInfo* fret; FnInfo* fdrv; FnInfo* fthk; }
+    bool fib; AirTyp* bt; usz f_bres; usz f_fib; usz f_st; usz f_live; usz f_gen; usz f_op; usz[20] f_env; usz[16] f_arg; usz[16] f_rv; usz[16] np; AirTyp*[16] rty;
+    Node* retarm; FnInfo*[16] fy; FnInfo*[16] farm; FnInfo* fret; FnInfo* fdrv; FnInfo* fthk; }
 struct ArmCx { Node* kdecl; AirPrd* flag; AirPrd* rv; AirTyp* opret; AirTyp* th; bool on; bool fib; AirPrd* frame; AirPrd* kgen; usz hix; usz j; }
-const usz MAXTP = 8;   // type parameters of one generic function / data type
+const usz MAXTP = 16;   // type parameters of one generic function / data type
 const usz MAXA = 64;    // parameters / arguments / tuple elements of one function, call or tuple
 const usz MAXA1 = 65;
 const usz MAXC = 64;    // variables one closure captures
@@ -430,7 +430,7 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
         }
         case Nk.N_TY_UNION:
         {
-            AirTyp*[8] ms; usz nm = 0;
+            AirTyp*[16] ms; usz nm = 0;
             lw.flatten_union(t, &ms[0], &nm, false);
             if (nm == 0) { return null; }
             if (nm == 1) { return ms[0]; }
@@ -438,7 +438,7 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
         }
         case Nk.N_TY_INTERSECT:
         {
-            AirTyp*[8] ms; usz nm = 0;
+            AirTyp*[16] ms; usz nm = 0;
             lw.flatten_union(t, &ms[0], &nm, true);
             if (nm == 1) { return ms[0]; }
             lw.unsup(t, "intersection of distinct types"); return null;
@@ -799,11 +799,11 @@ fn void Low.t_ret(Low* lw, Vx v)
 fn void Low.t_jump(Low* lw, usz to, Vx* args, usz n)
 {
     if (lw.cur == NOBLK) { return; }
-    char*[8] names;
-    for (usz i = 0; i < n && i < 8; i++) { names[i] = lw.name_of(args[i]); }
+    char*[16] names;
+    for (usz i = 0; i < n && i < 16; i++) { names[i] = lw.name_of(args[i]); }
     Blk* b = &lw.blks[lw.cur];
     b.tk = T_JUMP; b.t1 = to; b.nj = n;
-    for (usz i = 0; i < n && i < 8; i++) { b.jargs[i] = names[i]; }
+    for (usz i = 0; i < n && i < 16; i++) { b.jargs[i] = names[i]; }
     lw.mark_pred(to); lw.cur = NOBLK;
 }
 fn void Low.t_jump0(Low* lw, usz to) { Vx[1] none; lw.t_jump(to, &none[0], 0); }
@@ -1349,7 +1349,7 @@ fn AirTyp* Low.union_ty(Low* lw, Node* decl)
     for (usz i = 0; i < decl.child_count; i++)
     {
         Node* f = decl.children[i]; if (f == null || f.kind != Nk.N_DECL_FIELD) { continue; }
-        if (u.nf >= 8) { lw.unsup(decl, "union with more than 8 fields"); return null; }
+        if (u.nf >= 16) { lw.unsup(decl, "union with more than 16 fields"); return null; }
         AirTyp* ft = lw.ty(f.type_ann); if (ft == null) { return null; }
         u.fnames[u.nf] = lw.dup(lw.text(f)); u.ft[u.nf] = ft; u.nf++;
         usz w = lw.words(ft); if (w > u.words) { u.words = w; }
@@ -1454,7 +1454,7 @@ fn Enm* Low.enum_for(Low* lw, Node* decl)
         for (usz j = 0; j < vn.child_count; j++)
         {
             Node* tn = vn.children[j]; if (tn == null || !pfront_core::is_type(tn.kind)) { continue; }
-            if (vi.nf >= 8) { lw.unsup(vn, "variant with more than 8 payload fields"); return null; }
+            if (vi.nf >= 16) { lw.unsup(vn, "variant with more than 16 payload fields"); return null; }
             AirTyp* ft = lw.ty(tn); if (ft == null) { return null; }
             vi.ft[vi.nf] = ft; vi.off[vi.nf] = off; vi.nf++;
             off += lw.words(ft);
@@ -1525,7 +1525,8 @@ fn void Low.flatten_union(Low* lw, Node* t, AirTyp** out, usz* n, bool inter)
     { lw.flatten_union(t.resolved.type_ann, out, n, inter); return; }
     AirTyp* m = lw.ty(t); if (m == null) { return; }
     for (usz i = 0; i < *n; i++) { if (air_ll::ty_eq(out[i], m)) { return; } }
-    if (*n < 8) { out[*n] = m; *n = *n + 1; }
+    if (*n < 16) { out[*n] = m; *n = *n + 1; }
+    else { lw.unsup(t, "union or intersection of more than 16 members"); }
 }
 fn AirTyp* Low.union_enum_ty(Low* lw, AirTyp** ms, usz nm)
 {
@@ -2995,6 +2996,58 @@ fn Vx Low.saturating(Low* lw, Node* n, bool add, AirTyp* want)
     ins.name = lw.fresh("_sat"); ins.a = air_ir::air_mk_var(lw.a, fnm); ins.nargs = 2; ins.args[0] = l.p; ins.args[1] = r.p;
     return lw.vref(ins.name, l.t);
 }
+fn AirTyp* Low.uint_of(Low* lw, int bits)
+{
+    if (bits <= 8) { return lw.m.t_u8; }
+    if (bits <= 16) { return lw.m.t_u16; }
+    if (bits <= 32) { return lw.m.t_u32; }
+    return lw.m.t_u64;
+}
+// `a *| b`: saturating multiply, straight-line (no branch and no wider type, so it works for i64/u64 too).
+// Unsigned: p = a*b wraps; it overflowed iff a != 0 and p / a != b; the result is p | -overflow.
+// Signed: the same on the magnitudes |a|, |b|, with the limit MAX (positive result) or MAX+1 (negative result), then the sign is put back and
+// an overflow selects the limit (MAX, or MIN when the signs differ).
+fn Vx Low.sat_mul(Low* lw, Node* n, AirTyp* want)
+{
+    AirTyp* h = lw.hint(n.children[0]); if (h == null) { h = lw.hint(n.children[1]); } if (h == null) { h = want; }
+    Vx l = lw.expr(n.children[0], h); Vx r = lw.expr(n.children[1], h != null ? h : l.t);
+    if (l.t == null || !air_ll::ty_is_int(l.t)) { lw.err(n, "saturating arithmetic needs integers", null); return lw.unit(); }
+    if (!air_ll::ty_eq(l.t, r.t)) { r = lw.coerce_arg(n.children[1], r, l.t); }
+    if (!lw.live()) { return lw.unit(); }
+    bool sg = air_ll::ty_is_signed(l.t); int bits = air_ll::ty_bits(l.t);
+    if (bits > 64) { lw.err(n, "saturating multiply is limited to 64 bits", null); return lw.unit(); }
+    AirTyp* ut = lw.uint_of(bits);
+    Vx zero = lw.lit_int(0, ut); Vx one = lw.lit_int(1, ut);
+    Vx ma; Vx mb; Vx negres = zero;
+    if (sg)
+    {
+        Vx sh = lw.lit_int((long)(bits - 1), l.t);
+        Vx sa = lw.binop(ABIN_SHR, l, sh); Vx sb = lw.binop(ABIN_SHR, r, sh);   // all ones when negative
+        ma = lw.coerce(lw.binop(ABIN_SUB, lw.binop(ABIN_XOR, l, sa), sa), ut);
+        mb = lw.coerce(lw.binop(ABIN_SUB, lw.binop(ABIN_XOR, r, sb), sb), ut);
+        negres = lw.binop(ABIN_AND, lw.coerce(lw.binop(ABIN_XOR, sa, sb), ut), one);
+    }
+    else { ma = lw.coerce(l, ut); mb = lw.coerce(r, ut); }
+    Vx prod = lw.binop(ABIN_MUL, ma, mb);
+    Vx nz = lw.coerce(lw.binop(ABIN_NEQ, ma, zero), ut);
+    Vx den = lw.binop(ABIN_OR, ma, lw.binop(ABIN_XOR, nz, one));
+    Vx ovf = lw.binop(ABIN_AND, lw.coerce(lw.binop(ABIN_NEQ, lw.binop(ABIN_DIV, prod, den), mb), ut), nz);
+    if (!sg)
+    {
+        Vx msk = lw.binop(ABIN_SUB, zero, ovf);
+        return lw.coerce(lw.binop(ABIN_OR, prod, msk), l.t);
+    }
+    Vx limit = lw.binop(ABIN_ADD, lw.lit_int(((long)1 << (bits - 1)) - 1, ut), negres);
+    Vx ovf2 = lw.coerce(lw.binop(ABIN_GT, prod, limit), ut);
+    ovf = lw.binop(ABIN_OR, ovf, ovf2);
+    Vx s2 = lw.binop(ABIN_SUB, zero, negres);
+    Vx val = lw.binop(ABIN_SUB, lw.binop(ABIN_XOR, prod, s2), s2);
+    Vx msk = lw.binop(ABIN_SUB, zero, ovf);
+    Vx allones = lw.binop(ABIN_SUB, zero, one);
+    Vx keep = lw.binop(ABIN_AND, val, lw.binop(ABIN_XOR, msk, allones));
+    Vx out = lw.binop(ABIN_OR, keep, lw.binop(ABIN_AND, limit, msk));
+    return lw.coerce(out, l.t);
+}
 // `x |> f`: application of a function (or function value) to x
 fn Vx Low.pipeline(Low* lw, Node* n, AirTyp* want)
 {
@@ -3031,6 +3084,7 @@ fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
     if (op == Tk.TOKEN_PIPELINE) { return lw.pipeline(n, want); }
     if (op == Tk.TOKEN_AT) { return lw.matmul(n); }
     if (op == Tk.TOKEN_PLUS_PIPE || op == Tk.TOKEN_MINUS_PIPE) { return lw.saturating(n, op == Tk.TOKEN_PLUS_PIPE, want); }
+    if (op == Tk.TOKEN_STAR_PIPE) { return lw.sat_mul(n, want); }
     AirBinop b;
     if (!lw.binop_for(op, &b)) { lw.unsup(n, "binary operator"); return lw.unit(); }
     if (op == Tk.TOKEN_PLUS || op == Tk.TOKEN_MINUS)   // pointer arithmetic: p + n / p - n advance by n elements; p - q is the element distance
@@ -3776,12 +3830,12 @@ fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
         case Nk.N_PAT_VARIANT: case Nk.N_PAT_STRUCT:
         {
             Enm* e = lw.enum_of_ty(v.t);
-            Node*[8] subs; usz ns = 0;
+            Node*[16] subs; usz ns = 0;
             if (e != null && p.kind == Nk.N_PAT_VARIANT)
             {
                 long vi = lw.variant_index(e, lw.dname(p), p.resolved);
                 if (vi < 0) { lw.err(p, "pattern names no variant of the scrutinee's enum", lw.dname(p)); return false; }
-                for (usz i = 0; i < p.child_count && ns < 8; i++) { Node* c = p.children[i]; if (c != null && pfront_core::is_pattern(c.kind)) { subs[ns] = c; ns++; } }
+                for (usz i = 0; i < p.child_count && ns < 16; i++) { Node* c = p.children[i]; if (c != null && pfront_core::is_pattern(c.kind)) { subs[ns] = c; ns++; } }
                 return lw.pat_variant(e, (usz)vi, &subs[0], ns, v, fail);
             }
             if (e != null)    // `{ A: a }` / `{ B }` on an enum
@@ -4660,7 +4714,7 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     if (lw.nhnd >= 256) { lw.unsup(n, "more than 256 handle expressions"); return lw.unit(); }
     HndI* h = &lw.hnds[lw.nhnd]; h.id = lw.nhnd + 1; lw.nhnd++;
     h.th = th; h.nops = 0;
-    Node*[8] arms; Node*[8] ops; Node*[8] effs; Node* retarm = null;
+    Node*[16] arms; Node*[16] ops; Node*[16] effs; Node* retarm = null;
     for (usz i = 1; i < n.child_count; i++)
     {
         Node* arm = n.children[i]; if (arm == null) { continue; }
@@ -4671,7 +4725,7 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
             retarm = arm; continue;
         }
         if (op == null || op.kind != Nk.N_DECL_EFFECT_OP) { lw.unsup(arm, "handler arm that is neither an effect operation nor a return arm"); return lw.unit(); }
-        if (h.nops >= 8) { lw.unsup(n, "handler with more than 8 operations"); return lw.unit(); }
+        if (h.nops >= 16) { lw.unsup(n, "handler with more than 16 operations"); return lw.unit(); }
         for (usz j = 0; j < h.nops; j++) { if (ops[j] == op) { lw.err(arm, "two arms for one operation", null); return lw.unit(); } }
         arms[h.nops] = arm; ops[h.nops] = op; effs[h.nops] = op.parent; h.nops++;
     }
@@ -4686,7 +4740,7 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     h.frame = lw.nominal(lw.dup(&fnm[0]));
     AirDecl* fd = air_ir::air_mk_decl(lw.a, ADECL_DATA, h.frame.name);
     AirCtorDecl* fc = air_ir::air_mk_ctor_decl(lw.a, h.frame.name); fc.result_ty = h.frame; fd.add_ctor(fc);
-    FnInfo*[8] afs;
+    FnInfo*[16] afs;
     for (usz j = 0; j < h.nops; j++)
     {
         AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
@@ -4864,7 +4918,7 @@ fn void Low.arm_parts(Low* lw, Node* arm, usz nargs, Node** pats, usz* npat, Nod
     {
         Node* c = arm.children[i]; if (c == null) { continue; }
         if (c.kind == Nk.N_MODULE_PATH || c.kind == Nk.N_EXPR_PATH) { continue; }
-        if (pfront_core::is_pattern(c.kind)) { if (*npat < 8) { pats[*npat] = c; *npat = *npat + 1; } continue; }
+        if (pfront_core::is_pattern(c.kind)) { if (*npat < 16) { pats[*npat] = c; *npat = *npat + 1; } continue; }
         if (*body != null) { *bodyseq = *body; }
         *body = c;
     }
@@ -4874,7 +4928,7 @@ fn bool Low.arm_tail(Low* lw, Node* arm, Node* op)
 {
     AirTyp*[MAXA] ps; usz np = 0; AirTyp* ret = null;
     if (!lw.op_sig(op, &ps[0], &np, &ret)) { return true; }
-    Node*[8] pats; usz npat = 0; Node* kdecl = null; Node* body = null; Node* bodyseq = null;
+    Node*[16] pats; usz npat = 0; Node* kdecl = null; Node* body = null; Node* bodyseq = null;
     lw.arm_parts(arm, np, &pats[0], &npat, &kdecl, &body, &bodyseq);
     if (body == null) { return true; }
     return lw.tail_ok(body, kdecl, true) && (bodyseq == null || lw.tail_ok(bodyseq, kdecl, false));
@@ -5019,7 +5073,7 @@ fn Vx Low.handle_fib(Low* lw, HndI* h, Node* n, Node* body, AirTyp* bt, Node** a
     h.frame = lw.nominal(lw.dup(&fnm[0]));
     AirDecl* fd = air_ir::air_mk_decl(lw.a, ADECL_DATA, h.frame.name);
     AirCtorDecl* fc = air_ir::air_mk_ctor_decl(lw.a, h.frame.name); fc.result_ty = h.frame; fd.add_ctor(fc);
-    AirTyp*[8][MAXA] pty2;
+    AirTyp*[16][MAXA] pty2;
     usz fi = 0;
     for (usz j = 0; j < h.nops; j++)
     {
@@ -5265,7 +5319,7 @@ fn void Low.lower_arm_fib(Low* lw, FnInfo* f)
     }
     else
     {
-        Node*[8] pats; usz npat = 0; Node* kdecl = null; Node* bodyseq = null;
+        Node*[16] pats; usz npat = 0; Node* kdecl = null; Node* bodyseq = null;
         usz nargs = h.np[f.arm_j];
         lw.arm_parts(arm, nargs, &pats[0], &npat, &kdecl, &body, &bodyseq);
         for (usz i = 0; i < nargs && i < npat; i++) { lw.pat(pats[i], pv[i + 1], NOBLK); }
@@ -5318,7 +5372,7 @@ fn void Low.lower_arm(Low* lw, FnInfo* f)
         frame = lw.load(g.p, lw.ptr(h.frame));
     }
     // run in the handler's outer context: install what the handle displaced, remember what is installed now
-    Vx[8] saved;
+    Vx[16] saved;
     for (usz j = 0; j < h.nops; j++)
     {
         Vx gp = lw.gptr(h.g[j], h.hty[j]);
@@ -5329,12 +5383,12 @@ fn void Low.lower_arm(Low* lw, FnInfo* f)
         lw.store(gp.p, prev);
     }
     // payload and continuation binders
-    usz nargs = f.np - 1; Node*[8] pats; usz npat = 0; Node* body = null; Node* bodyseq = null;
+    usz nargs = f.np - 1; Node*[16] pats; usz npat = 0; Node* body = null; Node* bodyseq = null;
     for (usz i = 0; i < arm.child_count; i++)
     {
         Node* c = arm.children[i]; if (c == null) { continue; }
         if (c.kind == Nk.N_MODULE_PATH || c.kind == Nk.N_EXPR_PATH) { continue; }
-        if (pfront_core::is_pattern(c.kind)) { if (npat < 8) { pats[npat] = c; npat++; } continue; }
+        if (pfront_core::is_pattern(c.kind)) { if (npat < 16) { pats[npat] = c; npat++; } continue; }
         if (body != null) { bodyseq = body; }
         body = c;
     }
@@ -5423,12 +5477,13 @@ fn void Low.lower_fn1(Low* lw, FnInfo* f)
         pb[i] = air_ir::air_mk_binder(lw.a, pnm, f.pty[i], AMULT_UNR);
         pv[i] = lw.vref(pnm, f.pty[i]);
     }
-    Node*[256] arms; usz narms = 0;
+    Node*[4096] arms; usz narms = 0;
     Node* single_body = null;
     for (usz i = 0; i < d.child_count; i++)
     {
         Node* c = d.children[i]; if (c == null) { continue; }
-        if (c.kind == Nk.N_CLAUSE && narms < 256) { arms[narms] = c; narms++; }
+        if (c.kind == Nk.N_CLAUSE && narms < 4096) { arms[narms] = c; narms++; }
+        else if (c.kind == Nk.N_CLAUSE) { lw.unsup(d, "function with more than 4096 clauses"); }
     }
     Vx rv = lw.unit();
     if (narms == 0 && lw.is_brace_fn(d))
@@ -5537,7 +5592,7 @@ fn AirCmd* Low.assemble(Low* lw)
     {
         Blk* b = &lw.blks[bi - 1];
         if (b.npred == 0) { continue; }
-        AirBinder*[8] ps;
+        AirBinder*[16] ps;
         for (usz i = 0; i < b.np; i++) { ps[i] = air_ir::air_mk_binder(lw.a, b.pnames[i], b.ptys[i], AMULT_UNR); }
         AirCmd* lb = air_ir::air_mk_label(lw.a, b.name, &ps[0], b.np, lw.blk_cmd(b));
         spine = air_ir::air_mk_seq(lw.a, lb, spine);
