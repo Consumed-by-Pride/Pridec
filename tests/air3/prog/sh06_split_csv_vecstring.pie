@@ -1,0 +1,38 @@
+-- EXIT: 11
+-- stdlib executed: Vec<String> by value (the element size is sizeof(String), not 8): str.split, encoding.csv, str.join
+-- each passing check adds one; 11 checks
+use vec.vec
+use str.string
+use str.split
+use encoding.csv
+
+fn ok : (bool) -> i64 | (c) -> if c then 1i64 else 0i64
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    -- split "a,bb,,ccc" on ','
+    let src = "a,bb,,ccc" as ptr
+    let mut parts = split.str_split_char(src, 9i64, 44u8)
+    n = n + ok(vec.vec_len(&parts) == 4i64)
+    n = n + ok(string.string_len(vec.vec_get(&parts, 0i64) as *string.String) == 1i64)
+    n = n + ok(string.string_len(vec.vec_get(&parts, 1i64) as *string.String) == 2i64)
+    n = n + ok(string.string_len(vec.vec_get(&parts, 2i64) as *string.String) == 0i64)
+    n = n + ok(string.string_len(vec.vec_get(&parts, 3i64) as *string.String) == 3i64)
+    -- join them back with "-" : "a-bb--ccc" is 9 bytes
+    let joined = split.str_join(&parts, "-" as ptr, 1i64)
+    n = n + ok(string.string_len(&joined) == 9i64)
+    -- lines
+    let text = "x\r\nyy\nzzz" as ptr
+    let lines = split.str_split_lines(text, 9i64)
+    n = n + ok(vec.vec_len(&lines) == 3i64)
+    n = n + ok(string.string_len(vec.vec_get(&lines, 1i64) as *string.String) == 2i64)
+    -- csv: two records of three fields, one quoted field containing a comma
+    let data = "a,\"b,c\",d\n1,2,3\n" as ptr
+    let mut tab = csv.csv_parse_table(data, 16i64, 44u8)
+    n = n + ok(vec.vec_len(&tab.records) == 2i64)
+    let r0 = vec.vec_get(&tab.records, 0i64) as *csv.CsvRecord
+    let r1 = vec.vec_get(&tab.records, 1i64) as *csv.CsvRecord
+    n = n + ok(vec.vec_len(&r0.fields) == 3i64 && string.string_len(vec.vec_get(&r0.fields, 1i64) as *string.String) == 3i64)
+    n = n + ok(vec.vec_len(&r1.fields) == 3i64 && string.string_len(vec.vec_get(&r1.fields, 2i64) as *string.String) == 1i64)
+    n

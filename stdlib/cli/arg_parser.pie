@@ -19,7 +19,7 @@ fn argparser_new : (ptr, ptr) -> ArgParser
     ArgParser {
       prog_name: string.string_from_cstr(prog_cstr),
       doc:       string.string_from_cstr(doc_cstr),
-      flags:     vec.vec_new(8i64)
+      flags:     vec.vec_new(sizeof(flag.Flag) as i64)
     }
 
 fn argparser_destroy : *ArgParser -> ()
@@ -65,8 +65,8 @@ fn argparser_find_flag_by_short : (*ArgParser, u8) -> *flag.Flag
 fn argparser_parse_args : (*ArgParser, i64, *ptr) -> flag.ArgResult
   | (p, argc, argv) ->
     let mut res = flag.ArgResult {
-      flags:    vec.vec_new(8i64),
-      pos_args: vec.vec_new(8i64)
+      flags:    vec.vec_new(sizeof(flag.Flag) as i64),
+      pos_args: vec.vec_new(sizeof(string.String) as i64)
     }
     let mut i : i64 = 1i64   -- skip prog name at argv[0]
     while i < argc
