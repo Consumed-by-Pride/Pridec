@@ -7,14 +7,15 @@ use math.pow
 -- stdlib/math/trig.pie — Trigonometric and Inverse Trigonometric Functions
 -- High-precision Taylor and polynomial approximations for radians.
 
+-- bring x into [-PI, PI] by subtracting the nearest multiple of TAU (the old loops took ~x/6 iterations: 1e9 hung, 1e300 never returned).
+-- Beyond |x| = 1e15 (where the double has no fractional bits of a TAU multiple left) there is no meaningful reduction: 0.0
 fn normalize_radians : f64 -> f64
   | x ->
-    let mut rad = x
-    while rad > consts.PI
-      rad = rad - consts.TAU
-    while rad < -consts.PI
-      rad = rad + consts.TAU
-    rad
+    if x > 1000000000000000.0f64 || x < -1000000000000000.0f64 then 0.0f64
+    else
+      let q = x / consts.TAU
+      let n = (if q >= 0.0f64 then q + 0.5f64 else q - 0.5f64) as i64
+      x - (n as f64) * consts.TAU
 
 fn sin_f64 : f64 -> f64
   | x ->
@@ -54,23 +55,27 @@ fn tan_f64 : f64 -> f64
     if abs.abs_f64(c) < 0.0000000000000001f64 then 0.0f64
     else sin_f64(x) / c
 
+-- |x| > 1 folds to 1/x; |x| <= 1 is halved twice with atan(x) = 2 atan(x / (1 + sqrt(1 + x^2))) so the Maclaurin series sees |x| <= 0.2
+-- (the old series ran on |x| up to 1 for 30 terms, which converges like 1/60 there: atan(1) came out as 0.8).
 fn atan_f64 : f64 -> f64
   | x ->
     if x > 1.0f64 then (consts.PI / 2.0f64) - atan_f64(1.0f64 / x)
     else if x < -1.0f64 then -(consts.PI / 2.0f64) - atan_f64(1.0f64 / x)
     else
-      let x2 = x * x
-      let mut term = x
-      let mut sum  = x
+      let h1 = x / (1.0f64 + pow.sqrt_f64(1.0f64 + x * x))
+      let h2 = h1 / (1.0f64 + pow.sqrt_f64(1.0f64 + h1 * h1))
+      let x2 = h2 * h2
+      let mut term = h2
+      let mut sum  = h2
       let mut i : i64 = 1i64
       while i < 30i64
         term = -term * x2
         let add = term / (2i64 * i + 1i64) as f64
         sum = sum + add
-        if abs.abs_f64(add) < 0.0000000000000001f64
+        if abs.abs_f64(add) < 0.00000000000000001f64
           break
         i = i + 1i64
-      sum
+      4.0f64 * sum
 
 fn atan2_f64 : (f64, f64) -> f64
   | (y, x) ->
