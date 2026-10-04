@@ -19,7 +19,7 @@ struct MemTable
 
 fn mementry_new : (ptr, ptr, bool) -> *MemEntry
   | (k_cstr, v_cstr, tomb) ->
-    let e = os.linux.malloc(40i64) as *MemEntry
+    let e = os.linux.malloc(sizeof(MemEntry) as i64) as *MemEntry
     e.key  = string.string_from_cstr(k_cstr)
     e.val  = string.string_from_cstr(v_cstr)
     e.tomb = tomb

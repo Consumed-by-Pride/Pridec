@@ -29,12 +29,15 @@ fn argparser_destroy : *ArgParser -> ()
     let mut i : i64 = 0i64
     let len = vec.vec_len(&p.flags)
     while i < len
-      flag.flag_destroy(vec.vec_get(&p.flags, i) as *flag.Flag)
+      flag.flag_destroy_fields(vec.vec_get(&p.flags, i) as *flag.Flag)   -- the Flags live inside the Vec: free their strings, not the slot
       i = i + 1i64
     vec.vec_destroy(&p.flags)
 
 fn argparser_add_flag : (*ArgParser, *flag.Flag) -> ()
-  | (p, f) -> vec.vec_push(&p.flags, f as ptr)
+  | (p, f) ->
+    -- the parser keeps its own copy (vec_push copies sizeof(Flag) bytes); the strings move with it, so only the block f came in is freed
+    vec.vec_push(&p.flags, f as ptr)
+    os.linux.free(f as ptr)
 
 fn argparser_find_flag_by_name : (*ArgParser, ptr) -> *flag.Flag
   | (p, name_cstr) ->

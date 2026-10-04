@@ -18,7 +18,7 @@ struct BoundedReceiver
 
 fn bounded_channel_new : i64 -> (BoundedSender, BoundedReceiver)
   | cap ->
-    let ch = os.linux.malloc(64i64) as *BoundedChannel
+    let ch = os.linux.malloc(sizeof(BoundedChannel) as i64) as *BoundedChannel
     ch.queue  = mpmc.mpmc_new(cap)
     ch.closed = false
     (BoundedSender { chan: ch }, BoundedReceiver { chan: ch })

@@ -18,7 +18,7 @@ struct Arena
 
 fn arena_chunk_new : i64 -> *ArenaChunk
   | cap ->
-    let c = os.linux.malloc(32i64) as *ArenaChunk
+    let c = os.linux.malloc(sizeof(ArenaChunk) as i64) as *ArenaChunk
     c.buf     = os.linux.malloc(cap)
     c.cap     = cap
     c.used    = 0i64

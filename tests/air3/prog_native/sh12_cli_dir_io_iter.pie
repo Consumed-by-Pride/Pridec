@@ -1,0 +1,149 @@
+-- EXIT: 27
+-- stdlib executed: cli.arg_parser + cli.flag, fs.dir_iter (real directory), io (BufWriter/BufReader over a real file), iter.iter / iter.range
+-- each passing check adds one; 27 checks
+use cli.arg_parser
+use cli.flag
+use fs.dir_iter
+use fs.file
+use io
+use iter.iter
+use iter.range
+use vec.vec
+use str.string
+
+fn ok : (bool) -> i64 | (c) -> if c then 1i64 else 0i64
+
+fn add3 : (i64, i64) -> i64 | (acc, x) -> acc + x * x
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    -- ── cli ──
+    let mut p = arg_parser.argparser_new("prog" as ptr, "demo" as ptr)
+    arg_parser.argparser_add_flag(&p, flag.flag_new_bool("verbose" as ptr, 118u8, false, "be loud" as ptr))
+    arg_parser.argparser_add_flag(&p, flag.flag_new_int("count" as ptr, 99u8, 1i64, "how many" as ptr))
+    arg_parser.argparser_add_flag(&p, flag.flag_new_string("name" as ptr, 110u8, "x" as ptr, "who" as ptr))
+    let argv : *ptr = alloc [ptr; 9]
+    argv[0i64] = "prog" as ptr
+    argv[1i64] = "--verbose" as ptr
+    argv[2i64] = "--count" as ptr
+    argv[3i64] = "42" as ptr
+    argv[4i64] = "pos1" as ptr
+    argv[5i64] = "--name" as ptr
+    argv[6i64] = "bob" as ptr
+    argv[7i64] = "-z" as ptr
+    argv[8i64] = "pos2" as ptr
+    let mut res = arg_parser.argparser_parse_args(&p, 9i64, argv)
+    let fv = arg_parser.argparser_find_flag_by_name(&p, "verbose" as ptr)
+    let fc = arg_parser.argparser_find_flag_by_name(&p, "count" as ptr)
+    let fn_ = arg_parser.argparser_find_flag_by_name(&p, "name" as ptr)
+    n = n + ok(fv as i64 != 0i64 && fv.b_val)
+    n = n + ok(fc as i64 != 0i64 && fc.i_val == 42i64)
+    n = n + ok(fn_ as i64 != 0i64 && string.string_len(&fn_.s_val) == 3i64 && (string.string_as_slice(&fn_.s_val) as *u8)[0i64] == 98u8)
+    n = n + ok(arg_parser.argparser_find_flag_by_name(&p, "nope" as ptr) as i64 == 0i64)
+    n = n + ok(arg_parser.argparser_find_flag_by_short(&p, 99u8) as i64 == fc as i64)
+    n = n + ok(vec.vec_len(&res.pos_args) == 2i64)
+    let s0 = vec.vec_get(&res.pos_args, 0i64) as *string.String
+    let s1 = vec.vec_get(&res.pos_args, 1i64) as *string.String
+    n = n + ok(string.string_len(s0) == 4i64 && (string.string_as_slice(s1) as *u8)[3i64] == 50u8)
+    flag.argresult_destroy(&res)
+    arg_parser.argparser_destroy(&p)
+    free argv
+    -- ── dir_iter: three files in a fresh directory ──
+    let dir = "/tmp/pride_sh12_dir" as ptr
+    os.linux.unlink("/tmp/pride_sh12_dir/aa" as ptr)
+    os.linux.unlink("/tmp/pride_sh12_dir/bbbb" as ptr)
+    os.linux.unlink("/tmp/pride_sh12_dir/c" as ptr)
+    os.linux.rmdir(dir)
+    n = n + ok(os.linux.mkdir(dir, 493i64) == 0i64)
+    os.linux.close(os.linux.creat("/tmp/pride_sh12_dir/aa" as ptr, 420i64))
+    os.linux.close(os.linux.creat("/tmp/pride_sh12_dir/bbbb" as ptr, 420i64))
+    os.linux.close(os.linux.creat("/tmp/pride_sh12_dir/c" as ptr, 420i64))
+    let mut names = dir_iter.dir_list_paths(dir)
+    n = n + ok(vec.vec_len(&names) == 3i64)
+    let mut total : i64 = 0i64
+    let mut k : i64 = 0i64
+    while k < vec.vec_len(&names)
+      total = total + string.string_len(vec.vec_get(&names, k) as *string.String)
+      k = k + 1i64
+    n = n + ok(total == 7i64)
+    -- the raw iterator also yields "." and ".." and then an empty name at the end
+    let mut it = dir_iter.dir_iter_open(dir)
+    let mut seen : i64 = 0i64
+    let mut dots : i64 = 0i64
+    let mut going : bool = true
+    while going
+      let nm = dir_iter.dir_iter_next_name(&it)
+      if string.string_len(&nm) == 0i64 then going = false
+      else
+        seen = seen + 1i64
+        if (string.string_as_slice(&nm) as *u8)[0i64] == 46u8 then dots = dots + 1i64
+    dir_iter.dir_iter_close(&it)
+    n = n + ok(seen == 5i64 && dots == 2i64)
+    let mut bad = dir_iter.dir_iter_open("/tmp/pride_sh12_no_such_dir" as ptr)
+    n = n + ok(string.string_len(&dir_iter.dir_iter_next_name(&bad)) == 0i64)
+    os.linux.unlink("/tmp/pride_sh12_dir/aa" as ptr)
+    os.linux.unlink("/tmp/pride_sh12_dir/bbbb" as ptr)
+    os.linux.unlink("/tmp/pride_sh12_dir/c" as ptr)
+    n = n + ok(os.linux.rmdir(dir) == 0i64)
+    -- ── io: buffered write of 100 numbered lines through a 16-byte buffer, then buffered read back through a 8-byte one ──
+    let path = "/tmp/pride_sh12_io.txt" as ptr
+    let wfd = os.linux.creat(path, 420i64)
+    let mut w = io.bufwriter_new(wfd, 16i64)
+    let mut i : i64 = 0i64
+    while i < 100i64
+      io.bufwriter_write_i64(&w, i)
+      io.bufwriter_write_byte(&w, 10u8)
+      i = i + 1i64
+    io.bufwriter_write_str(&w, "tail-without-newline" as ptr)
+    n = n + ok(io.bufwriter_flush(&w) == 0i64 && io.bufwriter_ok(&w))
+    io.bufwriter_destroy(&w)
+    os.linux.close(wfd)
+    -- 10 one-digit lines (2 bytes), 90 two-digit lines (3 bytes), 20 bytes tail
+    let rfd = os.linux.open(path, 0i64, 0i64)
+    let mut r = io.bufreader_new(rfd, 8i64)
+    let line : *u8 = alloc [u8; 64]
+    let mut lines : i64 = 0i64
+    let mut sum : i64 = 0i64
+    let mut bytes : i64 = 0i64
+    let mut more : bool = true
+    while more
+      let got = io.bufreader_read_line(&r, line as ptr, 64i64)
+      if got <= 0i64 then more = false
+      else
+        lines = lines + 1i64
+        bytes = bytes + got
+        if lines <= 100i64
+          let mut v : i64 = 0i64
+          let mut j : i64 = 0i64
+          while line[j] != 10u8
+            v = v * 10i64 + (line[j] as i64 - 48i64)
+            j = j + 1i64
+          sum = sum + v
+    n = n + ok(lines == 101i64)
+    n = n + ok(sum == 4950i64)
+    n = n + ok(bytes == 10i64 * 2i64 + 90i64 * 3i64 + 20i64)
+    n = n + ok(io.bufreader_read_byte(&r) == -2i64)   -- end of file
+    io.bufreader_destroy(&r)
+    os.linux.close(rfd)
+    -- peek / skip / read_exact on the same file
+    let rfd2 = os.linux.open(path, 0i64, 0i64)
+    let mut r2 = io.bufreader_new(rfd2, 8i64)
+    n = n + ok(io.bufreader_peek_byte(&r2) == 48i64 && io.bufreader_read_byte(&r2) == 48i64)
+    n = n + ok(io.bufreader_skip(&r2, 4i64) == 4i64)
+    -- consumed "0\n1\n2"; next is "\n3\n4\n"
+    let buf5 : *u8 = alloc [u8; 5]
+    n = n + ok(io.bufreader_read_exact(&r2, buf5 as ptr, 5i64) == 5i64 && buf5[0i64] == 10u8 && buf5[1i64] == 51u8 && buf5[3i64] == 52u8 && buf5[4i64] == 10u8)
+    io.bufreader_destroy(&r2)
+    os.linux.close(rfd2)
+    os.linux.unlink(path)
+    free line
+    free buf5
+    -- ── iter ──
+    n = n + ok(iter.sum_range_i64(1i64, 101i64) == 5050i64)
+    n = n + ok(iter.foldl_range_i64(1i64, 5i64, 0i64, add3) == 30i64)
+    n = n + ok(iter.foldl_range_i64(5i64, 5i64, 7i64, add3) == 7i64)
+    n = n + ok(range.range_contains(3i64, 8i64, 7i64) && !range.range_contains(3i64, 8i64, 8i64))
+    n = n + ok(range.range_len(3i64, 8i64) == 5i64 && range.range_len(8i64, 3i64) == 0i64 && range.range_is_empty(4i64, 4i64))
+    n = n + ok(range.product_range_i64(1i64, 7i64) == 720i64 && range.count_range_i64(10i64, 25i64) == 15i64)
+    n

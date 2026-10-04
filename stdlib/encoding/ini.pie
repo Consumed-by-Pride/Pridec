@@ -21,7 +21,7 @@ struct IniConfig
 
 fn ini_entry_new : (ptr, ptr) -> *IniEntry
   | (k_cstr, v_cstr) ->
-    let e = os.linux.malloc(32i64) as *IniEntry
+    let e = os.linux.malloc(sizeof(IniEntry) as i64) as *IniEntry
     e.key = string.string_from_cstr(k_cstr)
     e.val = string.string_from_cstr(v_cstr)
     e
@@ -36,7 +36,7 @@ fn ini_entry_destroy : *IniEntry -> ()
 
 fn ini_section_new : ptr -> *IniSection
   | name_cstr ->
-    let s = os.linux.malloc(24i64) as *IniSection
+    let s = os.linux.malloc(sizeof(IniSection) as i64) as *IniSection
     s.name    = string.string_from_cstr(name_cstr)
     s.entries = vec.vec_new(8i64)
     s

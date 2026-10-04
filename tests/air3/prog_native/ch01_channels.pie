@@ -1,0 +1,63 @@
+-- EXIT: 19
+-- stdlib executed (single thread): channel.unbounded (FIFO of message pointers, close), channel.oneshot, channel.bounded (ring wraparound)
+-- each passing check adds one; 19 checks
+use channel.unbounded
+use channel.oneshot
+use channel.bounded
+
+fn ok : (bool) -> i64 | (c) -> if c then 1i64 else 0i64
+
+fn val : (i64) -> *i64
+  | (x) ->
+    let p : *i64 = alloc [i64; 1]
+    p[0i64] = x
+    p
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    -- unbounded: three messages come out in order, with their own contents
+    let ch = unbounded.unbounded_channel_new()
+    let mut tx = ch.0
+    let mut rx = ch.1
+    n = n + ok(unbounded.unbounded_send(&tx, val(10i64) as ptr))
+    n = n + ok(unbounded.unbounded_send(&tx, val(20i64) as ptr))
+    n = n + ok(unbounded.unbounded_send(&tx, val(30i64) as ptr))
+    let r1 = unbounded.unbounded_recv(&rx)
+    let r2 = unbounded.unbounded_recv(&rx)
+    n = n + ok(r1.1 && (r1.0 as *i64)[0i64] == 10i64)
+    n = n + ok(r2.1 && (r2.0 as *i64)[0i64] == 20i64)
+    n = n + ok(unbounded.unbounded_send(&tx, val(40i64) as ptr))
+    let r3 = unbounded.unbounded_recv(&rx)
+    let r4 = unbounded.unbounded_recv(&rx)
+    n = n + ok(r3.1 && (r3.0 as *i64)[0i64] == 30i64 && r4.1 && (r4.0 as *i64)[0i64] == 40i64)
+    -- closed and empty: receive reports "no message" instead of blocking; sending is refused
+    unbounded.unbounded_close(tx.chan)
+    let r5 = unbounded.unbounded_recv(&rx)
+    n = n + ok(!r5.1)
+    n = n + ok(!unbounded.unbounded_send(&tx, val(50i64) as ptr))
+    -- oneshot: one value, a second send is refused, the receiver gets the first
+    let oc = oneshot.oneshot_channel_new()
+    let mut otx = oc.0
+    let mut orx = oc.1
+    n = n + ok(oneshot.oneshot_send(&otx, val(7i64) as ptr))
+    n = n + ok(!oneshot.oneshot_send(&otx, val(8i64) as ptr))
+    let o1 = oneshot.oneshot_recv(&orx)
+    n = n + ok(o1.1 && (o1.0 as *i64)[0i64] == 7i64)
+    -- bounded, capacity 3: fill, drain two, refill past the end of the ring, drain in order
+    let bc = bounded.bounded_channel_new(3i64)
+    let mut btx = bc.0
+    let mut brx = bc.1
+    n = n + ok(bounded.bounded_send(&btx, val(1i64) as ptr))
+    n = n + ok(bounded.bounded_send(&btx, val(2i64) as ptr))
+    n = n + ok(bounded.bounded_send(&btx, val(3i64) as ptr))
+    let b1 = bounded.bounded_recv(&brx)
+    let b2 = bounded.bounded_recv(&brx)
+    n = n + ok(b1.1 && (b1.0 as *i64)[0i64] == 1i64 && b2.1 && (b2.0 as *i64)[0i64] == 2i64)
+    n = n + ok(bounded.bounded_send(&btx, val(4i64) as ptr))
+    n = n + ok(bounded.bounded_send(&btx, val(5i64) as ptr))
+    let b3 = bounded.bounded_recv(&brx)
+    let b4 = bounded.bounded_recv(&brx)
+    let b5 = bounded.bounded_recv(&brx)
+    n = n + ok((b3.0 as *i64)[0i64] == 3i64 && (b4.0 as *i64)[0i64] == 4i64 && (b5.0 as *i64)[0i64] == 5i64)
+    n

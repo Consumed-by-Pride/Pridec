@@ -25,7 +25,7 @@ struct JsonNode
 
 fn json_node_null : () -> *JsonNode
   | () ->
-    let p = os.linux.malloc(56i64) as *JsonNode
+    let p = os.linux.malloc(sizeof(JsonNode) as i64) as *JsonNode
     p.kind = JSON_NULL
     p.s_val = string.string_new()
     p.num   = 0.0f64

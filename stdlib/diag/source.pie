@@ -24,7 +24,7 @@ struct SourceMap
 
 fn sourcefile_new : (ptr, i64, i64) -> *SourceFile
   | (name_cstr, base, end_o) ->
-    let sf = os.linux.malloc(40i64) as *SourceFile
+    let sf = os.linux.malloc(sizeof(SourceFile) as i64) as *SourceFile
     sf.name     = string.string_from_cstr(name_cstr)
     sf.base_off = base
     sf.end_off  = end_o
