@@ -31,7 +31,7 @@ backend (PEAR 1, frozen) can run it. Both columns are given.
 | generics | type parameters are carried, nothing is instantiated | no (c22 crashes) | PEAR 2 must monomorphise |
 | rewrite rules, IRDL rule clauses | **no, on purpose** (30 clauses skipped, compile-time only; they used to be lowered as garbage) | n/a | |
 | `static mut` | **no storage**: the global is a nullary `def`; assignment rebinds a local | WRONG result (c25: 37) | needs an AIR global declaration |
-| `offsetof` | lowered as `sizeof usize` (wrong) | | known defect |
+| `offsetof` | lowered as `sizeof usize` in the AIR-H lowering (wrong); **correct in the AIR 3 low profile** (`offset_of(T, f)` = null-based `gep` + cast, `of01`) | | the AIR-H defect is not fixed |
 | nested items inside blocks (`stdlib/fmt.pie`) | not hoisted: 9 rows, only with `--all` | | |
 | name collisions in the flat namespace (`os.linux.write` vs libc `write`) | one of the two is skipped (555 skips with `--all`) | | |
 
