@@ -1325,3 +1325,24 @@ The APPROVE review on #23 422'd three times (never landed — distinct from the 
 
 ## State of the world
 Board EMPTY. Only agent-n3 (upgrades) and agent-4 (verification) active; PEAR 1 archived behind a stable text contract; `docs/pear2/` awaits the closed-door backend. When Father-of-Pride calls for review: the CONTRACT.md is the checklist, `make test-exec BACKEND=...` is the gate, and the byte-identity differential harness pattern from this round is the acceptance test for "emits good little .bc".
+
+# Round 19 — n3's AIR 2.2 + AIR 3.0 landed: the PEAR-free pipeline is real (2026-10-04, dev @ `f27320a3`)
+
+Two stacked PRs, both verified independently and merged: **#24 → `1f8b5a1`**, **#25 → `f27320a3`** (#24 ⊂ #25, ancestor-verified).
+
+## PR #24 (AIR 2.2 lowering, `51aaee4`) — every claim reproduced
+- `scripts/air-audit.py`: **185 programs, 13,165 constructs, 0 unlowered** (30 compile-time-only clauses deliberately skipped) — exact match.
+- New `tests/lowering` table: **35 ok / 15 known / 0 failed**; exec suite **43→45** (+2 promoted); air text 234→**238**/0; gate exit 0.
+- PEAR 1's handler gap now **traps honestly** (`pear: unsupported AIR form ... traps here`, pear.c3:1447) instead of silently defaulting.
+
+## PR #25 (AIR 3.0 low profile, `3c178de`, 52+ commits) — shared-code changes verified
+- **The milestone, demonstrated independently**: `pfrontc --emit-air-low` → `fib12.low.air` → `airtool verify-low` (0 errors) → `airtool emit-ll` (956 B LLVM IR) → `llc-23` → native → **fib(12) = 144**. That chain contains **zero PEAR codegen** — the replacement-backend world exists on dev today, with `legacy/pear1` still serving the exec contract.
+- **AirTyp.args 8→16**: 12-param sum = **78** (the 8-arg truncation family — §55's cousin — is dead for signatures).
+- **Offside-else parser fix**: par01 semantics verified in-suite (air3 31/0). Separate finding: **pear1c SEGFAULTS on indent-style-clause AIR** (par01.air, my offside.pie — both pre- and post-#25 pear1c). Out of pear1c's contract (those programs belong to the airtool chain), but the reader should trap-and-message, not segfault. **Filed as robustness nit.**
+- Suite movement, all promotions, zero regressions: conformance 151→**162**/100 (+11 from parser/SCCP/args fixes), exec 45→**46**/0/46, air text 238→**255**/0, air3 **31/0** new.
+- Gate exit 0 on both PR heads and post-merge (clean worktree): full matrix green.
+
+## Shape of dev after today
+TWO pipelines: (1) contract path — `pfrontc` (LLVM-free) → AIR 2.0 `.air` → `legacy/pear1/pear1c` → native (exec regression gate); (2) low path — `--emit-air-low` → AIR 3.0 `.low.air` → `airtool verify-low`/`emit-ll` → LLVM IR → native/wasm32 (PEAR-free). PEAR 2 agents inherit a written contract AND a working non-PEAR reference pipeline.
+
+Note: n3's sandbox also restored mid-task (combined recovery commits, stated in bodies) — the restore plague hits every agent. Verification pointers posted on #24/#25; ledger remains canonical.
