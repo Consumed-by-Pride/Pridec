@@ -36,8 +36,8 @@ Gate (`make test-air3`, part of `make test`; `tests/air3/gate.sh`, floors in `te
 * effects: tail-resumptive and aborting arms only; non-tail-resumptive (multi-shot, `resume` inside a nested continuation) is rejected;
 * MSP is thunk-based (no staging optimisation), `poison` is arbitrary, `offsetof` lowers to `sizeof usize`;
 * `*|` (saturating) is unsupported; plain `+ - *` wrap;
-* `[v; n]` by value with `n > 64` is rejected; global `[v; n]` is constant only for a zero fill; constant globals ≤ 16 fields/elements per aggregate;
-* structs by value ≤ 16 fields, ≤ 16 defers per function, unions ≤ 8 members, handlers ≤ 8 operations;
+* global `[v; n]` is constant only for a zero fill; a constant global array has any number of elements (`gl02`: 256), a constant struct/tuple ≤ 16 fields;
+* aggregates by value: a struct literal has ≤ 64 fields (more than 16 are built in memory, `ag01`: 24 fields), an array literal ≤ 1024 elements (more than 64 in memory, `ar03`), `[v; n]` any `n` (`ag02`); ≤ 16 defers per function, unions ≤ 8 members, handlers ≤ 8 operations, calls ≤ 16 arguments;
 * open-ended slice ranges `a[..n]`/`a[n..]` (the parser rejects them: E1050), bare enum constructor identifiers, `Rewrite` rules, `const fn K : u64 = e`: partial;
 * `static mut` has storage (a `global mut`) but no AIR-H counterpart;
 * `air_verify` rule V5 (low-profile conformance inside the verifier, no LLVM) is done (spec "Verifier rule V5"); `air_emit.c3` cases for the 3.0 forms are not done — `verify-low` is the type checker;

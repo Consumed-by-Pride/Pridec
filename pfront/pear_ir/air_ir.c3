@@ -131,7 +131,7 @@ struct AirPat {
 struct AirPrd {
     uint id; AirPrdTag tag; char* name; long ival; double fval; bool bval; char cval;
     usz bytes_len; char* bytes;
-    AirPrd*[16] subs; usz sub_count;
+    AirPrd** subs; usz sub_count, sub_cap;   // grown on demand (a wide array/tuple/call has no operand limit)
     AirBinder*[16] binders; usz binder_count;
     AirCmd* body; AirTyp* ty_arg;
     AirFieldInit*[16] rec_inits; usz rec_init_count;
@@ -294,7 +294,22 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
 // ── Append helpers ───────────────────────────────────────────────────────
 fn bool AirModule.add_decl(AirModule* m, AirDecl* d){ if(d==null)return false; if(m.decl_count>=4096)return false; m.decls[m.decl_count]=d; m.decl_count++; return true; }
 fn void AirTyp.add_arg(AirTyp* t, AirTyp* a){ if(t==null||a==null)return; if(t.arg_count>=16)return; t.args[t.arg_count]=a; t.arg_count++; }
-fn void AirPrd.add_sub(AirPrd* p, AirPrd* s){ if(p==null||s==null)return; if(p.sub_count>=16)return; p.subs[p.sub_count]=s; p.sub_count++; }
+fn void AirPrd.push_sub(AirPrd* p, AirPrd* s)   // like add_sub, but a null operand keeps its slot
+{
+    if (p == null) return;
+    if (p.sub_count >= p.sub_cap)
+    {
+        usz nc = p.sub_cap == 0 ? 4 : p.sub_cap * 2;
+        AirPrd** ns = (AirPrd**)malloc(nc * 8);
+        if (ns == null) return;
+        for (usz i = 0; i < nc; i++) ns[i] = null;
+        for (usz i = 0; i < p.sub_count; i++) ns[i] = p.subs[i];
+        if (p.subs != null) free((void*)p.subs);
+        p.subs = ns; p.sub_cap = nc;
+    }
+    p.subs[p.sub_count] = s; p.sub_count++;
+}
+fn void AirPrd.add_sub(AirPrd* p, AirPrd* s){ if(p==null||s==null)return; p.push_sub(s); }
 fn void AirCmd.add_prd(AirCmd* c, AirPrd* p){ if(c==null||p==null)return; if(c.prd_count>=16)return; c.prds[c.prd_count]=p; c.prd_count++; }
 fn void AirCmd.add_branch(AirCmd* c, AirBranch* b){ if(c==null||b==null)return; if(c.branch_count>=64)return; c.branches[c.branch_count]=b; c.branch_count++; }
 

@@ -1205,7 +1205,6 @@ fn Vx Low.array_lit(Low* lw, Node* n, AirTyp* want)
     {
         AirTyp* rat = null; Vx sl = lw.repeat_slot(n, want, &rat);
         if (!lw.live() || rat == null) { return lw.unit(); }
-        if (rat.ival > 64) { lw.err(n, "array value with more than 64 elements: bind it with `let` (it is filled in place)", null); return lw.unit(); }
         Vx lv = lw.load(sl.p, rat);
         AirTyp* wf = (want != null && want.tag != ATYP_ARRAY) ? lw.fat_elem(want) : null;
         if (wf != null && !lw.is_str_t(want)) { return lw.array_to_slice(lv, want); }
@@ -1214,20 +1213,35 @@ fn Vx Low.array_lit(Low* lw, Node* n, AirTyp* want)
     AirTyp* el = null; AirTyp* sl = null;
     if (want != null && want.tag == ATYP_ARRAY) { el = want.args[0]; }
     else if (want != null) { AirTyp* fe = lw.fat_elem(want); if (fe != null && !lw.is_str_t(want)) { el = fe; sl = want; } }
-    Vx[64] vs; usz cnt = 0;
+    Vx[1024] vs; usz cnt = 0;
     for (usz i = 0; i < n.child_count; i++)
     {
-        if (cnt >= 64) { lw.unsup(n, "array literal with more than 64 elements"); return lw.unit(); }
+        if (cnt >= 1024) { lw.unsup(n, "array literal with more than 1024 elements (use a constant global table)"); return lw.unit(); }
         Vx v = lw.expr(n.children[i], el);
         if (el == null) { el = v.t; }
         if (el != null) { v = lw.coerce_arg(n.children[i], v, el); }
         vs[cnt] = v; cnt++;
     }
     if (el == null) { lw.err(n, "empty array literal without a known element type", null); return lw.unit(); }
-    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_ARRAY;
-    for (usz i = 0; i < cnt; i++) { p.add_sub(vs[i].p); }
     AirTyp* at = air_ir::air_mk_typ_array(lw.a, el, (long)cnt);
-    Vx v = lw.let_(p, at, "_arr");
+    Vx v;
+    if (cnt > 64)   // a long literal is built in memory: alloca, one store per element, one load
+    {
+        Vx slot = lw.alloca_(at);
+        for (usz i = 0; i < cnt; i++)
+        {
+            Vx[2] gi; gi[0] = lw.lit_int(0, lw.m.t_i64); gi[1] = lw.lit_int((long)i, lw.m.t_i64);
+            Vx ep = lw.gep(slot.p, at, &gi[0], 2, el);
+            lw.store(ep.p, vs[i]);
+        }
+        v = lw.load(slot.p, at);
+    }
+    else
+    {
+        AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_ARRAY;
+        for (usz i = 0; i < cnt; i++) { p.add_sub(vs[i].p); }
+        v = lw.let_(p, at, "_arr");
+    }
     if (sl != null) { return lw.array_to_slice(v, sl); }
     return v;
 }
@@ -1948,7 +1962,7 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
             for (usz i = 0; i < e.child_count; i++)
             {
                 AirPrd* v = lw.const_init(e.children[i], t.args[i]); if (v == null) { return null; }
-                p.subs[i] = v; p.sub_count++;
+                p.push_sub(v);
             }
             return p;
         }
@@ -1963,12 +1977,12 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
                 if (!zero) { return null; }
                 AirPrd* z = air_ir::air_mk_prd_unit(lw.a); z.ty = t; return z;   // zeroinitializer
             }
-            if (t.ival != (long)e.child_count || e.child_count > 16) { return null; }
+            if (t.ival != (long)e.child_count) { return null; }
             AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_ARRAY; p.ty = t;
             for (usz i = 0; i < e.child_count; i++)
             {
                 AirPrd* v = lw.const_init(e.children[i], t.args[0]); if (v == null) { return null; }
-                p.subs[i] = v; p.sub_count++;
+                p.push_sub(v);
             }
             return p;
         }
@@ -2487,21 +2501,34 @@ fn Vx Low.struct_lit(Low* lw, Node* n, AirTyp* want)
     AirDecl* d = lw.data_of(st);
     if (st == null || d == null) { return lw.unit(); }
     AirCtorDecl* c = d.ctors[0];
-    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_RECORD;
-    Vx[16] vals; bool[16] seen;
-    for (usz i = 0; i < 16; i++) { seen[i] = false; }
+    if (c.field_count > 64) { lw.unsup(n, "struct literal with more than 64 fields"); return lw.unit(); }
+    Vx[64] vals; bool[64] seen;
+    for (usz i = 0; i < 64; i++) { seen[i] = false; }
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* fi = n.children[i];
         if (fi == null || fi.kind != Nk.N_EXPR_FIELD_INIT) { continue; }
         char* fnm = lw.text(fi); long k = -1;
         AirTyp* ft = fnm == null ? null : lw.field_ty(st, fnm, &k);
-        if (ft == null || k < 0 || k >= 16) { lw.err(fi, "field is not declared", fnm); return lw.unit(); }
+        if (ft == null || k < 0 || k >= 64) { lw.err(fi, "field is not declared", fnm); return lw.unit(); }
         Vx v = lw.expr(fi.child_count > 0 ? fi.children[0] : null, ft);
         v = lw.coerce_arg(fi, v, ft);
         vals[(usz)k] = v; seen[(usz)k] = true;
     }
-    for (usz i = 0; i < c.field_count && i < 16; i++)
+    if (c.field_count > 16)   // a record predicate holds 16 fields: a wide struct is built in memory (alloca, one store per field, one load)
+    {
+        for (usz i = 0; i < c.field_count; i++) { if (!seen[i]) { lw.err(n, "field is not initialised", c.fields[i].name); return lw.unit(); } }
+        Vx slot = lw.alloca_(st);
+        for (usz i = 0; i < c.field_count; i++)
+        {
+            Vx[2] gi; gi[0] = lw.lit_int(0, lw.m.t_i64); gi[1] = lw.lit_int((long)i, lw.m.t_i32);
+            Vx fp = lw.gep(slot.p, st, &gi[0], 2, c.fields[i].ty);
+            lw.store(fp.p, vals[i]);
+        }
+        return lw.load(slot.p, st);
+    }
+    AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_RECORD;
+    for (usz i = 0; i < c.field_count; i++)
     {
         if (!seen[i]) { lw.err(n, "field is not initialised", c.fields[i].name); return lw.unit(); }
         AirFieldInit* fi = air_ir::air_new_AirFieldInit(lw.a);

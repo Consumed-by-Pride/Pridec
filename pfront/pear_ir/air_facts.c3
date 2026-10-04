@@ -93,7 +93,7 @@ fn ulong FactScan.prd(FactScan* s, air_ir::AirPrd* p, int depth)
         case APRD_TUPLE: case APRD_ARRAY: case APRD_INL: case APRD_INR:
         {
             ulong mask = 0;
-            for (usz i = 0; i < p.sub_count && i < 16; i++) { mask |= s.prd(p.subs[i], depth + 1); }
+            for (usz i = 0; i < p.sub_count; i++) { mask |= s.prd(p.subs[i], depth + 1); }
             if (p.sub_count > 16) { s.complete = false; }
             return mask;
         }

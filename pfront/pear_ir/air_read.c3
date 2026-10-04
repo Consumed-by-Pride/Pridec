@@ -511,8 +511,7 @@ fn void Rd.sub_list(Rd* r, AirPrd* p)
     {
         while (!r.failed)
         {
-            if (p.sub_count >= 16) { r.fail("more than 16 producer operands"); return; }
-            p.subs[p.sub_count] = r.prd(); p.sub_count++;
+            p.push_sub(r.prd());
             if (r.eat_p(',')) { continue; }
             break;
         }
@@ -572,7 +571,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
                 r.next();
                 AirPrd* p = r.new_prd(APRD_BINOP); if (p == null) { return null; }
                 p.bop = (AirBinop)bo;
-                p.subs[0] = r.prd(); p.subs[1] = r.prd(); p.sub_count = 2;
+                p.push_sub(r.prd()); p.push_sub(r.prd());
                 r.expect_p(')');
                 return p;
             }
@@ -582,7 +581,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
                 r.next();
                 AirPrd* p = r.new_prd(APRD_UNOP); if (p == null) { return null; }
                 p.uop = (AirUnop)uo;
-                p.subs[0] = r.prd(); p.sub_count = 1;
+                p.push_sub(r.prd());
                 r.expect_p(')');
                 return p;
             }
@@ -650,7 +649,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
         AirPrd* p = r.new_prd(l ? APRD_INL : APRD_INR); if (p == null) { return null; }
         r.expect_p('['); p.ty_arg = r.typ(); r.expect_p(']');
         r.expect_p('(');
-        p.subs[0] = r.prd(); p.sub_count = 1;
+        p.push_sub(r.prd());
         r.expect_p(')'); return p;
     }
     if (r.is_kw("lam") || r.is_kw("cometa"))
@@ -681,12 +680,8 @@ fn AirPrd* Rd.prd_core(Rd* r)
         if (is_al) { p.ty_arg = r.typ(); }
         else
         {
-            p.subs[0] = r.prd(); p.sub_count = 1;
-            while (!r.failed && r.eat_p(','))
-            {
-                if (p.sub_count >= 16) { r.fail("more than 16 gep operands"); return null; }
-                p.subs[p.sub_count] = r.prd(); p.sub_count++;
-            }
+            p.push_sub(r.prd());
+            while (!r.failed && r.eat_p(',')) { p.push_sub(r.prd()); }
         }
         r.expect_p(')'); return p;
     }
@@ -694,7 +689,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
     {
         r.next(); r.expect_p('(');
         AirPrd* p = r.new_prd(APRD_COERCE); if (p == null) { return null; }
-        p.subs[0] = r.prd(); p.sub_count = 1; r.expect_p(','); p.ty = r.typ();
+        p.push_sub(r.prd()); r.expect_p(','); p.ty = r.typ();
         r.expect_p(')'); return p;
     }
     if (r.is_kw("sizeof") || r.is_kw("alignof") || r.is_kw("poison"))
@@ -720,7 +715,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
     {
         bool ev = r.is_kw("eval"); r.next(); r.expect_p('(');
         AirPrd* p = r.new_prd(ev ? APRD_EVAL : APRD_SPLICE); if (p == null) { return null; }
-        p.subs[0] = r.prd(); p.sub_count = 1; r.expect_p(')'); return p;
+        p.push_sub(r.prd()); r.expect_p(')'); return p;
     }
     if (air_text::is_reserved(r.tb)) { r.fail("reserved word used as a variable (quote it with backticks)"); return null; }
     AirPrd* v = r.new_prd(APRD_VAR);
