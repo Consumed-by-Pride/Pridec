@@ -259,11 +259,36 @@ fn char* decl_attr_str(AirDecl* d, char* nm)
     for (usz i = 0; i < d.attr_count; i++) { if (air_text::streq(d.attr_name[i], nm)) { return d.attr_str[i]; } }
     return null;
 }
+fn bool decl_has_attr_str(AirDecl* d, char* nm, char* val) { char* s = decl_attr_str(d, nm); return s != null && air_text::streq(s, val); }
 fn long decl_attr_int(AirDecl* d, char* nm)
 {
     if (d == null) { return 0; }
     for (usz i = 0; i < d.attr_count; i++) { if (air_text::streq(d.attr_name[i], nm) && d.attr_has_int[i]) { return d.attr_int[i]; } }
     return 0;
+}
+// calling convention of a declaration: `attr callconv "NAME"` (or the `fastcc` modifier) -> LLVM keyword; null = the C convention.
+// Unknown names are rejected by air_verify V5, so this never has to guess.
+fn char* cc_keyword(char* nm)
+{
+    if (nm == null) { return null; }
+    if (air_text::streq(nm, "c")) { return null; }
+    if (air_text::streq(nm, "fast")) { return "fastcc"; }
+    if (air_text::streq(nm, "preserve_most")) { return "preserve_mostcc"; }
+    if (air_text::streq(nm, "preserve_all")) { return "preserve_allcc"; }
+    if (air_text::streq(nm, "x86_intr")) { return "x86_intrcc"; }
+    if (air_text::streq(nm, "win64")) { return "win64cc"; }
+    if (air_text::streq(nm, "sysv64")) { return "x86_64_sysvcc"; }
+    if (air_text::streq(nm, "aapcs")) { return "arm_aapcscc"; }
+    if (air_text::streq(nm, "aapcs_vfp")) { return "arm_aapcs_vfpcc"; }
+    return null;
+}
+fn bool cc_known(char* nm) { return nm != null && (air_text::streq(nm, "c") || cc_keyword(nm) != null); }
+fn char* decl_cc(AirDecl* d)
+{
+    if (d == null) { return null; }
+    char* a = decl_attr_str(d, "callconv");
+    if (a != null) { return cc_keyword(a); }
+    return d.is_fastcc ? "fastcc" : null;
 }
 // ` section "x", align N` suffix for a global (LLVM wants the commas for globals)
 fn void Ll.global_attrs(Ll* l, Sb* o, AirDecl* d)
@@ -769,6 +794,7 @@ fn void Ll.emit_call(Ll* l, AirPrd* callee, AirCns* k, AirCmd** next_out, char**
     o.put("  ");
     if (!isvoid) { o.put(r); o.put(" = "); }
     o.put("call ");
+    { char* cck = decl_cc(d); if (cck != null) { o.put(cck); o.putc(' '); } }
     l.ret_ty(o, ret);
     if (va)
     {
@@ -1052,7 +1078,7 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
     bool int_main = is_main && d.ret_ty != null && ty_is_int(d.ret_ty) && ty_bits(d.ret_ty) != 32;   // the C ABI entry returns i32 (a wasm32 `main` of another width has a different signature)
     bool wrap = is_main && (unit_main || int_main);
     Sb hdr; hdr.init();
-    hdr.put("define "); l.ret_ty(&hdr, d.ret_ty); hdr.putc(' '); hdr.name('@', wrap ? "pride_main" : d.name); hdr.putc('(');
+    hdr.put("define "); { char* cck = decl_cc(d); if (cck != null) { hdr.put(cck); hdr.putc(' '); } } l.ret_ty(&hdr, d.ret_ty); hdr.putc(' '); hdr.name('@', wrap ? "pride_main" : d.name); hdr.putc('(');
     usz entry = l.new_block("entry", false);
     for (usz i = 0; i < d.param_count; i++)
     {
@@ -1060,7 +1086,10 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
         if (b == null) { continue; }
         if (!ty_low(b.ty, 0)) { l.err("parameter type is not part of the low profile", b.name); }
         if (i > 0) { hdr.put(", "); }
-        l.ty(&hdr, b.ty); hdr.putc(' ');
+        l.ty(&hdr, b.ty);
+        if (i == 0 && decl_has_attr_str(d, "callconv", "x86_intr") && b.ty != null && b.ty.tag == ATYP_PTR && b.ty.args[0] != null)   // the interrupt frame is passed by value in memory
+        { hdr.put(" byval("); l.ty(&hdr, b.ty.args[0]); hdr.putc(')'); }
+        hdr.putc(' ');
         Sb pn; pn.init(); pn.name('%', b.name);
         char* ps = pn.take();
         hdr.put(ps);
@@ -1159,7 +1188,7 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
 fn void Ll.declare(Ll* l, AirDecl* d, Sb* out)
 {
     l.fn_name = d.name;
-    out.put("declare "); l.ret_ty(out, d.ret_ty); out.putc(' '); out.name('@', d.name); out.putc('(');
+    out.put("declare "); { char* cck = decl_cc(d); if (cck != null) { out.put(cck); out.putc(' '); } } l.ret_ty(out, d.ret_ty); out.putc(' '); out.name('@', d.name); out.putc('(');
     for (usz i = 0; i < d.param_count; i++)
     {
         if (i > 0) { out.put(", "); }

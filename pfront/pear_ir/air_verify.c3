@@ -36,6 +36,7 @@
 module air_verify;
 import air_ir;
 import air_text;
+import air_ll;
 
 extern fn int   fprintf(void* f, char* fmt, ...);
 extern fn void* fdopen(int fd, char* mode);
@@ -288,7 +289,7 @@ fn void Verify.low_cmd(Verify* v, AirCmd* c)
 }
 fn bool known_attr(char* n)
 {
-    char*[11] ok = { "section", "align", "packed", "thread_local", "naked", "noinline", "inline", "cold", "noredzone", "no_builtins", null };
+    char*[12] ok = { "section", "align", "packed", "thread_local", "naked", "noinline", "inline", "cold", "noredzone", "no_builtins", "callconv", null };
     for (usz i = 0; ok[i] != null; i++) { if (air_text::streq(ok[i], n)) { return true; } }
     return false;
 }
@@ -314,6 +315,19 @@ fn void Verify.low_decl(Verify* v, AirDecl* d)
             if (s && (d.attr_str[i] == null || d.attr_str[i][0] == 0)) { v.viol5("section needs a non-empty string:", d.name); }
             if (s && d.attr_str[i] != null) { for (usz k = 0; d.attr_str[i][k] != 0; k++) { if (d.attr_str[i][k] == '"') { v.viol5("section name contains a quote:", d.name); } } }
             if (a && (!d.attr_has_int[i] || d.attr_int[i] <= 0 || (d.attr_int[i] & (d.attr_int[i] - 1)) != 0)) { v.viol5("align needs a power of two:", d.name); }
+        }
+        else if (air_text::streq(n, "callconv"))
+        {
+            if (!(is_def || d.tag == ADECL_DECLARE)) { v.viol5("callconv applies to functions:", d.name); }
+            char* cn = d.attr_str[i];
+            if (cn == null || !air_ll::cc_known(cn)) { v.viol5("unknown calling convention:", cn); }
+            else if (air_text::streq(cn, "x86_intr"))
+            {
+                // LLVM: the handler takes a pointer to the frame (passed byval) and optionally the error code, and returns nothing
+                bool ok = d.param_count >= 1 && d.param_count <= 2 && d.params[0] != null && d.params[0].ty != null && d.params[0].ty.tag == ATYP_PTR && d.params[0].ty.arg_count > 0 && d.params[0].ty.args[0] != null && d.params[0].ty.args[0].tag == ATYP_NOMINAL;
+                if (ok && d.param_count == 2) { AirTyp* et = d.params[1].ty; ok = et != null && (et.tag == ATYP_USZ || et.tag == ATYP_U64 || et.tag == ATYP_I64 || et.tag == ATYP_U32 || et.tag == ATYP_I32); }
+                if (!ok || d.ret_ty == null || d.ret_ty.tag != ATYP_UNIT) { v.viol5("an x86_intr handler is (ptr(Frame) [, error code]) : unit:", d.name); }
+            }
         }
         else if (air_text::streq(n, "packed")) { if (!is_data) { v.viol5("packed applies to data:", d.name); } }
         else if (air_text::streq(n, "thread_local")) { if (!is_glob || !d.g_mut) { v.viol5("thread_local applies to a mutable global:", d.name); } }

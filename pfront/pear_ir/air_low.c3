@@ -231,6 +231,13 @@ fn void Low.copy_attrs(Low* lw, AirDecl* ad, Node* src)
             for (usz i = 0; i < al; i++) { sb[i] = arg[i]; } sb[al] = 0;
             air_ir::air_add_attr(ad, lw.dup("section"), lw.dup(&sb[0]), 0, false);
         }
+        else if (seq(nn, "callconv"))
+        {
+            if (!isstr || arg == null || al == 0 || al > 30) { continue; }
+            char[32] cb; for (usz i = 0; i < al; i++) { cb[i] = arg[i]; } cb[al] = 0;
+            if (!air_ll::cc_known(&cb[0])) { lw.unsup(src, "unknown calling convention"); continue; }
+            air_ir::air_add_attr(ad, lw.dup("callconv"), lw.dup(&cb[0]), 0, false);
+        }
         else if (seq(nn, "align"))
         {
             if (isstr || arg == null || al == 0 || al > 9) { continue; }

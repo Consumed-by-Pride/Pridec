@@ -1,6 +1,7 @@
 -- a bare-metal x86-64 kernel skeleton (no OS, no libc): a #naked entry in .text.boot that sets the stack and calls kmain, a packed
 -- GDT in its own section with 16-byte alignment, port I/O and control-register access through inline asm (several outputs),
--- volatile MMIO to the VGA text buffer, an ISR stub that is #naked, and no red zone / no SSE.
+-- volatile MMIO to the VGA text buffer, an ISR stub that is #naked, two handlers in the x86_intr calling convention (with and without an error
+-- code), and no red zone / no SSE.
 -- checked by tests/air3/bare.sh (linked with kernel.ld at 0x100000; not run: it needs a machine)
 #packed
 struct GdtEntry
@@ -66,6 +67,28 @@ fn isr_stub : () -> ()
       asm { "pushq %rax\n\tcallq timer_isr\n\tpopq %rax\n\tiretq" : : : "memory" }
       while true
         ()
+
+struct IntFrame
+  rip: u64
+  cs: u64
+  rflags: u64
+  rsp: u64
+  ss: u64
+
+-- real interrupt handlers: the x86_intr calling convention saves what they clobber and returns with iretq
+#callconv("x86_intr")
+fn irq0 : (*IntFrame) -> ()
+  | (f) ->
+      TICKS = TICKS + 1i64
+      outb(32u16, 32u8)
+      ()
+
+#callconv("x86_intr")
+fn page_fault : (*IntFrame, u64) -> ()
+  | (f, err) ->
+      TICKS = TICKS + 1000i64 + (err as i64)
+      vga_put(2i64, 3925u16)
+      ()
 
 fn kmain : () -> ()
   | () ->

@@ -61,6 +61,7 @@ The low profile defines these (anything else is dropped by the producer, never i
 | `attr align N` (power of two) | `def`, `global` | `align N` | `#align(64)` |
 | `attr packed` | `data` | `type <{ … }>` (also for constant initialisers) | `#packed` |
 | `attr thread_local` | `global mut` | `thread_local global` (a worker thread gets its own zero/initial copy; `tls01`, native only) | `#thread_local` |
+| `attr callconv "NAME"` | `def`, `declare` | NAME ∈ `c fast preserve_most preserve_all x86_intr win64 sysv64 aapcs aapcs_vfp` → `fastcc` … `x86_intrcc`; calls to the function carry the same keyword (the `fastcc` modifier means `callconv "fast"`). `x86_intr`: `(ptr(Frame) [, error code]) : unit`, the frame parameter is emitted `byval(%Frame)` and the function returns with `iretq` | `#callconv("x86_intr")` |
 | `attr naked` | `def` | `naked`: no prologue/epilogue; the body must be inline asm plus a non-returning end | `#naked` |
 | `attr noinline` / `attr inline` / `attr cold` | `def` | `noinline` / `alwaysinline` / `cold` | `#noinline`, `#inline`, `#cold` |
 
@@ -97,6 +98,15 @@ Externs keep their Pride-declared signatures: a Pride `i64` is not a C `long` on
 Bare metal (`tests/air3/bare.sh`): `tests/air3/prog_bare/kernel.pie` (naked `_start` in `.text.boot`, packed 16-aligned GDT in `.gdt`, port I/O and `cpuid`
 through asm, volatile VGA MMIO, naked ISR stub, `#noredzone`) is built for `x86_64-unknown-none-elf` with `-sse +soft-float`, the kernel code model and
 `kernel.ld`; the image is inspected (entry `0x100000`, no undefined symbol, GDT bytes, no SSE register), not run: there is no QEMU here.
+
+## Verifier rule V5 (AIR level)
+
+`airtool verify` checks, for modules whose header says `air 3.0`, the low-profile rules that need no LLVM: attribute names, arguments and targets
+(table above, none twice, `inline`/`noinline` not together), a `naked` def has no parameters and contains `asm`, an `x86_intr` signature, data is a
+single-constructor non-generic struct (no enum layout, no codata), atomic/fence orders in range, an `asm` has template, constraints and result type.
+For these modules V2 accepts a jump to any label of the same def (the labels of a body are one control-flow graph). `airtool lint` must report 0 for every
+rule (a single-constructor `data` is the layout, not H8). Gated: `tests/air3/bad_verify/` (13 rejected files), every `good/*.air`, every program of the corpus
+and every stdlib module go through `verify` and `lint` as well as `verify-low`.
 
 ## Consumer limits (air_ll)
 

@@ -22,6 +22,9 @@ if [ -f $W/kernel.elf ]; then
     hex=$(readelf -x .gdt $W/kernel.elf | awk '/0x/{for(i=2;i<=5;i++)printf "%s",$i}')
     [ "${hex:0:48}" = "0000000000000000ffff0000009aaf00ffff00000092cf00" ] || bad "GDT bytes: $hex"
     [ "$(objdump -d $W/kernel.elf | grep -c xmm)" = 0 ] || bad "SSE registers in kernel code"
+    grep -q 'x86_intrcc void @"irq0"(ptr byval(%"IntFrame")' $W/k.ll || bad "irq0 is not an x86_intr function with a byval frame"
+    for h in irq0 page_fault; do objdump -d $W/kernel.elf | awk "/<$h>:/,/iretq/" | grep -q iretq || bad "$h does not return with iretq"; done
+    objdump -d $W/kernel.elf | awk '/<page_fault>:/,/iretq/' | grep -q 'add .*\$0x[0-9a-f]*,%rsp' || bad "page_fault does not drop the error code from the stack"
     grep -q 'noredzone' $W/k.ll || bad "no noredzone attribute in the IR"
     objdump -d $W/kernel.elf | awk '/<timer_isr>:/,/ret/' | grep -q -- '-0x[0-9a-f]*(%rsp)' && bad "red zone used in timer_isr"
 fi
