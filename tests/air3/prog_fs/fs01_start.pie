@@ -1,0 +1,9 @@
+-- EXIT: 7
+-- EXPECT: hi\n
+-- freestanding: no libc, no crt -- the program's own `_start` is the entry and `syscall` is the x86-64 instruction
+fn _start : () -> ()
+  | () ->
+      let msg : *u8 = "hi\n"
+      syscall(1, 1, msg, 3)
+      syscall(60, 7)
+      ()

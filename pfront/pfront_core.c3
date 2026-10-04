@@ -355,6 +355,75 @@ struct PNode
     Payload  p;
 }
 
+// `fn f : T -> U  #extern("symbol")`: the attribute is not an AST node; the symbol is kept in a side table keyed by the
+// declaration (the parser fills it, the AIR lowering reads it).
+const usz MAX_EXT_SYMS = 16384;
+PNode*[MAX_EXT_SYMS] g_ext_node;
+char*[MAX_EXT_SYMS]  g_ext_ptr;
+usz[MAX_EXT_SYMS]    g_ext_len;
+usz                  g_ext_n;
+char*                g_pend_ext_ptr;
+usz                  g_pend_ext_len;
+fn void set_ext_sym(PNode* n, char* s, usz len)
+{
+    if (g_ext_n >= MAX_EXT_SYMS) { return; }
+    g_ext_node[g_ext_n] = n; g_ext_ptr[g_ext_n] = s; g_ext_len[g_ext_n] = len; g_ext_n++;
+}
+// Declaration attributes other than #extern (`#section(".x")`, `#align(16)`, `#packed`, `#naked`, `#noinline`, ...): a side table
+// keyed by the declaration; the parser fills it, the AIR lowering reads the ones it understands.
+const usz MAX_ATTRS = 4096;
+PNode*[MAX_ATTRS] g_attr_node;
+char*[MAX_ATTRS]  g_attr_name; usz[MAX_ATTRS] g_attr_nlen;
+char*[MAX_ATTRS]  g_attr_arg;  usz[MAX_ATTRS] g_attr_alen; bool[MAX_ATTRS] g_attr_isstr;
+usz               g_attr_n;
+char*[16] g_pa_name; usz[16] g_pa_nlen; char*[16] g_pa_arg; usz[16] g_pa_alen; bool[16] g_pa_isstr; usz g_pa_n;   // pending, until the declaration exists
+fn void pend_attr(char* nm, usz nl, char* arg, usz al, bool isstr)
+{
+    if (g_pa_n >= 16) { return; }
+    g_pa_name[g_pa_n] = nm; g_pa_nlen[g_pa_n] = nl; g_pa_arg[g_pa_n] = arg; g_pa_alen[g_pa_n] = al; g_pa_isstr[g_pa_n] = isstr; g_pa_n++;
+}
+fn void attach_attrs(PNode* n)
+{
+    for (usz i = 0; i < g_pa_n && g_attr_n < MAX_ATTRS; i++)
+    {
+        g_attr_node[g_attr_n] = n; g_attr_name[g_attr_n] = g_pa_name[i]; g_attr_nlen[g_attr_n] = g_pa_nlen[i];
+        g_attr_arg[g_attr_n] = g_pa_arg[i]; g_attr_alen[g_attr_n] = g_pa_alen[i]; g_attr_isstr[g_attr_n] = g_pa_isstr[i]; g_attr_n++;
+    }
+    g_pa_n = 0;
+}
+struct PendAttrs { char*[16] name; usz[16] nlen; char*[16] arg; usz[16] alen; bool[16] isstr; usz n; }
+fn PendAttrs pa_take()   // the pending attributes, removed from the global list
+{
+    PendAttrs s; s.n = g_pa_n;
+    for (usz i = 0; i < g_pa_n; i++) { s.name[i] = g_pa_name[i]; s.nlen[i] = g_pa_nlen[i]; s.arg[i] = g_pa_arg[i]; s.alen[i] = g_pa_alen[i]; s.isstr[i] = g_pa_isstr[i]; }
+    g_pa_n = 0; return s;
+}
+fn void attach_saved(PNode* n, PendAttrs* s)
+{
+    for (usz i = 0; i < s.n && g_attr_n < MAX_ATTRS; i++)
+    {
+        g_attr_node[g_attr_n] = n; g_attr_name[g_attr_n] = s.name[i]; g_attr_nlen[g_attr_n] = s.nlen[i];
+        g_attr_arg[g_attr_n] = s.arg[i]; g_attr_alen[g_attr_n] = s.alen[i]; g_attr_isstr[g_attr_n] = s.isstr[i]; g_attr_n++;
+    }
+}
+// the k-th attribute of `n` (any name): returns false past the end
+fn bool attr_at(PNode* n, usz k, char** nm, usz* nl, char** arg, usz* al, bool* isstr)
+{
+    usz seen = 0;
+    for (usz i = 0; i < g_attr_n; i++)
+    {
+        if (g_attr_node[i] != n) { continue; }
+        if (seen == k) { *nm = g_attr_name[i]; *nl = g_attr_nlen[i]; *arg = g_attr_arg[i]; *al = g_attr_alen[i]; *isstr = g_attr_isstr[i]; return true; }
+        seen++;
+    }
+    return false;
+}
+fn char* ext_sym_of(PNode* n, usz* len)
+{
+    for (usz i = 0; i < g_ext_n; i++) { if (g_ext_node[i] == n) { *len = g_ext_len[i]; return g_ext_ptr[i]; } }
+    return null;
+}
+
 // ── Arena ───────────────────────────────────────────────────────────────────
 const usz SLAB_SIZE = 4 * 1024 * 1024;
 const usz MAX_SLABS = 512;

@@ -1,0 +1,4 @@
+// ERROR: unknown attribute
+air 3.0 Main "v.pie";
+
+attr bogus def main() : i64 = ret(0 : i64);

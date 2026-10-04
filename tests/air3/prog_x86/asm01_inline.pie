@@ -1,0 +1,11 @@
+-- EXIT: 44
+-- inline asm (x86-64 only): one output, one input, a clobber-only block, an immediate `$7`; lowered to one LLVM `call asm sideeffect`
+fn main : () -> i64
+  | () ->
+      let mut r : i64 = 0
+      let x : i64 = 40
+      asm { "leaq 2(%1), %0" : "=r"(r) : "r"(x) }
+      asm { "nop" : : : "memory" }
+      let mut s : i64 = 0
+      asm { "movq $7, %0" : "=r"(s) }
+      r + s - 5 + 2 - 2 - 0

@@ -89,3 +89,19 @@ fn ub_check_alignment : (ptr, i64) -> bool
                 false
             }
         }
+
+-- Short names for qualified use (`ub.assume(c)` after `use pride.ub`); the `ub_*` spellings above stay.
+fn assume : bool -> ()
+    | cond -> ub_assume(cond)
+
+fn trap : () -> ()
+    | () -> ub_trap()
+
+fn poison_memory : (ptr, i64) -> PoisonCell
+    | (addr, len) -> ub_poison_memory(addr, len)
+
+fn freeze_val : i64 -> i64
+    | v -> ub_freeze_val(v)
+
+fn check_alignment : (ptr, i64) -> bool
+    | (addr, align_bytes) -> ub_check_alignment(addr, align_bytes)

@@ -1,0 +1,211 @@
+-- PRIDE-OS: a 32-bit x86 Multiboot kernel written in Pride (no libc, no crt, no runtime), booted in QEMU by tests/air3/boot.sh.
+-- It parks on a Multiboot header, sets its own stack, programs the serial port, the PICs and the PIT, loads an IDT whose handlers are
+-- x86_intr functions (timer IRQ0, software interrupt 0x80), waits for timer ticks with sti/hlt, dispatches through `dyn Driver`
+-- trait objects, and powers the machine off through the isa-debug-exit device.
+
+-- multiboot v1 header: magic 0x1BADB002, flags 0, checksum -(magic + flags)
+#used
+#section(".multiboot")
+#align(4)
+let MB : [u32; 3] = [464367618u32, 0u32, 3830599678u32]
+
+#used
+#section(".bss")
+#align(4096)
+let mut STACK : [u8; 16384] = [0u8; 16384]
+
+#used
+#section(".bss")
+#align(8)
+let mut IDT : [u64; 256] = [0u64; 256]
+
+#packed
+struct IdtPtr
+  limit: u16
+  base: u32
+
+let mut IDTR : IdtPtr = IdtPtr { limit: 0u16, base: 0u32 }
+let mut TICKS : i64 = 0i64
+let mut SWINTS : i64 = 0i64
+let mut HEAP : [u8; 4096] = [0u8; 4096]
+let mut HEAP_TOP : i64 = 0i64
+
+fn outb : (u16, u8) -> ()
+  | (port, v) ->
+      asm { "outb %1, %0" : : "{dx}"(port), "{al}"(v) : "memory" }
+      ()
+
+fn inb : u16 -> u8
+  | (port) ->
+      let mut r : u8 = 0u8
+      asm { "inb %1, %0" : "={al}"(r) : "{dx}"(port) : "memory" }
+      r
+
+-- ── serial console (COM1) ──
+fn serial_init : () -> ()
+  | () ->
+      outb(1017u16, 0u8)
+      outb(1019u16, 128u8)
+      outb(1016u16, 1u8)
+      outb(1017u16, 0u8)
+      outb(1019u16, 3u8)
+      outb(1018u16, 199u8)
+      outb(1020u16, 11u8)
+      ()
+
+fn putc : u8 -> ()
+  | (c) ->
+      while (inb(1021u16) & 32u8) == 0u8
+        ()
+      outb(1016u16, c)
+      ()
+
+fn puts : str -> ()
+  | (s) ->
+      let mut i = 0
+      while i < s.len
+        putc(s[i])
+        i = i + 1
+      ()
+
+-- 32-bit division only: a freestanding i386 kernel has no libgcc, so no __divdi3
+fn put_dec : i32 -> ()
+  | (n) ->
+      if n >= 10i32 then put_dec(n / 10i32) else ()
+      putc((48i32 + n % 10i32) as u8)
+      ()
+
+-- ── a bump allocator over a static arena ──
+fn kalloc : i64 -> *u8
+  | (n) ->
+      let p = &HEAP[HEAP_TOP]
+      HEAP_TOP = HEAP_TOP + ((n + 7) / 8) * 8
+      p
+
+-- ── drivers behind trait objects ──
+interface Driver
+  fn probe : Self -> i64
+  fn poke : (Self, i64) -> i64
+
+struct Uart
+  port: i64
+struct Timer
+  hz: i64
+  ticks_seen: i64
+
+impl Driver for Uart
+  fn probe : Self -> i64 | u -> u.port
+  fn poke : (Self, i64) -> i64 | (u, v) -> u.port + v
+
+impl Driver for Timer
+  fn probe : Self -> i64 | t -> t.hz
+  fn poke : (Self, i64) -> i64 | (t, v) -> t.hz * v + t.ticks_seen
+
+-- ── interrupts ──
+struct IntFrame
+  eip: u32
+  cs: u32
+  eflags: u32
+
+#callconv("x86_intr")
+fn irq0 : (*IntFrame) -> ()
+  | (f) ->
+      let p = &TICKS
+      volatile *p = volatile *p + 1
+      outb(32u16, 32u8)
+      ()
+
+#callconv("x86_intr")
+fn swint : (*IntFrame) -> ()
+  | (f) ->
+      let p = &SWINTS
+      volatile *p = volatile *p + 1
+      ()
+
+fn idt_set : (i64, ptr) -> ()
+  | (v, h) ->
+      let a = (h as i64) & 4294967295
+      let lo = a & 65535
+      let hi = (a >> 16) & 65535
+      -- offset 15..0 | selector 0x08 | type 0x8E (present, ring 0, 32-bit interrupt gate) | offset 31..16
+      let e = lo | (8 << 16) | (142 << 40) | (hi << 48)
+      let t = &IDT[v]
+      *t = e as u64
+      ()
+
+fn pic_pit_init : () -> ()
+  | () ->
+      outb(32u16, 17u8)
+      outb(160u16, 17u8)
+      outb(33u16, 32u8)
+      outb(161u16, 40u8)
+      outb(33u16, 4u8)
+      outb(161u16, 2u8)
+      outb(33u16, 1u8)
+      outb(161u16, 1u8)
+      outb(33u16, 254u8)
+      outb(161u16, 255u8)
+      outb(67u16, 52u8)
+      outb(64u16, 156u8)
+      outb(64u16, 46u8)
+      ()
+
+fn idt_load : () -> ()
+  | () ->
+      idt_set(32, irq0 as ptr)
+      idt_set(128, swint as ptr)
+      IDTR.limit = 2047u16
+      IDTR.base = ((&IDT) as i64) as u32
+      let p = &IDTR
+      asm { "lidt (%eax)" : : "{eax}"(p) : "memory" }
+      ()
+
+#used
+fn kmain : () -> ()
+  | () ->
+      serial_init()
+      puts("PRIDE-OS: booting\n")
+      idt_load()
+      pic_pit_init()
+      asm { "sti" : : : "memory" }
+      let tp = &TICKS
+      while (volatile *tp) < 5
+        asm { "hlt" : : : "memory" }
+      asm { "cli" : : : "memory" }   -- the count is frozen from here on
+      let tk = volatile *tp
+      puts("PRIDE-OS: timer ticks=")
+      put_dec(tk as i32)
+      puts("\n")
+      asm { "int $0x80" : : : "memory" }
+      asm { "int $0x80" : : : "memory" }
+      let sp = &SWINTS
+      puts("PRIDE-OS: software interrupts=")
+      put_dec((volatile *sp) as i32)
+      puts("\n")
+      -- trait objects built in memory the kernel allocated itself
+      let u = kalloc(8) as *Uart
+      u.port = 1016
+      let t = kalloc(16) as *Timer
+      t.hz = 100
+      t.ticks_seen = tk
+      let drivers : [dyn Driver; 2] = [u as dyn Driver, t as dyn Driver]
+      let mut sum = 0
+      let mut i = 0
+      while i < 2
+        sum = sum + drivers[i].probe() + drivers[i].poke(2)
+        i = i + 1
+      puts("PRIDE-OS: drivers sum=")
+      put_dec(sum as i32)
+      puts("\n")
+      if sum > 0 then puts("PRIDE-OS: OK\n") else puts("PRIDE-OS: FAIL\n")
+      outb(244u16, 16u8)
+      while true
+        asm { "hlt" : : : "memory" }
+
+#section(".text.boot")
+#naked
+fn _start : () -> ()
+  | () ->
+      asm { "movl $STACK+16384, %esp\n\txorl %ebp, %ebp\n\tcall kmain\n1:\thlt\n\tjmp 1b" : : : "memory" }
+      while true
+        ()

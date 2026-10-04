@@ -721,11 +721,11 @@ fn void emit_cns(AirEmitter* e, AirCns* k)
             // continuation consumer (usually a covar; sometimes another
             // composite). Print generically: walk STACKs collecting args,
             // then emit the final consumer.
-            AirPrd*[16] args; usz ac = 0;
+            AirPrd*[64] args; usz ac = 0;
             AirCns* cur = k.tail;
             while (cur != null && cur.tag == ACNS_STACK)
             {
-                if (ac < 16) { args[ac] = cur.prd; ac++; }
+                if (ac < 64) { args[ac] = cur.prd; ac++; }
                 cur = cur.tail;
             }
             e.wr("call(");
@@ -882,11 +882,11 @@ fn void emit_cns_prefix_up_to(AirEmitter* e, AirCns* c, AirCns* term)
         case ACNS_COMU: case ACNS_COVAR: return;
         case ACNS_CALL:
         {
-            AirPrd*[16] args; usz ac = 0;
+            AirPrd*[64] args; usz ac = 0;
             AirCns* cur = c.tail;
             while (cur != null && cur.tag == ACNS_STACK && cur != term)
             {
-                if (ac < 16) { args[ac] = cur.prd; ac++; }
+                if (ac < 64) { args[ac] = cur.prd; ac++; }
                 cur = cur.tail;
             }
             e.wr("call(");
@@ -981,11 +981,11 @@ fn void emit_cmd(AirEmitter* e, AirCmd* c)
                         // "let x = ..."); no wrapping <...>.
                         emit_prd(e, c.prd);
                         e.wr("(");
-                        AirPrd*[16] args; usz ac = 0;
+                        AirPrd*[64] args; usz ac = 0;
                         AirCns* cc = c.cns.tail;
                         while (cc != null && cc != term && cc.tag == ACNS_STACK)
                         {
-                            if (ac < 16) { args[ac] = cc.prd; ac++; }
+                            if (ac < 64) { args[ac] = cc.prd; ac++; }
                             cc = cc.tail;
                         }
                         for (usz i = 0; i < ac; i++)
@@ -1434,7 +1434,7 @@ fn void emit_decl(AirEmitter* e, AirDecl* d)
                 // do not add an unimplemented text-to-PEAR parser contract.
                 e.wr("; air facts: checked");
                 if (d.memory_readonly) { e.wr(" memory(read)"); }
-                for (usz i = 0; i < d.param_count && i < 16; i++)
+                for (usz i = 0; i < d.param_count && i < 64; i++)
                 {
                     if (d.params[i] != null && d.params[i].no_capture)
                     { e.wr(" captures(none):"); e.wr(d.params[i].name); }

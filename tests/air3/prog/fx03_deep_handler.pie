@@ -1,0 +1,17 @@
+-- EXIT: 26
+-- Deep handlers: while an arm runs, the handler that is OUTSIDE it is installed, so an arm that performs
+-- the same operation reaches the outer handler (inner: n -> outer(n) + 2; outer: n -> n * 10); 1 -> E.op(2) is handled by the OUTER handler: 2*12 = 24, the inner arm resumes with 24+2 = 26.
+effect E
+  op : i64 -> i64
+fn body : () -> i64 ! [E]
+  | () -> E.op(1)
+fn inner : () -> i64 ! [E]
+  | () ->
+      handle body()
+        | E.op x k ->
+            let y : i64 = E.op(x + 1)
+            k (y + 2)
+fn main : () -> i64
+  | () ->
+      handle inner()
+        | E.op x k -> k (x * 12)

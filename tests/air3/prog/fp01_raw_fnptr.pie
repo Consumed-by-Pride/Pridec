@@ -1,0 +1,10 @@
+-- EXIT: 27
+-- raw code pointers as function values: `fn as ptr`, `ptr as fn(..) -> r`, and an extern passed as a value
+fn labs : i64 -> i64 #extern("labs")
+fn add : (i64, i64) -> i64 | (a, b) -> a + b
+fn apply : (fn(i64) -> i64, i64) -> i64 | (f, x) -> f(x)
+fn main : () -> i64 | () ->
+  let p = add as ptr
+  let f = p as fn(i64, i64) -> i64
+  let s = f(3i64, 4i64)
+  s + apply(labs, 0i64 - 20i64)

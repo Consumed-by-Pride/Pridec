@@ -90,7 +90,7 @@ fn st_find_config_table : (*SystemTable, *os.uefi.Guid) -> ptr
     let mut i : u64 = 0u64
     while i < st.number_of_table_entries
       let entry = (tables as i64 + i as i64 * 24i64) as *ConfigurationTable
-      if os.uefi.guid_eq(&entry.vendor_guid, guid) then entry.vendor_table
+      if os.uefi.guid_eq(entry.vendor_guid, *guid) then return entry.vendor_table
       i = i + 1u64
     0 as ptr
 

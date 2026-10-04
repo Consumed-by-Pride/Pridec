@@ -1,0 +1,6 @@
+// ERROR: bound twice
+air 3.0 Main "x";
+def main() : i64 =
+  let a = 1 : i64 in
+    let a = 2 : i64 in
+      ret(a);

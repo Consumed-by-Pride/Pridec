@@ -1,0 +1,19 @@
+-- EXIT: 45
+-- 500 handlers in a loop: each runs its body on a fresh fiber and then FINISHES (the arm resumes: value 1+1), or is ABANDONED (the arm does not resume).
+-- Every fiber (a 128 KiB stack) must be released: 500 x 2 leaked stacks would be ~125 MB.  one(i) - i is 2 for an even i (pick resumes: q + 2) and 7 for an odd i (abort: q + 7): 250 * 2 + 250 * 7 = 2250, / 50 = 45.
+effect P
+  pick : i64 -> i64
+fn work : i64 -> i64 ! [P]
+  | n -> (P.pick(n)) + 1
+fn one : i64 -> i64
+  | n ->
+      handle work(n)
+        | P.pick q k -> if q % 2 == 0 then (k q) + 1 else q + 7
+fn main : () -> i64
+  | () ->
+      let mut s : i64 = 0
+      let mut i : i64 = 0
+      while i < 500
+        s = s + one(i) - i
+        i = i + 1
+      s / 50

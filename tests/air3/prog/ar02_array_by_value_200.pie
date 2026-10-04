@@ -1,0 +1,13 @@
+-- EXIT: 100
+-- a 200-element array returned by value
+fn fill : () -> [i64; 200]
+  | () ->
+      let mut a = [0; 200]
+      let mut i = 0
+      while i < 200
+        a[i] = i
+        i = i + 1
+      a
+fn main : () -> i64 | () ->
+  let a = fill()
+  a[100]

@@ -15,7 +15,8 @@ enum AirPrdTag : int { APRD_INVALID, APRD_VAR, APRD_CON, APRD_INT, APRD_FLOAT,
     APRD_TUPLE, APRD_RECORD, APRD_ARRAY, APRD_INL, APRD_INR, APRD_LAMBDA,
     APRD_MU, APRD_COMETA, APRD_BINOP, APRD_UNOP, APRD_COERCE,
     APRD_SIZEOF, APRD_ALIGNOF, APRD_OFFSETOF, APRD_REIFY, APRD_EVAL,
-    APRD_QUOTE, APRD_SPLICE, APRD_POISON, APRD_UNREACHABLE_VAL }
+    APRD_QUOTE, APRD_SPLICE, APRD_POISON, APRD_UNREACHABLE_VAL,
+    APRD_ALLOCA, APRD_LOAD, APRD_GEP }   // AIR 3.0: explicit memory (alloca(T), load(p) : T, gep[T](p, i...) : ptr)
 
 enum AirCnsTag : int { ACNS_INVALID, ACNS_COVAR, ACNS_STACK, ACNS_FST, ACNS_SND,
     ACNS_PROJ, ACNS_FIELD, ACNS_INDEX, ACNS_CALL, ACNS_CASE, ACNS_COCASE,
@@ -27,7 +28,8 @@ enum AirCmdTag : int { ACMD_INVALID, ACMD_CUT, ACMD_MU, ACMD_MUTILDE, ACMD_JUMP,
     ACMD_MATCH, ACMD_HANDLE, ACMD_PERFORM, ACMD_RESUME, ACMD_UNSAFE,
     ACMD_UNCHECKED, ACMD_COMPTIME, ACMD_ASSERT, ACMD_ASSUME, ACMD_UB, ACMD_TRAP,
     ACMD_RET, ACMD_BREAK, ACMD_CONTINUE, ACMD_DEFER, ACMD_LABEL, ACMD_NOP,
-    ACMD_ASM, ACMD_SYSCALL, ACMD_ATOMIC, ACMD_FENCE }
+    ACMD_ASM, ACMD_SYSCALL, ACMD_ATOMIC, ACMD_FENCE,
+    ACMD_STORE }   // AIR 3.0: store(p, v)
 
 enum AirPatTag : int { APAT_INVALID, APAT_WILD, APAT_BIND, APAT_INT, APAT_FLOAT,
     APAT_BOOL, APAT_CHAR, APAT_STRING, APAT_TUPLE, APAT_ARRAY, APAT_RECORD,
@@ -49,7 +51,8 @@ enum AirBinop : int { ABIN_ADD, ABIN_SUB, ABIN_MUL, ABIN_DIV, ABIN_MOD,
     ABIN_EQ, ABIN_NEQ, ABIN_LT, ABIN_GT, ABIN_LE, ABIN_GE, ABIN_PIPE }
 enum AirUnop : int { AUN_NEG, AUN_NOT, AUN_BITNOT, AUN_DEREF, AUN_REF, AUN_ADDR, AUN_COMULT }
 enum AirDeclTag : int { ADECL_DATA, ADECL_CODATA, ADECL_DEF, ADECL_DEFCO,
-    ADECL_DECLARE, ADECL_IMPORT, ADECL_MODULE, ADECL_EFFECT }
+    ADECL_DECLARE, ADECL_IMPORT, ADECL_MODULE, ADECL_EFFECT,
+    ADECL_GLOBAL }   // AIR 3.0: global [mut] NAME : T [= constant]
 
 // Qualifier claims cross an explicit trust boundary: unknown by default,
 // candidate from the final conservative AST analysis, then screened on AIR.
@@ -114,24 +117,24 @@ struct AirEffectOp { uint id; char* name; AirTyp* op_ty; }
 
 // ── Core AST nodes ────────────────────────────────────────────────────────
 struct AirTyp {
-    uint id; AirTypTag tag; AirTyp*[8] args; usz arg_count; char* name;
+    uint id; AirTypTag tag; AirTyp*[64] args; usz arg_count; char* name;
     AirMult mult; int mult_exact; long ival; double fval;
     AirFieldInit*[64] rec_fields; usz rec_field_count;
     AirTyp* eff_tail; char* eff_name; void* refine_extra;
 }
 struct AirPat {
     uint id; AirPatTag tag; char* name; long ival; double fval;
-    AirPat*[16] sub; usz sub_count;
-    AirFieldInit*[16] fields; usz field_count;
+    AirPat*[64] sub; usz sub_count;
+    AirFieldInit*[64] fields; usz field_count;
     AirPat* as_pat; AirPat* or_alt; AirTyp* ty;
 }
 struct AirPrd {
     uint id; AirPrdTag tag; char* name; long ival; double fval; bool bval; char cval;
     usz bytes_len; char* bytes;
-    AirPrd*[16] subs; usz sub_count;
+    AirPrd** subs; usz sub_count, sub_cap;   // grown on demand (a wide array/tuple/call has no operand limit)
     AirBinder*[16] binders; usz binder_count;
     AirCmd* body; AirTyp* ty_arg;
-    AirFieldInit*[16] rec_inits; usz rec_init_count;
+    AirFieldInit** rec_inits; usz rec_init_count, rec_init_cap;   // grown on demand (a record of any width)
     AirBinop bop; AirUnop uop; AirTyp* ty;
 }
 struct AirCns {
@@ -147,7 +150,7 @@ struct AirCns {
 }
 struct AirCmd {
     uint id; AirCmdTag tag; AirPrd* prd; AirCns* cns;
-    AirPrd*[16] prds; usz prd_count;
+    AirPrd*[64] prds; usz prd_count;
     char* binder; AirBinder*[16] mbinders; usz mbinder_count;
     AirCmd* body;
     AirCmd* next;
@@ -159,19 +162,23 @@ struct AirCmd {
     char*[16] jump_args; usz jump_arg_count;
     char* ub_msg; int asm_dialect; char* asm_text; AirTyp* poison_ty;
     int atomic_op, atomic_order;
+    bool vol; char* asm_cons; AirTyp* asm_ret;   // AIR 3.0: volatile store; asm constraints (LLVM syntax) and result type
 }
 struct AirDecl {
     uint id; AirDeclTag tag; char* name;
     AirBinder*[16] typarams; usz typaram_count; AirMult mult;
     AirCtorDecl*[64] ctors; usz ctor_count;
     AirDtorDecl*[64] dtors; usz dtor_count;
-    AirBinder*[16] params; usz param_count;
+    AirBinder*[64] params; usz param_count;
     AirCmd* def_body; AirTyp* ret_ty;
     bool is_pub, is_extern, is_fastcc, is_varargs;
     bool memory_readonly; // candidate: no externally visible writes
     AirFactState fact_state; // only AIR_CHECKED may authorize LLVM attributes
     char* extern_link; AirEffectOp*[16] ops; usz op_count;
     char* import_path; char* import_alias; bool import_glob; char* module_name;
+    AirPrd* g_init; bool g_mut;   // ADECL_GLOBAL: constant initialiser (null = zero) and mutability
+    // AIR 3.0 declaration attributes: `attr NAME [STRING|INT]` before the declaration (section, align, naked, noinline, inline, cold, packed)
+    char*[8] attr_name; char*[8] attr_str; long[8] attr_int; bool[8] attr_has_int; usz attr_count;
 }
 struct AirModule {
     uint id; char* name; char* source_path;
@@ -201,6 +208,7 @@ struct AirModule {
     AirPrd* p_false;
     AirPrd* p_null;
     AirCns* c_ret; AirPat* pat_wild; AirCmd* nop;
+    bool low;   // AIR 3.0 profile: the file claims to be low-level (typed, explicit memory, no high-level forms)
 }
 
 // ── Allocators ────────────────────────────────────────────────────────────
@@ -285,9 +293,39 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
 
 // ── Append helpers ───────────────────────────────────────────────────────
 fn bool AirModule.add_decl(AirModule* m, AirDecl* d){ if(d==null)return false; if(m.decl_count>=4096)return false; m.decls[m.decl_count]=d; m.decl_count++; return true; }
-fn void AirTyp.add_arg(AirTyp* t, AirTyp* a){ if(t==null||a==null)return; if(t.arg_count>=8)return; t.args[t.arg_count]=a; t.arg_count++; }
-fn void AirPrd.add_sub(AirPrd* p, AirPrd* s){ if(p==null||s==null)return; if(p.sub_count>=16)return; p.subs[p.sub_count]=s; p.sub_count++; }
-fn void AirCmd.add_prd(AirCmd* c, AirPrd* p){ if(c==null||p==null)return; if(c.prd_count>=16)return; c.prds[c.prd_count]=p; c.prd_count++; }
+fn void AirTyp.add_arg(AirTyp* t, AirTyp* a){ if(t==null||a==null)return; if(t.arg_count>=64)return; t.args[t.arg_count]=a; t.arg_count++; }
+fn void AirPrd.push_sub(AirPrd* p, AirPrd* s)   // like add_sub, but a null operand keeps its slot
+{
+    if (p == null) return;
+    if (p.sub_count >= p.sub_cap)
+    {
+        usz nc = p.sub_cap == 0 ? 4 : p.sub_cap * 2;
+        AirPrd** ns = (AirPrd**)malloc(nc * 8);
+        if (ns == null) return;
+        for (usz i = 0; i < nc; i++) ns[i] = null;
+        for (usz i = 0; i < p.sub_count; i++) ns[i] = p.subs[i];
+        if (p.subs != null) free((void*)p.subs);
+        p.subs = ns; p.sub_cap = nc;
+    }
+    p.subs[p.sub_count] = s; p.sub_count++;
+}
+fn void AirPrd.push_rec(AirPrd* p, AirFieldInit* f)
+{
+    if (p == null || f == null) return;
+    if (p.rec_init_count >= p.rec_init_cap)
+    {
+        usz nc = p.rec_init_cap == 0 ? 4 : p.rec_init_cap * 2;
+        AirFieldInit** ns = (AirFieldInit**)malloc(nc * 8);
+        if (ns == null) return;
+        for (usz i = 0; i < nc; i++) ns[i] = null;
+        for (usz i = 0; i < p.rec_init_count; i++) ns[i] = p.rec_inits[i];
+        if (p.rec_inits != null) free((void*)p.rec_inits);
+        p.rec_inits = ns; p.rec_init_cap = nc;
+    }
+    p.rec_inits[p.rec_init_count] = f; p.rec_init_count++;
+}
+fn void AirPrd.add_sub(AirPrd* p, AirPrd* s){ if(p==null||s==null)return; p.push_sub(s); }
+fn void AirCmd.add_prd(AirCmd* c, AirPrd* p){ if(c==null||p==null)return; if(c.prd_count>=64)return; c.prds[c.prd_count]=p; c.prd_count++; }
 fn void AirCmd.add_branch(AirCmd* c, AirBranch* b){ if(c==null||b==null)return; if(c.branch_count>=64)return; c.branches[c.branch_count]=b; c.branch_count++; }
 
 // ── Smart constructors ───────────────────────────────────────────────────
@@ -303,9 +341,14 @@ fn AirBranch* air_mk_branch(AirArena* a, AirPat* pat, AirCmd* body) {
     AirBranch* b=air_new_AirBranch(a); if(b==null)return null;
     b.pat=pat; b.body=body; b.guard=null; return b;
 }
+fn void air_add_attr(AirDecl* d, char* nm, char* str, long iv, bool has_int)
+{
+    if (d == null || d.attr_count >= 8) { return; }
+    d.attr_name[d.attr_count] = nm; d.attr_str[d.attr_count] = str; d.attr_int[d.attr_count] = iv; d.attr_has_int[d.attr_count] = has_int; d.attr_count++;
+}
 fn AirDecl* air_mk_decl(AirArena* a, AirDeclTag tag, char* nm) {
     AirDecl* d=air_new_AirDecl(a); if(d==null)return null;
-    d.tag=tag; d.name=nm; d.typaram_count=0; d.mult=AMULT_UNR;
+    d.tag=tag; d.name=nm; d.typaram_count=0; d.mult=AMULT_UNR; d.attr_count=0;
     d.ctor_count=0; d.dtor_count=0; d.param_count=0;
     d.def_body=null; d.ret_ty=null; d.is_pub=false; d.is_extern=false;
     d.is_varargs=false; d.memory_readonly=false; d.fact_state=AFACT_UNKNOWN; d.extern_link=null; d.op_count=0;
@@ -393,11 +436,11 @@ fn AirPrd* air_mk_bytes(AirArena* a, char* buf, usz len)
     { AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_BYTES; p.bytes=a.dup(buf,len); p.bytes_len=(long)len; return p; }
 fn AirPrd* air_mk_tuple(AirArena* a, AirPrd** ps, usz n) {
     AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_TUPLE; p.sub_count=0;
-    for(usz i=0;i<n&&i<16;i++){p.add_sub(ps[i]);} return p;
+    for(usz i=0;i<n;i++){p.add_sub(ps[i]);} return p;
 }
 fn AirPrd* air_mk_array(AirArena* a, AirPrd** ps, usz n) {
     AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_ARRAY; p.sub_count=0;
-    for(usz i=0;i<n&&i<16;i++){p.add_sub(ps[i]);} return p;
+    for(usz i=0;i<n;i++){p.add_sub(ps[i]);} return p;
 }
 fn AirPrd* air_mk_inl(AirArena* a, AirTyp* t, AirPrd* v)
     { AirPrd* p=air_new_AirPrd(a); if(p==null)return null; p.tag=APRD_INL; p.ty_arg=t; p.add_sub(v); return p; }
@@ -485,11 +528,11 @@ fn AirPat* air_mk_pat_bool(AirArena* a, bool v)
     { AirPat* p=air_mk_pat(a,APAT_BOOL); if(p==null)return null; p.ival=v?1:0; return p; }
 fn AirPat* air_mk_pat_variant(AirArena* a, char* nm, AirPat** subs, usz n) {
     AirPat* p=air_mk_pat(a,APAT_VARIANT); if(p==null)return null; p.name=nm;
-    for(usz i=0;i<n&&i<16;i++){p.sub[i]=subs[i]; p.sub_count++;} return p;
+    for(usz i=0;i<n&&i<64;i++){p.sub[i]=subs[i]; p.sub_count++;} return p;
 }
 fn AirPat* air_mk_pat_tuple(AirArena* a, AirPat** subs, usz n) {
     AirPat* p=air_mk_pat(a,APAT_TUPLE); if(p==null)return null;
-    for(usz i=0;i<n&&i<16;i++){p.sub[i]=subs[i]; p.sub_count++;} return p;
+    for(usz i=0;i<n&&i<64;i++){p.sub[i]=subs[i]; p.sub_count++;} return p;
 }
 
 // Types
@@ -503,7 +546,7 @@ fn AirTyp* air_mk_typ_arrow(AirArena* a, AirTyp* dom, AirTyp* cod)
     { AirTyp* t=air_mk_typ(a,ATYP_ARROW); if(t==null)return null; t.add_arg(dom); t.add_arg(cod); return t; }
 fn AirTyp* air_mk_typ_tuple(AirArena* a, AirTyp** args, usz n) {
     AirTyp* t=air_mk_typ(a,ATYP_TUPLE); if(t==null)return null;
-    for(usz i=0;i<n&&i<8;i++)t.add_arg(args[i]); return t;
+    for(usz i=0;i<n&&i<64;i++)t.add_arg(args[i]); return t;
 }
 fn AirTyp* air_mk_typ_array(AirArena* a, AirTyp* elem, long len)
     { AirTyp* t=air_mk_typ(a,ATYP_ARRAY); if(t==null)return null; t.add_arg(elem); t.ival=len; return t; }
@@ -553,7 +596,7 @@ fn void AirDecl.add_ctor(AirDecl* d, AirCtorDecl* c)
 fn void AirDecl.add_dtor(AirDecl* d, AirDtorDecl* dd)
     { if(d==null||dd==null)return; if(d.dtor_count>=64)return; d.dtors[d.dtor_count]=dd; d.dtor_count++; }
 fn void AirDecl.add_param(AirDecl* d, AirBinder* b)
-    { if(d==null||b==null)return; if(d.param_count>=16)return; d.params[d.param_count]=b; d.param_count++; }
+    { if(d==null||b==null)return; if(d.param_count>=64)return; d.params[d.param_count]=b; d.param_count++; }
 fn void AirDecl.add_typaram(AirDecl* d, AirBinder* b)
     { if(d==null||b==null)return; if(d.typaram_count>=16)return; d.typarams[d.typaram_count]=b; d.typaram_count++; }
 fn void AirDecl.add_op(AirDecl* d, AirEffectOp* o)

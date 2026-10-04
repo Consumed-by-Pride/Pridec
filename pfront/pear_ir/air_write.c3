@@ -389,6 +389,17 @@ fn void AirW.prd_core(AirW* w, AirPrd* p, int d)
         case APRD_SPLICE: w.s("splice("); w.prd(p.sub_count > 0 ? p.subs[0] : null, d); w.c(')'); return;
         case APRD_POISON: w.s("poison("); w.typ(p.ty); w.c(')'); return;
         case APRD_UNREACHABLE_VAL: w.s("unreachable"); return;
+        case APRD_ALLOCA: w.s("alloca("); w.typ(p.ty_arg); w.c(')'); return;
+        case APRD_LOAD:
+            if (p.sub_count != 1) { w.err("load needs one operand"); }
+            w.s(p.bval ? "load volatile(" : "load("); w.prd(p.sub_count > 0 ? p.subs[0] : null, d); w.c(')'); return;
+        case APRD_GEP:
+        {
+            if (p.sub_count < 1) { w.err("gep needs a base pointer"); }
+            w.s("gep["); w.typ(p.ty_arg); w.s("]("); w.prd(p.sub_count > 0 ? p.subs[0] : null, d);
+            for (usz i = 1; i < p.sub_count; i++) { w.s(", "); w.prd(p.subs[i], d); }
+            w.c(')'); return;
+        }
         default:
             w.err("producer tag not representable in AIR 2.0");
             w.s("nil");
@@ -609,7 +620,9 @@ fn void AirW.cmd(AirW* w, AirCmd* c, int d)
             if (c.asm_dialect == 1) { w.s(" intel"); }
             else if (c.asm_dialect == 2) { w.s(" att"); }
             else if (c.asm_dialect != 0) { w.err("unknown asm dialect"); }
-            w.c(' '); w.opt_str(c.asm_text); w.prds(&c.prds[0], c.prd_count, d);
+            w.c(' '); w.opt_str(c.asm_text);
+            if (c.asm_cons != null) { w.c(' '); w.opt_str(c.asm_cons); w.s(" : ["); w.typ(c.asm_ret); w.c(']'); }   // AIR 3.0: LLVM constraints and the result type
+            w.prds(&c.prds[0], c.prd_count, d);
             w.result(c.cns, d);
             return;
         }
@@ -632,6 +645,9 @@ fn void AirW.cmd(AirW* w, AirCmd* c, int d)
             w.result(c.cns, d);
             return;
         }
+        case ACMD_STORE:
+            if (c.prd_count != 2) { w.err("store needs a pointer and a value"); }
+            w.s(c.vol ? "store volatile(" : "store("); w.prd(c.prd_count > 0 ? c.prds[0] : null, d); w.s(", "); w.prd(c.prd_count > 1 ? c.prds[1] : null, d); w.c(')'); return;
         case ACMD_FENCE:
         {
             char* ord = air_text::atomic_order_name(c.atomic_order);
@@ -676,6 +692,16 @@ fn void AirW.fields(AirW* w, AirField** fs, usz n)
     for (usz i = 0; i < n; i++) { if (i > 0) { w.s(", "); } w.field(fs[i]); }
     w.c(')');
 }
+fn void AirW.attrs(AirW* w, AirDecl* d)
+{
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        w.s("attr "); w.name(d.attr_name[i]);
+        if (d.attr_str[i] != null) { w.c(' '); w.opt_str(d.attr_str[i]); }
+        else if (d.attr_has_int[i]) { w.c(' '); w.int_(d.attr_int[i]); }
+        w.c(' ');
+    }
+}
 fn void AirW.decl(AirW* w, AirDecl* d)
 {
     if (d == null) { w.err("null declaration"); return; }
@@ -707,6 +733,7 @@ fn void AirW.decl_body(AirW* w, AirDecl* d)
         case ADECL_DEFCO:
         case ADECL_DECLARE:
         {
+            w.attrs(d);
             if (d.is_pub)     { w.s("pub "); }
             if (d.is_extern)  { w.s("extern "); }
             if (d.is_fastcc)  { w.s("fastcc "); }
@@ -727,6 +754,7 @@ fn void AirW.decl_body(AirW* w, AirDecl* d)
         }
         case ADECL_DATA:
         {
+            w.attrs(d);
             if (d.is_pub) { w.s("pub "); }
             w.s("data "); w.name(d.name); w.mult(d.mult);
             if (d.typaram_count > 0) { w.s(" ["); for (usz i = 0; i < d.typaram_count; i++) { if (i > 0) { w.s(", "); } w.binder(d.typarams[i]); } w.c(']'); }
@@ -761,6 +789,17 @@ fn void AirW.decl_body(AirW* w, AirDecl* d)
             w.s("\n};\n\n");
             return;
         }
+        case ADECL_GLOBAL:
+        {
+            w.attrs(d);
+            if (d.is_pub) { w.s("pub "); }
+            if (d.is_extern) { w.s("extern "); }
+            w.s("global "); if (d.g_mut) { w.s("mut "); }
+            w.name(d.name); w.s(" : "); w.typ(d.ret_ty);
+            if (d.g_init != null) { w.s(" = "); w.prd(d.g_init, 1); }
+            w.s(";\n\n");
+            return;
+        }
         case ADECL_EFFECT:
         {
             if (d.is_pub) { w.s("pub "); }
@@ -792,14 +831,14 @@ fn int write_module(AirModule* m, char* path)
     void* f = (path != null) ? fopen(path, "w") : fdopen(1, "w");
     if (f == null) { return -1; }
     w.out = f;
-    w.s("// AIR 2.2 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)\n");
+    w.s(m.low ? "// AIR 3.0 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde), low profile\n" : "// AIR 2.2 -- Abstractive Intermediate Representation (lambda-bar mu mu-tilde)\n");
     w.s("// canonical text; grammar in docs/specs/AIR.md; do not hand-edit\n");
     w.dg_on = (getenv("AIR_DIGEST") != null);
     w.dg_quiet = false;
     w.dg_total = 0;
     w.dg_verbose = (getenv("AIR_DIGEST_V") != null);
     w.dg = 0;
-    w.s("air 2.2 "); w.name(m.name); w.c(' '); w.opt_str(m.source_path); w.s(";\n\n");
+    w.s(m.low ? "air 3.0 " : "air 2.2 "); w.name(m.name); w.c(' '); w.opt_str(m.source_path); w.s(";\n\n");
     for (usz i = 0; i < m.decl_count; i++) { w.decl(m.decls[i]); }
     if (path != null) { fclose(f); } else { fflush(f); }
     void* se = fdopen(2, "w");

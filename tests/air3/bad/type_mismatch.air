@@ -1,0 +1,7 @@
+// ERROR: operands have different types
+air 3.0 Main "x";
+def main() : i64 =
+  let a = 1 : i64 in
+    let b = 2 : i32 in
+      let c = (add a b : i64) : i64 in
+        ret(c);

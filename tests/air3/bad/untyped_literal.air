@@ -1,0 +1,5 @@
+// ERROR: literal without an integer type
+air 3.0 Main "x";
+def main() : i64 =
+  let a = 1 : infer in
+    ret(a);

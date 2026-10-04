@@ -1,0 +1,19 @@
+-- EXIT: 35
+-- open-ended slice ranges: xs[lo..], xs[..hi], xs[..=hi], xs[..] on an array and on a slice (they were E1050 / "not lowered yet")
+fn tail : [i64] -> [i64]
+  | xs -> xs[1..]
+
+fn main : () -> i64
+  | () ->
+      let a : [i64; 5] = [1, 2, 3, 4, 5]
+      let s = a[2..]          -- [3, 4, 5]
+      let t = a[..2]          -- [1, 2]
+      let u = a[..]           -- all five
+      let w = a[..=2]         -- [1, 2, 3]
+      let r = tail(s)         -- [4, 5]
+      if s.len != 3 then 1
+      else if t.len != 2 then 2
+      else if u.len != 5 then 3
+      else if w.len != 3 then 4
+      else if r.len != 2 then 5
+      else s[0] + t[1] + u[4] + w[2] + r[0] + r[1] + 13

@@ -1,0 +1,18 @@
+-- EXIT: 107
+-- `@` on ranked arrays with non-square shapes and floats: [2x3] @ [3x2] = [[58, 64], [139, 154]]; [2x3] @ [3] = [14, 32];
+-- f64 dot product 1.5*2.0 + 2.0*4.0 = 11.0.   (154 - 58) + 11 = 107
+fn main : () -> i64
+  | () ->
+      let a : Tensor<i64; 2, 3> = [| [| 1, 2, 3 |], [| 4, 5, 6 |] |]
+      let b : Tensor<i64; 3, 2> = [| [| 7, 8 |], [| 9, 10 |], [| 11, 12 |] |]
+      let c = a @ b
+      let v : Tensor<i64; 3> = [| 1, 2, 3 |]
+      let av = a @ v
+      let x : Tensor<f64; 2> = [| 1.5, 2.0 |]
+      let y : Tensor<f64; 2> = [| 2.0, 4.0 |]
+      let d : f64 = x @ y
+      if c[0][1] != 64 then 1
+      else if c[1][0] != 139 then 2
+      else if av[0] != 14 then 3
+      else if av[1] != 32 then 4
+      else (c[1][1] - c[0][0]) + (d as i64)

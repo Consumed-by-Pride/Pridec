@@ -1,0 +1,14 @@
+-- EXIT: 21
+-- an `else` on its own line at the OUTER if's indent binds to the outer if (offside rule), not the inner one
+fn pick : (i64, i64) -> i64
+  | (i, n) ->
+    let mut r = 0i64
+    if i == 3i64
+      if n == 4i64
+        r = 10i64
+    else
+      r = 20i64
+    r
+
+fn main : () -> i64 | () ->
+  pick(5i64, 0i64) + pick(3i64, 9i64) + 1i64 - 0i64 + pick(3i64, 4i64) - 10i64

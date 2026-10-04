@@ -1,0 +1,19 @@
+-- EXIT: 150
+-- a struct holding a 100-element array and an 80-element array of structs, built by repeat fills, returned and passed by value
+type P = struct
+  x : i64
+  y : i64
+type World = struct
+  cells : [i64; 100]
+  pts : [P; 80]
+  n : i64
+fn total : World -> i64
+  | w -> w.cells[99] + w.pts[79].y + w.n
+fn mk : () -> World
+  | () ->
+      let mut w = World { cells: [0; 100], pts: [P { x: 0, y: 0 }; 80], n: 50 }
+      w.cells[99] = 40
+      w.pts[79].y = 60
+      w
+fn main : () -> i64 | () ->
+  total(mk())

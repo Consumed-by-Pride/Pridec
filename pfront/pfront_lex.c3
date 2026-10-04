@@ -150,6 +150,8 @@ enum TokenType : int
     TOKEN_KW_ATOMIC_XOR,
     TOKEN_KW_ATOMIC_XCHG,
     TOKEN_KW_ATOMIC_CMPXCHG,
+    TOKEN_KW_ATOMIC_LOAD, TOKEN_KW_ATOMIC_STORE, TOKEN_KW_ATOMIC_NAND, TOKEN_KW_ATOMIC_MAX, TOKEN_KW_ATOMIC_MIN,
+    TOKEN_KW_ATOMIC_UMAX, TOKEN_KW_ATOMIC_UMIN,
 
     /*
      Metaprogramming keywords
@@ -1458,15 +1460,22 @@ fn TokenType keyword_type(char* p, usz len) @private
             if (span_eq(p, len, "atomic_sub", 10)) return TokenType.TOKEN_KW_ATOMIC_SUB;
             if (span_eq(p, len, "atomic_and", 10)) return TokenType.TOKEN_KW_ATOMIC_AND;
             if (span_eq(p, len, "atomic_xor", 10)) return TokenType.TOKEN_KW_ATOMIC_XOR;
+            if (span_eq(p, len, "atomic_max", 10)) return TokenType.TOKEN_KW_ATOMIC_MAX;
+            if (span_eq(p, len, "atomic_min", 10)) return TokenType.TOKEN_KW_ATOMIC_MIN;
             break;
 
         case 11:
             if (span_eq(p, len, "unreachable", 11)) return TokenType.TOKEN_KW_UNREACHABLE;
             if (span_eq(p, len, "atomic_xchg", 11)) return TokenType.TOKEN_KW_ATOMIC_XCHG;
+            if (span_eq(p, len, "atomic_load", 11)) return TokenType.TOKEN_KW_ATOMIC_LOAD;
+            if (span_eq(p, len, "atomic_nand", 11)) return TokenType.TOKEN_KW_ATOMIC_NAND;
+            if (span_eq(p, len, "atomic_umax", 11)) return TokenType.TOKEN_KW_ATOMIC_UMAX;
+            if (span_eq(p, len, "atomic_umin", 11)) return TokenType.TOKEN_KW_ATOMIC_UMIN;
             break;
 
         case 12:
             if (span_eq(p, len, "thread_local", 12)) return TokenType.TOKEN_KW_THREAD_LOCAL;
+            if (span_eq(p, len, "atomic_store", 12)) return TokenType.TOKEN_KW_ATOMIC_STORE;
             break;
 
         case 13:
@@ -2237,6 +2246,13 @@ fn char* token_type_name(TokenType t)
         case TOKEN_KW_ATOMIC_XOR:     return "atomic_xor";
         case TOKEN_KW_ATOMIC_XCHG:    return "atomic_xchg";
         case TOKEN_KW_ATOMIC_CMPXCHG: return "atomic_cmpxchg";
+        case TOKEN_KW_ATOMIC_LOAD:    return "atomic_load";
+        case TOKEN_KW_ATOMIC_STORE:   return "atomic_store";
+        case TOKEN_KW_ATOMIC_NAND:    return "atomic_nand";
+        case TOKEN_KW_ATOMIC_MAX:     return "atomic_max";
+        case TOKEN_KW_ATOMIC_MIN:     return "atomic_min";
+        case TOKEN_KW_ATOMIC_UMAX:    return "atomic_umax";
+        case TOKEN_KW_ATOMIC_UMIN:    return "atomic_umin";
         case TOKEN_KW_ASSERT:     return "assert";
         case TOKEN_KW_INVARIANT:  return "invariant";
         case TOKEN_KW_UNREACHABLE:return "unreachable";

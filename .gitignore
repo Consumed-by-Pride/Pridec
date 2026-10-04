@@ -22,6 +22,8 @@
 !/docs/**/*.air
 !/legacy/**/*.air
 !/tests/air/**/*.air
+!/tests/air3/**/*.air
+*.low.air
 # ── Editor / tool detritus ──────────────────────────────────────────────
 .understand-anything/
 .vscode/

@@ -5,7 +5,7 @@
 c06_loop_break	139	0 0 0 0	PEAR 1 SEGV: `while` with `break` -- the .air is well-formed (label/jump), the legacy backend crashes; not diagnosed further
 c08_match_guard	139	0 0 0 0	guards are now in the AIR (`guard { <c | %guard> }`); PEAR 1 does not implement guarded branches
 c10_enum_match	139	0 0 0 0	PEAR 1 SEGV: enum constructor patterns (backend limit, tests/exec/XFAIL.tsv family)
-c11_higher_order	NOBIN	-	front end rejects the function-typed tuple parameter `(i64 -> i64, i64) -> i64` (E1012); no .air
+c11_higher_order	139	0 0 0 0	PEAR 1 SEGV: the front end parses the function-typed tuple parameter now and the .air verifies; the legacy backend crashes on function values (the AIR 3 chain runs it, tests/air3/low_corpus.sh)
 c12_tuple	139	0 0 0 0	`let (a, b) = t` is now lowered to `match t { tuple(bind a, bind b) -> ... }` (was: a, b unbound, exit 0); PEAR 1 cannot run tuple patterns
 c21_interface_impl	139	0 0 0 0	interface/impl are compile-time only (not in AIR); the call goes through a dictionary PEAR 1 does not have
 c22_generic	139	0 0 0 0	PEAR 1 SEGV on a generic fn (type parameters are carried in the .air, not instantiated)

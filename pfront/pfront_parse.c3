@@ -684,6 +684,23 @@ fn bool Parser.arrow_follows_group(Parser* p, usz from)
 
 // True when the token run starting at `from` is only layout before `want`.
 // Used for lookahead across line breaks without mutating parser state.
+// An `else` that starts its own line at a SHALLOWER indent than the block this
+// `if` sits in belongs to an enclosing `if`, not to this one (the offside rule;
+// without this the else of an outer `if` was captured by the inner one, which
+// silently changed the program: `if a / if b / x / else / y` bound `else` to b).
+fn bool Parser.else_is_outer(Parser* p)
+{
+    usz look = 0;
+    while (look + 1 < LA_SIZE)
+    {
+        Tk t = p.peek(look).type;
+        if (t == Tk.TOKEN_NEWLINE || t == Tk.TOKEN_INDENT || t == Tk.TOKEN_DEDENT) { look = look + 1; continue; }
+        break;
+    }
+    if (p.peek(look).type != Tk.TOKEN_KW_ELSE) { return false; }
+    return p.peek(look).col - 1 < p.stmt_indent;
+}
+
 fn bool Parser.layout_then(Parser* p, Tk want)
 {
     usz look = 0;
@@ -988,6 +1005,27 @@ fn Node* Parser.parse_type_postfix(Parser* p)
     return base;
 }
 
+// inside parentheses an arrow belongs to the type: `A -> B [! row]` after an already parsed `first` makes the function type
+fn Node* Parser.arrow_tail(Parser* p, Node* first)
+{
+    if (!(p.check(Tk.TOKEN_ARROW) || p.check(Tk.TOKEN_ARROW_ASCII))) { return first; }
+    Tok ar = p.advance();
+    Node* ret = p.parse_type_with_arrow();
+    Node* fnty = p.mk_at(Nk.N_TY_FN, ar);
+    p.add(fnty, first);
+    if (ret != null)
+    {
+        Node* rw = p.mk_at(Nk.N_TY_CONSTRAINT, ar);
+        p.add(rw, ret);
+        p.add(fnty, rw);
+    }
+    if (p.check(Tk.TOKEN_BANG))
+    {
+        Node* row = p.parse_effect_row();
+        if (row != null) { p.add(fnty, row); }
+    }
+    return fnty;
+}
 fn Node* Parser.parse_type_atom(Parser* p)
 {
     Tok t = p.cur();
@@ -997,10 +1035,51 @@ fn Node* Parser.parse_type_atom(Parser* p)
         case TOKEN_TYPEVAR:
         {
             p.advance();
+            // `Tensor<T; d1, d2, ...>` is a ranked array: the nested fixed arrays [[T; dk] ...; d1]
+            if (t.len == 6 && t.start[0] == 'T' && t.start[1] == 'e' && t.start[2] == 'n' && t.start[3] == 's' && t.start[4] == 'o' && t.start[5] == 'r' && p.check(Tk.TOKEN_LT))
+            {
+                p.advance();
+                Node* elem = p.parse_type();
+                p.expect(Tk.TOKEN_SEMI, 1013, "expected ';' and the dimensions after the element type of a Tensor");
+                Node*[8] dims; usz nd = 0;
+                while (nd < 8)
+                {
+                    dims[nd] = p.parse_expr_prec(7);
+                    nd++;
+                    if (!p.accept(Tk.TOKEN_COMMA)) { break; }
+                }
+                p.expect(Tk.TOKEN_GT, 1010, "expected '>' to close the Tensor type");
+                Node* cur = elem;
+                for (usz di = nd; di > 0; di--)
+                {
+                    Node* arr = p.mk_at(Nk.N_TY_ARRAY, t);
+                    p.add(arr, cur);
+                    p.add(arr, dims[di - 1]);
+                    cur = arr;
+                }
+                return cur;
+            }
+            // `dyn Shape`: a trait object (data pointer + vtable) for the interface Shape; the node names the interface, aux 77 marks it
+            if (t.len == 3 && t.start[0] == 'd' && t.start[1] == 'y' && t.start[2] == 'n' && (p.cur().type == Tk.TOKEN_IDENT || p.cur().type == Tk.TOKEN_TYPEVAR))
+            {
+                Tok it = p.advance();
+                Node* dn = p.mk_at(Nk.N_TY_NAME, it);
+                dn.name_id = p.intern_tok(it);
+                dn.p.sptr = it.start;
+                dn.p.slen = it.len;
+                dn.p.aux = 77;
+                return dn;
+            }
             Node* n = p.mk_at(Nk.N_TY_NAME, t);
             n.name_id = p.intern_tok(t);
             n.p.sptr = t.start;
             n.p.slen = t.len;
+            // `Str` is the capitalised spelling of the primitive `str` (tests/exec/24, 35 write it that way)
+            if (t.len == 3 && t.start[0] == 'S' && t.start[1] == 't' && t.start[2] == 'r')
+            {
+                n.name_id = p.interner.intern("str", 3);
+                n.p.sptr = "str";
+            }
             return n;
         }
         case TOKEN_WILDCARD:
@@ -1069,6 +1148,8 @@ fn Node* Parser.parse_type_atom(Parser* p)
             }
 
             Node* first = p.parse_type();
+            bool had_arrow = p.check(Tk.TOKEN_ARROW) || p.check(Tk.TOKEN_ARROW_ASCII);
+            first = p.arrow_tail(first);   // `(A -> B)` is a function type; `(A -> B, C)` has it as one component of a tuple
             if (p.check(Tk.TOKEN_COMMA))
             {
                 Node* tup = p.mk_at(Nk.N_TY_TUPLE, t);
@@ -1084,7 +1165,7 @@ fn Node* Parser.parse_type_atom(Parser* p)
                         p.add(tup, p.mk_at(Nk.N_TY_INFER, el));
                         break;
                     }
-                    p.add(tup, p.parse_type());
+                    p.add(tup, p.arrow_tail(p.parse_type()));
                 }
                 p.expect(Tk.TOKEN_RPAREN, 1012, "expected ')' to close tuple type");
                 return tup;
@@ -1102,25 +1183,10 @@ fn Node* Parser.parse_type_atom(Parser* p)
              path, so downstream sees one representation of a function
              type rather than three.
             */
-            if (p.check(Tk.TOKEN_ARROW) || p.check(Tk.TOKEN_ARROW_ASCII))
+            if (had_arrow)
             {
-                Tok ar = p.advance();
-                Node* ret = p.parse_type_with_arrow();
-                Node* fnty = p.mk_at(Nk.N_TY_FN, ar);
-                p.add(fnty, first);
-                if (ret != null)
-                {
-                    Node* rw = p.mk_at(Nk.N_TY_CONSTRAINT, ar);
-                    p.add(rw, ret);
-                    p.add(fnty, rw);
-                }
-                if (p.check(Tk.TOKEN_BANG))
-                {
-                    Node* row = p.parse_effect_row();
-                    if (row != null) { p.add(fnty, row); }
-                }
                 p.expect(Tk.TOKEN_RPAREN, 1012, "expected ')' after parenthesised function type");
-                return fnty;
+                return first;
             }
             p.expect(Tk.TOKEN_RPAREN, 1012, "expected ')' after parenthesised type");
             return first;
@@ -1702,7 +1768,8 @@ fn int infix_prec(Tk t)
         case TOKEN_PERCENT:
         case TOKEN_STAR_QUESTION:
         case TOKEN_STAR_PERCENT:
-        case TOKEN_STAR_PIPE:     return 13;
+        case TOKEN_STAR_PIPE:
+        case TOKEN_AT:            return 13;   // `a @ b`: matrix/vector product of ranked arrays
         case TOKEN_KW_AS:         return 14;
         /*
          0 means "not an infix operator" and is load-bearing: callers loop
@@ -1977,6 +2044,48 @@ fn Node* Parser.parse_expr_prec(Parser* p, int min_prec)
     return left;
 }
 
+// the AIR atomic operation number (air_text::atomic_op_name) of an `atomic_*` keyword
+fn int atomic_op_index(Tk t)
+{
+    switch (t)
+    {
+        case TOKEN_KW_ATOMIC_LOAD:    return 0;
+        case TOKEN_KW_ATOMIC_STORE:   return 1;
+        case TOKEN_KW_ATOMIC_XCHG:    return 2;
+        case TOKEN_KW_ATOMIC_ADD:     return 3;
+        case TOKEN_KW_ATOMIC_SUB:     return 4;
+        case TOKEN_KW_ATOMIC_AND:     return 5;
+        case TOKEN_KW_ATOMIC_OR:      return 6;
+        case TOKEN_KW_ATOMIC_XOR:     return 7;
+        case TOKEN_KW_ATOMIC_NAND:    return 8;
+        case TOKEN_KW_ATOMIC_MAX:     return 9;
+        case TOKEN_KW_ATOMIC_MIN:     return 10;
+        case TOKEN_KW_ATOMIC_UMAX:    return 11;
+        case TOKEN_KW_ATOMIC_UMIN:    return 12;
+        case TOKEN_KW_ATOMIC_CMPXCHG: return 13;
+        default: return 3;
+    }
+}
+// `atomic_add(p, v, "acquire")` / `fence("release")`: a trailing string literal naming a memory order is the order,
+// not an operand (the default is seq_cst = 4)
+fn void take_order(pfront_core::PNode* n)
+{
+    if (n.child_count == 0) { return; }
+    pfront_core::PNode* last = n.children[n.child_count - 1];
+    if (last == null || last.kind != pfront_core::NodeKind.N_EXPR_STRING || last.p.sptr == null) { return; }
+    char* q = last.p.sptr; usz ql = (usz)last.p.slen;
+    if (ql >= 2 && q[0] == '"') { q = q + 1; ql = ql - 2; }
+    char*[5] names = { "relaxed", "acquire", "release", "acq_rel", "seq_cst" };
+    for (int i = 0; i < 5; i++)
+    {
+        char* nm = names[i]; usz k = 0; while (nm[k] != 0) { k++; }
+        if (k != ql) { continue; }
+        bool same = true;
+        for (usz j = 0; j < k; j++) { if (q[j] != nm[j]) { same = false; } }
+        if (same) { n.p.ival = (ulong)i; n.child_count--; return; }
+    }
+}
+
 fn bool tok_starts_expr(Tk t)
 {
     switch (t)
@@ -2036,6 +2145,13 @@ fn bool tok_starts_expr(Tk t)
         case TOKEN_KW_ATOMIC_XOR:
         case TOKEN_KW_ATOMIC_XCHG:
         case TOKEN_KW_ATOMIC_CMPXCHG:
+        case TOKEN_KW_ATOMIC_LOAD:
+        case TOKEN_KW_ATOMIC_STORE:
+        case TOKEN_KW_ATOMIC_NAND:
+        case TOKEN_KW_ATOMIC_MAX:
+        case TOKEN_KW_ATOMIC_MIN:
+        case TOKEN_KW_ATOMIC_UMAX:
+        case TOKEN_KW_ATOMIC_UMIN:
         case TOKEN_KW_TAIL:
             return true;
         default:
@@ -2634,6 +2750,21 @@ fn Node* Parser.parse_primary(Parser* p)
                 p.no_struct_lit = saved;
                 return tup;
             }
+            if (p.check(Tk.TOKEN_SEMI))   // `(a; b; c)`: a sequence, its value is the last expression
+            {
+                Node* seq = p.mk_at(Nk.N_BLOCK, t);
+                p.add(seq, first);
+                while (p.accept(Tk.TOKEN_SEMI))
+                {
+                    p.skip_layout();
+                    if (p.check(Tk.TOKEN_RPAREN)) { break; }
+                    p.add(seq, p.parse_expr());
+                    p.skip_layout();
+                }
+                p.expect(Tk.TOKEN_RPAREN, 1041, "expected ')' to close a sequence");
+                p.no_struct_lit = saved;
+                return seq;
+            }
             p.expect(Tk.TOKEN_RPAREN, 1041, "expected ')' after expression");
             p.no_struct_lit = saved;
             return first;
@@ -2643,6 +2774,24 @@ fn Node* Parser.parse_primary(Parser* p)
         {
             p.advance();
             Node* arr = p.mk_at(Nk.N_EXPR_ARRAY, t);
+            if (p.check(Tk.TOKEN_PIPE))   // `[| a, b |]`: a ranked (tensor) literal -- an array literal; nest them for more ranks
+            {
+                p.advance();
+                bool sv_np = p.no_pipe_infix; bool sv_sl = p.no_struct_lit;
+                p.no_pipe_infix = true; p.no_struct_lit = false;
+                p.skip_layout();
+                while (!p.check(Tk.TOKEN_PIPE) && !p.at_end())
+                {
+                    p.add(arr, p.parse_expr());
+                    p.skip_layout();
+                    if (!p.accept(Tk.TOKEN_COMMA)) { break; }
+                    p.skip_layout();
+                }
+                p.no_pipe_infix = sv_np; p.no_struct_lit = sv_sl;
+                p.expect(Tk.TOKEN_PIPE, 1042, "expected '|]' to close a tensor literal");
+                p.expect(Tk.TOKEN_RBRACK, 1042, "expected '|]' to close a tensor literal");
+                return arr;
+            }
             bool saved = p.no_struct_lit;
             p.no_struct_lit = false;
             p.skip_layout();
@@ -2763,6 +2912,15 @@ fn Node* Parser.parse_primary(Parser* p)
             // same rule as TOKEN_KW_TAIL and TOKEN_KW_HANDLE: a staging
             // block is followed by a level or a body, never by a token that
             // closes or separates the enclosing expression.
+            // `stage y + 10`: an expression directly after `stage` (an identifier that is not
+            // the soft keyword `then`, or a float/string literal) is the spec's stage passthrough: it evaluates as the bare expression.
+            // An identifier right after an identifier is not valid in any other reading.
+            Tok nx1 = p.peek(1);
+            if ((nx1.type == Tk.TOKEN_IDENT && !tok_is_then(nx1)) || nx1.type == Tk.TOKEN_LIT_FLOAT || nx1.type == Tk.TOKEN_LIT_STRING)
+            {
+                p.advance();
+                return p.parse_expr();   // unwrapped: the operand runs at the enclosing stage (no quote node, no stage-escape)
+            }
             if (!tok_starts_stage_body(p.peek(1).type))
             {
                 p.advance();
@@ -2999,6 +3157,8 @@ fn Node* Parser.parse_primary(Parser* p)
                 if (!p.check(Tk.TOKEN_RPAREN)) { p.add(n, p.parse_expr()); }
                 p.expect(Tk.TOKEN_RPAREN, 1048, "expected ')' after fence");
             }
+            n.p.ival = 4;
+            pfront_parse::take_order(n);
             return n;
         }
 
@@ -3009,10 +3169,18 @@ fn Node* Parser.parse_primary(Parser* p)
         case TOKEN_KW_ATOMIC_XOR:
         case TOKEN_KW_ATOMIC_XCHG:
         case TOKEN_KW_ATOMIC_CMPXCHG:
+        case TOKEN_KW_ATOMIC_LOAD:
+        case TOKEN_KW_ATOMIC_STORE:
+        case TOKEN_KW_ATOMIC_NAND:
+        case TOKEN_KW_ATOMIC_MAX:
+        case TOKEN_KW_ATOMIC_MIN:
+        case TOKEN_KW_ATOMIC_UMAX:
+        case TOKEN_KW_ATOMIC_UMIN:
         {
             p.advance();
             Node* n = p.mk_at(Nk.N_EXPR_ATOMIC, t);
-            n.p.op = (int)t.type;
+            n.p.op = pfront_parse::atomic_op_index(t.type);   // the AIR atomic-op number (air_text::atomic_op_name), not the token
+            n.p.ival = 4;                                      // seq_cst unless a trailing order string says otherwise
             n.effects = n.effects | pfront_core::EFF_IO;
             p.expect(Tk.TOKEN_LPAREN, 1049, "expected '(' after atomic operation");
             while (!p.check(Tk.TOKEN_RPAREN) && !p.at_end())
@@ -3021,6 +3189,7 @@ fn Node* Parser.parse_primary(Parser* p)
                 if (!p.accept(Tk.TOKEN_COMMA)) { break; }
             }
             p.expect(Tk.TOKEN_RPAREN, 1049, "expected ')' to close atomic operation");
+            pfront_parse::take_order(n);
             return n;
         }
 
@@ -3132,6 +3301,20 @@ fn Node* Parser.parse_primary(Parser* p)
             return id;
         }
 
+        case TOKEN_DOTDOT:
+        case TOKEN_DOTDOTEQ:
+        {
+            // `..hi` / `..=hi` / `..`: a range with no lower bound (0) -- `xs[..n]`, `xs[..]`
+            p.advance();
+            Node* rng = p.mk_at(Nk.N_EXPR_RANGE, t);
+            if (t.type == Tk.TOKEN_DOTDOTEQ) { rng.flags = rng.flags | pfront_core::NF_INCLUSIVE; }
+            Node* z = p.mk_at(Nk.N_EXPR_INT, t);
+            z.p.ival = 0; z.p.sptr = "0"; z.p.slen = 1;
+            { char w0; bool sg0; read_num_suffix("0", 1, &w0, &sg0); z.p.width = w0; z.p.is_signed = sg0; }
+            p.add(rng, z);
+            if (tok_starts_expr(p.ct())) { p.add(rng, p.parse_expr_prec(12)); }
+            return rng;
+        }
         case TOKEN_LBRACE:
             return p.parse_brace_block();
 
@@ -3299,7 +3482,7 @@ fn Node* Parser.parse_if(Parser* p)
     // as "expected an expression" on the `else` line. Scan the whole run.
     if (p.check(Tk.TOKEN_NEWLINE) || p.check(Tk.TOKEN_DEDENT))
     {
-        if (p.layout_then(Tk.TOKEN_KW_ELSE))
+        if (p.layout_then(Tk.TOKEN_KW_ELSE) && !p.else_is_outer())
         {
             while (p.check(Tk.TOKEN_NEWLINE) || p.check(Tk.TOKEN_DEDENT))
             {
@@ -3497,6 +3680,7 @@ fn Node* Parser.parse_match(Parser* p)
     bool braced = p.accept(Tk.TOKEN_LBRACE);
     p.skip_layout();
     bool indented = p.accept(Tk.TOKEN_INDENT);
+    bool arms_deeper = false;   // arms deeper than the statement: the lexer opened a level for the first `|` without an INDENT token
     p.skip_newlines();
     while (true)
     {
@@ -3542,6 +3726,7 @@ fn Node* Parser.parse_match(Parser* p)
             if (!p.check(Tk.TOKEN_PIPE)) { break; }
         }
         Tok bar = p.advance();
+        if (n.child_count == 1 && !indented && !braced && bar.col - 1 > p.stmt_indent) { arms_deeper = true; }   // see parse_handle
         Node* arm = p.mk_at(Nk.N_MATCH_ARM, bar);
         bool sv = p.in_fn_sig;
         p.in_fn_sig = false;
@@ -3596,6 +3781,7 @@ fn Node* Parser.parse_match(Parser* p)
         p.skip_newlines();
     }
     if (indented) { while (p.accept(Tk.TOKEN_DEDENT)) {} }
+    else if (arms_deeper && p.check(Tk.TOKEN_DEDENT)) { p.advance(); }   // the matching DEDENT, or the statements after the match leave their block
     if (braced) { p.skip_layout(); p.expect(Tk.TOKEN_RBRACE, 1062, "expected '}' to close match"); }
     if (n.child_count < 2)
     {
@@ -3614,10 +3800,12 @@ fn Node* Parser.parse_handle(Parser* p)
     p.no_pipe_infix = true;
     p.add(n, p.parse_block_or_expr());
     p.no_pipe_infix = saved_pipe;
+    bool arms_deeper = false;   // the first arm's `|` sits deeper than the statement: the lexer opened a level for it without an INDENT token
     p.skip_layout();
     while (p.check(Tk.TOKEN_PIPE))
     {
         Tok bar = p.advance();
+        if (n.child_count == 1 && bar.col - 1 > p.stmt_indent) { arms_deeper = true; }
         Node* arm = p.mk_at(Nk.N_HANDLER_ARM, bar);
         // Effect.op args -> body
         Tok en = p.cur();
@@ -3675,6 +3863,8 @@ fn Node* Parser.parse_handle(Parser* p)
         if (p.peek(look).col < bar.col) { break; }
         p.skip_layout();
     }
+    // ...and the DEDENT that closes that level comes after the last arm: take it, or the statements after the handler leave the enclosing block
+    if (arms_deeper && p.check(Tk.TOKEN_DEDENT)) { p.advance(); }
     return n;
 }
 
@@ -4514,12 +4704,12 @@ fn Node* Parser.parse_fn_decl(Parser* p, bool is_pub)
             cl.flags = cl.flags | pfront_core::NF_SYNTHETIC;
             if (init != null) { p.add(cl, init); }
             p.add(n, cl);
-            p.skip_trailing_attrs();
+            p.skip_trailing_attrs(); p.attach_ext(n);
             p.skip_newlines();
             return n;
         }
 
-        p.skip_trailing_attrs();
+        p.skip_trailing_attrs(); p.attach_ext(n);
         p.skip_newlines();
         bool indented = p.accept(Tk.TOKEN_INDENT);
         p.skip_newlines();
@@ -4541,7 +4731,7 @@ fn Node* Parser.parse_fn_decl(Parser* p, bool is_pub)
          Skipped here, after the INDENT, so both spellings work and
          neither needs its own rule.
         */
-        p.skip_trailing_attrs();
+        if (indented) { p.skip_trailing_attrs(); p.attach_ext(n); }   // (an unindented `#attr` here belongs to the NEXT declaration)
         p.skip_newlines();
 
         /*
@@ -4694,7 +4884,7 @@ fn Node* Parser.parse_fn_decl(Parser* p, bool is_pub)
         Node* row = p.parse_effect_row();
         if (row != null) { p.add(n, row); }
     }
-    p.skip_trailing_attrs();
+    p.skip_trailing_attrs(); p.attach_ext(n);
     if (p.check(Tk.TOKEN_KW_WHERE))
     {
         p.advance();
@@ -5417,6 +5607,33 @@ fn int Parser.parse_stage_offset(Parser* p)
 // ── Attributes ──────────────────────────────────────────────────────────────
 // #[attr] / #[attr(args)] and #attr forms. Attributes are attached to the
 // following declaration as trailing metadata children.
+// records `name` or `name(arg)` (the argument's first token: a string or an integer) as a pending attribute of the next declaration;
+// consumes through the closing parenthesis. The cursor is on the name token.
+fn void Parser.grab_attr(Parser* p)
+{
+    Tok nm = p.cur();
+    if (p.check(Tk.TOKEN_NEWLINE) || p.at_end() || p.check(Tk.TOKEN_RBRACK)) { return; }
+    p.advance();
+    char* ap = null; usz al = 0; bool isstr = false;
+    if (p.check(Tk.TOKEN_LPAREN))
+    {
+        p.advance();
+        if (p.check(Tk.TOKEN_LIT_STRING))
+        {
+            Tok st = p.cur(); ap = st.start; al = st.len; isstr = true;
+            if (al >= 2 && ap[0] == '"') { ap = ap + 1; al = al - 2; }
+        }
+        else if (p.check(Tk.TOKEN_LIT_INT)) { Tok it = p.cur(); ap = it.start; al = it.len; }
+        int depth = 1;
+        while (depth > 0 && !p.at_end())
+        {
+            if (p.check(Tk.TOKEN_LPAREN)) { depth = depth + 1; }
+            if (p.check(Tk.TOKEN_RPAREN)) { depth = depth - 1; }
+            p.advance();
+        }
+    }
+    if (nm.type != Tk.TOKEN_KW_EXTERN || isstr) { pfront_core::pend_attr(nm.start, nm.len, ap, al, isstr); }   // (a leading `#extern("sym")` is recorded as an attribute; globals read it)
+}
 fn void Parser.skip_attributes(Parser* p)
 {
     while (p.check(Tk.TOKEN_HASH) || p.check(Tk.TOKEN_AT))
@@ -5424,28 +5641,20 @@ fn void Parser.skip_attributes(Parser* p)
         p.advance();
         if (p.accept(Tk.TOKEN_LBRACK))
         {
-            int depth = 1;
-            while (depth > 0 && !p.at_end())
+            while (!p.check(Tk.TOKEN_RBRACK) && !p.at_end())
+            {
+                p.grab_attr();
+                if (!p.accept(Tk.TOKEN_COMMA)) { break; }
+            }
+            int depth = 1;   // anything unexpected up to the closing bracket is skipped
+            while (!p.at_end())
             {
                 if (p.check(Tk.TOKEN_LBRACK)) { depth = depth + 1; }
-                if (p.check(Tk.TOKEN_RBRACK)) { depth = depth - 1; }
+                if (p.check(Tk.TOKEN_RBRACK)) { depth = depth - 1; if (depth == 0) { p.advance(); break; } }
                 p.advance();
             }
         }
-        else
-        {
-            if (p.check(Tk.TOKEN_IDENT) || p.check(Tk.TOKEN_TYPEVAR)) { p.advance(); }
-            if (p.accept(Tk.TOKEN_LPAREN))
-            {
-                int depth = 1;
-                while (depth > 0 && !p.at_end())
-                {
-                    if (p.check(Tk.TOKEN_LPAREN)) { depth = depth + 1; }
-                    if (p.check(Tk.TOKEN_RPAREN)) { depth = depth - 1; }
-                    p.advance();
-                }
-            }
-        }
+        else { p.grab_attr(); }
         p.skip_newlines();
     }
 }
@@ -5453,6 +5662,12 @@ fn void Parser.skip_attributes(Parser* p)
 // Trailing attributes: `fn f : T -> U   #extern("name") #cc(c)`. These sit at
 // the END of a signature line, so every declaration parser must tolerate them
 // before the layout terminator. Skipping them here keeps that in one place.
+fn void Parser.attach_ext(Parser* p, Node* n)
+{
+    if (pfront_core::g_pend_ext_ptr == null) { return; }
+    pfront_core::set_ext_sym(n, pfront_core::g_pend_ext_ptr, pfront_core::g_pend_ext_len);
+    pfront_core::g_pend_ext_ptr = null; pfront_core::g_pend_ext_len = 0;
+}
 fn void Parser.skip_trailing_attrs(Parser* p)
 {
     while (p.check(Tk.TOKEN_HASH) || p.check(Tk.TOKEN_AT))
@@ -5472,10 +5687,19 @@ fn void Parser.skip_trailing_attrs(Parser* p)
         }
         // #name or #name(args) — also accept keyword-valued attribute names
         // such as #extern / #inline / #packed, which the lexer keywordises.
+        bool is_ext_attr = p.check(Tk.TOKEN_KW_EXTERN);
+        if (!is_ext_attr) { p.grab_attr(); continue; }
         if (!p.check(Tk.TOKEN_NEWLINE) && !p.at_end()) { p.advance(); }
         if (p.check(Tk.TOKEN_LPAREN))
         {
             p.advance();
+            if (is_ext_attr && p.check(Tk.TOKEN_LIT_STRING))
+            {
+                Tok st = p.cur();
+                char* sp = st.start; usz sl = st.len;
+                if (sl >= 2 && sp[0] == '"') { sp = sp + 1; sl = sl - 2; }
+                pfront_core::g_pend_ext_ptr = sp; pfront_core::g_pend_ext_len = sl;
+            }
             int depth = 1;
             while (depth > 0 && !p.at_end())
             {
@@ -5490,7 +5714,9 @@ fn void Parser.skip_trailing_attrs(Parser* p)
 fn Node* Parser.parse_decl(Parser* p)
 {
     p.skip_newlines();
+    pfront_core::g_pa_n = 0;
     p.skip_attributes();
+    pfront_core::PendAttrs lead_attrs = pfront_core::pa_take();   // (nested declarations reset the pending list)
     p.skip_newlines();
     if (p.at_end()) { return null; }
 
@@ -5565,6 +5791,8 @@ fn Node* Parser.parse_decl(Parser* p)
     {
         if (is_pub) { d.flags = d.flags | pfront_core::NF_PUB; }
         if (doc != null) { d.type_slot = null; p.add(d, doc); }
+        pfront_core::attach_attrs(d);                      // trailing attributes of this declaration
+        pfront_core::attach_saved(d, &lead_attrs);         // leading ones
     }
     return d;
 }

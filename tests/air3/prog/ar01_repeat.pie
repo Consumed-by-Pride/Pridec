@@ -1,0 +1,18 @@
+-- EXIT: 52
+-- [v; n] fills in place (loop), const-sized arrays, 300 elements (308 mod 256)
+const N : i64 = 100
+fn sum : (*i64, i64) -> i64
+  | (p, n) ->
+      let mut s : i64 = 0
+      let mut i : i64 = 0
+      while i < n
+        s = s + p[i]
+        i = i + 1
+      s
+fn main : () -> i64
+  | () ->
+      let a : [i64; 100] = [3i64; 100]
+      let b = [2i64; 4]
+      let mut c : [u8; 300] = [1u8; 300]
+      c[299] = 5u8
+      (sum(&a[0], N) + b[3] + (c[299] as i64) + (c[0] as i64)) & 255

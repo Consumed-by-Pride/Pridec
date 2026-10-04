@@ -1,0 +1,6 @@
+// ERROR: attribute given twice
+air 3.0 Main "v.pie";
+
+attr cold attr cold def f() : i64 = ret(1 : i64);
+
+def main() : i64 = ret(0 : i64);

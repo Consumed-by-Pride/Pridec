@@ -43,6 +43,7 @@ struct Rd
     char      punct;
     long      ival;
     double    fval;
+    int       ver_major;   // 2 or 3 (3 = low profile: alloca/load/gep/store/global are legal)
     int       ver_minor;   // header version 2.<ver_minor>: 2.1 requires result continuations (2.2: perform too)
     char*     tb;      // decoded token text (ids, strings)
     usz       tlen;
@@ -293,7 +294,7 @@ fn AirTyp* Rd.typ(Rd* r)
         {
             while (!r.failed)
             {
-                if (t.arg_count >= 8) { r.fail("more than 8 type arguments"); return null; }
+                if (t.arg_count >= 64) { r.fail("more than 64 type arguments"); return null; }
                 AirTyp* x = r.typ();
                 t.args[t.arg_count] = x; t.arg_count++;
                 if (r.eat_p(',')) { continue; }
@@ -346,7 +347,7 @@ fn usz Rd.binder_list(Rd* r, AirBinder** out, usz cap)
     {
         while (!r.failed)
         {
-            if (n >= cap) { r.fail("too many binders (limit 16)"); return n; }
+            if (n >= cap) { r.fail("too many binders"); return n; }
             out[n] = r.binder(); n++;
             if (r.eat_p(',')) { continue; }
             break;
@@ -363,7 +364,7 @@ fn usz Rd.name_list(Rd* r, char** out, usz cap)
     {
         while (!r.failed)
         {
-            if (n >= cap) { r.fail("too many names (limit 16)"); return n; }
+            if (n >= cap) { r.fail("too many names"); return n; }
             out[n] = r.name(); n++;
             if (r.eat_p(',')) { continue; }
             break;
@@ -413,7 +414,7 @@ fn AirPat* Rd.pat(Rd* r)
         {
             while (!r.failed)
             {
-                if (p.sub_count >= 16) { r.fail("more than 16 sub-patterns"); return null; }
+                if (p.sub_count >= 64) { r.fail("more than 64 sub-patterns"); return null; }
                 p.sub[p.sub_count] = r.pat(); p.sub_count++;
                 if (r.eat_p(',')) { continue; }
                 break;
@@ -431,7 +432,7 @@ fn AirPat* Rd.pat(Rd* r)
         {
             while (!r.failed)
             {
-                if (p.field_count >= 16) { r.fail("more than 16 record-pattern fields"); return null; }
+                if (p.field_count >= 64) { r.fail("more than 64 record-pattern fields"); return null; }
                 AirFieldInit* f = air_ir::air_new_AirFieldInit(a);
                 f.name = r.name();
                 p.fields[p.field_count] = f; p.field_count++;
@@ -453,7 +454,7 @@ fn AirPat* Rd.pat(Rd* r)
             {
                 while (!r.failed)
                 {
-                    if (p.sub_count >= 16) { r.fail("more than 16 sub-patterns"); return null; }
+                    if (p.sub_count >= 64) { r.fail("more than 64 sub-patterns"); return null; }
                     p.sub[p.sub_count] = r.pat(); p.sub_count++;
                     if (r.eat_p(',')) { continue; }
                     break;
@@ -510,8 +511,7 @@ fn void Rd.sub_list(Rd* r, AirPrd* p)
     {
         while (!r.failed)
         {
-            if (p.sub_count >= 16) { r.fail("more than 16 producer operands"); return; }
-            p.subs[p.sub_count] = r.prd(); p.sub_count++;
+            p.push_sub(r.prd());
             if (r.eat_p(',')) { continue; }
             break;
         }
@@ -571,7 +571,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
                 r.next();
                 AirPrd* p = r.new_prd(APRD_BINOP); if (p == null) { return null; }
                 p.bop = (AirBinop)bo;
-                p.subs[0] = r.prd(); p.subs[1] = r.prd(); p.sub_count = 2;
+                p.push_sub(r.prd()); p.push_sub(r.prd());
                 r.expect_p(')');
                 return p;
             }
@@ -581,7 +581,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
                 r.next();
                 AirPrd* p = r.new_prd(APRD_UNOP); if (p == null) { return null; }
                 p.uop = (AirUnop)uo;
-                p.subs[0] = r.prd(); p.sub_count = 1;
+                p.push_sub(r.prd());
                 r.expect_p(')');
                 return p;
             }
@@ -631,11 +631,10 @@ fn AirPrd* Rd.prd_core(Rd* r)
         {
             while (!r.failed)
             {
-                if (p.rec_init_count >= 16) { r.fail("more than 16 record fields"); return null; }
-                AirFieldInit* f = air_ir::air_new_AirFieldInit(a);
+                                AirFieldInit* f = air_ir::air_new_AirFieldInit(a);
                 f.name = r.name(); r.expect_p('=');
                 f.value = r.prd();
-                p.rec_inits[p.rec_init_count] = f; p.rec_init_count++;
+                p.push_rec(f);
                 if (r.eat_p(',')) { continue; }
                 break;
             }
@@ -649,7 +648,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
         AirPrd* p = r.new_prd(l ? APRD_INL : APRD_INR); if (p == null) { return null; }
         r.expect_p('['); p.ty_arg = r.typ(); r.expect_p(']');
         r.expect_p('(');
-        p.subs[0] = r.prd(); p.sub_count = 1;
+        p.push_sub(r.prd());
         r.expect_p(')'); return p;
     }
     if (r.is_kw("lam") || r.is_kw("cometa"))
@@ -669,11 +668,27 @@ fn AirPrd* Rd.prd_core(Rd* r)
         p.body = r.cmd();
         return p;
     }
+    if (r.is_kw("alloca") || r.is_kw("load") || r.is_kw("gep"))
+    {
+        if (r.ver_major < 3) { r.fail("alloca/load/gep need `air 3.0`"); return null; }
+        bool is_al = r.is_kw("alloca"); bool is_ld = r.is_kw("load"); r.next();
+        AirPrd* p = r.new_prd(is_al ? APRD_ALLOCA : (is_ld ? APRD_LOAD : APRD_GEP)); if (p == null) { return null; }
+        if (is_ld && r.eat_kw("volatile")) { p.bval = true; }
+        if (!is_al && !is_ld) { r.expect_p('['); p.ty_arg = r.typ(); r.expect_p(']'); }
+        r.expect_p('(');
+        if (is_al) { p.ty_arg = r.typ(); }
+        else
+        {
+            p.push_sub(r.prd());
+            while (!r.failed && r.eat_p(',')) { p.push_sub(r.prd()); }
+        }
+        r.expect_p(')'); return p;
+    }
     if (r.is_kw("coerce"))
     {
         r.next(); r.expect_p('(');
         AirPrd* p = r.new_prd(APRD_COERCE); if (p == null) { return null; }
-        p.subs[0] = r.prd(); p.sub_count = 1; r.expect_p(','); p.ty = r.typ();
+        p.push_sub(r.prd()); r.expect_p(','); p.ty = r.typ();
         r.expect_p(')'); return p;
     }
     if (r.is_kw("sizeof") || r.is_kw("alignof") || r.is_kw("poison"))
@@ -699,7 +714,7 @@ fn AirPrd* Rd.prd_core(Rd* r)
     {
         bool ev = r.is_kw("eval"); r.next(); r.expect_p('(');
         AirPrd* p = r.new_prd(ev ? APRD_EVAL : APRD_SPLICE); if (p == null) { return null; }
-        p.subs[0] = r.prd(); p.sub_count = 1; r.expect_p(')'); return p;
+        p.push_sub(r.prd()); r.expect_p(')'); return p;
     }
     if (air_text::is_reserved(r.tb)) { r.fail("reserved word used as a variable (quote it with backticks)"); return null; }
     AirPrd* v = r.new_prd(APRD_VAR);
@@ -1046,6 +1061,7 @@ fn AirCmd* Rd.cmd(Rd* r)
         if (r.kind == T_STR) { c.asm_text = r.dup_tok(); r.next(); }
         else if (r.is_kw("nil")) { r.next(); }
         else { r.fail("expected asm text"); return null; }
+        if (r.kind == T_STR) { c.asm_cons = r.dup_tok(); r.next(); r.expect_p(':'); r.expect_p('['); c.asm_ret = r.typ(); r.expect_p(']'); }   // AIR 3.0
         r.expect_p('(');
         if (!r.is_p(')'))
         {
@@ -1083,7 +1099,7 @@ fn AirCmd* Rd.cmd(Rd* r)
         int op = -1;
         if (r.kind == T_ID)
         {
-            for (int i = 0; i < 13; i++) { if (air_text::streq(r.tb, air_text::atomic_op_name(i))) { op = i; } }
+            for (int i = 0; i < 14; i++) { if (air_text::streq(r.tb, air_text::atomic_op_name(i))) { op = i; } }
         }
         if (op < 0) { r.fail("expected an atomic operation name"); return null; }
         r.next();
@@ -1097,6 +1113,17 @@ fn AirCmd* Rd.cmd(Rd* r)
         r.expect_p(')');
         r.result(c);
         return c;
+    }
+    if (r.is_kw("store"))
+    {
+        if (r.ver_major < 3) { r.fail("store(p, v) needs `air 3.0`"); return null; }
+        r.next();
+        bool svol = r.eat_kw("volatile");
+        r.expect_p('(');
+        AirCmd* c = r.new_cmd(ACMD_STORE); if (c == null) { return null; }
+        c.vol = svol;
+        c.prds[0] = r.prd(); r.expect_p(','); c.prds[1] = r.prd(); c.prd_count = 2;
+        r.expect_p(')'); return c;
     }
     if (r.is_kw("fence"))
     {
@@ -1152,6 +1179,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
     AirArena* a = r.a;
     bool is_pub = false; bool is_extern = false; bool is_fastcc = false; bool is_varargs = false;
     bool ro = false; bool facts = false; char* link = null;
+    char*[8] pend_attr_n; char*[8] pend_attr_s; long[8] pend_attr_i; bool[8] pend_attr_h; usz pend_attr_c = 0;
     while (!r.failed && r.kind == T_ID)
     {
         if (r.eat_kw("pub")) { is_pub = true; continue; }
@@ -1159,6 +1187,17 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         if (r.eat_kw("fastcc")) { is_fastcc = true; continue; }
         if (r.eat_kw("varargs")) { is_varargs = true; continue; }
         if (r.eat_kw("readonly")) { ro = true; continue; }
+        if (r.is_kw("attr"))
+        {
+            r.next();
+            char* an = r.name();
+            if (pend_attr_c >= 8) { r.fail("more than 8 attributes on a declaration"); continue; }
+            if (r.kind == T_STR) { char* sv = r.dup_tok(); r.next(); pend_attr_n[pend_attr_c] = an; pend_attr_s[pend_attr_c] = sv; pend_attr_i[pend_attr_c] = 0; pend_attr_h[pend_attr_c] = false; }
+            else if (r.kind == T_INT) { long iv = r.ival; r.next(); pend_attr_n[pend_attr_c] = an; pend_attr_s[pend_attr_c] = null; pend_attr_i[pend_attr_c] = iv; pend_attr_h[pend_attr_c] = true; }
+            else { pend_attr_n[pend_attr_c] = an; pend_attr_s[pend_attr_c] = null; pend_attr_i[pend_attr_c] = 0; pend_attr_h[pend_attr_c] = false; }
+            pend_attr_c++;
+            continue;
+        }
         if (r.is_kw("facts"))
         {
             r.next();
@@ -1202,9 +1241,10 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         AirDecl* d = air_ir::air_mk_decl(a, tg, r.name());
         d.is_pub = is_pub; d.is_extern = is_extern; d.is_fastcc = is_fastcc; d.is_varargs = is_varargs;
         d.extern_link = link; d.memory_readonly = ro;
+        for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         d.fact_state = facts ? AFACT_AST_FINAL : AFACT_UNKNOWN;   // claims are candidates, always
         r.typarams(d);
-        d.param_count = r.binder_list(&d.params[0], 16);
+        d.param_count = r.binder_list(&d.params[0], 64);
         if (r.eat_p(':')) { d.ret_ty = r.typ(); }
         if (r.eat_p('=')) { d.def_body = r.cmd(); }
         r.expect_p(';');
@@ -1212,11 +1252,26 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         if (m.decl_count >= 4096) { r.fail("more than 4096 declarations"); return false; }
         return m.add_decl(d);
     }
+    if (r.is_kw("global"))
+    {
+        if (r.ver_major < 3) { r.fail("global needs `air 3.0`"); return false; }
+        r.next();
+        AirDecl* d = air_ir::air_mk_decl(a, ADECL_GLOBAL, null);
+        d.is_pub = is_pub; d.is_extern = is_extern;
+        for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
+        if (r.eat_kw("mut")) { d.g_mut = true; }
+        d.name = r.name(); r.expect_p(':'); d.ret_ty = r.typ();
+        if (r.eat_p('=')) { d.g_init = r.prd(); }
+        r.expect_p(';');
+        if (r.failed) { return false; }
+        return m.add_decl(d);
+    }
     if (r.is_kw("data") || r.is_kw("codata"))
     {
         bool is_data = r.is_kw("data"); r.next();
         AirDecl* d = air_ir::air_mk_decl(a, is_data ? ADECL_DATA : ADECL_CODATA, r.name());
         d.is_pub = is_pub;
+        for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         if (r.eat_kw("lin")) { d.mult = AMULT_LIN; } else if (r.eat_kw("aff")) { d.mult = AMULT_AFF; }
         r.typarams(d);
         r.expect_p('{');
@@ -1282,7 +1337,7 @@ fn bool read_text(char* text, usz len, char* path, AirArena* a, AirModule* m, bo
     r.a = a; r.failed = false; r.path = path; r.quiet = quiet;
     r.errmsg = null; r.err_line = 0; r.err_col = 0;
     r.tb = (char*)malloc(len + 16);
-    r.tlen = 0; r.tline = 1; r.tcol = 1; r.ver_minor = 0;
+    r.tlen = 0; r.tline = 1; r.tcol = 1; r.ver_minor = 0; r.ver_major = 2;
     if (r.tb == null) { return false; }
     r.next();
     // header:  air 2.0 NAME SOURCE ;
@@ -1293,7 +1348,8 @@ fn bool read_text(char* text, usz len, char* path, AirArena* a, AirModule* m, bo
         else if (r.fval == 2.0) { r.ver_minor = 0; r.next(); }
         else if (r.fval == 2.1) { r.ver_minor = 1; r.next(); }
         else if (r.fval == 2.2) { r.ver_minor = 2; r.next(); }
-        else { r.fail("unsupported AIR version (this reader implements 2.0, 2.1 and 2.2)"); }
+        else if (r.fval == 3.0) { r.ver_major = 3; r.ver_minor = 2; r.next(); }   // 3.0 keeps every 2.2 rule
+        else { r.fail("unsupported AIR version (this reader implements 2.0, 2.1, 2.2 and 3.0)"); }
     }
     char* mname = r.name();
     char* msrc = null;
@@ -1306,6 +1362,7 @@ fn bool read_text(char* text, usz len, char* path, AirArena* a, AirModule* m, bo
     {
         if (!m.init(a, mname == null ? "" : mname, msrc)) { r.fail("module init failed"); }
         m.decl_count = 0;    // the file lists every decl, including the libc declares
+        m.low = (r.ver_major == 3);
     }
     while (!r.failed && r.kind != T_EOF)
     {

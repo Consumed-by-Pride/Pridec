@@ -1,0 +1,15 @@
+-- EXIT: 42
+-- EXPECT: ok\n
+-- freestanding: a `#naked` _start written in assembly aligns the stack, calls a Pride function, and exits with its result (no libc, no crt)
+fn real_main : () -> i64
+  | () ->
+      let msg : *u8 = "ok\n"
+      syscall(1, 1, msg, 3)
+      42i64
+
+#naked
+fn _start : () -> ()
+  | () ->
+      asm { "xorl %ebp, %ebp\n\tandq $-16, %rsp\n\tcallq real_main\n\tmovq %rax, %rdi\n\tmovl $60, %eax\n\tsyscall" : : : "memory" }
+      while true
+        ()

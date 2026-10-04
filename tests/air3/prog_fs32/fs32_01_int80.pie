@@ -1,0 +1,9 @@
+-- EXIT: 7
+-- EXPECT: hi\n
+-- freestanding i386: no libc, no crt -- `syscall` is `int $0x80` (eax = number, ebx ecx edx esi edi ebp = arguments)
+fn _start : () -> ()
+  | () ->
+      let msg : *u8 = "hi\n"
+      syscall(4, 1, msg, 3)
+      syscall(1, 7)
+      ()

@@ -5,7 +5,6 @@
 #   V3 = a variable the lowering emitted but never bound. Today this is: meta builtins (quote/eval/reify), session
 #   endpoints (tx/rx), effect resume (`k`), clause pattern binders of TRS rules / enum payloads, and block-scope leaks.
 #   A consumer must treat such a free variable as UNSUPPORTED, never as an external symbol.
-examples_hybrid_scoped_effects_showcase	0 0 2 0
 examples_sigils	0 0 31 0
 tests_exec_32_enum_clauses	0 0 1 0
 tests_pfront_45_opt_branch	0 0 1 0
@@ -17,4 +16,3 @@ tests_pfront_stress_s02_metaprog	0 0 21 0
 tests_pfront_stress_s03_effects_data	0 0 1 0
 tests_pfront_syntax_x07_meta_attrs	0 0 3 0
 tests_pfront_syntax_x10_graph_compiler	0 0 7 0
-tests_pfront_syntax_x13_wide_constructs	0 0 1 0

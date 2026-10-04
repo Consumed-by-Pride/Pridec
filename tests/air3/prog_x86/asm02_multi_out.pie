@@ -1,0 +1,14 @@
+-- EXIT: 31
+-- inline asm (x86-64 only): two outputs in fixed registers (divq: rax = quotient, rdx = remainder) and a `+r` in/out operand
+fn main : () -> i64
+  | () ->
+      let mut q : i64 = 0
+      let mut rem : i64 = 0
+      let a : i64 = 100
+      let z : i64 = 0
+      let d : i64 = 7
+      asm { "divq %4" : "={rax}"(q), "={rdx}"(rem) : "{rax}"(a), "{rdx}"(z), "r"(d) }
+      let mut acc : i64 = 10
+      let x : i64 = 5
+      asm { "addq %1, %0" : "+r"(acc) : "r"(x) }
+      q + rem + acc

@@ -1,0 +1,23 @@
+-- EXIT: 61
+-- Two nested handlers whose arms resume in non-tail position. work = a*10 + b*2 + c with a = E.eop(1) -> 2, b = F.fop(2) -> 3, c = E.eop(3) -> 6 = 32.
+-- inner (F): return arm +7, fop arm adds 20 after the resume; outer (E): each eop arm adds 1 after the resume.
+-- 32 + 7 = 39; + 20 = 59; + 1 (eop 3) + 1 (eop 1) = 61.  The E requests travel through the inner handler's driver.
+effect E
+  eop : i64 -> i64
+effect F
+  fop : i64 -> i64
+fn work : () -> i64 ! [E, F]
+  | () ->
+      let a : i64 = E.eop(1)
+      let b : i64 = F.fop(2)
+      let c : i64 = E.eop(3)
+      a * 10 + b * 2 + c
+fn inner : () -> i64 ! [E]
+  | () ->
+      handle work()
+        | F.fop x k -> (k (x + 1)) + 20
+        | return(r) -> r + 7
+fn main : () -> i64
+  | () ->
+      handle inner()
+        | E.eop x k -> (k (x * 2)) + 1

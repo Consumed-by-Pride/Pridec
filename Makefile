@@ -64,7 +64,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-lowering airtool legacy-pear test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -90,7 +90,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-lowering
+test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -161,7 +161,7 @@ $(PEAR1): $(PEAR1_SRC) $(AIR_READ_CORE) | c3c
 # only the IR, the text reader/writer and the validity rules.
 AIR_CORE  := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/air_text.c3 \
              pfront/pear_ir/air_write.c3 pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3 \
-             pfront/pear_ir/air_verify.c3 tools/air/airtool.c3
+             pfront/pear_ir/air_verify.c3 pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3 tools/air/airtool.c3
 AIRTOOL   := tmp/airtool
 airtool: $(AIRTOOL)
 $(AIRTOOL): $(AIR_CORE) | c3c
@@ -176,6 +176,13 @@ test-air: $(BINARY) $(AIRTOOL)
 
 # AIR lowering table: one feature per program in tests/lowering, audit + verify + native exit code,
 # with the known-failing cases recorded exactly (tests/lowering/KNOWN.tsv).
+# AIR 3.0 low profile: hand-written good/bad .air + the reference consumer (.air -> .ll -> executable)
+test-air3: $(BINARY) $(AIRTOOL)
+	@echo "==> AIR 3.0 low profile (reference consumer)"
+	bash tests/air3/run.sh $(AIRTOOL)
+	@echo "==> AIR 3.0 lowering gate (pfrontc --emit-air-low -> LLVM -> run)"
+	bash tests/air3/gate.sh
+
 test-lowering: $(BINARY) $(AIRTOOL) $(PEAR1)
 	@echo "==> AIR lowering table (audit, verify, native exit code)"
 	bash tests/lowering/run.sh ./$(BINARY)

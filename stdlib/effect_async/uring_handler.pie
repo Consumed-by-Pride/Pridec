@@ -49,23 +49,14 @@ fn uring_handler_new : u32 -> UringEffectHandler
   | entries ->
     UringEffectHandler {
       uring:     native_uring_new(entries),
-      suspended: vec.vec_new(16i64),
+      suspended: vec.vec_new(40i64),   -- the Vec stores AsyncRequest records by value (5 words)
       next_id:   1i64
     }
 
 fn uring_handler_destroy : *UringEffectHandler -> ()
   | h ->
     if h != null then {
-      let mut i : i64 = 0i64;
-      let len = vec.vec_len(&h.suspended);
-      while true do {
-        if i >= len then {
-          break;
-        };
-        os.linux.free(vec.vec_get(&h.suspended, i));
-        i = i + 1i64;
-      };
-      vec.vec_destroy(&h.suspended);
+      vec.vec_destroy(&h.suspended);   -- the records live inside the Vec's buffer: nothing else to free
       native_uring_destroy(&h.uring);
     } else {
       ()
@@ -77,13 +68,8 @@ fn uring_handler_submit_read : (*UringEffectHandler, i64, ptr, i64) -> i64
       let id = h.next_id;
       h.next_id = h.next_id + 1i64;
       let req = driver.asyncreq_new_read(id, fd, buf, len);
-      let p = os.linux.malloc(40i64) as *driver.AsyncRequest;
-      p.req_id  = req.req_id;
-      p.fd      = req.fd;
-      p.buf     = req.buf;
-      p.len     = req.len;
-      p.op_kind = req.op_kind;
-      vec.vec_push(&h.suspended, p as ptr);
+      let mut rq = req;
+      vec.vec_push(&h.suspended, &rq as ptr);   -- copies the 40-byte record into the Vec
       let _submitted : i64 = native_uring_submit(&h.uring);   -- native shim: result is the only effect
       id
     } else {

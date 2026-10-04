@@ -1,0 +1,66 @@
+-- EXIT: 60
+-- EXPECT: rt\n
+-- freestanding (the exported `malloc` takes an i64, as every Pride `malloc` declaration does): the program supplies its own `malloc`, `free`, `memcpy`, `memset` (#export) and `_start`; closures (heap environments), a 96-byte struct copied by value and a zero-filled array all run with no libc
+let mut HEAP : [u8; 4096] = [0u8; 4096]
+let mut TOP : i64 = 0i64
+
+#export("malloc")
+fn my_malloc : i64 -> *u8
+  | (n) ->
+      let at = TOP
+      TOP = TOP + ((n + 15i64) & (0i64 - 16i64))
+      &HEAP[at]
+
+#export("free")
+fn my_free : (*u8) -> ()
+  | (p) -> ()
+
+#export("memcpy") #no_builtins
+fn my_memcpy : (*u8, *u8, usz) -> *u8
+  | (d, s, n) ->
+      let mut i : i64 = 0i64
+      while i < n as i64
+        d[i] = s[i]
+        i = i + 1i64
+      d
+
+#export("memset") #no_builtins
+fn my_memset : (*u8, i32, usz) -> *u8
+  | (d, c, n) ->
+      let mut i : i64 = 0i64
+      while i < n as i64
+        d[i] = c as u8
+        i = i + 1i64
+      d
+
+struct Big
+  a: i64
+  b: i64
+  c: i64
+  d: i64
+  e: i64
+  f: i64
+  g: i64
+  h: i64
+  i: i64
+  j: i64
+  k: i64
+  l: i64
+
+fn make_adder : (i64) -> fn(i64) -> i64
+  | (n) -> fn (x: i64) -> i64 { x + n }
+
+fn copy_big : (Big) -> Big
+  | (b) -> b
+
+fn _start : () -> ()
+  | () ->
+      let msg : *u8 = "rt\n"
+      syscall(1, 1, msg, 3)
+      let add = make_adder(40i64)
+      let big = Big { a: 1i64, b: 2i64, c: 3i64, d: 4i64, e: 5i64, f: 6i64, g: 7i64, h: 8i64, i: 9i64, j: 10i64, k: 11i64, l: 12i64 }
+      let cp = copy_big(big)
+      let mut z : [i64; 8] = [5i64; 8]
+      z = [0i64; 8]
+      syscall(60, add(cp.a + cp.l + z[3] + 7i64))
+      ()

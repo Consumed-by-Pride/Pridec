@@ -1,0 +1,18 @@
+# tests/air/LINT_BASELINE.tsv -- scripts/air-lint.py result. Columns: rule | deficiencies | programs affected.
+# Only ever goes DOWN (docs/pear2/AIR3_PLAN.md); regenerate with --save after a real improvement.
+T1 untyped parameter	190	95
+T2 untyped return	86	36
+T3 untyped literal	2108	105
+T4 untyped operation	1004	81
+T5 untyped aggregate	73	23
+T6 high-level type	0	0
+M1 rebound name	1385	61
+H1 effects	15	6
+H2 closure	0	0
+H3 staging	0	0
+H4 generic decl	1	1
+H5 complex pattern	83	52
+H6 guard	1	1
+H7 comptime/defer	0	0
+H8 data/codata decl	25	19
+H9 unresolved field slot	68	2

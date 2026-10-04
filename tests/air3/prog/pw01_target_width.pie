@@ -1,0 +1,8 @@
+-- EXIT: 26
+-- WASM32-EXIT: 14
+-- usz and a slice's stored length are as wide as a pointer of the target: 8 + 16 on x86-64, 4 + 8 on wasm32 (+ a length of 2 read back as i64)
+fn main : () -> i64
+  | () ->
+      let a : [i64; 3] = [1i64, 2i64, 3i64]
+      let s : [i64] = a[0i64..2i64]
+      sizeof(usz) as i64 + sizeof([u8]) as i64 + s.len

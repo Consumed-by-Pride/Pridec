@@ -1,0 +1,13 @@
+-- EXIT: 9
+-- Aborting from inside a closure called by the handled computation.
+effect Q
+  quit : i64 -> i64
+fn apply_twice : (i64 -> i64) -> i64 ! [Q]
+  | f -> f(f(1))
+fn run : () -> i64
+  | () ->
+      let g = fn (x: i64) -> i64 { Q.quit(x + 8) + 1000 }
+      handle apply_twice(g)
+        | Q.quit c k -> c
+fn main : () -> i64
+  | () -> run()

@@ -1,0 +1,6 @@
+// ERROR: thread_local applies to a mutable global
+air 3.0 Main "v.pie";
+
+attr thread_local global G : i64 = 1 : i64;
+
+def main() : i64 = ret(0 : i64);

@@ -19,7 +19,6 @@
 11_logical_nonbool.pie	missing type-warn at 3:10
 120_extern_cc.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 121_naked_fn.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
-124_closure_multi_arg.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
 124_higher_order.pie	2 unexpected compile errors
 126_recursive_let.pie	expected CLEAN, got 1 errors/warnings
 127_labeled_break.pie	2 unexpected compile errors
@@ -37,13 +36,11 @@
 153_extern_puts.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 154_extern_multi.pie	expected CLEAN, got 5 errors/warnings; 5 unexpected compile errors
 15_effect_undeclared.pie	missing effect-warn at 4:1
-164_higher_order.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
 168_effect_io.pie	expected CLEAN, got 1 errors/warnings
 170_extern_math.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
 171_extern_stdio.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
 175_pattern_guards.pie	expected CLEAN, got 3 errors/warnings
 17_ub_bang.pie	count effect-err want=0 got=1; 1 unexpected compile errors
-180_closure_basics.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
 188_channel_ops.pie	expected CLEAN, got 3 errors/warnings
 18_match_nonexhaustive.pie	count lint-warn want=1 got=2
 194_compression.pie	expected CLEAN, got 1 errors/warnings
@@ -60,7 +57,6 @@
 243_enum_payload_oversize.pie	count type-err want=1 got=0
 244_enum_payload_multi.pie	count type-err want=1 got=0
 247_effect_arm_outer_assign.pie	count type-err want=1 got=0; 1 unexpected compile errors
-249_effect_row_polymorphism.pie	expected CLEAN, got 5 errors/warnings; 3 unexpected compile errors
 24_struct_field_mismatch.pie	missing type-warn at 6:27
 250_enum_match_sealed.pie	expected CLEAN, got 2 errors/warnings
 251_enum_arm_order.pie	expected CLEAN, got 2 errors/warnings
@@ -77,7 +73,6 @@
 28_return_type_mismatch.pie	missing type-warn at 3:10
 30_union_subtype_bad.pie	missing type-warn at 6:15
 33_handler_partial_leak.pie	missing effect-warn at 6:1
-34_open_row_ok.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
 35_match_no_catchall.pie	lint-warn@4:7 text!~'non-exhaustive'
 36_deref_nonpointer.pie	missing type-warn at 3:10
 38_shift_float.pie	missing type-warn at 3:12
@@ -86,23 +81,17 @@
 44_if_typed_branch_warns.pie	missing type-warn at 3:10
 47_class_guidance.pie	missing parse at 2:1; 4 unexpected compile errors
 50_realistic_kernel.pie	1 unexpected compile errors
-55_generic_map.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
 56_concrete_field_still_warns.pie	missing type-warn at 6:22
 58_use_alias.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 59_cross_module_collision.pie	expected CLEAN, got 2 errors/warnings
-60_str_primitive.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
 61_aggregate_cmp_warns.pie	missing type-warn at 5:17
 62_bool_order_warns.pie	missing type-warn at 3:17
 63_union_exhaustive_clean.pie	expected CLEAN, got 1 errors/warnings
 64_call_nonfn_warns.pie	missing type-warn at 3:11
-65_fn_param_call_clean.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
 66_pgen_metavars.pie	expected CLEAN, got 5 errors/warnings; 1 unexpected compile errors
 67_rewrite_metavars.pie	expected CLEAN, got 1 errors/warnings
-68_rank3_tensor.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 69_tensor_elemwise_mismatch.pie	missing type-warn at 4:11; 2 unexpected compile errors
 70_if_assign_hint.pie	missing type-warn at 4:12; 2 unexpected compile errors
-71_irdl_dialect_clean.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
-72_irdl_unknown_opcode.pie	2 unexpected compile errors (unknown type name Str in the fixture); the irdl unknown-opcode diagnostic itself is now produced at 7:3
 74_handler_resume.pie	expected CLEAN, got 1 errors/warnings
 75_with_binding.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 78_standalone_graph.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
