@@ -1,0 +1,16 @@
+-- EXIT: 15
+-- generics past four type parameters (the limit was 4, silently truncated; it is 8 now, and more is an error)
+type Six<A, B, C, D, E, F> = struct
+  a : A
+  b : B
+  c : C
+  d : D
+  e : E
+  f : F
+
+fn pick<A, B, C, D, E, F> : (Six<A, B, C, D, E, F>, A, B, C, D, E, F) -> F
+  | (s, a, b, c, d, e, f) -> s.f
+
+fn main : () -> i64 | () ->
+  let s : Six<i64, i64, i64, u8, bool, i64> = Six { a: 1, b: 2, c: 3, d: 4u8, e: true, f: 6 }
+  pick(s, 1, 2, 3, 4u8, true, 6) + s.a + s.b + s.c + s.d as i64 + (if s.e then 1 else 0) - 2

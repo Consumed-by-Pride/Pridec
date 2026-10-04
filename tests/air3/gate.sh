@@ -19,6 +19,8 @@ fi
 out=$(bash tests/air3/low_corpus.sh tests/air3/prog_native/*.pie 2>&1 | tail -1); echo "native: $out"
 case "$out" in *"FRONT=0 NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: air3 native-only programs"; fail=1;; esac
 # freestanding x86-64 Linux: no libc, no crt; the program's own (possibly #naked) `_start`, `syscall` as the instruction
+out=$(bash tests/air3/internalize.sh 2>&1 | tail -2); echo "linkage: $out"
+case "$out" in *"internalize linkage: PASS"*) ;; *) echo "FAIL: internalize linkage"; fail=1;; esac
 if [ "$(uname -m)" = x86_64 ]; then
     out=$(bash tests/air3/low_corpus.sh --freestanding tests/air3/prog_fs/*.pie 2>&1 | tail -1); echo "freestanding: $out"
     case "$out" in *"FRONT=0 NOLOWER=0 VERIFY=0 LLVM=0 WRONG=0"*) ;; *) echo "FAIL: air3 freestanding programs"; fail=1;; esac

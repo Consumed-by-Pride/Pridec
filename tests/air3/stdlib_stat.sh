@@ -12,7 +12,7 @@ for f in $(find stdlib -name "*.pie" | sort); do
   elif echo "$o" | grep -q "function(s) lowered"; then
     if tmp/airtool verify-low "$tmpd/s.low.air" >/dev/null 2>&1 && tmp/airtool verify "$tmpd/s.low.air" >/dev/null 2>&1 && tmp/airtool lint "$tmpd/s.low.air" >/dev/null 2>&1; then
       # LLVM must accept the module too: emit .ll, parse + verify + optimise + write an object (no link)
-      if tmp/airtool emit-ll "$tmpd/s.low.air" -o "$tmpd/s.ll" >/dev/null 2>&1 && python3 scripts/ll-exe.py "$tmpd/s.ll" -o "$tmpd/s.o" -O2 --emit-obj >"$tmpd/ll.err" 2>&1; then r=OK
+      if tmp/airtool emit-ll "$tmpd/s.low.air" -o "$tmpd/s.ll" ${LOW_INTERNALIZE:+--internalize} >/dev/null 2>&1 && python3 scripts/ll-exe.py "$tmpd/s.ll" -o "$tmpd/s.o" -O2 --emit-obj >"$tmpd/ll.err" 2>&1; then r=OK
       else r="LLVM $(head -c 120 "$tmpd/ll.err" | head -1)"; fi
     else r=VERIFY; fi
   else r="OTHER $(echo "$o" | head -1 | cut -c1-50)"; fi

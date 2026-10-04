@@ -109,6 +109,12 @@ through asm, volatile VGA MMIO, naked ISR stub, `#noredzone`) is built for `x86_
   symbol (`__kernel_end`: only its address is meaningful), a symbol defined in assembly. Pride: `#extern("sym") let [mut] X : T`. A second declaration of the
   same symbol is the same storage. `#export("sym") let mut X : T = c` names a definition's symbol exactly.
 
+* Library mode (a module without `main`): the top-level functions and globals of the entry module are `pub` (Pride has no private marker for them; the
+  stdlib declares no `pub` at all); everything reached from other modules is not. Stdlib objects at -O2: 805,424 bytes plain, 543,528 with `--internalize`.
+  Checked on the objects by `tests/air3/internalize.sh` (nm letters).
+* A function with `#callconv` used as a function value is called through an adapter that uses its own convention (`cc01`); its address as a raw pointer
+  (`f as ptr`: IDT / vector tables) is just the address — calling a raw pointer uses the C convention, so that is the caller's affair.
+
 ## Verifier rule V5 (AIR level)
 
 `airtool verify` checks, for modules whose header says `air 3.0`, the low-profile rules that need no LLVM: attribute names, arguments and targets
