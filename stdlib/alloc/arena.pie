@@ -18,7 +18,7 @@ struct Arena
 
 fn arena_chunk_new : i64 -> *ArenaChunk
   | cap ->
-    let c = os.linux.malloc(32i64) as *ArenaChunk
+    let c = os.linux.malloc(sizeof(ArenaChunk) as i64) as *ArenaChunk
     c.buf     = os.linux.malloc(cap)
     c.cap     = cap
     c.used    = 0i64
@@ -69,13 +69,21 @@ fn arena_alloc : (*Arena, i64, i64) -> ptr
       cur.used = aligned_used + size
       p
     else
-      let next_cap = if size > a.chunk_sz then size + a.chunk_sz else a.chunk_sz
-      let new_c = arena_chunk_new(next_cap)
-      cur.next_ch = new_c as ptr
-      a.current   = new_c
-      let p = new_c.buf
-      new_c.used  = size
-      p
+      -- after arena_clear the chain still holds the old chunks (all empty): move on to the next one when the request fits,
+      -- otherwise put a new chunk in front of it.  (Replacing cur.next_ch dropped the rest of the chain: a leak per clear.)
+      let nxt = cur.next_ch as *ArenaChunk
+      if nxt as i64 != 0i64 && nxt.cap >= size && nxt.used == 0i64
+        a.current = nxt
+        arena_alloc(a, size, align_bytes)
+      else
+        let next_cap = if size > a.chunk_sz then size + a.chunk_sz else a.chunk_sz
+        let new_c = arena_chunk_new(next_cap)
+        new_c.next_ch = cur.next_ch
+        cur.next_ch = new_c as ptr
+        a.current   = new_c
+        let p = new_c.buf
+        new_c.used  = size
+        p
 
 fn arena_alloc_zeroed : (*Arena, i64, i64) -> ptr
   | (a, size, align_bytes) ->

@@ -25,8 +25,8 @@ Header: `air 3.0 Main "src";`. A file is a list of declarations; the syntax is t
 
 * every `def` parameter, `let`, block parameter and result has a **concrete low type**: the machine integers
   (`i8…i64,isz,u8…u64,usz`), `f32,f64,bool,char,unit,!`, `ptr(T)`, `T[n]`, tuples, arrows, and `nominal` data;
-* **no** `infer`, `con`, `lam`, `mu`, `cometa`, `reify`, `eval`, `quote`, `splice`, `offsetof`, `alignof` (the
-  producer has evaluated them: quote/splice/eval become thunks, `sizeof` is a constant, effects are ordinary
+* **no** `infer`, `con`, `lam`, `mu`, `cometa`, `reify`, `eval`, `quote`, `splice`, `alignof` (the
+  producer has evaluated them: quote/splice/eval become thunks, `sizeof` is a constant, `offset_of` is a null-based `gep` + `ptrtoint`, effects are ordinary
   code — see below);
 * control flow is `label`-spine blocks with `jump` arguments (phis), `if`, `match` on int/bool/char, `ret`,
   `trap`, `ub`, `cut`;
@@ -42,7 +42,7 @@ Header: `air 3.0 Main "src";`. A file is a list of declarations; the syntax is t
   (`<fn>.bodyN`, the fiber entry) and a *driver* (`<fn>.driveN`) resumes the fiber, runs the arm on the handler's
   stack when it yields (`resume k v` = store v, call the driver again), forwards requests aimed at an outer
   handler by yielding its own fiber, and releases the fiber (`__pride_fiber_release`) when the body finishes or
-  the arm does not resume. One-shot (a second resume traps); needs `runtime/compiler_rt.c` (native only);
+  the arm does not resume. One-shot (a second resume traps); needs `runtime/compiler_rt.c` (native: ucontext, 1 MiB mmap stack + guard page) or, on wasm32, `runtime/wasi/pride_fiber.c` + `scripts/wasm-fibers.py` (binaryen Asyncify: each fiber owns an unwind buffer and a shadow stack; the entry is re-entered in rewind mode on every resume); not available on i386/freestanding;
 * variadic C calls: `declare … varargs`; `syscall` is the `syscall` command (≤ 7 operands).
 
 ## Systems primitives (OS / concurrency)

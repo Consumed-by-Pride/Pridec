@@ -142,11 +142,16 @@ fn count_digits_u64 : u64 -> i64
       n
 
 -- f64 bit layout helpers
+-- the bit pattern, read through a stack slot (`v as u64` is a value conversion: 1.5 would become 1)
 fn f64_bits : f64 -> u64
-  | v -> v as u64   -- reinterpret (Pride raw cast)
+  | v ->
+    let mut t = v
+    (&t as *u64)[0i64]
 
 fn f64_from_bits : u64 -> f64
-  | v -> v as f64
+  | v ->
+    let mut t = v
+    (&t as *f64)[0i64]
 
 fn f64_sign_bit    : f64 -> bool  | v -> (f64_bits(v) >> 63u64) != 0u64
 fn f64_exp_bits    : f64 -> u64   | v -> (f64_bits(v) >> 52u64) & 0x7FFu64

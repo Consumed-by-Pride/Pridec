@@ -58,7 +58,7 @@ fn dir_iter_close : *DirIter -> ()
 
 fn dir_list_paths : ptr -> vec.Vec
   | dir_path ->
-    let mut out = vec.vec_new(8i64)
+    let mut out = vec.vec_new(sizeof(string.String) as i64)
     let mut it = dir_iter_open(dir_path)
     if it.fd >= 0i64
       while true

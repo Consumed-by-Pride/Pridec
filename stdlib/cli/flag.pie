@@ -25,7 +25,7 @@ struct ArgResult
 
 fn flag_new_bool : (ptr, u8, bool, ptr) -> *Flag
   | (name_cstr, sh, default_val, doc_cstr) ->
-    let f = os.linux.malloc(56i64) as *Flag
+    let f = os.linux.malloc(sizeof(Flag) as i64) as *Flag
     f.name    = string.string_from_cstr(name_cstr)
     f.short_c = sh
     f.kind    = KIND_BOOL
@@ -37,7 +37,7 @@ fn flag_new_bool : (ptr, u8, bool, ptr) -> *Flag
 
 fn flag_new_int : (ptr, u8, i64, ptr) -> *Flag
   | (name_cstr, sh, default_val, doc_cstr) ->
-    let f = os.linux.malloc(56i64) as *Flag
+    let f = os.linux.malloc(sizeof(Flag) as i64) as *Flag
     f.name    = string.string_from_cstr(name_cstr)
     f.short_c = sh
     f.kind    = KIND_INT
@@ -49,7 +49,7 @@ fn flag_new_int : (ptr, u8, i64, ptr) -> *Flag
 
 fn flag_new_string : (ptr, u8, ptr, ptr) -> *Flag
   | (name_cstr, sh, default_cstr, doc_cstr) ->
-    let f = os.linux.malloc(56i64) as *Flag
+    let f = os.linux.malloc(sizeof(Flag) as i64) as *Flag
     f.name    = string.string_from_cstr(name_cstr)
     f.short_c = sh
     f.kind    = KIND_STRING
@@ -59,13 +59,21 @@ fn flag_new_string : (ptr, u8, ptr, ptr) -> *Flag
     f.doc     = string.string_from_cstr(doc_cstr)
     f
 
-fn flag_destroy : *Flag -> ()
+-- release the strings a Flag owns; the Flag itself (heap or inside a Vec) is the caller's
+fn flag_destroy_fields : *Flag -> ()
   | f ->
     if f as i64 == 0i64 then ()
     else
       string.string_destroy(&f.name)
       string.string_destroy(&f.s_val)
       string.string_destroy(&f.doc)
+
+-- release a Flag made by flag_new_*: its strings and the malloc'd block
+fn flag_destroy : *Flag -> ()
+  | f ->
+    if f as i64 == 0i64 then ()
+    else
+      flag_destroy_fields(f)
       os.linux.free(f as ptr)
 
 fn argresult_destroy : *ArgResult -> ()

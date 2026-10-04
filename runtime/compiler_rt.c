@@ -800,11 +800,25 @@ uint64_t __pride_get_arm_arg(uint64_t idx) {
  * ============================================================================
  */
 
-#define PRIDE_FIBER_STACK_SIZE (128 * 1024)
+/* A fiber runs the body of a `handle` on its own stack.  The stack is a lazily committed anonymous mapping (physical memory is only used
+ * as deep as the body actually recurses) with an inaccessible guard page below it, so a runaway body faults instead of silently
+ * corrupting the heap neighbour (the old 128 KiB malloc block did that).  Default 1 MiB; PRIDE_FIBER_STACK_KB=n overrides (min 64). */
+#define PRIDE_FIBER_GUARD 4096u
+static size_t pride_fiber_stack_bytes(void) {
+    static size_t sz = 0;
+    if (sz == 0) {
+        const char* e = getenv("PRIDE_FIBER_STACK_KB");
+        size_t kb = e ? (size_t)strtoul(e, NULL, 10) : 0;
+        if (kb < 64) kb = 1024;
+        sz = kb * 1024;
+    }
+    return sz;
+}
 
 typedef struct PrideFiber {
     ucontext_t uc;
-    char*      stack;
+    char*      stack;      /* start of the mapping (guard page first) */
+    size_t     map_bytes;
     struct PrideFiber* caller;
     void*      yield_val;
     int        completed;
@@ -827,14 +841,18 @@ static void fiber_entry_tramp(uint32_t fhi, uint32_t flo, uint32_t ehi, uint32_t
 PrideFiber* __pride_fiber_spawn(void* entry_fn, void* arg) {
     PrideFiber* fib = (PrideFiber*)pride_alloc(sizeof(PrideFiber));
     if (PRIDE_UNLIKELY(fib == NULL)) panic_fmt("fiber_spawn: OOM");
-    fib->stack = (char*)pride_alloc(PRIDE_FIBER_STACK_SIZE);
-    if (PRIDE_UNLIKELY(fib->stack == NULL)) panic_fmt("fiber_spawn: stack OOM");
+    size_t usable = pride_fiber_stack_bytes();
+    fib->map_bytes = usable + PRIDE_FIBER_GUARD;
+    void* map = mmap(NULL, fib->map_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (PRIDE_UNLIKELY(map == MAP_FAILED)) panic_fmt("fiber_spawn: stack OOM");
+    mprotect(map, PRIDE_FIBER_GUARD, PROT_NONE);
+    fib->stack = (char*)map;
     fib->caller = NULL;
     fib->yield_val = arg;
     fib->completed = 0;
     getcontext(&fib->uc);
-    fib->uc.uc_stack.ss_sp   = fib->stack;
-    fib->uc.uc_stack.ss_size = PRIDE_FIBER_STACK_SIZE;
+    fib->uc.uc_stack.ss_sp   = fib->stack + PRIDE_FIBER_GUARD;
+    fib->uc.uc_stack.ss_size = usable;
     fib->uc.uc_link          = NULL;
     uintptr_t fib_raw = (uintptr_t)fib;
     uintptr_t fn_raw  = (uintptr_t)entry_fn;
@@ -869,7 +887,7 @@ void* __pride_fiber_yield(void* arg) {
 /* Free a fiber that finished or was abandoned (its handler arm did not resume it).  The caller is NOT running on that fiber. */
 void __pride_fiber_release(PrideFiber* fib) {
     if (fib == NULL) return;
-    if (fib->stack) pride_free(fib->stack, PRIDE_FIBER_STACK_SIZE);
+    if (fib->stack) munmap(fib->stack, fib->map_bytes);
     pride_free(fib, sizeof(PrideFiber));
 }
 

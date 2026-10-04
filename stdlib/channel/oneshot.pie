@@ -22,7 +22,7 @@ struct OneshotReceiver
 
 fn oneshot_channel_new : () -> (OneshotSender, OneshotReceiver)
   | () ->
-    let ch = os.linux.malloc(48i64) as *OneshotChannel
+    let ch = os.linux.malloc(sizeof(OneshotChannel) as i64) as *OneshotChannel
     ch.value   = 0 as ptr
     ch.has_val = false
     ch.closed  = false

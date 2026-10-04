@@ -20,7 +20,7 @@ struct BTreeMap
 
 fn btree_node_new : bool -> *BTreeNode
   | is_leaf ->
-    let node = os.linux.malloc(40i64) as *BTreeNode
+    let node = os.linux.malloc(sizeof(BTreeNode) as i64) as *BTreeNode
     node.keys     = os.linux.malloc((2i64 * BTREE_ORDER - 1i64) * 8i64) as *u64
     node.values   = os.linux.malloc((2i64 * BTREE_ORDER - 1i64) * 8i64) as *i64
     node.children = if is_leaf then 0 as *ptr else os.linux.malloc((2i64 * BTREE_ORDER) * 8i64) as *ptr
@@ -79,35 +79,85 @@ fn btree_contains : (*BTreeMap, u64) -> bool
     let (_, found) = btree_get(map, key)
     found
 
+-- CLRS B-tree with minimum degree t = BTREE_ORDER: a node holds at most 2t-1 keys and 2t children.
+-- split the full child y = x.children[i] around its median key, which moves up into x at position i.
+fn btree_split_child : (*BTreeNode, i64) -> ()
+  | (x, i) ->
+    let t = BTREE_ORDER
+    let y = x.children[i] as *BTreeNode
+    let z = btree_node_new(y.is_leaf)
+    z.n_keys = t - 1i64
+    let mut j : i64 = 0i64
+    while j < t - 1i64
+      z.keys[j]   = y.keys[j + t]
+      z.values[j] = y.values[j + t]
+      j = j + 1i64
+    if !y.is_leaf
+      let mut c : i64 = 0i64
+      while c < t
+        z.children[c] = y.children[c + t]
+        c = c + 1i64
+    let mk = y.keys[t - 1i64]
+    let mv = y.values[t - 1i64]
+    y.n_keys = t - 1i64
+    -- make room in x for the new child (i+1) and the median key (i)
+    let mut k = x.n_keys
+    while k > i
+      x.children[k + 1i64] = x.children[k]
+      k = k - 1i64
+    x.children[i + 1i64] = z as ptr
+    let mut m = x.n_keys - 1i64
+    while m >= i
+      x.keys[m + 1i64]   = x.keys[m]
+      x.values[m + 1i64] = x.values[m]
+      m = m - 1i64
+    x.keys[i]   = mk
+    x.values[i] = mv
+    x.n_keys = x.n_keys + 1i64
+
+-- insert into a node that is known not to be full; true if the key is new, false if an existing value was replaced
 fn btree_insert_nonfull : (*BTreeNode, u64, i64) -> bool
   | (node, key, val) ->
-    let mut i = node.n_keys - 1i64
-    if node.is_leaf
-      while i >= 0i64 && node.keys[i] > key
-        node.keys[i + 1i64]   = node.keys[i]
-        node.values[i + 1i64] = node.values[i]
-        i = i - 1i64
-      if i >= 0i64 && node.keys[i] == key
-        node.values[i] = val
-        false
-      else
-        node.keys[i + 1i64]   = key
-        node.values[i + 1i64] = val
-        node.n_keys = node.n_keys + 1i64
-        true
-    else
-      while i >= 0i64 && node.keys[i] > key
-        i = i - 1i64
+    let mut i : i64 = 0i64
+    while i < node.n_keys && node.keys[i] < key
       i = i + 1i64
+    if i < node.n_keys && node.keys[i] == key
+      node.values[i] = val
+      false
+    else if node.is_leaf
+      let mut j = node.n_keys
+      while j > i
+        node.keys[j]   = node.keys[j - 1i64]
+        node.values[j] = node.values[j - 1i64]
+        j = j - 1i64
+      node.keys[i]   = key
+      node.values[i] = val
+      node.n_keys = node.n_keys + 1i64
+      true
+    else
       let child = node.children[i] as *BTreeNode
       if child.n_keys == 2i64 * BTREE_ORDER - 1i64
-        -- simple split placeholder for fixed order
-        btree_insert_nonfull(child, key, val)
+        btree_split_child(node, i)
+        if node.keys[i] == key
+          node.values[i] = val
+          false
+        else if node.keys[i] < key
+          btree_insert_nonfull(node.children[i + 1i64] as *BTreeNode, key, val)
+        else
+          btree_insert_nonfull(node.children[i] as *BTreeNode, key, val)
       else
         btree_insert_nonfull(child, key, val)
 
 fn btree_insert : (*BTreeMap, u64, i64) -> bool
   | (map, key, val) ->
+    if map.root as i64 == 0i64
+      map.root = btree_node_new(true)
+    let r = map.root
+    if r.n_keys == 2i64 * BTREE_ORDER - 1i64
+      let s = btree_node_new(false)
+      s.children[0i64] = r as ptr
+      map.root = s
+      btree_split_child(s, 0i64)
     let added = btree_insert_nonfull(map.root, key, val)
     if added
       map.count = map.count + 1i64

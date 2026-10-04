@@ -1,0 +1,210 @@
+-- EXIT: 53
+-- a compiler written in Pride: source text -> recursive-descent parser -> stack bytecode -> VM.  The language has integers, a..z
+-- variables, + - * / <, parentheses, `x = e;`, `e;` (the last one is the result) and `while (e) { ... }`.
+-- Program 1: fib(10) = 55, minus 2 = 53.  Program 2 (precedence and associativity) is checked inside: 26.  A wrong one adds 100.
+struct Ctx
+  src  : *u8
+  pos  : i64
+  code : *i64
+  n    : i64
+
+fn at : (*Ctx) -> i64
+  | (c) -> c.src[c.pos] as i64
+
+fn peek : (*Ctx) -> i64
+  | (c) ->
+    while at(c) == 32i64 || at(c) == 10i64
+      c.pos = c.pos + 1i64
+    at(c)
+
+fn emit : (*Ctx, i64) -> i64
+  | (c, v) ->
+    c.code[c.n] = v
+    c.n = c.n + 1i64
+    c.n
+
+fn is_digit : (i64) -> bool
+  | (ch) -> ch >= 48i64 && ch <= 57i64
+
+fn atom : (*Ctx) -> i64
+  | (c) ->
+    let ch = peek(c)
+    if ch == 40i64 then paren(c)
+    else if is_digit(ch) then number(c)
+    else variable(c)
+
+fn paren : (*Ctx) -> i64
+  | (c) ->
+    c.pos = c.pos + 1i64
+    let e = expr(c)
+    peek(c)
+    c.pos = c.pos + 1i64
+    e
+
+fn number : (*Ctx) -> i64
+  | (c) ->
+    let mut v : i64 = 0i64
+    while is_digit(at(c))
+      v = v * 10i64 + (at(c) - 48i64)
+      c.pos = c.pos + 1i64
+    emit(c, 1i64)
+    emit(c, v)
+
+fn variable : (*Ctx) -> i64
+  | (c) ->
+    let v = at(c) - 97i64
+    c.pos = c.pos + 1i64
+    emit(c, 2i64)
+    emit(c, v)
+
+fn term : (*Ctx) -> i64
+  | (c) ->
+    atom(c)
+    let mut op = peek(c)
+    while op == 42i64 || op == 47i64
+      c.pos = c.pos + 1i64
+      atom(c)
+      emit(c, if op == 42i64 then 6i64 else 7i64)
+      op = peek(c)
+    c.n
+
+fn sum : (*Ctx) -> i64
+  | (c) ->
+    term(c)
+    let mut op = peek(c)
+    while op == 43i64 || op == 45i64
+      c.pos = c.pos + 1i64
+      term(c)
+      emit(c, if op == 43i64 then 4i64 else 5i64)
+      op = peek(c)
+    c.n
+
+fn expr : (*Ctx) -> i64
+  | (c) ->
+    sum(c)
+    if peek(c) == 60i64 then
+      c.pos = c.pos + 1i64
+      sum(c)
+      emit(c, 8i64)
+    else
+      c.n
+
+-- `while` followed by '(' : the keyword is five letters starting with w
+fn is_while : (*Ctx) -> bool
+  | (c) -> peek(c) == 119i64 && c.src[c.pos + 1i64] as i64 == 104i64 && c.src[c.pos + 4i64] as i64 == 101i64
+
+fn is_assign : (*Ctx) -> bool
+  | (c) ->
+    let ch = peek(c)
+    if ch >= 97i64 && ch <= 122i64 then c.src[c.pos + 1i64] as i64 == 61i64 || c.src[c.pos + 2i64] as i64 == 61i64 && c.src[c.pos + 1i64] as i64 == 32i64
+    else false
+
+fn stmt : (*Ctx) -> i64
+  | (c) ->
+    if is_while(c) then while_stmt(c)
+    else if is_assign(c) then assign(c)
+    else
+      expr(c)
+      emit(c, 3i64)
+      emit(c, 26i64)
+      peek(c)
+      c.pos = c.pos + 1i64
+      c.n
+
+fn assign : (*Ctx) -> i64
+  | (c) ->
+    let v = peek(c) - 97i64
+    c.pos = c.pos + 1i64
+    peek(c)
+    c.pos = c.pos + 1i64
+    expr(c)
+    emit(c, 3i64)
+    emit(c, v)
+    peek(c)
+    c.pos = c.pos + 1i64
+    c.n
+
+fn while_stmt : (*Ctx) -> i64
+  | (c) ->
+    c.pos = c.pos + 5i64
+    let top = c.n
+    peek(c)
+    c.pos = c.pos + 1i64
+    expr(c)
+    peek(c)
+    c.pos = c.pos + 1i64
+    emit(c, 9i64)
+    let hole = emit(c, 0i64) - 1i64
+    peek(c)
+    c.pos = c.pos + 1i64
+    while peek(c) != 125i64 && at(c) != 0i64
+      stmt(c)
+    c.pos = c.pos + 1i64
+    emit(c, 10i64)
+    emit(c, top)
+    c.code[hole] = c.n
+    c.n
+
+fn compile : (*u8, *i64) -> i64
+  | (src, code) ->
+    let mut c = Ctx { src: src, pos: 0i64, code: code, n: 0i64 }
+    while peek(&c) != 0i64
+      stmt(&c)
+    emit(&c, 12i64)
+
+fn run : (*i64) -> i64
+  | (code) ->
+    let vars : *i64 = alloc [i64; 27]
+    let stk : *i64 = alloc [i64; 64]
+    let mut i : i64 = 0i64
+    while i < 27i64
+      vars[i] = 0i64
+      i = i + 1i64
+    let mut pc : i64 = 0i64
+    let mut sp : i64 = 0i64
+    let mut go : bool = true
+    while go
+      let op = code[pc]
+      pc = pc + 1i64
+      if op == 1i64 then
+        stk[sp] = code[pc]
+        sp = sp + 1i64
+        pc = pc + 1i64
+      else if op == 2i64 then
+        stk[sp] = vars[code[pc]]
+        sp = sp + 1i64
+        pc = pc + 1i64
+      else if op == 3i64 then
+        sp = sp - 1i64
+        vars[code[pc]] = stk[sp]
+        pc = pc + 1i64
+      else if op >= 4i64 && op <= 8i64 then
+        let b = stk[sp - 1i64]
+        let a = stk[sp - 2i64]
+        sp = sp - 1i64
+        stk[sp - 1i64] = if op == 4i64 then a + b else if op == 5i64 then a - b else if op == 6i64 then a * b else if op == 7i64 then a / b else if a < b then 1i64 else 0i64
+      else if op == 9i64 then
+        sp = sp - 1i64
+        pc = if stk[sp] == 0i64 then code[pc] else pc + 1i64
+      else if op == 10i64 then
+        pc = code[pc]
+      else
+        go = false
+    let r = vars[26]
+    free vars
+    free stk
+    r
+
+fn eval_src : (*u8) -> i64
+  | (src) ->
+    let code : *i64 = alloc [i64; 1024]
+    compile(src, code)
+    let r = run(code)
+    free code
+    r
+
+fn main : () -> i64
+  | () ->
+    let fib = eval_src("n = 10; a = 0; b = 1; while (n) { t = a + b; a = b; b = t; n = n - 1; } a - 2;" as *u8)
+    let prec = eval_src("x = (3 + 4) * 5 - 12 / 4 - 2 * 3; y = 2 < 3; x + y * 100 - 100;" as *u8)
+    if prec != 26i64 then fib + 100i64 else fib

@@ -1,0 +1,25 @@
+-- EXIT: 51
+-- a variant with 12 payload fields and a struct with 10 type parameters (both limits were 8)
+enum Wide
+  W(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)
+  N
+
+type Ten<A, B, C, D, E, F, G, H, I, J> = struct
+  a : A
+  b : B
+  j : J
+
+fn pick : (Wide) -> i64
+  | (w) ->
+    match w
+      | W(a, b, c, d, e, f, g, h, i, j, k, l) -> a + b + c + d + e + f + g + h + i + j + k + l
+      | N -> 0i64
+
+fn tj : (Ten<i64, i64, i64, i64, i64, i64, i64, i64, i64, i64>) -> i64
+  | (t) -> t.a + t.b + t.j
+
+fn main : () -> i64
+  | () ->
+    let w = Wide.W(1i64, 2i64, 3i64, 4i64, 5i64, 6i64, 7i64, 8i64, 9i64, 10i64, 11i64, 12i64)
+    let t : Ten<i64, i64, i64, i64, i64, i64, i64, i64, i64, i64> = Ten { a: 1i64, b: 2i64, j: 3i64 }
+    pick(w) - 33i64 + tj(t)

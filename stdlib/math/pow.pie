@@ -65,7 +65,7 @@ fn sqrt_f64 : f64 -> f64
     else
       let mut g = x
       let mut i : i64 = 0i64
-      while i < 20i64
+      while i < 100i64
         let next_g = 0.5f64 * (g + x / g)
         if abs.abs_f64(next_g - g) < 0.000000000000001f64
           break

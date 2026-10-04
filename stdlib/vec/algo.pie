@@ -161,15 +161,20 @@ fn vec_pop_heap_u64 : *vec.Vec -> bool
       let last  = data[len - 1i64]
       vec.vec_truncate(v, len - 1i64)
       let n = len - 1i64
+      -- the old max (first) is dropped; `last` goes to the root and sifts down.  The children must be compared with `last`, the value
+      -- being placed, not with the stale slot at idx (the old code compared with the dropped root and left the heap unordered).
       let mut idx : i64 = 0i64
       while true
         let left  = 2i64 * idx + 1i64
         let right = 2i64 * idx + 2i64
         let mut largest = idx
-        if left < n && data[left] > data[largest]
+        let mut big = last
+        if left < n && data[left] > big
           largest = left
-        if right < n && data[right] > data[largest]
+          big = data[left]
+        if right < n && data[right] > big
           largest = right
+          big = data[right]
         if largest == idx
           break
         data[idx] = data[largest]

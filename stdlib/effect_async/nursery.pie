@@ -46,7 +46,7 @@ fn nursery_spawn : (*Nursery, i64, ptr) -> i64
     if n != null && n.is_active then {
       let tid = n.next_task;
       n.next_task = n.next_task + 1i64;
-      let t = os.linux.malloc(32i64) as *NurseryTask;
+      let t = os.linux.malloc(sizeof(NurseryTask) as i64) as *NurseryTask;
       t.id        = tid;
       t.prompt_id = prompt_id;
       t.completed = false;

@@ -1,0 +1,32 @@
+-- EXIT: 12
+-- stdlib executed: exp, ln, atan, sin/cos range reduction, sqrt against reference values (relative tolerance 1e-9)
+-- the old series did not converge away from 0: exp(20) was wrong in the 3rd digit, atan(1) came out as 0.8, ln(100) did not converge,
+-- and sin(1e9) spun for 1.6e8 loop iterations
+use math.exp
+use math.trig
+use math.pow
+use math.abs
+
+fn near : (f64, f64) -> i64
+  | (a, b) ->
+    let scale = if abs.abs_f64(b) > 1.0f64 then abs.abs_f64(b) else 1.0f64
+    if abs.abs_f64(a - b) <= 0.000000001f64 * scale then 1i64 else 0i64
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    n = n + near(exp.exp_f64(1.0f64), 2.718281828459045f64)
+    n = n + near(exp.exp_f64(20.0f64), 485165195.4097903f64)
+    n = n + near(exp.exp_f64(-5.0f64), 0.006737946999085467f64)
+    n = n + near(exp.ln_f64(100.0f64), 4.605170185988092f64)
+    n = n + near(exp.ln_f64(0.001f64), -6.907755278982137f64)
+    n = n + near(trig.atan_f64(1.0f64), 0.7853981633974483f64)
+    n = n + near(trig.atan_f64(-3.0f64), -1.2490457723982544f64)
+    n = n + near(trig.sin_f64(10.0f64), -0.5440211108893698f64)
+    n = n + near(trig.cos_f64(1.0f64), 0.5403023058681398f64)
+    n = n + near(pow.sqrt_f64(1000000000000.0f64), 1000000.0f64)
+    n = n + near(pow.sqrt_f64(2.0f64), 1.4142135623730951f64)
+    -- the reduction returns promptly for a huge argument and the result stays a sine
+    let s = trig.sin_f64(1000000000.0f64)
+    n = n + (if s <= 1.0f64 && s >= -1.0f64 then 1i64 else 0i64)
+    n

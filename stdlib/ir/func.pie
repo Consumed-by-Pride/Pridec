@@ -17,7 +17,7 @@ struct IrFunction
 
 fn ir_func_new : (ptr, *types.IrFnType, bool) -> *IrFunction
   | (name_cstr, fn_ty, is_ext) ->
-    let f = os.linux.malloc(48i64) as *IrFunction
+    let f = os.linux.malloc(sizeof(IrFunction) as i64) as *IrFunction
     f.name    = string.string_from_cstr(name_cstr)
     f.fn_type = fn_ty
     f.blocks  = vec.vec_new(8i64)
@@ -25,13 +25,13 @@ fn ir_func_new : (ptr, *types.IrFnType, bool) -> *IrFunction
     f
 
 fn ir_func_add_block : (*IrFunction, *block.IrBlock) -> ()
-  | (func, blk) -> vec.vec_push(&func.blocks, blk as ptr)
+  | (func, blk) -> vec.vec_push_ptr(&func.blocks, blk as ptr)
 
 fn ir_func_entry_block : *IrFunction -> *block.IrBlock
   | func ->
     let len = vec.vec_len(&func.blocks)
     if len == 0i64 then 0 as *block.IrBlock
-    else vec.vec_get(&func.blocks, 0i64) as *block.IrBlock
+    else vec.vec_get_ptr(&func.blocks, 0i64) as *block.IrBlock
 
 fn ir_func_destroy : *IrFunction -> ()
   | func ->
@@ -41,7 +41,7 @@ fn ir_func_destroy : *IrFunction -> ()
       let mut i : i64 = 0i64
       let len = vec.vec_len(&func.blocks)
       while i < len
-        block.ir_block_destroy(vec.vec_get(&func.blocks, i) as *block.IrBlock)
+        block.ir_block_destroy(vec.vec_get_ptr(&func.blocks, i) as *block.IrBlock)
         i = i + 1i64
       vec.vec_destroy(&func.blocks)
       os.linux.free(func as ptr)

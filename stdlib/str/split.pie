@@ -8,7 +8,7 @@ use str.string
 
 fn str_split_char : (ptr, i64, u8) -> vec.Vec
   | (s, len, delim) ->
-    let mut out = vec.vec_new(8i64)
+    let mut out = vec.vec_new(sizeof(string.String) as i64)
     let buf = s as *u8
     let mut start : i64 = 0i64
     let mut i : i64 = 0i64
@@ -24,7 +24,7 @@ fn str_split_char : (ptr, i64, u8) -> vec.Vec
 
 fn str_split_lines : (ptr, i64) -> vec.Vec
   | (s, len) ->
-    let mut out = vec.vec_new(8i64)
+    let mut out = vec.vec_new(sizeof(string.String) as i64)
     let buf = s as *u8
     let mut start : i64 = 0i64
     let mut i : i64 = 0i64

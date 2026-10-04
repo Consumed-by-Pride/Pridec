@@ -19,29 +19,43 @@ struct MemTable
 
 fn mementry_new : (ptr, ptr, bool) -> *MemEntry
   | (k_cstr, v_cstr, tomb) ->
-    let e = os.linux.malloc(40i64) as *MemEntry
+    let e = os.linux.malloc(sizeof(MemEntry) as i64) as *MemEntry
     e.key  = string.string_from_cstr(k_cstr)
     e.val  = string.string_from_cstr(v_cstr)
     e.tomb = tomb
     e
 
-fn mementry_destroy : *MemEntry -> ()
+-- release the strings of an entry (heap block or Vec slot); the storage is the caller's
+fn mementry_destroy_fields : *MemEntry -> ()
   | e ->
     if e as i64 == 0i64 then ()
     else
       string.string_destroy(&e.key)
       string.string_destroy(&e.val)
+
+fn mementry_destroy : *MemEntry -> ()
+  | e ->
+    if e as i64 == 0i64 then ()
+    else
+      mementry_destroy_fields(e)
       os.linux.free(e as ptr)
 
+-- move a freshly made entry into the table: the Vec stores MemEntry BY VALUE (vec_push copies sizeof(MemEntry) bytes), the strings
+-- go with the copy, so only the malloc'd shell is freed.  (The table used 16-byte slots and then read them as 72-byte entries.)
+fn memtable_adopt : (*MemTable, *MemEntry) -> ()
+  | (mt, ne) ->
+    vec.vec_push(&mt.entries, ne as ptr)
+    os.linux.free(ne as ptr)
+
 fn memtable_new : i64 -> MemTable
-  | cap -> MemTable { entries: vec.vec_new(16i64), max_cap: if cap <= 0i64 then 1024i64 else cap }
+  | cap -> MemTable { entries: vec.vec_new(sizeof(MemEntry) as i64), max_cap: if cap <= 0i64 then 1024i64 else cap }
 
 fn memtable_destroy : *MemTable -> ()
   | mt ->
     let mut i : i64 = 0i64
     let len = vec.vec_len(&mt.entries)
     while i < len
-      mementry_destroy(vec.vec_get(&mt.entries, i) as *MemEntry)
+      mementry_destroy_fields(vec.vec_get(&mt.entries, i) as *MemEntry)
       i = i + 1i64
     vec.vec_destroy(&mt.entries)
 
@@ -70,7 +84,7 @@ fn memtable_put : (*MemTable, ptr, ptr) -> ()
       e.tomb = false
     else
       let ne = mementry_new(key_cstr, val_cstr, false)
-      vec.vec_push(&mt.entries, ne as ptr)
+      memtable_adopt(mt, ne)
 
 fn memtable_get : (*MemTable, ptr) -> (string.String, bool)
   | (mt, key_cstr) ->
@@ -86,7 +100,7 @@ fn memtable_delete : (*MemTable, ptr) -> bool
     let idx = memtable_find_idx(mt, key_cstr)
     if idx < 0i64
       let ne = mementry_new(key_cstr, "" as ptr, true)
-      vec.vec_push(&mt.entries, ne as ptr)
+      memtable_adopt(mt, ne)
       true
     else
       let e = vec.vec_get(&mt.entries, idx) as *MemEntry

@@ -1,0 +1,26 @@
+-- EXIT: 0
+-- a global initialised with [v; n]: the fill must be emitted (it was an error), for non-zero v and for a large n
+let table : [i64; 1000] = [7; 1000]
+let zeros : [u8; 4096] = [0u8; 4096]
+let mut grid : [i32; 64] = [-3i32; 64]
+
+fn main : () -> i64
+  | () ->
+    let mut s : i64 = 0i64
+    let mut i : i64 = 0i64
+    while i < 1000i64
+      s = s + table[i]
+      i = i + 1i64
+    let mut z : i64 = 0i64
+    let mut j : i64 = 0i64
+    while j < 4096i64
+      z = z + zeros[j] as i64
+      j = j + 1i64
+    grid[5i64] = 10i32
+    let mut g : i64 = 0i64
+    let mut k : i64 = 0i64
+    while k < 64i64
+      g = g + grid[k] as i64
+      k = k + 1i64
+    -- 7000 + 0 + (63 * -3 + 10 = -179) = 6821
+    if s == 7000i64 && z == 0i64 && g == -179i64 then 0i64 else 1i64

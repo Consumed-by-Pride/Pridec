@@ -24,7 +24,7 @@ struct SourceMap
 
 fn sourcefile_new : (ptr, i64, i64) -> *SourceFile
   | (name_cstr, base, end_o) ->
-    let sf = os.linux.malloc(40i64) as *SourceFile
+    let sf = os.linux.malloc(sizeof(SourceFile) as i64) as *SourceFile
     sf.name     = string.string_from_cstr(name_cstr)
     sf.base_off = base
     sf.end_off  = end_o
@@ -40,21 +40,21 @@ fn sourcefile_destroy : *SourceFile -> ()
       os.linux.free(sf as ptr)
 
 fn sourcemap_new : () -> SourceMap
-  | () -> SourceMap { files: vec.vec_new(4i64) }
+  | () -> SourceMap { files: vec.vec_new(8i64) }
 
 fn sourcemap_destroy : *SourceMap -> ()
   | sm ->
     let mut i : i64 = 0i64
     let len = vec.vec_len(&sm.files)
     while i < len
-      sourcefile_destroy(vec.vec_get(&sm.files, i) as *SourceFile)
+      sourcefile_destroy(vec.vec_get_ptr(&sm.files, i) as *SourceFile)
       i = i + 1i64
     vec.vec_destroy(&sm.files)
 
 fn sourcemap_add_file : (*SourceMap, ptr, i64, i64) -> *SourceFile
   | (sm, name_cstr, base, end_o) ->
     let sf = sourcefile_new(name_cstr, base, end_o)
-    vec.vec_push(&sm.files, sf as ptr)
+    vec.vec_push_ptr(&sm.files, sf as ptr)
     sf
 
 fn sourcemap_lookup_offset : (*SourceMap, i64) -> SourceLoc
@@ -63,7 +63,7 @@ fn sourcemap_lookup_offset : (*SourceMap, i64) -> SourceLoc
     let len = vec.vec_len(&sm.files)
     let mut target_sf = 0 as *SourceFile
     while i < len
-      let sf = vec.vec_get(&sm.files, i) as *SourceFile
+      let sf = vec.vec_get_ptr(&sm.files, i) as *SourceFile
       if offset >= sf.base_off && offset <= sf.end_off
         target_sf = sf
         break

@@ -1,10 +1,10 @@
 // Pride runtime for wasm32-wasi (C, compiled with `zig cc -target wasm32-wasi`).
 //
-// AIR 3 is target-neutral: an extern declared in Pride keeps the signature Pride gave it (`i64` is 64 bits, so
-// a C `size_t` parameter declared `i64` is an i64 in the .air). A 32-bit target's libc takes 32-bit sizes, so
-// scripts/ll-exe.py renames every external function F of a wasm module to `pride_rt_F` and THIS file defines
-// each of them with the Pride-declared (i64) signature, forwarding to wasi-libc. The link error for a missing
-// symbol therefore names exactly what a target must supply.
+// AIR 3 is target-neutral: an extern declared in Pride keeps the signature Pride gave it.  scripts/ll-exe.py renames every external function
+// F of a wasm module to `pride_rt_F` and THIS file defines each of them, forwarding to wasi-libc; the link error for a missing symbol names
+// exactly what a target must supply.  The C functions that take or return `size_t`/`ssize_t` (malloc, memcpy, write, strlen, ...) are
+// declared in the .air with the target's pointer width (air_low.c3 c_abi_widths), i.e. i32 here, so the definitions below use size_t as libc does.
+// Fibers (non-tail-resumptive effect handlers) are in pride_fiber.c: link it too, then run scripts/wasm-fibers.py (binaryen Asyncify).
 //
 // `syscall` (the AIR `syscall` instruction and libc's variadic `syscall`) is emulated for the Linux numbers the
 // stdlib uses most; an unknown number returns -38 (ENOSYS).
@@ -17,17 +17,18 @@
 #include <fcntl.h>
 #include <errno.h>
 
-void *pride_rt_malloc(long long n) { return malloc((size_t)n); }
+// size_t / ssize_t parameters are pointer-wide: the lowering declares these C functions with usz/isz (air_low.c3 c_abi_widths), i32 on wasm32
+void *pride_rt_malloc(size_t n) { return malloc(n); }
 void pride_rt_free(void *p) { free(p); }
-int pride_rt_write(int fd, const void *p, long long n) { return (int)write(fd, p, (size_t)n); }
-long long pride_rt_read(int fd, void *p, long long n) { return (long long)read(fd, p, (size_t)n); }
-void *pride_rt_calloc(long long a, long long b) { return calloc((size_t)a, (size_t)b); }
-void *pride_rt_realloc(void *p, long long n) { return realloc(p, (size_t)n); }
-void *pride_rt_memcpy(void *d, const void *s, long long n) { return memcpy(d, s, (size_t)n); }
-void *pride_rt_memmove(void *d, const void *s, long long n) { return memmove(d, s, (size_t)n); }
-void *pride_rt_memset(void *d, int c, long long n) { return memset(d, c, (size_t)n); }
-int pride_rt_memcmp(const void *a, const void *b, long long n) { return memcmp(a, b, (size_t)n); }
-long long pride_rt_strlen(const char *s) { return (long long)strlen(s); }
+ssize_t pride_rt_write(int fd, const void *p, size_t n) { return write(fd, p, n); }
+ssize_t pride_rt_read(int fd, void *p, size_t n) { return read(fd, p, n); }
+void *pride_rt_calloc(size_t a, size_t b) { return calloc(a, b); }
+void *pride_rt_realloc(void *p, size_t n) { return realloc(p, n); }
+void *pride_rt_memcpy(void *d, const void *s, size_t n) { return memcpy(d, s, n); }
+void *pride_rt_memmove(void *d, const void *s, size_t n) { return memmove(d, s, n); }
+void *pride_rt_memset(void *d, int c, size_t n) { return memset(d, c, n); }
+int pride_rt_memcmp(const void *a, const void *b, size_t n) { return memcmp(a, b, n); }
+size_t pride_rt_strlen(const char *s) { return strlen(s); }
 int pride_rt_strcmp(const char *a, const char *b) { return strcmp(a, b); }
 int pride_rt_close(int fd) { return close(fd); }
 void pride_rt_exit(int c) { exit(c); }

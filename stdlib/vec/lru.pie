@@ -21,27 +21,19 @@ struct LruList
 fn lrulist_new : i64 -> LruList
   | cap ->
     let c = if cap <= 0i64 then 64i64 else cap
-    LruList { items: vec.vec_new(8i64), head_idx: -1i64, tail_idx: -1i64, max_cap: c }
+    LruList { items: vec.vec_new(32i64), head_idx: -1i64, tail_idx: -1i64, max_cap: c }
 
 fn lrulist_destroy : *LruList -> ()
   | lru ->
-    let mut i : i64 = 0i64
-    let len = vec.vec_len(&lru.items)
-    while i < len
-      os.linux.free(vec.vec_get(&lru.items, i))
-      i = i + 1i64
     vec.vec_destroy(&lru.items)
     lru.head_idx = -1i64; lru.tail_idx = -1i64
 
 fn lrulist_push_head : (*LruList, u64, i64) -> i64
   | (lru, key, val) ->
     let id = vec.vec_len(&lru.items)
-    let item = os.linux.malloc(32i64) as *LruItem
-    item.key      = key
-    item.value    = val
-    item.prev_idx = -1i64
-    item.next_idx = lru.head_idx
-    vec.vec_push(&lru.items, item as ptr)
+    -- the Vec holds LruItem by value (32 bytes per slot); vec_push copies from the address it is given
+    let mut item = LruItem { key: key, value: val, prev_idx: -1i64, next_idx: lru.head_idx }
+    vec.vec_push(&lru.items, &item as ptr)
     if lru.head_idx >= 0i64
       let old_h = vec.vec_get(&lru.items, lru.head_idx) as *LruItem
       old_h.prev_idx = id
@@ -53,7 +45,9 @@ fn lrulist_push_head : (*LruList, u64, i64) -> i64
 fn lrulist_access : (*LruList, i64) -> bool
   | (lru, idx) ->
     let len = vec.vec_len(&lru.items)
-    if idx < 0i64 || idx >= len || idx == lru.head_idx then true
+    if idx < 0i64 || idx >= len then false
+    else if (vec.vec_get(&lru.items, idx) as *LruItem).prev_idx == -2i64 then false   -- already evicted
+    else if idx == lru.head_idx then true
     else
       let item = vec.vec_get(&lru.items, idx) as *LruItem
       let prev = item.prev_idx
@@ -86,6 +80,8 @@ fn lrulist_evict_tail : *LruList -> (u64, i64, bool)
         let p_node = vec.vec_get(&lru.items, prv) as *LruItem
         p_node.next_idx = -1i64
       lru.tail_idx = prv
-      if lru.head_idx == lru.tail_idx
-        lru.head_idx = -1i64
+      if prv < 0i64
+        lru.head_idx = -1i64      -- the list is empty now
+      t_node.prev_idx = -2i64     -- evicted: access() must not relink it
+      t_node.next_idx = -2i64
       (k, v, true)

@@ -22,8 +22,8 @@ struct UnboundedReceiver
 
 fn unbounded_channel_new : () -> (UnboundedSender, UnboundedReceiver)
   | () ->
-    let ch = os.linux.malloc(48i64) as *UnboundedChannel
-    ch.items  = vec.vec_new(16i64)
+    let ch = os.linux.malloc(sizeof(UnboundedChannel) as i64) as *UnboundedChannel
+    ch.items  = vec.vec_new(8i64)   -- a queue of message pointers, like the bounded and oneshot channels
     ch.mut    = mutex.mutex_new()
     ch.avail  = cond.condvar_new()
     ch.closed = false
@@ -36,7 +36,8 @@ fn unbounded_send : (*UnboundedSender, ptr) -> bool
       mutex.mutex_unlock(&tx.chan.mut)
       false
     else
-      vec.vec_push(&tx.chan.items, msg_ptr)
+      let mut mp = msg_ptr
+      vec.vec_push(&tx.chan.items, &mp as ptr)   -- vec_push copies the element from the address it is given
       cond.condvar_signal(&tx.chan.avail)
       mutex.mutex_unlock(&tx.chan.mut)
       true
@@ -50,7 +51,7 @@ fn unbounded_recv : *UnboundedReceiver -> (ptr, bool)
       mutex.mutex_unlock(&rx.chan.mut)
       (0 as ptr, false)
     else
-      let val = vec.vec_get(&rx.chan.items, 0i64)
+      let val = (vec.vec_get(&rx.chan.items, 0i64) as *ptr)[0i64]   -- read the pointer BEFORE vec_remove shifts the slots
       vec.vec_remove(&rx.chan.items, 0i64, 0 as ptr)
       mutex.mutex_unlock(&rx.chan.mut)
       (val, true)

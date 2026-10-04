@@ -26,7 +26,8 @@ fn hm_hash : (i64, i64) -> i64
   | (k, cap) ->
       let h  = 14695981039346656037i64;
       let h2 = h ^ k;
-      (h2 * 1099511628211i64) % cap
+      -- the product wraps; `%` of a negative number is negative and indexed outside the bucket array: mask the sign off first
+      (((h2 * 1099511628211i64) as u64 >> 1u64) as i64) % cap
 
 fn hm_grow : *HashMap -> ()
   | m ->

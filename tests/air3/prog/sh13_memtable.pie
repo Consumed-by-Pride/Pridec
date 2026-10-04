@@ -1,0 +1,56 @@
+-- EXIT: 11
+-- stdlib executed: db.memtable (put, overwrite, get, delete/tombstone, growth past the first Vec buffers, destroy)
+-- each passing check adds one; 11 checks
+use db.memtable
+use str.string
+
+fn ok : (bool) -> i64 | (c) -> if c then 1i64 else 0i64
+
+fn first_byte : (*string.String) -> i64
+  | (s) -> if string.string_len(s) == 0i64 then -1i64 else (string.string_as_slice(s) as *u8)[0i64] as i64
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    let mut mt = memtable.memtable_new(0i64)
+    memtable.memtable_put(&mt, "alpha" as ptr, "one" as ptr)
+    memtable.memtable_put(&mt, "beta" as ptr, "two" as ptr)
+    memtable.memtable_put(&mt, "gamma" as ptr, "three" as ptr)
+    let a = memtable.memtable_get(&mt, "alpha" as ptr)
+    let b = memtable.memtable_get(&mt, "beta" as ptr)
+    let g = memtable.memtable_get(&mt, "gamma" as ptr)
+    n = n + ok(a.1 && string.string_len(&a.0) == 3i64 && first_byte(&a.0) == 111i64)
+    n = n + ok(b.1 && string.string_len(&b.0) == 3i64 && first_byte(&b.0) == 116i64)
+    n = n + ok(g.1 && string.string_len(&g.0) == 5i64 && first_byte(&g.0) == 116i64)
+    -- overwrite
+    memtable.memtable_put(&mt, "beta" as ptr, "TWO!" as ptr)
+    let b2 = memtable.memtable_get(&mt, "beta" as ptr)
+    n = n + ok(b2.1 && string.string_len(&b2.0) == 4i64 && first_byte(&b2.0) == 84i64)
+    -- missing key
+    let m = memtable.memtable_get(&mt, "delta" as ptr)
+    n = n + ok(!m.1)
+    -- delete an existing key, delete an unknown key (a tombstone is recorded), put it back
+    n = n + ok(memtable.memtable_delete(&mt, "alpha" as ptr))
+    n = n + ok(!memtable.memtable_get(&mt, "alpha" as ptr).1)
+    n = n + ok(memtable.memtable_delete(&mt, "zeta" as ptr) && !memtable.memtable_get(&mt, "zeta" as ptr).1)
+    memtable.memtable_put(&mt, "alpha" as ptr, "again" as ptr)
+    let a2 = memtable.memtable_get(&mt, "alpha" as ptr)
+    n = n + ok(a2.1 && string.string_len(&a2.0) == 5i64)
+    -- growth: 40 more keys, the early ones must survive the reallocations of the entry vector
+    let keys : *u8 = alloc [u8; 4]
+    keys[2i64] = 0u8
+    keys[3i64] = 0u8
+    let mut i : i64 = 0i64
+    while i < 40i64
+      keys[0i64] = (65i64 + i / 10i64) as u8
+      keys[1i64] = (48i64 + i % 10i64) as u8
+      memtable.memtable_put(&mt, keys as ptr, "v" as ptr)
+      i = i + 1i64
+    let g2 = memtable.memtable_get(&mt, "gamma" as ptr)
+    keys[0i64] = 68u8
+    keys[1i64] = 57u8
+    let last = memtable.memtable_get(&mt, keys as ptr)
+    n = n + ok(g2.1 && string.string_len(&g2.0) == 5i64 && last.1 && first_byte(&last.0) == 118i64)
+    memtable.memtable_destroy(&mt)
+    free keys
+    n + 1i64

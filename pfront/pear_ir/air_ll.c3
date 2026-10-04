@@ -424,6 +424,7 @@ fn Val Ll.prd(Ll* l, AirPrd* p)
         {
             if (!ty_is_float(p.ty)) { l.err("float literal without a float type", null); v.ty = l.m.t_f64; } else { v.ty = p.ty; }
             double dv = p.fval; ulong bits = 0;
+            if (p.ty != null && p.ty.tag == ATYP_F32) { float fv = (float)dv; dv = (double)fv; }   // LLVM wants a float constant to be exactly a float: 0.1f32 is 0x3FB99999A0000000, not the double 0.1
             // bit pattern of the double via memcpy-free union trick
             ulong* bp = (ulong*)&dv; bits = *bp;
             Sb s; s.init(); s.put("0x"); s.hex(bits, 16); v.op = s.take(); return v;
@@ -484,7 +485,7 @@ fn void Ll.const_init(Ll* l, Sb* o, AirPrd* g, AirTyp* t, char* gname)
         case APRD_BOOL: o.put(g.bval ? "true" : "false"); return;
         case APRD_NULL: o.put("null"); return;
         case APRD_UNIT: o.put("zeroinitializer"); return;
-        case APRD_FLOAT: { double dv = g.fval; ulong* bp = (ulong*)&dv; o.put("0x"); o.hex(*bp, 16); return; }
+        case APRD_FLOAT: { double dv = g.fval; if (g.ty != null && g.ty.tag == ATYP_F32) { float fv = (float)dv; dv = (double)fv; } ulong* bp = (ulong*)&dv; o.put("0x"); o.hex(*bp, 16); return; }
         case APRD_STRING: case APRD_BYTES: o.put(l.str_const(g)); return;
         case APRD_TUPLE: case APRD_ARRAY:
         {

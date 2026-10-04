@@ -1,0 +1,18 @@
+-- EXIT: 16
+-- a plain top-level `let` (no `mut`) that the program assigns is a writable global: it must not be an LLVM constant
+let counter = 5
+let table : [i64; 3] = [3, 4, 5]
+
+fn bump : (i64) -> i64
+    | (n) -> {
+        counter = counter + n
+        table[1i64] = table[1i64] + n
+        counter
+    }
+
+fn main : () -> i64
+    | () -> {
+        let a = bump(2i64)      -- 7
+        let b = bump(3i64)      -- 10
+        a + b + table[1i64] - 10 - 0 + 0 - 0   -- 7 + 10 + 9 - 10 = 16
+    }

@@ -5,30 +5,55 @@ use math.abs
 
 -- stdlib/math/exp.pie — Exponentiation and Natural / Base-N Logarithms
 
+-- exp(x) = 2^k * exp(r) with k = round(x / ln 2), |r| <= ln2/2: the Taylor series is only evaluated on |r| < 0.35
+-- (the old series ran on x itself for 30 terms, which is wrong beyond |x| ~ 10: exp(20) was off in the 3rd digit)
 fn exp_f64 : f64 -> f64
   | x ->
-    if x > 700.0f64 then 1.7976931348623157e308f64
-    else if x < -700.0f64 then 0.0f64
+    if x > 709.0f64 then 1.7976931348623157e308f64
+    else if x < -745.0f64 then 0.0f64
     else
+      let q = x / consts.LN_2
+      let k = (if q >= 0.0f64 then q + 0.5f64 else q - 0.5f64) as i64
+      let r = x - (k as f64) * consts.LN_2
       let mut term = 1.0f64
       let mut sum  = 1.0f64
       let mut i : i64 = 1i64
       while i < 30i64
-        term = term * x / i as f64
+        term = term * r / i as f64
         sum = sum + term
-        if abs.abs_f64(term) < 0.0000000000000001f64
+        if abs.abs_f64(term) < 0.00000000000000001f64
           break
         i = i + 1i64
-      sum
+      let mut res = sum
+      let mut j : i64 = 0i64
+      if k > 0i64
+        while j < k
+          res = res * 2.0f64
+          j = j + 1i64
+      else
+        while j > k
+          res = res * 0.5f64
+          j = j - 1i64
+      res
 
 fn exp2_f64 : f64 -> f64
   | x -> exp_f64(x * consts.LN_2)
 
+-- ln(x) = e ln 2 + ln(m), x = m 2^e with m in [0.75, 1.5): atanh series on y = (m-1)/(m+1), |y| <= 0.2
+-- (the old series ran on x directly, so ln(100) or ln(0.001) did not converge in 35 terms)
 fn ln_f64 : f64 -> f64
   | x ->
     if x <= 0.0f64 then -1.7976931348623157e308f64
     else
-      let y = (x - 1.0f64) / (x + 1.0f64)
+      let mut m = x
+      let mut e : i64 = 0i64
+      while m >= 1.5f64
+        m = m * 0.5f64
+        e = e + 1i64
+      while m < 0.75f64
+        m = m * 2.0f64
+        e = e - 1i64
+      let y = (m - 1.0f64) / (m + 1.0f64)
       let y2 = y * y
       let mut term = y
       let mut sum  = y
@@ -37,10 +62,10 @@ fn ln_f64 : f64 -> f64
         term = term * y2
         let add = term / (2i64 * i + 1i64) as f64
         sum = sum + add
-        if abs.abs_f64(add) < 0.0000000000000001f64
+        if abs.abs_f64(add) < 0.00000000000000001f64
           break
         i = i + 1i64
-      2.0f64 * sum
+      (e as f64) * consts.LN_2 + 2.0f64 * sum
 
 fn log2_f64 : f64 -> f64
   | x -> ln_f64(x) * consts.LOG2_E

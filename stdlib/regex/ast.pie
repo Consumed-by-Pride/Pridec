@@ -18,7 +18,7 @@ struct RegexNode
 
 fn regex_node_new : (i64, u8, i64, i64) -> *RegexNode
   | (kind, b, l, r) ->
-    let p = os.linux.malloc(32i64) as *RegexNode
+    let p = os.linux.malloc(sizeof(RegexNode) as i64) as *RegexNode
     p.kind     = kind
     p.byte_val = b
     p.left_id  = l

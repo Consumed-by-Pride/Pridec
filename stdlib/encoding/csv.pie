@@ -14,7 +14,7 @@ struct CsvTable
   records : vec.Vec
 
 fn csv_record_new : () -> CsvRecord
-  | () -> CsvRecord { fields: vec.vec_new(8i64) }
+  | () -> CsvRecord { fields: vec.vec_new(sizeof(string.String) as i64) }
 
 fn csv_record_destroy : *CsvRecord -> ()
   | rec ->
@@ -47,7 +47,7 @@ fn csv_parse_line : (ptr, i64, u8) -> CsvRecord
 
 fn csv_parse_table : (ptr, i64, u8) -> CsvTable
   | (data_ptr, len, delim) ->
-    let mut tab = CsvTable { records: vec.vec_new(16i64) }
+    let mut tab = CsvTable { records: vec.vec_new(sizeof(CsvRecord) as i64) }
     let buf = data_ptr as *u8
     let mut start : i64 = 0i64
     let mut i : i64 = 0i64

@@ -1,0 +1,137 @@
+-- EXIT: 25
+-- stdlib executed: vec.smallvec (inline then spill), alloc.bump, alloc.arena (chunk growth, clear, reuse), math.stats, encoding.hex_dump
+-- each passing check adds one; 25 checks
+use vec.vec
+use vec.smallvec
+use alloc.bump
+use alloc.arena
+use math.stats
+use encoding.hex_dump
+use str.string
+
+fn ok : (bool) -> i64 | (c) -> if c then 1i64 else 0i64
+
+fn near : (f64, f64) -> bool
+  | (a, b) -> (if a > b then a - b else b - a) < 0.000001f64
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    -- smallvec: 4 inline slots of i64, push 10
+    let mut sv = smallvec.smallvec_new(4i64, 8i64)
+    let mut i : i64 = 0i64
+    while i < 4i64
+      let mut x = i * 11i64
+      smallvec.smallvec_push(&sv, &x as ptr)
+      i = i + 1i64
+    n = n + ok(smallvec.smallvec_len(&sv) == 4i64 && !smallvec.smallvec_is_spilled(&sv))
+    while i < 10i64
+      let mut x = i * 11i64
+      smallvec.smallvec_push(&sv, &x as ptr)
+      i = i + 1i64
+    n = n + ok(smallvec.smallvec_len(&sv) == 10i64 && smallvec.smallvec_is_spilled(&sv) && smallvec.smallvec_cap(&sv) >= 10i64)
+    let mut all : i64 = 1i64
+    i = 0i64
+    while i < 10i64
+      if (smallvec.smallvec_get(&sv, i) as *i64)[0i64] != i * 11i64 then all = 0i64
+      i = i + 1i64
+    n = n + all
+    let mut out : i64 = 0i64
+    n = n + ok(smallvec.smallvec_pop(&sv, &out as ptr) && out == 99i64 && smallvec.smallvec_len(&sv) == 9i64)
+    let mut nv : i64 = 5i64
+    n = n + ok(smallvec.smallvec_set(&sv, 0i64, &nv as ptr) && (smallvec.smallvec_get(&sv, 0i64) as *i64)[0i64] == 5i64)
+    n = n + ok(smallvec.smallvec_get(&sv, 9i64) as i64 == 0i64 && !smallvec.smallvec_set(&sv, 12i64, &nv as ptr))
+    smallvec.smallvec_clear(&sv)
+    n = n + ok(smallvec.smallvec_len(&sv) == 0i64 && !smallvec.smallvec_pop(&sv, 0 as ptr))
+    smallvec.smallvec_destroy(&sv)
+    -- bump
+    let mut bp = bump.bump_new(64i64)
+    let p1 = bump.bump_alloc(&bp, 5i64, 1i64) as i64
+    let p2 = bump.bump_alloc(&bp, 8i64, 8i64) as i64
+    n = n + ok(p1 != 0i64 && p2 == p1 + 8i64)
+    let p3 = bump.bump_alloc_zeroed(&bp, 16i64, 8i64)
+    n = n + ok((p3 as *i64)[0i64] == 0i64 && (p3 as *i64)[1i64] == 0i64)
+    n = n + ok(bump.bump_alloc(&bp, 64i64, 8i64) as i64 == 0i64)
+    bump.bump_reset(&bp)
+    n = n + ok(bump.bump_alloc(&bp, 64i64, 1i64) as i64 == p1)
+    bump.bump_destroy(&bp)
+    -- bump over a caller buffer
+    let raw : *u8 = alloc [u8; 32]
+    let mut bb = bump.bump_from_buffer(raw as ptr, 32i64)
+    n = n + ok(bump.bump_alloc(&bb, 32i64, 1i64) as i64 == raw as i64 && bump.bump_alloc(&bb, 1i64, 1i64) as i64 == 0i64)
+    bump.bump_destroy(&bb)
+    free raw
+    -- arena: 64-byte chunks, allocate 40 x 8 bytes, every block must stay intact
+    let mut ar = arena.arena_new(64i64)
+    let ptrs : *i64 = alloc [i64; 40]
+    i = 0i64
+    while i < 40i64
+      let q = arena.arena_alloc(&ar, 8i64, 8i64)
+      (q as *i64)[0i64] = 1000i64 + i
+      ptrs[i] = q as i64
+      i = i + 1i64
+    let mut intact : i64 = 1i64
+    i = 0i64
+    while i < 40i64
+      if (ptrs[i] as *i64)[0i64] != 1000i64 + i then intact = 0i64
+      i = i + 1i64
+    n = n + intact
+    n = n + ok(ptrs[1i64] == ptrs[0i64] + 8i64 && ptrs[8i64] != ptrs[7i64] + 8i64)
+    -- an allocation larger than a chunk
+    let big = arena.arena_alloc_zeroed(&ar, 500i64, 8i64)
+    n = n + ok((big as *i64)[0i64] == 0i64 && (big as *i64)[62i64] == 0i64)
+    -- clear, then repeat the same allocations: the old chunks must be reused (same addresses), not replaced and leaked
+    arena.arena_clear(&ar)
+    let mut same : i64 = 1i64
+    i = 0i64
+    while i < 40i64
+      if arena.arena_alloc(&ar, 8i64, 8i64) as i64 != ptrs[i] then same = 0i64
+      i = i + 1i64
+    n = n + same
+    -- and the arena keeps working far past the old chain
+    i = 0i64
+    let mut fine : i64 = 1i64
+    while i < 200i64
+      let q = arena.arena_alloc(&ar, 8i64, 8i64)
+      (q as *i64)[0i64] = i
+      if (q as *i64)[0i64] != i then fine = 0i64
+      i = i + 1i64
+    n = n + fine
+    arena.arena_destroy(&ar)
+    free ptrs
+    -- stats
+    let mut v = vec.vec_new(8i64)
+    let mut k : i64 = 1i64
+    while k <= 8i64
+      let mut x = k as f64
+      vec.vec_push(&v, &x as ptr)
+      k = k + 1i64
+    n = n + ok(near(stats.mean_f64(&v), 4.5f64))
+    n = n + ok(near(stats.variance_f64(&v, false), 5.25f64))
+    n = n + ok(near(stats.variance_f64(&v, true), 6.0f64))
+    n = n + ok(near(stats.stddev_f64(&v, false), 2.29128784747792f64))
+    let mm = stats.min_max_f64(&v)
+    n = n + ok(near(mm.0, 1.0f64) && near(mm.1, 8.0f64))
+    let mut w = vec.vec_new(8i64)
+    k = 1i64
+    while k <= 8i64
+      let mut y = (2 * k + 1) as f64
+      vec.vec_push(&w, &y as ptr)
+      k = k + 1i64
+    n = n + ok(near(stats.pearson_correlation_f64(&v, &w), 1.0f64))
+    vec.vec_destroy(&v)
+    vec.vec_destroy(&w)
+    -- hex dump of 20 bytes: two rows
+    let data : *u8 = alloc [u8; 20]
+    i = 0i64
+    while i < 20i64
+      data[i] = (i + 65i64) as u8
+      i = i + 1i64
+    data[3i64] = 10u8
+    let mut dump = hex_dump.hex_dump_format_slice(data as ptr, 20i64)
+    -- 2 rows of "00000000  41 42 43 0a ..." ; row 1 has 16 bytes, row 2 has 4
+    n = n + ok(string.string_len(&dump) == 79i64 + 67i64)
+    let txt = string.string_as_slice(&dump) as *u8
+    n = n + ok(txt[0i64] == 48u8 && txt[8i64] == 32u8 && txt[10i64] == 52u8 && txt[11i64] == 49u8 && txt[19i64] == 48u8 && txt[20i64] == 97u8)
+    free data
+    n

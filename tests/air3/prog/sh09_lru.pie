@@ -1,0 +1,40 @@
+-- EXIT: 12
+-- stdlib executed: vec.lru (push, access = move to front, evict least recently used, drain to empty, destroy)
+-- (before the fix: the Vec held 8-byte slots that were then read as 32-byte items => segfault; eviction also corrupted head)
+-- each passing check adds one; 12 checks
+use vec.vec
+use vec.lru
+
+fn ok : (bool) -> i64 | (c) -> if c then 1i64 else 0i64
+
+fn main : () -> i64
+  | () ->
+    let mut n : i64 = 0i64
+    let mut l = lru.lrulist_new(8i64)
+    let a = lru.lrulist_push_head(&l, 100u64, 1i64)
+    let b = lru.lrulist_push_head(&l, 200u64, 2i64)
+    let c = lru.lrulist_push_head(&l, 300u64, 3i64)
+    -- order, most recent first: c b a ; tail = a
+    n = n + ok(l.head_idx == c && l.tail_idx == a)
+    -- touch a: a c b ; tail = b
+    n = n + ok(lru.lrulist_access(&l, a))
+    n = n + ok(l.head_idx == a && l.tail_idx == b)
+    let e1 = lru.lrulist_evict_tail(&l)
+    n = n + ok(e1.2 && e1.0 == 200u64 && e1.1 == 2i64)
+    -- a c ; tail = c, head must still be a
+    n = n + ok(l.head_idx == a && l.tail_idx == c)
+    let e2 = lru.lrulist_evict_tail(&l)
+    n = n + ok(e2.2 && e2.0 == 300u64 && e2.1 == 3i64)
+    -- only a left: head == tail == a
+    n = n + ok(l.head_idx == a && l.tail_idx == a)
+    let e3 = lru.lrulist_evict_tail(&l)
+    n = n + ok(e3.2 && e3.0 == 100u64 && e3.1 == 1i64)
+    -- empty
+    n = n + ok(l.head_idx == -1i64 && l.tail_idx == -1i64)
+    let e4 = lru.lrulist_evict_tail(&l)
+    n = n + ok(!e4.2)
+    -- the list is reusable after draining
+    let d = lru.lrulist_push_head(&l, 400u64, 4i64)
+    n = n + ok(l.head_idx == d && l.tail_idx == d)
+    lru.lrulist_destroy(&l)
+    n + 1i64
