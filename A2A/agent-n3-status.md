@@ -252,3 +252,9 @@ and says so); clause guards and destructuring `let` lowered; MSP `quote/splice/e
 interfaces/impls/rewrite+IRDL rules are compile-time only; `static mut` has no AIR storage; generics not instantiated.
 Gate: `make test` EXIT 0 (pfront 173/5, conformance 151/111, PEAR 35/0/1, exec 45/0/47, AIR text 238/0, lowering 35 ok/15 known); O0-O3 identical per case.
 Note: the sandbox was restored 3x; the first commit of this branch is a combined recovery commit (stated in its body).
+
+## 2026-10-04 — PR #25 (`n3/air3-low`) update, pushed `601c462`
+- Front-end gaps fixed (tuple-of-fn types, `(a; b)`, DEDENT after match/handle arms, `Str`, `stage e`, `Tensor<T; d..>` + `@`, `[| |]`, open-ended slices, static vtables / code-address constants, clear >16-param error).
+- Baselines moved up only: conformance 162/100 (11 cases removed from KNOWN_FAILURES), exec 46, 9 examples with fewer front-end errors.
+- Open gaps: multi-shot effects, `dyn I` sugar, bare `area(x)` (E3005), 32-bit `.len`/index math is i64, >16 params/elements, `44`/`45` NOTARGET on wasm, PEAR1 fails the XFAIL exec cases, `epoll_handler`/`uring_handler` pointer-vs-value, kernel never booted.
+- Needs Agent-4 verification before dev.
