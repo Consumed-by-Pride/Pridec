@@ -54,7 +54,7 @@ fn int main(String[] args)
     {
         int[8] cnt;
         int n = air_verify::verify_module(&mod, &cnt[0], false, 1000000);
-        printf("verify: %d violation(s)  V1=%d V2=%d V3=%d V4=%d  | conventions: J1(implicit %%kN joins)=%d N1(module-path roots)=%d J2(%%resume)=%d\n", n, cnt[0], cnt[1], cnt[2], cnt[3], cnt[4], cnt[5], cnt[6]);
+        printf("verify: %d violation(s)  V1=%d V2=%d V3=%d V4=%d V5=%d  | conventions: J1(implicit %%kN joins)=%d N1(module-path roots)=%d J2(%%resume)=%d\n", n, cnt[0], cnt[1], cnt[2], cnt[3], cnt[7], cnt[4], cnt[5], cnt[6]);
         arena.destroy();
         return n == 0 ? 0 : 1;
     }

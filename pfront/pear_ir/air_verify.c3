@@ -28,6 +28,10 @@
 //   unbound but is the receiver of a `field` chain is a MODULE-PATH ROOT
 //   (`os.linux.PROT_READ`): resolved by name against the loaded modules.
 //   V4  a `def` has a body, a `declare` has none, names are present.
+//   V5  (modules of the low profile only, AIR 3.0) the low-profile rules that need no LLVM: declaration attributes are known, carry
+//       the argument they need and sit on a declaration they mean something for; a `naked` def has no parameters and an `asm`;
+//       data is a single-constructor struct (no enum layout, no type parameters); atomic operation/order and fence order are in
+//       range; an `asm` has a template, constraints and a result type. (`airtool verify-low` additionally runs the type walk.)
 // ============================================================================
 module air_verify;
 import air_ir;
@@ -51,7 +55,8 @@ struct Verify
     usz         nlab;
     char*[VMAX] bound;    // every variable binder seen in this decl (flat)
     usz         nbound;
-    int[8]      counts;   // [0..3] violations V1..V4; [4] J1 implicit joins; [5] N1 module-path roots; [6] J2 `%resume`
+    int[8]      counts;   // [0..3] violations V1..V4; [4] J1 implicit joins; [5] N1 module-path roots; [6] J2 `%resume`; [7] violations V5
+    bool        saw_asm;
     bool        field_recv;   // the variable use being checked is a field-chain receiver
     int         shown;
     int         limit;
@@ -75,6 +80,17 @@ fn void Verify.viol(Verify* v, int cls, char* what, char* nm)
         v.shown++;
         void* se = fdopen(2, "w");
         fprintf(se, "air-verify: V%d in `%s`: %s `%s`\n", cls + 1, v.d.name == null ? "?" : v.d.name, what, nm == null ? "nil" : nm);
+        fflush(se);
+    }
+}
+fn void Verify.viol5(Verify* v, char* what, char* nm)
+{
+    v.counts[7]++;
+    if (!v.quiet && v.shown < v.limit)
+    {
+        v.shown++;
+        void* se = fdopen(2, "w");
+        fprintf(se, "air-verify: V5 in `%s`: %s `%s`\n", v.d.name == null ? "?" : v.d.name, what, nm == null ? "nil" : nm);
         fflush(se);
     }
 }
@@ -247,6 +263,77 @@ fn void Verify.chk_cmd(Verify* v, AirCmd* c)
     v.ncov = cmark; v.nlab = lmark;
 }
 
+// AIR 3.0 (low profile): the labels of a body form one control-flow graph, so a jump may target any label of the same def
+// (docs/specs/AIR3.md "Labels"); they are all visible from the start.
+fn void Verify.collect_labels(Verify* v, AirCmd* c)
+{
+    if (c == null) { return; }
+    if (c.tag == ACMD_LABEL && c.binder != null && v.nlab < VMAX) { v.lab[v.nlab] = c.binder; v.nlab++; }
+    v.collect_labels(c.body); v.collect_labels(c.next); v.collect_labels(c.then_c); v.collect_labels(c.else_c); v.collect_labels(c.handled);
+    for (usz i = 0; i < c.branch_count; i++) { AirBranch* b = c.branches[i]; if (b != null) { v.collect_labels(b.body); } }
+}
+
+fn void Verify.low_cmd(Verify* v, AirCmd* c)
+{
+    if (c == null) { return; }
+    if (c.tag == ACMD_ASM)
+    {
+        v.saw_asm = true;
+        if (c.asm_text == null || c.asm_cons == null || c.asm_ret == null) { v.viol5("asm without a template, constraints or result type:", null); }
+    }
+    if (c.tag == ACMD_ATOMIC && (c.atomic_op < 0 || c.atomic_op > 13 || c.atomic_order < 0 || c.atomic_order > 4)) { v.viol5("atomic operation or memory order out of range:", null); }
+    if (c.tag == ACMD_FENCE && (c.atomic_order < 1 || c.atomic_order > 4)) { v.viol5("fence order must be acquire, release, acq_rel or seq_cst:", null); }
+    v.low_cmd(c.body); v.low_cmd(c.next); v.low_cmd(c.then_c); v.low_cmd(c.else_c); v.low_cmd(c.handled);
+    for (usz i = 0; i < c.branch_count; i++) { AirBranch* b = c.branches[i]; if (b != null) { v.low_cmd(b.body); } }
+}
+fn bool known_attr(char* n)
+{
+    char*[11] ok = { "section", "align", "packed", "thread_local", "naked", "noinline", "inline", "cold", "noredzone", "no_builtins", null };
+    for (usz i = 0; ok[i] != null; i++) { if (air_text::streq(ok[i], n)) { return true; } }
+    return false;
+}
+fn void Verify.low_decl(Verify* v, AirDecl* d)
+{
+    bool is_def = d.tag == ADECL_DEF; bool is_glob = d.tag == ADECL_GLOBAL; bool is_data = d.tag == ADECL_DATA;
+    if (d.tag == ADECL_CODATA) { v.viol5("codata in the low profile:", d.name); }
+    if (is_data)
+    {
+        if (d.typaram_count > 0) { v.viol5("generic data in the low profile:", d.name); }
+        if (d.ctor_count != 1) { v.viol5("data with several constructors (enum layout) in the low profile:", d.name); }
+    }
+    bool has_inline = false; bool has_noinline = false;
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        char* n = d.attr_name[i];
+        if (n == null || !known_attr(n)) { v.viol5("unknown attribute:", n); continue; }
+        for (usz j = 0; j < i; j++) { if (air_text::streq(d.attr_name[j], n)) { v.viol5("attribute given twice:", n); } }
+        bool s = air_text::streq(n, "section"); bool a = air_text::streq(n, "align");
+        if (s || a)
+        {
+            if (!is_def && !is_glob) { v.viol5("section/align apply to functions and globals:", n); }
+            if (s && (d.attr_str[i] == null || d.attr_str[i][0] == 0)) { v.viol5("section needs a non-empty string:", d.name); }
+            if (s && d.attr_str[i] != null) { for (usz k = 0; d.attr_str[i][k] != 0; k++) { if (d.attr_str[i][k] == '"') { v.viol5("section name contains a quote:", d.name); } } }
+            if (a && (!d.attr_has_int[i] || d.attr_int[i] <= 0 || (d.attr_int[i] & (d.attr_int[i] - 1)) != 0)) { v.viol5("align needs a power of two:", d.name); }
+        }
+        else if (air_text::streq(n, "packed")) { if (!is_data) { v.viol5("packed applies to data:", d.name); } }
+        else if (air_text::streq(n, "thread_local")) { if (!is_glob || !d.g_mut) { v.viol5("thread_local applies to a mutable global:", d.name); } }
+        else { if (!is_def) { v.viol5("function attribute on something that is not a def:", n); } }
+        if (air_text::streq(n, "inline")) { has_inline = true; }
+        if (air_text::streq(n, "noinline")) { has_noinline = true; }
+    }
+    if (has_inline && has_noinline) { v.viol5("inline and noinline together:", d.name); }
+    v.saw_asm = false;
+    if (is_def) { v.low_cmd(d.def_body); }
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        if (is_def && d.attr_name[i] != null && air_text::streq(d.attr_name[i], "naked"))
+        {
+            if (d.param_count != 0) { v.viol5("a naked function has no parameters:", d.name); }
+            if (!v.saw_asm) { v.viol5("a naked function must be assembly:", d.name); }
+        }
+    }
+}
+
 // Returns the total number of violations (0 = valid). counts[0..3] = V1..V4.
 fn int verify_module(AirModule* m, int* counts_out, bool quiet, int limit)
 {
@@ -259,6 +346,7 @@ fn int verify_module(AirModule* m, int* counts_out, bool quiet, int limit)
         AirDecl* d = m.decls[i];
         if (d == null) { continue; }
         v.d = d; v.ncov = 0; v.nlab = 0; v.nbound = 0;
+        if (m.low) { v.low_decl(d); }
         if (d.tag == ADECL_DEF || d.tag == ADECL_DEFCO || d.tag == ADECL_DECLARE)
         {
             if (d.name == null) { v.viol(3, "declaration without a name:", null); }
@@ -266,11 +354,12 @@ fn int verify_module(AirModule* m, int* counts_out, bool quiet, int limit)
             if (d.tag == ADECL_DECLARE && d.def_body != null) { v.viol(3, "declare with a body:", d.name); }
             for (usz j = 0; j < d.param_count; j++) { if (d.params[j] != null) { v.bind_var(d.params[j].name); } }
             v.collect_cmd(d.def_body);
+            if (m.low) { v.collect_labels(d.def_body); }
             v.chk_cmd(d.def_body);
         }
     }
-    int total = v.counts[0] + v.counts[1] + v.counts[2] + v.counts[3];
-    if (counts_out != null) { for (usz i = 0; i < 7; i++) { counts_out[i] = v.counts[i]; } }
+    int total = v.counts[0] + v.counts[1] + v.counts[2] + v.counts[3] + v.counts[7];
+    if (counts_out != null) { for (usz i = 0; i < 8; i++) { counts_out[i] = v.counts[i]; } }
     free((void*)v);
     return total;
 }

@@ -25,7 +25,7 @@
 //       (constructor/tuple/record/array/as/or/ref/rest/string/float pattern)
 //   H6  a branch guard
 //   H7  comptime / defer blocks left in the body
-//   H8  data / codata declarations (the consumer must invent the layout)
+//   H8  data / codata declarations (the consumer must invent the layout); in a low module only codata, generic data and multi-constructor data
 //   H9  a `field` whose declaration slot is unresolved (index < 0)
 // ============================================================================
 module air_lint;
@@ -68,6 +68,7 @@ struct Lint
     usz             only_entry;   // 1: count only the entry module (before the first `module` marker)
     char**          seen;
     usz             nseen;
+    bool            low;          // AIR 3.0 module: a single-constructor, non-generic `data` IS the struct layout (not H8)
 }
 
 fn bool lint_untyped(AirTyp* t)
@@ -196,6 +197,7 @@ fn void Lint.cmd(Lint* l, AirCmd* c)
 fn void Lint.decl(Lint* l, AirDecl* d)
 {
     if (d == null) { return; }
+    if (l.low && d.tag == ADECL_DATA && d.ctor_count == 1 && d.typaram_count == 0) { return; }
     if (d.tag == ADECL_DATA || d.tag == ADECL_CODATA) { l.counts[14]++; return; }
     if (d.tag != ADECL_DEF && d.tag != ADECL_DEFCO && d.tag != ADECL_DECLARE) { return; }
     if (d.typaram_count > 0) { l.counts[10]++; }
@@ -220,7 +222,7 @@ fn int lint_module(AirModule* m, int* counts, bool entry_only)
     if (l == null) { return -1; }
     for (usz i = 0; i < LINT_RULES; i++) { l.counts[i] = 0; }
     l.seen = (char**)malloc(8 * LINT_MAXNAMES);
-    l.nseen = 0;
+    l.nseen = 0; l.low = m.low;
     if (l.seen == null) { free((void*)l); return -1; }
     for (usz i = 0; i < m.decl_count; i++)
     {

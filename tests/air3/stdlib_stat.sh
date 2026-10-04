@@ -10,7 +10,7 @@ for f in $(find stdlib -name "*.pie" | sort); do
     r=$(echo "$o" | grep -m1 "air-low: error" | sed 's/air-low: error: [0-9]*:[0-9]*: in `[^`]*`: //' | cut -c1-80)
   elif echo "$o" | grep -qE "refusing to emit|errors=[1-9]"; then r=FRONT
   elif echo "$o" | grep -q "function(s) lowered"; then
-    if tmp/airtool verify-low "$tmpd/s.low.air" >/dev/null 2>&1; then
+    if tmp/airtool verify-low "$tmpd/s.low.air" >/dev/null 2>&1 && tmp/airtool verify "$tmpd/s.low.air" >/dev/null 2>&1 && tmp/airtool lint "$tmpd/s.low.air" >/dev/null 2>&1; then
       # LLVM must accept the module too: emit .ll, parse + verify + optimise + write an object (no link)
       if tmp/airtool emit-ll "$tmpd/s.low.air" -o "$tmpd/s.ll" >/dev/null 2>&1 && python3 scripts/ll-exe.py "$tmpd/s.ll" -o "$tmpd/s.o" -O2 --emit-obj >"$tmpd/ll.err" 2>&1; then r=OK
       else r="LLVM $(head -c 120 "$tmpd/ll.err" | head -1)"; fi
