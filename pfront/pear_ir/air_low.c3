@@ -2075,7 +2075,14 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
                 if (e.child_count == 0 || e.children[0] == null) { return null; }
                 Node* f0 = e.children[0];
                 bool zero = (f0.kind == Nk.N_EXPR_INT && f0.p.ival == 0) || (f0.kind == Nk.N_EXPR_BOOL && f0.p.ival == 0) || f0.kind == Nk.N_EXPR_NULL;
-                if (!zero) { return null; }
+                if (!zero)   // any other constant fill: the element written out n times (bounded: the text form of a table is n entries long)
+                {
+                    if (t.ival <= 0 || t.ival > 65536) { return null; }
+                    AirPrd* ev = lw.const_init(f0, t.args[0]); if (ev == null) { return null; }
+                    AirPrd* fp = air_ir::air_new_AirPrd(lw.a); fp.tag = APRD_ARRAY; fp.ty = t;
+                    for (long k = 0; k < t.ival; k++) { fp.push_sub(ev); }
+                    return fp;
+                }
                 AirPrd* z = air_ir::air_mk_prd_unit(lw.a); z.ty = t; return z;   // zeroinitializer
             }
             if (t.ival != (long)e.child_count) { return null; }

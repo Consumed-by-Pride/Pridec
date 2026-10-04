@@ -1,0 +1,21 @@
+-- EXIT: 42
+-- the body of a non-tail-resumptive handle runs on a fiber stack: a recursion 8000 deep overflowed the old fixed 128 KiB block
+-- (silently, into the heap); the stack is now a 1 MiB lazily committed mapping with a guard page (PRIDE_FIBER_STACK_KB overrides).
+effect T
+  tick : i64 -> i64
+
+fn depth : i64 -> i64 ! [T]
+  | n ->
+      if n == 0i64
+        T.tick(1i64)
+      else
+        1i64 + depth(n - 1i64)
+
+fn main : () -> i64
+  | () ->
+      let r = handle depth(8000i64)
+        | T.tick x k ->
+            let v = k (x + 1i64)
+            v + 1i64
+      -- depth(0) = tick(1) -> resumed with 2 ; 8000 additions -> 8002 ; the arm adds 1 -> 100003
+      r % 251i64 - (8003i64 % 251i64) + 42i64
