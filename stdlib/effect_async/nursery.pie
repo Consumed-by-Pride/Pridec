@@ -26,7 +26,7 @@ fn nursery_new : i64 -> Nursery
   | scope_id ->
     Nursery {
       scope_id:  scope_id,
-      tasks:     vec.vec_new(16i64),
+      tasks:     vec.vec_new(32i64),   -- tasks are stored BY VALUE: one slot = one NurseryTask (4 x 8 bytes)
       next_task: 1i64,
       is_active: true
     }
@@ -34,15 +34,7 @@ fn nursery_new : i64 -> Nursery
 fn nursery_destroy : *Nursery -> ()
   | n ->
     if n != null then {
-      let mut i : i64 = 0i64;
-      let len = vec.vec_len(&n.tasks);
-      while true do {
-        if i >= len then {
-          break;
-        };
-        os.linux.free(vec.vec_get(&n.tasks, i));
-        i = i + 1i64;
-      };
+      -- the slots are values inside the vec's buffer: freeing them one by one freed interior pointers
       vec.vec_destroy(&n.tasks);
       n.is_active = false;
     } else {
@@ -59,7 +51,8 @@ fn nursery_spawn : (*Nursery, i64, ptr) -> i64
       t.prompt_id = prompt_id;
       t.completed = false;
       t.cont_ptr  = cont_ptr;
-      vec.vec_push(&n.tasks, t as ptr);
+      vec.vec_push(&n.tasks, t as ptr);   -- copies the 32-byte task into the vec
+      os.linux.free(t as ptr);
       effects.local_bind(tid, cont_ptr, prompt_id);
       tid
     } else {
