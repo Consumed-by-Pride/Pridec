@@ -501,6 +501,12 @@ fn void Ll.const_init(Ll* l, Sb* o, AirPrd* g, AirTyp* t, char* gname)
             o.put(is_t ? " }" : " ]");
             return;
         }
+        case APRD_VAR:   // the address of a function or another global: a link-time constant
+        {
+            AirDecl* tg = l.find(g.name);
+            if (tg == null || t.tag != ATYP_PTR) { l.err("an initialiser may name only a function or global (as a pointer):", g.name); o.put("zeroinitializer"); return; }
+            o.put("@\""); o.put(g.name); o.put("\""); return;
+        }
         case APRD_RECORD:
         {
             if (t.tag != ATYP_NOMINAL) { l.err("record initialiser without a nominal type", gname); return; }

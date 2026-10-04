@@ -1,0 +1,34 @@
+-- EXIT: 55
+-- dynamic dispatch written in the language: STATIC vtables (a global whose initialiser holds code addresses, `f as ptr`), a
+-- {data, vtable} fat pointer, and a call through the loaded pointer. Also a flat table of handlers indexed at run time.
+struct Sq { s: i64; }
+struct Rect { w: i64; h: i64; }
+struct VT { area: ptr; perim: ptr; }
+struct Dyn { data: ptr; vt: *VT; }
+
+fn sq_area : ptr -> i64 | p -> (p as *Sq).s * (p as *Sq).s
+fn sq_perim : ptr -> i64 | p -> (p as *Sq).s * 4
+fn rect_area : ptr -> i64 | p -> (p as *Rect).w * (p as *Rect).h
+fn rect_perim : ptr -> i64 | p -> ((p as *Rect).w + (p as *Rect).h) * 2
+
+fn area : Dyn -> i64
+  | d ->
+      let f = (d.vt.area) as fn(ptr) -> i64
+      f(d.data)
+fn perim : Dyn -> i64
+  | d ->
+      let f = (d.vt.perim) as fn(ptr) -> i64
+      f(d.data)
+
+static VQ : VT = VT { area: sq_area as ptr, perim: sq_perim as ptr }
+static VR : VT = VT { area: rect_area as ptr, perim: rect_perim as ptr }
+static HANDLERS : [ptr; 2] = [sq_area as ptr, rect_area as ptr]
+
+fn main : () -> i64
+  | () ->
+      let mut q = Sq { s: 3 }
+      let mut r = Rect { w: 2, h: 5 }
+      let a = Dyn { data: &q as ptr, vt: &VQ }
+      let b = Dyn { data: &r as ptr, vt: &VR }
+      let h = HANDLERS[1] as fn(ptr) -> i64
+      area(a) + perim(a) + area(b) + perim(b) + h(&r as ptr)

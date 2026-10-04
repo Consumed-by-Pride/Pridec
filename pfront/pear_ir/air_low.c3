@@ -429,7 +429,7 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
         case Nk.N_TY_TUPLE:
         {
             AirTyp*[16] ts; usz n = 0;
-            for (usz i = 0; i < t.child_count && n < 16; i++) { AirTyp* e = lw.ty(t.children[i]); if (e == null) { return null; } ts[n] = e; n++; }
+            for (usz i = 0; i < t.child_count; i++) { if (n >= 16) { lw.unsup(t, "a tuple type with more than 16 elements"); return null; } AirTyp* e = lw.ty(t.children[i]); if (e == null) { return null; } ts[n] = e; n++; }
             return air_ir::air_mk_typ_tuple(lw.a, &ts[0], n);
         }
         case Nk.N_TY_FN:
@@ -455,13 +455,14 @@ fn bool Low.sig_of(Low* lw, Node* tf, AirTyp** ps, usz* np, AirTyp** rt)
     *np = 0;
     if (cc > 2)   // `fn(a, b) -> r`: the parameters are the leading children
     {
-        for (usz i = 0; i + 1 < cc && *np < 16; i++) { AirTyp* e = lw.ty(tf.children[i]); if (e == null) { return false; } ps[*np] = e; *np = *np + 1; }
+        for (usz i = 0; i + 1 < cc; i++) { if (*np >= 16) { lw.unsup(tf, "a function type with more than 16 parameters"); return false; } AirTyp* e = lw.ty(tf.children[i]); if (e == null) { return false; } ps[*np] = e; *np = *np + 1; }
     }
     else if (dom.kind == Nk.N_TY_UNIT) { }
     else if (dom.kind == Nk.N_TY_TUPLE)
     {
-        for (usz i = 0; i < dom.child_count && *np < 16; i++)
+        for (usz i = 0; i < dom.child_count; i++)
         {
+            if (*np >= 16 && !(dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count)) { lw.unsup(tf, "a function type with more than 16 parameters"); return false; }
             if (dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count) { continue; }   // the trailing `...` of a variadic extern
             AirTyp* e = lw.ty(dom.children[i]); if (e == null) { return false; }
             ps[*np] = e; *np = *np + 1;
@@ -600,7 +601,8 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
             if (tn == null && c.child_count > 0 && c.children[0] != null) { tn = c.children[0].type_ann; }
             if (tn == null && c.child_count > 0 && c.children[0] != null && c.children[0].kind == Nk.N_PAT_WILDCARD) { continue; }   // `main(_)`: no parameter
             AirTyp* pt = lw.ty(tn); if (pt == null) { lw.nfn--; return null; }
-            if (f.np < 16) { f.pty[f.np] = pt; f.np++; }
+            if (f.np >= 16) { lw.unsup(d, "a function with more than 16 parameters"); lw.nfn--; return null; }
+            f.pty[f.np] = pt; f.np++;
         }
         Node* rn = d.type_ann;
         f.ret = (rn == null || rn.kind == Nk.N_TY_FN) ? lw.m.t_unit : lw.ty(rn);
@@ -1925,6 +1927,12 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
             AirTyp* to = lw.ty(e.type_ann); if (to == null || !air_ll::ty_eq(to, t)) { return null; }
             Node* c0 = e.children[0];
             if (t.tag == ATYP_PTR && c0.kind == Nk.N_EXPR_INT && c0.p.ival == 0) { AirPrd* z = air_ir::air_mk_prd_null(lw.a); z.ty = t; return z; }
+            if (t.tag == ATYP_PTR && c0.kind == Nk.N_EXPR_IDENT && c0.resolved != null && c0.resolved.kind == Nk.N_DECL_FN)   // `f as ptr`: the code address, a link-time constant
+            {
+                Vx fv = lw.expr(c0, null);
+                if (fv.p != null && fv.p.tag == APRD_VAR && fv.t != null && fv.t.tag == ATYP_ARROW) { AirPrd* g = air_ir::air_mk_var(lw.a, fv.p.name); g.ty = t; return g; }
+                return null;
+            }
             return lw.const_init(c0, t);
         }
         case Nk.N_EXPR_STRUCT_LIT:
@@ -3136,18 +3144,20 @@ fn Vx Low.asm_(Low* lw, Node* n)
 fn Vx Low.slicing(Low* lw, Node* n)
 {
     Node* rg = n.children[1];
-    if (rg.child_count < 2) { lw.unsup(n, "open-ended slice range"); return lw.unit(); }
+    bool open_hi = rg.child_count < 2;     // `xs[lo..]`: up to the length
     bool incl = (rg.flags & pfront_core::NF_INCLUSIVE) != 0;
     AirTyp* bt = lw.hint(n.children[0]);
     AirTyp* i64t = lw.m.t_i64;
     Vx lo = lw.coerce(lw.expr(rg.children[0], i64t), i64t);
-    Vx hi = lw.coerce(lw.expr(rg.children[1], i64t), i64t);
+    Vx hi;
+    if (!open_hi) { hi = lw.coerce(lw.expr(rg.children[1], i64t), i64t); }
     if (!lw.live()) { return lw.unit(); }
-    if (incl) { hi = lw.binop(ABIN_ADD, hi, lw.lit_int(1, i64t)); }
+    if (incl && !open_hi) { hi = lw.binop(ABIN_ADD, hi, lw.lit_int(1, i64t)); }
     AirPrd* base = null; AirTyp* el = null; AirTyp* rt = null; bool checked = true; Vx len;
     if (bt != null && bt.tag == ATYP_ARRAY)
     {
         el = bt.args[0]; rt = lw.fat_ty(el, false); len = lw.lit_int(bt.ival, i64t);
+        if (open_hi) { hi = len; }
         Pl bp;
         if (!lw.place(n.children[0], &bp) || !air_ll::ty_eq(bp.t, bt))
         {
@@ -3165,6 +3175,7 @@ fn Vx Low.slicing(Low* lw, Node* n)
         el = lw.fat_elem(bt); rt = bt;
         Vx sv = lw.expr(n.children[0], null); if (!lw.live()) { return lw.unit(); }
         Vx sp = lw.field_of(sv, "ptr", 0, lw.ptr(el)); len = lw.coerce(lw.field_of(sv, "len", 1, lw.m.t_usz), i64t);
+        if (open_hi) { hi = len; }
         lw.bounds(hi, lw.binop(ABIN_ADD, len, lw.lit_int(1, i64t)));
         lw.bounds(lo, lw.binop(ABIN_ADD, hi, lw.lit_int(1, i64t)));
         Vx[1] ix1; ix1[0] = lo;
@@ -3176,6 +3187,7 @@ fn Vx Low.slicing(Low* lw, Node* n)
         el = lw.pointee(pv.t);
         if (el == null) { lw.err(n, "slicing a value that is neither a pointer, an array nor a slice", null); return lw.unit(); }
         rt = lw.fat_ty(el, false); checked = false;
+        if (open_hi) { lw.err(n, "an open-ended slice of a raw pointer has no length to run to", null); return lw.unit(); }
         Vx[1] ix1; ix1[0] = lo;
         base = lw.gep(pv.p, el, &ix1[0], 1, el).p;
     }

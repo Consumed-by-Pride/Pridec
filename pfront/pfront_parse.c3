@@ -3290,6 +3290,20 @@ fn Node* Parser.parse_primary(Parser* p)
             return id;
         }
 
+        case TOKEN_DOTDOT:
+        case TOKEN_DOTDOTEQ:
+        {
+            // `..hi` / `..=hi` / `..`: a range with no lower bound (0) -- `xs[..n]`, `xs[..]`
+            p.advance();
+            Node* rng = p.mk_at(Nk.N_EXPR_RANGE, t);
+            if (t.type == Tk.TOKEN_DOTDOTEQ) { rng.flags = rng.flags | pfront_core::NF_INCLUSIVE; }
+            Node* z = p.mk_at(Nk.N_EXPR_INT, t);
+            z.p.ival = 0; z.p.sptr = "0"; z.p.slen = 1;
+            { char w0; bool sg0; read_num_suffix("0", 1, &w0, &sg0); z.p.width = w0; z.p.is_signed = sg0; }
+            p.add(rng, z);
+            if (tok_starts_expr(p.ct())) { p.add(rng, p.parse_expr_prec(12)); }
+            return rng;
+        }
         case TOKEN_LBRACE:
             return p.parse_brace_block();
 
