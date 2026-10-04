@@ -1,10 +1,10 @@
 // Pride runtime for wasm32-wasi (C, compiled with `zig cc -target wasm32-wasi`).
 //
-// AIR 3 is target-neutral: an extern declared in Pride keeps the signature Pride gave it (`i64` is 64 bits, so
-// a C `size_t` parameter declared `i64` is an i64 in the .air). A 32-bit target's libc takes 32-bit sizes, so
-// scripts/ll-exe.py renames every external function F of a wasm module to `pride_rt_F` and THIS file defines
-// each of them with the Pride-declared (i64) signature, forwarding to wasi-libc. The link error for a missing
-// symbol therefore names exactly what a target must supply.
+// AIR 3 is target-neutral: an extern declared in Pride keeps the signature Pride gave it.  scripts/ll-exe.py renames every external function
+// F of a wasm module to `pride_rt_F` and THIS file defines each of them, forwarding to wasi-libc; the link error for a missing symbol names
+// exactly what a target must supply.  The C functions that take or return `size_t`/`ssize_t` (malloc, memcpy, write, strlen, ...) are
+// declared in the .air with the target's pointer width (air_low.c3 c_abi_widths), i.e. i32 here, so the definitions below use size_t as libc does.
+// Fibers (non-tail-resumptive effect handlers) are in pride_fiber.c: link it too, then run scripts/wasm-fibers.py (binaryen Asyncify).
 //
 // `syscall` (the AIR `syscall` instruction and libc's variadic `syscall`) is emulated for the Linux numbers the
 // stdlib uses most; an unknown number returns -38 (ENOSYS).
