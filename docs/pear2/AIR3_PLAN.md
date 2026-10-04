@@ -14,8 +14,8 @@ Gate (`make test-air3`, part of `make test`; `tests/air3/gate.sh`, floors in `te
 | corpus | result |
 |---|---|
 | `tests/air3/prog/*.pie` (effects, closures, raw fn pointers, tuples, wide signatures, constant globals, offside `else`, quote/splice) | all pass: built from the low `.air`, executed, exit code/stdout as the header says |
-| `tests/exec` (84 programs) | 72 PASS, 12 are rejected by the front end itself (`XFAIL.tsv`); 0 NOLOWER / VERIFY / LLVM / WRONG |
-| the same `.ll` built for `wasm32-wasi` (LLVM wasm backend → zig `wasm-ld` + wasi-libc + `runtime/wasi/pride_rt.c`) and **run under wasmtime** (`low_corpus.sh --wasm`, in the gate) | 14/14 prog and 72/72 exec programs produce the same exit status and stdout as native. Externs keep their Pride-declared signatures, so `ll-exe.py` renames each external `F` to `pride_rt_F` and the shim adapts the 32-bit libc ABI (`malloc(i64)` vs wasm32 `malloc(i32)` trapped before this); only `malloc/free/write/syscall/labs/abs/…` exist so far |
+| `tests/exec` (84 programs) | **84 PASS**; 0 FRONT / NOLOWER / VERIFY / LLVM / WRONG (the 12 front-end gaps of the previous round are closed: tuple-of-function types, `(a; b)` sequences, the stray DEDENT after `handle`/`match` arms, `Str`, `stage e`, `Tensor<T; d..>` / `[\| \|]` / `@`, the stdlib `ub.assume` family; see section 4) |
+| the same `.ll` built for `wasm32-wasi` (LLVM wasm backend → zig `wasm-ld` + wasi-libc + `runtime/wasi/pride_rt.c`) and **run under wasmtime** (`low_corpus.sh --wasm`, in the gate) | 14/14 prog and 82/82 exec programs (2 more call the host fiber runtime and are reported NOTARGET) produce the same exit status and stdout as native. Externs keep their Pride-declared signatures, so `ll-exe.py` renames each external `F` to `pride_rt_F` and the shim adapts the 32-bit libc ABI (`malloc(i64)` vs wasm32 `malloc(i32)` trapped before this); only `malloc/free/write/syscall/labs/abs/…` exist so far |
 | `stdlib/**` (260 modules, library mode) | 260/260 lower, verify-low, and compile to an `-O2` LLVM object |
 
 "Library mode": a module with no `main` lowers every non-generic function it defines.
@@ -28,6 +28,11 @@ Gate (`make test-air3`, part of `make test`; `tests/air3/gate.sh`, floors in `te
 * front-end passes (theory residualisation, constant folding) dropped literal width suffixes (`1i32 - 1023i32` became an untyped `i64`);
 * emitter-made block names collided with lowering labels (58 stdlib modules produced invalid LLVM);
 * stdlib type errors that PEAR 1 let through (see the `stdlib lowers completely` commit).
+* parser, found while closing the exec front-end gaps: a `|` arm line deeper than its statement opens an indentation level in the lexer *without* an INDENT token, but its DEDENT is emitted — so after any statement-level `match`/`handle` the rest of the block silently became top-level (`e` unresolved after the first `match e`). `parse_match`/`parse_handle` now consume that DEDENT;
+* `(i64 -> i64, i64)` (a function type inside a tuple type) and `(a; b; c)` sequences did not parse; `Str` was not a type name (it is now the spelling of `str`); `stage y + 10` read `stage` as a variable (it is the bare expression now);
+* `Tensor<T; d1, d2>` (nested fixed arrays), `[| a, b |]` literals and `a @ b` (vector·vector, matrix@vector, matrix@matrix; i/f element types; shapes checked while lowering) were not in the front end at all; `@` lowers to three counted loops over stack slots — no new AIR form;
+* stdlib: `pride.ub` lacked the short names the tests call (`ub.assume`, …); `effect_async.nursery` stored 32-byte tasks in a 16-byte-element vec (heap overflow) and freed vec-interior pointers (double free);
+* tests fixed because they were wrong, not the compiler: `15_ub_explicit` (`ub!` outside `unsafe` is E3230 by design), `44_hybrid_scoped_effects` (called an API with types the stdlib does not declare, resumed a fiber with a null entry; now a real raw C entry `fiber_entry as ptr`), `46_mlcee_contextual_effects` (inspected a box with no code and asserted it found one).
 
 ## 3 What is still not at LLVM level (honest list)
 

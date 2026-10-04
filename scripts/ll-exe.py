@@ -95,7 +95,7 @@ if "--freestanding" in args and want_triple and want_triple.startswith((b"i386",
     os.unlink(obj)
     if r.returncode: sys.exit("ll-exe: link: " + r.stderr)
     sys.exit(0)
-link = ["gcc", obj, "-o", out, "-no-pie"]
+link = ["gcc", obj, "-o", out, "-no-pie"] + [a_ for i_, a_ in enumerate(args[1:], 1) if args[i_ - 1] == "--link"]   # --link FILE (repeatable): extra .c/.o/.a to link, e.g. runtime/compiler_rt.c
 if "--freestanding" in args: link += ["-nostdlib", "-static", "-Wl,-e,_start"]   # no libc, no crt: the program's own `_start` is the entry
 r = subprocess.run(link, capture_output=True, text=True,
                    env=dict(os.environ, LD_LIBRARY_PATH=""))
