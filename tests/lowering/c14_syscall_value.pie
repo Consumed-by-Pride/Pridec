@@ -1,0 +1,2 @@
+-- EXIT: 3
+fn main(_) -> i64 { let r: i64 = syscall(39); if r > 0 { return 3; } return 4; }

@@ -1,0 +1,2 @@
+-- EXIT: 42
+fn main(_) -> i64 { syscall(231, 42); return 0; }

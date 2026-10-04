@@ -1,0 +1,3 @@
+-- EXIT: 9
+static mut G: i64 = 4;
+fn main(_) -> i64 { G = G + 5; return G; }

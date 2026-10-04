@@ -1,0 +1,7 @@
+-- EXIT: 42
+interface Get
+  fn get : Self -> i64
+struct C { n: i64; }
+fn getc : C -> i64
+  | c -> c.n
+fn main(_) -> i64 { let c: C = C { n: 42 }; return getc(c); }

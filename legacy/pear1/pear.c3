@@ -86,6 +86,7 @@ extern fn Lvalue ll_build_bitcast(Lbuilder b, Lvalue v, Ltype t, char* n) @cname
 extern fn Lvalue ll_build_ptrtoint(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildPtrToInt");
 extern fn Lvalue ll_build_inttoptr(Lbuilder b, Lvalue v, Ltype t, char* n) @cname("LLVMBuildIntToPtr");
 extern fn Lvalue ll_build_call2(Lbuilder b, Ltype ft, Lvalue f, Lvalue* a, uint n, char* nm) @cname("LLVMBuildCall2");
+extern fn Lvalue ll_build_global_str(Lbuilder b, char* s, char* n) @cname("LLVMBuildGlobalStringPtr");
 extern fn Lvalue ll_build_ret(Lbuilder b, Lvalue v) @cname("LLVMBuildRet");
 extern fn Lvalue ll_build_ret_void(Lbuilder b) @cname("LLVMBuildRetVoid");
 extern fn Lvalue ll_build_br(Lbuilder b, Lblock bb) @cname("LLVMBuildBr");
@@ -161,6 +162,8 @@ const int  LLVM_ATTR_SPECULATABLE = 68;  // Speculatable
 
 
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
+extern fn char* getenv(char* name);
+extern fn int ll_verify_module(Lmodule m, int action, char** out) @cname("LLVMVerifyModule");
 
 // ── Codegen state ─────────────────────────────────────────────────────
 
@@ -604,6 +607,14 @@ fn Lvalue PearCg.prd_i64(PearCg* cg, AirPrd* p)
                 return ll_build_sub(cg.b, zero, r, "neg");
             }
             return r;
+        }
+        case APRD_STRING: case APRD_BYTES:
+        {
+            // The address of a NUL-terminated copy of the literal's bytes (embedded NULs end
+            // the copy: PEAR 1 does not carry string lengths).
+            char* lit = p.tag == APRD_STRING ? p.name : p.bytes;
+            Lvalue gp = ll_build_global_str(cg.b, lit == null ? (char*)"" : lit, (char*)"str");
+            return ll_build_ptrtoint(cg.b, gp, cg.i64ty, cg.mktmp());
         }
         case APRD_CHAR:
             return ll_const_int(cg.i64ty, (ulong)p.ival, 0);
@@ -1138,8 +1149,52 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
             Lvalue base = ll_build_inttoptr(cg.b, v, i64p, cg.mktmp());
             Lvalue off = ll_const_int(cg.i64ty, (ulong)k.idx, 0);
             Lvalue addr = ll_build_gep2(cg.b, cg.i64ty, base, &off, 1, cg.mktmp());
+            if (k.tail != null && k.tail.tag == ACNS_STORE)
+            {
+                // `field f #i · store(v ; 8)` denotes the field's PLACE (AIR.md 6.1):
+                // deliver the slot address to the store instead of loading the slot.
+                Lvalue slot_int = ll_build_ptrtoint(cg.b, addr, cg.i64ty, cg.mktmp());
+                return cg.cns(slot_int, k.tail);
+            }
             Lvalue fv = ll_build_load2(cg.b, cg.i64ty, addr, cg.mktmp());
             return cg.cns(fv, k.tail);
+        }
+        case ACNS_ASCRIBE:
+        {
+            // `as T`: every PEAR 1 value is an i64, so a cast to a narrower integer type is a
+            // wrap to that width (zero-extend for uN, sign-extend for iN); anything else is
+            // the identity on the 64-bit representation. (Before this case the consumer fell
+            // to `default:` and the program hit `unreachable` at the first `x as T`.)
+            Lvalue cv = v;
+            if (v != null && k.ty != null)
+            {
+                int bits = 0; bool sgn = false;
+                switch (k.ty.tag)
+                {
+                    case ATYP_I8:  bits = 8;  sgn = true;
+                    case ATYP_I16: bits = 16; sgn = true;
+                    case ATYP_I32: bits = 32; sgn = true;
+                    case ATYP_U8:  bits = 8;
+                    case ATYP_U16: bits = 16;
+                    case ATYP_U32: bits = 32;
+                    default: bits = 0;
+                }
+                if (bits > 0)
+                {
+                    if (sgn)
+                    {
+                        Lvalue sh = ll_const_int(cg.i64ty, (ulong)(64 - bits), 0);
+                        Lvalue up = ll_build_shl(cg.b, v, sh, cg.mktmp());
+                        cv = ll_build_ashr(cg.b, up, sh, cg.mktmp());
+                    }
+                    else
+                    {
+                        ulong mask = ((ulong)1 << (ulong)bits) - 1;
+                        cv = ll_build_and(cg.b, v, ll_const_int(cg.i64ty, mask, 0), cg.mktmp());
+                    }
+                }
+            }
+            return cg.cns(cv, k.tail);
         }
         case ACNS_FST: case ACNS_SND: case ACNS_PROJ:
         {
@@ -1234,7 +1289,14 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
                 argv[0] = ll_build_inttoptr(cg.b, argv[0], cg.i8ptrty, cg.mktmp());
             }
             char* nm = cg.mktmp();
-            Lvalue r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm);
+            Lvalue r;
+            if (callee == cg.free_fn)
+            {
+                // A void call must not be named; its "result" is unit (0 in the i64 representation).
+                (void)ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, (char*)"");
+                r = ll_const_int(cg.i64ty, 0, 0);
+            }
+            else { r = ll_build_call2(cg.b, fn_ty, callee, &argv[0], ac, nm); }
             if (ret_is_ptr)
             {
                 r = ll_build_ptrtoint(cg.b, r, cg.i64ty, nm);
@@ -1376,6 +1438,14 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────
+
+// pear_unsupported_form — PEAR 1 has no lowering for this AIR command. Compiling it to a
+// silent no-op (the old behaviour) hid the gap; the program now traps at that point and the
+// compiler says why.
+fn void pear_unsupported_form(char* what)
+{
+    (void)printf((char*)"pear: unsupported AIR form `%s` -- the generated code traps here\n", what);
+}
 
 fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
 {
@@ -1689,6 +1759,33 @@ fn bool PearCg.cmd(PearCg* cg, AirCmd* c)
         case ACMD_DEFER:
         {
             return cg.cmd(c.body);
+        }
+        case ACMD_SYSCALL:
+        {
+            // `syscall n(a...) · k` -> libc `syscall(long n, ...)`, result to k (the same libc
+            // entry the stdlib wrappers use: stdlib/os/linux.pie #extern("syscall")).
+            Ltype[1] sa; sa[0] = cg.i64ty;
+            Ltype sfty = ll_fn_ty(cg.i64ty, &sa[0], 1, 1);
+            Lvalue sfn = ll_get_named_fn(cg.mod, (char*)"syscall");
+            if (sfn == null) { sfn = ll_add_fn(cg.mod, (char*)"syscall", sfty); }
+            Lvalue[17] sargv; uint sn = 0;
+            sargv[0] = cg.prd_i64(c.prd); sn = 1;
+            for (usz i = 0; i < c.prd_count && sn < 17; i++) { sargv[sn] = cg.prd_i64(c.prds[i]); sn++; }
+            Lvalue sres = ll_build_call2(cg.b, sfty, sfn, &sargv[0], sn, cg.mktmp());
+            if (c.cns == null) { return false; }
+            return cg.cns(sres, c.cns);
+        }
+        case ACMD_ASM: case ACMD_ATOMIC: case ACMD_FENCE:
+        {
+            // Not implemented by PEAR 1: say so instead of compiling to a silent no-op.
+            pear_unsupported_form(c.tag == ACMD_ASM ? (char*)"asm" : (c.tag == ACMD_ATOMIC ? (char*)"atomic" : (char*)"fence"));
+            ll_build_unreachable(cg.b); cg.terminated = true; return true;
+        }
+        case ACMD_PERFORM: case ACMD_HANDLE: case ACMD_RESUME:
+        {
+            // Algebraic effects: PEAR 1 has no handler runtime (ledger P04-P06). Say so.
+            pear_unsupported_form(c.tag == ACMD_PERFORM ? (char*)"perform" : (c.tag == ACMD_HANDLE ? (char*)"handle" : (char*)"resume"));
+            ll_build_unreachable(cg.b); cg.terminated = true; return true;
         }
         case ACMD_TRAP: case ACMD_UB:
             ll_build_unreachable(cg.b); cg.terminated = true; return true;
@@ -2025,6 +2122,107 @@ fn char* pear_pipe_for(int lvl)
     return PEAR_PIPE_O3;
 }
 
+// ── Reachability pruning ────────────────────────────────────────────────
+// PEAR 1 used to emit EVERY definition of the program (the whole prelude and stdlib) and so
+// had to compile bodies nobody calls; since AIR 2.1 lowers more of those bodies faithfully,
+// several stdlib bodies (arena_destroy, slab_*, ...) are not valid PEAR 1 IR (values used as
+// pointers, blocks without terminators). Only definitions reachable from `main` are emitted
+// now; the rest stay declared. The walk over-approximates: any variable use or field name
+// that spells a definition counts as a reference. No `main` => nothing is pruned (library).
+extern fn void* calloc(usz count, usz size);
+extern fn void  free(void* p);
+fn void* pear_zalloc(usz count, usz size) { return calloc(count, size); }
+fn void  pear_zfree(void* p) { free(p); }
+struct PearReach
+{
+    AirModule* mod;
+    bool*      mark;       // by decl index
+    uint*      work;
+    usz        nwork;
+    usz        ndecl;
+}
+
+fn void pear_reach_name(PearReach* r, char* nm)
+{
+    if (nm == null || nm[0] == 0) { return; }
+    for (usz i = 0; i < r.ndecl; i++)
+    {
+        AirDecl* d = r.mod.decls[i];
+        if (d == null || d.tag != ADECL_DEF || r.mark[i] || d.name == null) { continue; }
+        if (!pear_same_name(d.name, nm)) { continue; }
+        r.mark[i] = true; r.work[r.nwork] = (uint)i; r.nwork++;
+    }
+}
+fn void pear_reach_prd(PearReach* r, AirPrd* p)
+{
+    if (p == null) { return; }
+    if (p.tag == APRD_VAR) { pear_reach_name(r, p.name); }
+    for (usz i = 0; i < p.sub_count; i++) { pear_reach_prd(r, p.subs[i]); }
+    for (usz i = 0; i < p.rec_init_count; i++) { if (p.rec_inits[i] != null) { pear_reach_prd(r, p.rec_inits[i].value); } }
+    pear_reach_cmd(r, p.body);
+}
+fn void pear_reach_cns(PearReach* r, AirCns* k)
+{
+    if (k == null) { return; }
+    if (k.tag == ACNS_FIELD) { pear_reach_name(r, k.name); }
+    pear_reach_prd(r, k.prd);
+    pear_reach_cns(r, k.tail);
+    for (usz i = 0; i < k.branch_count; i++) { if (k.branches[i] != null) { pear_reach_cmd(r, k.branches[i].body); pear_reach_cmd(r, k.branches[i].guard); } }
+    for (usz i = 0; i < k.cobranch_count; i++) { if (k.cobranches[i] != null) { pear_reach_cmd(r, k.cobranches[i].body); } }
+    pear_reach_cmd(r, k.body);
+}
+fn void pear_reach_cmd(PearReach* r, AirCmd* c)
+{
+    if (c == null) { return; }
+    pear_reach_prd(r, c.prd);
+    pear_reach_cns(r, c.cns);
+    for (usz i = 0; i < c.prd_count; i++) { pear_reach_prd(r, c.prds[i]); }
+    for (usz i = 0; i < c.jump_arg_count; i++) { pear_reach_name(r, c.jump_args[i]); }
+    pear_reach_cmd(r, c.body); pear_reach_cmd(r, c.next); pear_reach_cmd(r, c.then_c);
+    pear_reach_cmd(r, c.else_c); pear_reach_cmd(r, c.handled);
+    for (usz i = 0; i < c.branch_count; i++) { if (c.branches[i] != null) { pear_reach_cmd(r, c.branches[i].body); pear_reach_cmd(r, c.branches[i].guard); } }
+}
+// Fills `emit[i]` for every decl; returns the number of definitions that stay pruned.
+fn usz pear_reachable(AirModule* mod, bool* emit)
+{
+    usz n = mod.decl_count;
+    usz pruned = 0;
+    bool has_main = false;
+    for (usz i = 0; i < n; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        emit[i] = true;
+        if (d != null && d.tag == ADECL_DEF && d.name != null && pear_same_name(d.name, "main")) { has_main = true; }
+    }
+    if (!has_main) { return 0; }
+    PearReach r;
+    r.mod = mod; r.ndecl = n; r.nwork = 0;
+    r.mark = (bool*)(bool*)pear_zalloc(n + 1, 1);
+    r.work = (uint*)pear_zalloc(n + 1, 4);
+    if (r.mark == null || r.work == null) { return 0; }
+    for (usz i = 0; i < n; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d != null && d.tag == ADECL_DEF && d.name != null && pear_same_name(d.name, "main"))
+        {
+            r.mark[i] = true; r.work[r.nwork] = (uint)i; r.nwork++;
+        }
+    }
+    usz head = 0;
+    while (head < r.nwork)
+    {
+        AirDecl* d = mod.decls[r.work[head]]; head++;
+        if (d != null) { pear_reach_cmd(&r, d.def_body); }
+    }
+    for (usz i = 0; i < n; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d != null && d.tag == ADECL_DEF && !r.mark[i]) { emit[i] = false; pruned++; }
+    }
+    pear_zfree((void*)r.mark); pear_zfree((void*)r.work);
+    return pruned;
+}
+
 fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* mod)
 {
     cg.air = mod;
@@ -2087,12 +2285,15 @@ fn void pear_setup(PearCg* cg, Lcontext ctx, Lmodule m, Lbuilder b, AirModule* m
         if (d == null) continue;
         if (d.tag == ADECL_DEF) { (void)pear_fn_get_or_create(cg, d); }
     }
+    bool* emit = (bool*)pear_zalloc((usz)mod.decl_count + 1, 1);
+    if (emit != null) { (void)pear_reachable(mod, emit); }
     for (uint i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
         if (d == null) continue;
-        if (d.tag == ADECL_DEF) { pear_emit_fn(cg, d); }
+        if (d.tag == ADECL_DEF && (emit == null || emit[i])) { pear_emit_fn(cg, d); }
     }
+    if (emit != null) { pear_zfree((void*)emit); }
 }
 
 fn void pear_emit_module(AirModule* mod, char* bc_path, int opt_level)
@@ -2157,6 +2358,16 @@ fn bool pear_emit_obj(AirModule* mod, char* obj_path, int opt_level)
     }
     PearCg cg;
     pear_setup(&cg, ctx, m, b, mod);
+    // Debugging aid: PEAR1_DUMP_LL=/path/out.ll writes the module (before optimisation) as
+    // textual LLVM IR, so a wrong executable can be traced back to the code PEAR 1 generated.
+    {
+        char* dump = getenv((char*)"PEAR1_DUMP_LL");
+        if (dump != null && dump[0] != 0)
+        {
+            char* derr = null; (void)ll_print_mod_to_file(m, dump, &derr);
+            char* verr = null; (void)ll_verify_module(m, 1, &verr);   // 1 = print the findings to stderr
+        }
+    }
     // Run PEAR mid-end pipeline WITHOUT the TM attached. LLVM 19's DwarfEHPrepare
     // pass segfaults when added to the codegen pipeline on modules containing
     // recursive functions (see https://github.com/llvm/llvm-project/issues/XXXX);

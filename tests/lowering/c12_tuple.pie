@@ -1,0 +1,2 @@
+-- EXIT: 42
+fn main(_) -> i64 { let t: (i64, i64) = (40, 2); let (a, b) = t; return a + b; }

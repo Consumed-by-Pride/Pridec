@@ -1,0 +1,2 @@
+-- EXIT: 7
+fn main(_) -> i64 { let mut x: i64 = 1; { defer { x = 7; } } return x; }

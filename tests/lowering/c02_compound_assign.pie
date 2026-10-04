@@ -1,0 +1,2 @@
+-- EXIT: 5
+fn main(_) -> i64 { let mut x: i64 = 1; x += 4; return x; }

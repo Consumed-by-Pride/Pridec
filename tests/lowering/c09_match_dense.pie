@@ -1,0 +1,10 @@
+-- EXIT: 32
+fn choose(n: i64) -> i64 {
+  match n
+    | 0 -> 10
+    | 1 -> 21
+    | 2 -> 32
+    | 3 -> 43
+    | _ -> 99
+}
+fn main(_) -> i64 { return choose(2); }
