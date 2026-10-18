@@ -1,0 +1,9 @@
+// PEAR 2 M3 rejection: one external symbol cannot have conflicting scalar ABIs.
+air 2.2 Main "extern_conflict_main.pie";
+
+link "pear2_conflict" extern declare numeric(value : i64) : i64;
+link "pear2_conflict" extern declare predicate(value : bool) : bool;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

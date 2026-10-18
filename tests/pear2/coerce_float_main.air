@@ -1,0 +1,22 @@
+// PEAR2: explicit integer/float conversions and f32/f64 widening/narrowing.
+air 2.2 Main "coerce_float_main.pie";
+
+def signed_to_float(x : i32) : f64 =
+  mu~ %ret.
+    <coerce(x, f64) | %ret>;
+
+def float_to_unsigned(x : f32) : u32 =
+  mu~ %ret.
+    <coerce(x, u32) | %ret>;
+
+def widen(x : f32) : f64 =
+  mu~ %ret.
+    <coerce(x, f64) | %ret>;
+
+def narrow(x : f64) : f32 =
+  mu~ %ret.
+    <coerce(x, f32) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

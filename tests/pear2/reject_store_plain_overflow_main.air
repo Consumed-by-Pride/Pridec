@@ -1,0 +1,11 @@
+// PEAR2: untyped integer constants must still fit the destination memory type.
+air 2.2 Main "reject_store_plain_overflow_main.pie";
+
+def invalid_store(p : ptr(u8)) : i64 =
+  mu~ %ret.
+    <p | store(300; 1) · comu _.
+      <0 | %ret>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

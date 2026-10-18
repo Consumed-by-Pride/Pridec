@@ -1,0 +1,86 @@
+// PEAR 2 regression: typed x * 8 is eligible for same-width shift reduction.
+air 2.2 Main "strength_reduction_main.pie";
+
+def scale8(x : i32) : i32 =
+  mu~ %ret.
+    <(mul x : i32 8) : i32 | %ret>;
+
+def remainder8(x : u32) : u32 =
+  mu~ %ret.
+    <(mod x : u32 8) : u32 | %ret>;
+
+def quotient8(x : u32) : u32 =
+  mu~ %ret.
+    <(div x : u32 8) : u32 | %ret>;
+
+def remainder_one_i32(x : i32) : i32 =
+  mu~ %ret.
+    <(mod x : i32 1) : i32 | %ret>;
+
+def mask_u32(x : u32) : u32 =
+  mu~ %ret.
+    <(and x : u32 4294967295 : u32) : u32 | %ret>;
+
+def invert_u32(x : u32) : u32 =
+  mu~ %ret.
+    <(xor x : u32 4294967295 : u32) : u32 | %ret>;
+
+def or_zero_u32(x : u32) : u32 =
+  mu~ %ret.
+    <(or 0 : u32 x : u32) : u32 | %ret>;
+
+def xor_zero_u32(x : u32) : u32 =
+  mu~ %ret.
+    <(xor 0 : u32 x : u32) : u32 | %ret>;
+
+def invert_bool_left(x : bool) : bool =
+  mu~ %ret.
+    <(xor true : bool x : bool) : bool | %ret>;
+
+def invert_bool_right(x : bool) : bool =
+  mu~ %ret.
+    <(xor x : bool true : bool) : bool | %ret>;
+
+def bool_eq_true(x : bool) : bool =
+  mu~ %ret.
+    <(eq true : bool x : bool) : bool | %ret>;
+
+def bool_eq_false(x : bool) : bool =
+  mu~ %ret.
+    <(eq x : bool false : bool) : bool | %ret>;
+
+def bool_neq_true(x : bool) : bool =
+  mu~ %ret.
+    <(neq true : bool x : bool) : bool | %ret>;
+
+def bool_neq_false(x : bool) : bool =
+  mu~ %ret.
+    <(neq x : bool false : bool) : bool | %ret>;
+
+def same_i32_coercion(x : i32) : i32 =
+  mu~ %ret.
+    <coerce(x : i32, i32) | %ret>;
+
+def same_bool_coercion(x : bool) : bool =
+  mu~ %ret.
+    <coerce(x : bool, bool) | %ret>;
+
+def same_f32_coercion(x : f32) : f32 =
+  mu~ %ret.
+    <coerce(x : f32, f32) | %ret>;
+
+def multiply_zero_right(x : i32) : i32 =
+  mu~ %ret.
+    <(mul x : i32 0) : i32 | %ret>;
+
+def multiply_zero_left(x : u32) : u32 =
+  mu~ %ret.
+    <(mul 0 : u32 x : u32) : u32 | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <scale8 | call · 7 : i32 · comu scaled.
+      if (eq scaled 56 : i32) then
+        <42 | %ret>
+      else
+        <0 | %ret>>;

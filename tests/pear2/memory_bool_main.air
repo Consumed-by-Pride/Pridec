@@ -1,0 +1,12 @@
+// PEAR 2 M3: bool pointees use explicit i1 accesses and one-byte memory widths.
+air 2.2 Main "memory_bool_main.pie";
+
+def roundtrip_bool(p : ptr(bool)) : bool =
+  mu~ %ret.
+    <p | store(true; 1) · comu _.
+      <p | deref · comu flag.
+        <flag | %ret>>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

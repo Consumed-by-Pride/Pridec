@@ -1,0 +1,24 @@
+// PEAR 2 M3: typed i8/i16/i32 pointer cells use width-correct unaligned memory ops.
+air 2.2 Main "memory_widths_main.pie";
+
+def roundtrip8(p : ptr(i8)) : i8 =
+  mu~ %ret.
+    <p | store(42 : i8; 1) · comu _.
+      <p | deref · comu value.
+        <value | %ret>>>;
+
+def roundtrip16(p : ptr(i16)) : i16 =
+  mu~ %ret.
+    <p | store(420 : i16; 2) · comu _.
+      <p | deref · comu value.
+        <value | %ret>>>;
+
+def roundtrip32(p : ptr(i32)) : i32 =
+  mu~ %ret.
+    <p | store(42000 : i32; 4) · comu _.
+      <p | deref · comu value.
+        <value | %ret>>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

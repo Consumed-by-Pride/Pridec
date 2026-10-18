@@ -1,0 +1,9 @@
+// PEAR 2 must not merge f32 and f64 declarations under one external symbol.
+air 2.2 Main "reject_float_abi_conflict_main.pie";
+
+link "pear2_float_conflict" extern declare single(x : f32) : f32;
+link "pear2_float_conflict" extern declare wide(x : f64) : f64;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

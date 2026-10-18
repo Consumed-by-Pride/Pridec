@@ -1,0 +1,41 @@
+// PEAR 2 M3: f32/f64 arithmetic, comparisons, scalar ABI, and direct calls.
+air 2.2 Main "float_main.pie";
+
+extern declare external_scale(x : f64) : f64;
+
+def add_f64(a : f64, b : f64) : f64 =
+  mu~ %ret.
+    <(add a b) | %ret>;
+
+def mul_f32(a : f32, b : f32) : f32 =
+  mu~ %ret.
+    <(mul a b) | %ret>;
+
+def sub_f32(a : f32, b : f32) : f32 =
+  mu~ %ret.
+    <(sub a b) | %ret>;
+
+def div_f32(a : f32, b : f32) : f32 =
+  mu~ %ret.
+    <(div a b) | %ret>;
+
+def rem_f32(a : f32, b : f32) : f32 =
+  mu~ %ret.
+    <(mod a b) | %ret>;
+
+def neg_f32(x : f32) : f32 =
+  mu~ %ret.
+    <(neg x) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <add_f64 | call · 1.5 : f64 · 2.5 : f64 · comu total64.
+      <mul_f32 | call · 1.5 : f32 · 2.0 : f32 · comu total32.
+        <external_scale | call · total64 · comu scaled.
+          if (eq total64 4.0 : f64) then
+            if (eq total32 3.0 : f32) then
+              <42 | %ret>
+            else
+              <0 | %ret>
+          else
+            <0 | %ret>>>>>;

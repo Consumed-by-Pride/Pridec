@@ -1,0 +1,6 @@
+// PEAR 2 M0 must reject unsupported AIR rather than fabricate output.
+air 2.2 Main "unsupported_main.pie";
+
+def main() =
+  mu~ %ret.
+    trap;

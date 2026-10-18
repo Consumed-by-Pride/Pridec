@@ -1,0 +1,38 @@
+// PEAR 2 M3: explicit integer coercions lower to sext, zext, trunc, or a no-op.
+air 2.2 Main "coerce_integer_main.pie";
+
+def signed8_to_i32(x : i8) : i32 =
+  mu~ %ret.
+    <coerce(x, i32) | %ret>;
+
+def unsigned8_to_i32(x : u8) : i32 =
+  mu~ %ret.
+    <coerce(x, i32) | %ret>;
+
+def signed32_to_i64(x : i32) : i64 =
+  mu~ %ret.
+    <coerce(x, i64) | %ret>;
+
+def unsigned32_to_i64(x : u32) : i64 =
+  mu~ %ret.
+    <coerce(x, i64) | %ret>;
+
+def truncate_i32_to_i8(x : i32) : i8 =
+  mu~ %ret.
+    <coerce(x, i8) | %ret>;
+
+def same_width_u32_to_i32(x : u32) : i32 =
+  mu~ %ret.
+    <coerce(x, i32) | %ret>;
+
+def integer_to_bool(x : i32) : bool =
+  mu~ %ret.
+    <coerce(x, bool) | %ret>;
+
+def bool_to_u8(x : bool) : u8 =
+  mu~ %ret.
+    <coerce(x, u8) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

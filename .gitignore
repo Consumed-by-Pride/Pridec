@@ -7,6 +7,7 @@
 
 # ── Compiler binaries ───────────────────────────────────────────────────
 /pfrontc
+/pear2/pear2c
 /legacy/pear1/pear1c
 /pride
 /pride_new
@@ -23,6 +24,7 @@
 !/legacy/**/*.air
 !/tests/air/**/*.air
 !/tests/air3/**/*.air
+!/tests/pear2/*.air
 *.low.air
 # ── Editor / tool detritus ──────────────────────────────────────────────
 .understand-anything/

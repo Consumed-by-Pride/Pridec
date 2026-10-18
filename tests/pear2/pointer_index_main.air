@@ -1,0 +1,61 @@
+// PEAR2: dynamic signed/unsigned pointer indexes, scalar loads and stores, and float memory.
+air 2.2 Main "pointer_index_main.pie";
+
+def load_i32(p : ptr(i32), ix : i64) : i32 =
+  mu~ %ret.
+    <p | index(ix; 4) · %ret>;
+
+def store_then_load_i32(p : ptr(i32), ix : i64) : i32 =
+  mu~ %ret.
+    <p | index(ix; 4) · store(42 : i32; 4) · comu _.
+      <p | index(ix; 4) · %ret>>;
+
+def truncate_store_to_u8(p : ptr(u8)) : i64 =
+  mu~ %ret.
+    <p | store(300 : i32; 1) · comu _.
+      <0 | %ret>>;
+
+def extend_store_from_u8(p : ptr(i32), value : u8) : i64 =
+  mu~ %ret.
+    <p | store(value; 4) · comu _.
+      <0 | %ret>>;
+
+def pointer_to_bits(p : ptr(i32)) : u64 =
+  mu~ %ret.
+    <coerce(p, u64) | %ret>;
+
+def bits_to_pointer(bits : u64) : ptr(i32) =
+  mu~ %ret.
+    <coerce(bits, ptr(i32)) | %ret>;
+
+def roundtrip_pointer(p : ptr(ptr(i32)), value : ptr(i32)) : ptr(i32) =
+  mu~ %ret.
+    <p | index(1 : infer; 8) · store(value; 8) · comu _.
+      <p | index(1 : infer; 8) · %ret>>;
+
+def roundtrip_nested_array(p : ptr(array#2(array#2(i8)))) : i8 =
+  mu~ %ret.
+    <p | store(array(array(1 : i8, 2 : i8) : array#2(i8), array(3 : i8, 4 : i8) : array#2(i8)) : array#2(array#2(i8)); 4) · comu _.
+      <p | deref · comu matrix.
+        <matrix | proj 1 · comu row.
+          <row | proj 0 · %ret>>>>;
+
+def roundtrip_array(p : ptr(array#2(i32))) : i32 =
+  mu~ %ret.
+    <p | store(array(17 : i32, 19 : i32) : array#2(i32); 8) · comu _.
+      <p | deref · comu values.
+        <values | proj 1 · %ret>>>;
+
+def roundtrip_f32(p : ptr(f32)) : f32 =
+  mu~ %ret.
+    <p | store(2.5 : f32; 4) · comu _.
+      <p | deref · %ret>>;
+
+def roundtrip_f64(p : ptr(f64)) : f64 =
+  mu~ %ret.
+    <p | store(3.25 : f64; 8) · comu _.
+      <p | deref · %ret>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

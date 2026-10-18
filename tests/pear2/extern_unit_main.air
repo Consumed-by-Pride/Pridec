@@ -1,0 +1,10 @@
+// PEAR 2 M3 subset: void extern calls continue without inventing a value.
+air 2.2 Main "extern_unit_main.pie";
+
+extern declare release(p : ptr(u8)) : unit;
+
+def main() : i64 =
+  mu~ %ret.
+    let value = null in
+      <release | call · value · comu _.
+        <42 | %ret>>;

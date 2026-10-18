@@ -64,7 +64,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool legacy-pear test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-pear2 check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -90,7 +90,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering
+test: test-pfront test-conform test-pear test-pear2 test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -168,6 +168,31 @@ $(AIRTOOL): $(AIR_CORE) | c3c
 	mkdir -p tmp
 	$(C3C) compile --stdlib $(C3C_LIB) $(AIR_CORE) --max-stack-object-size 262144 -o $(AIRTOOL)
 
+# PEAR 2 bootstrap backend. It is a separate executable and links the shared
+# AIR reader/verifier plus LLVM 23; it does not link PEAR 1 or pfrontc.
+PEAR2_BIN := pear2/pear2c
+PEAR2_SRC := $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_opt.c3 pear2/pear2c_main.c3
+pear2c: $(PEAR2_BIN)
+$(PEAR2_BIN): $(PEAR2_SRC) | c3c
+	$(C3C) compile --stdlib $(C3C_LIB) $(PEAR2_SRC) --max-stack-object-size 262144 $(LDFLAGS) -o $(PEAR2_BIN)
+
+PEAR2_OPT_TEST := tmp/pear2-opt-test
+PEAR2_OPT_TEST_SRC := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3
+$(PEAR2_OPT_TEST): $(PEAR2_OPT_TEST_SRC) | c3c
+	mkdir -p tmp
+	$(C3C) compile --stdlib $(C3C_LIB) $(PEAR2_OPT_TEST_SRC) --max-stack-object-size 262144 -o $(PEAR2_OPT_TEST)
+
+test-pear2: $(PEAR2_BIN) $(PEAR2_OPT_TEST)
+	./$(PEAR2_OPT_TEST)
+	bash tests/pear2/run.sh ./$(PEAR2_BIN)
+
+# Syntax/type-check PEAR2 and the structural optimizer harness without linking
+# LLVM. This is useful on no-LLVM hosts; it does not replace runtime tests.
+check-pear2: | c3c
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_opt.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
+	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
+	bash -n tests/pear2/run.sh
+
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
 # (canonical re-print, validity ledger) and the write->read round trip.
 test-air: $(BINARY) $(AIRTOOL)
@@ -197,6 +222,6 @@ legacy:
 
 # ── Clean ───────────────────────────────────────────────────────────────
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(PEAR2_BIN)
 	rm -f tmp/*.air
-	find . -name "*.air" -not -path "./docs/*" -not -path "./legacy/*" -delete
+	find . -name "*.air" -not -path "./docs/*" -not -path "./legacy/*" -not -path "./tests/pear2/*" -delete

@@ -1,0 +1,12 @@
+// PEAR 2 M3 bootstrap: scalar C-ABI extern with explicit symbol mapping.
+air 2.2 Main "extern_bool_main.pie";
+
+link "pear2_truth" extern declare truth(flag : bool) : bool;
+
+def main() : i64 =
+  mu~ %ret.
+    <truth | call · true · comu condition.
+      if condition then
+        <42 | %ret>
+      else
+        <0 | %ret>>;

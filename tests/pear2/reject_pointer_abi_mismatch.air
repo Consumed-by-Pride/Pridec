@@ -1,0 +1,11 @@
+// PEAR 2 M3 rejection: an i64 argument cannot satisfy a pointer parameter.
+air 2.2 Main "reject_pointer_abi_mismatch.pie";
+
+def identity(p : ptr(u8)) : ptr(u8) =
+  mu~ %ret.
+    <p | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <identity | call · 0 : i64 · comu ignored.
+      <0 | %ret>>;

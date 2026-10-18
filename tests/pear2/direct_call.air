@@ -1,0 +1,16 @@
+// PEAR 2 M1: a scalar parameter, bind-pattern match, and direct call.
+air 2.2 Main "direct_call.pie";
+
+def add1(x : i64) : i64 =
+  mu~ %ret_2.
+    match x {
+      bind x_1 ->
+        <(add x_1 1 : i64) | %ret_2>;
+    };
+
+def main() : i64 =
+  mu~ %ret_2.
+    match unit {
+      tuple() ->
+        <add1 | call · 41 : i64 · %ret_2>;
+    };

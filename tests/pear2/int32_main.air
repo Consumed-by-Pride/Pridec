@@ -1,0 +1,14 @@
+// PEAR 2 M3 subset: i32 arithmetic and direct-call ABI.
+air 2.2 Main "int32_main.pie";
+
+def add32(a : i32, b : i32) : i32 =
+  mu~ %ret.
+    <(add a b) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <add32 | call · 40 : i32 · 2 : i32 · comu sum.
+      if (eq sum 42 : i32) then
+        <42 | %ret>
+      else
+        <0 | %ret>>;

@@ -1,0 +1,14 @@
+// PEAR 2 M2: i1 label parameters carry boolean loop/branch state.
+air 2.2 Main "label_bool_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      label choose(flag : bool).
+        if flag then
+          <42 | %ret>
+        else
+          <0 | %ret>;
+      let condition = true in
+        jump choose(condition)
+    };

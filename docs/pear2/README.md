@@ -1,8 +1,10 @@
 # PEAR 2 — start here
 
-PEAR 2 is the new backend: **AIR 2.0 text in, native code out**. It starts at a `.air` file and nowhere else.
-The front end (`pfrontc`) ends at `.air` and links no LLVM; PEAR 1 (the old backend) lives frozen in
-`legacy/pear1/` and is only the *reference* and the regression gate for the front end.
+PEAR 2 is the planned separate backend: **untyped AIR 2.x text in, LLVM bitcode out**. It starts at a `.air` file and nowhere else. It is not `air_ll` (the AIR 3 low-profile reference consumer) and does not share `pfrontc`'s AST.
+
+Implementation is a bootstrap backend with a fixture-covered subset of M1–M3: i8/i16/i32/i64/i128 plus unannotated internal scalar definitions under documented defaults, Unicode scalar `char`, f32/f64, bool/pointer/unit; integer/float arithmetic and conversions; direct internal aggregate calls/returns for tuples and fixed arrays up to 1,024 elements; local tuple/array construction and destructuring; pointer indexing, dereference, and stores for supported 1/2/4/8-byte elements, with integer values converted to the stored width; scalar/array size and scalar alignment queries; terminal branches, integer/boolean/char switch matches, f32/f64 matches, scalar and tuple/array bind/wild guards, structured `while` loops, fixed-array `for` loops, zero-parameter `break`/`continue` label transfers, label/jump edges, assertions, assumptions, and traps. String/byte literals are supported as explicitly typed fixed i8 arrays, not C strings or heap strings. External C ABIs remain scalar-only; aggregate function ABIs are restricted to internal definitions. `pear2/pear2c_main.c3` consumes canonical AIR 2.x text and emits verified LLVM bitcode; unsupported forms fail closed. This is not a complete or production-ready backend: whole-CFG checks, broad data/ABI coverage, a full optimization pipeline, and LLVM-backed execution coverage remain outstanding. A first conservative AIR optimizer removes same-representation integer, bool, and float coercions, folds checked integer coercions and i64-range constants; lowers typed multiplication by a power of two to a same-width left shift, unsigned division by a power of two to a logical right shift, and unsigned remainder by a power of two to a bit mask; rewrites remainder by one and multiplication by zero to zero-mask `AND` operations that retain the input; composes nested same-kind shifts when their combined count stays in range; folds in-range shifts and comparisons; folds selected integer unary operations and boolean-not, and cancels representation-compatible double-not operations. Representation-matched integer identities include all-ones `AND`, integer `XOR`-to-bit-not, and zero-valued `OR`/`XOR` in either operand order; boolean `XOR true` becomes `NOT`; equality and inequality against literal booleans reduce to the value or `NOT`. The optimizer also specializes immediate pure `if` conditions from folded boolean lets and pure return/cut expressions from integer lets, retaining bindings for other uses, and reduces literal boolean branches. `-O1` runs one pass, `-O2` iterates up to four times, and `-O3` up to eight times until a pass makes no rewrites; `-O0` disables AIR optimization. `--stats` reports the pass count, total rewrites, and fold, operand, strength-reduction, shift-combination, branch, and let-specialization counts. The pass is re-verified by the shared AIR verifier. `make check-pear2` runs C3 check-only compilation for the backend and structural harness without LLVM; `make test-pear2` adds executable optimizer and LLVM bitcode regression tests and therefore requires an LLVM-enabled C3 build. See [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for exact limits and exit criteria.
+
+The front end (`pfrontc`) ends at `.air` and links no LLVM. PEAR 1 lives frozen in `legacy/pear1/`; it is a regression reference, not PEAR 2's implementation.
 
 | you need | where |
 |---|---|
@@ -19,6 +21,8 @@ The front end (`pfrontc`) ends at `.air` and links no LLVM; PEAR 1 (the old back
 make                       # pfrontc  (no LLVM needed)
 make airtool               # tmp/airtool
 make legacy-pear           # legacy/pear1/pear1c  (needs LLVM 23: ~/.cache/llvm23)
+make pear2c                # pear2/pear2c bootstrap subset (needs LLVM C API)
+make test-pear2            # fixture checks + fail-closed tests
 
 ./pfrontc tests/exec/pear/p03_fib.pie --emit-air     # writes tests/exec/pear/p03_fib.air  (whole program, ~270 KB)
 tmp/airtool verify tests/exec/pear/p03_fib.air       # validity rules, conventions counted
@@ -42,8 +46,8 @@ is reported XPASS and fails the run, so the list can only shrink honestly.
 
 1. Scalar functions: `def`, `mu~ %ret`, cuts, `(op a b)`, `if`, direct `call`, `let`, `comu`, `seq` → `p01`–`p04`, `p05`.
 2. Control flow: `label`/`jump`, the `%kN` joins (J1), mutable rebinding (A1) → loops and `p`-suite.
-3. Memory: `index`, `store`, `field`, `as`, strings, externs (`malloc/free/write`) → `04_dynamic_alloc`, `12_struct_ops`.
-4. Data: `match`/`case` with tuple/ctor patterns, `data`/`codata` declarations.
+3. Memory/data next: general bounds/layout policy, `field`, heap allocation and ownership, and external string/aggregate ABIs. The current subset covers typed pointer index/load/store and local fixed arrays, but not allocator/runtime integration or records.
+4. Data next: constructor-tagged `data`/`codata`, guarded matches, records, and broader aggregate ABI rules. Local tuples/fixed arrays and recursive bind/wild/rest patterns are currently supported.
 5. `syscall` — **blocked on the front end**: the lowering currently drops its operands (AIR.md §11.1); fix that first.
 6. Effects and staging: front end emits them, nobody executes them yet (ledger P04–P06).
 

@@ -1,0 +1,10 @@
+// PEAR 2 M1: integer match lowers to an LLVM switch with a default arm.
+air 2.2 Main "match_int_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    match 2 {
+      0 -> <10 | %ret>;
+      2 -> <42 | %ret>;
+      _ -> <0 | %ret>;
+    };

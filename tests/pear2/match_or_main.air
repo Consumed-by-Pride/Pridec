@@ -1,0 +1,14 @@
+// PEAR2: scalar literal or-patterns lower to a single ordered arm test.
+air 2.2 Main "match_or_main.pie";
+
+def classify(value : i32) : i64 =
+  mu~ %ret.
+    match value {
+      or(1, 2) -> <12 | %ret>;
+      or(3, 4) -> <34 | %ret>;
+      _ -> <0 | %ret>;
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <classify | call · 2 : i32 · %ret>;
