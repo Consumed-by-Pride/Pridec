@@ -862,6 +862,27 @@ fn int main()
     unsigned_mul_all_ones_decl.def_body = unsigned_mul_all_ones_ret;
     mod.decls[60] = unsigned_mul_all_ones_decl;
 
+    AirPrd* left_scale_factor = make_int(&arena, 8, null);
+    AirPrd* multiply_by_eight_left = make_binop(&arena, ABIN_MUL, mod.t_i32, left_scale_factor, scale_value);
+    AirCmd* scale_left_ret = air_ir::air_new_AirCmd(&arena);
+    scale_left_ret.tag = ACMD_RET;
+    scale_left_ret.prd = multiply_by_eight_left;
+    AirDecl* scale_left_decl = air_ir::air_new_AirDecl(&arena);
+    scale_left_decl.tag = ADECL_DEF;
+    scale_left_decl.name = (char*)"multiply_by_power_of_two_left";
+    scale_left_decl.def_body = scale_left_ret;
+    mod.decls[61] = scale_left_decl;
+
+    AirPrd* multiply_by_six_left = make_binop(&arena, ABIN_MUL, mod.t_i32, non_power_factor, scale_value);
+    AirCmd* non_power_left_ret = air_ir::air_new_AirCmd(&arena);
+    non_power_left_ret.tag = ACMD_RET;
+    non_power_left_ret.prd = multiply_by_six_left;
+    AirDecl* non_power_left_decl = air_ir::air_new_AirDecl(&arena);
+    non_power_left_decl.tag = ADECL_DEF;
+    non_power_left_decl.name = (char*)"multiply_by_non_power_of_two_left";
+    non_power_left_decl.def_body = non_power_left_ret;
+    mod.decls[62] = non_power_left_decl;
+
     // Refuse a narrow signed overflow rather than baking host or wrapping
     // semantics into a constant, and leave division-by-zero untouched.
     AirPrd* narrow_sum = air_ir::air_new_AirPrd(&arena);
@@ -927,11 +948,11 @@ fn int main()
     range_decl.name = (char*)"out_of_range";
     range_decl.def_body = range_ret;
     mod.decls[6] = range_decl;
-    mod.decl_count = 61;
+    mod.decl_count = 63;
 
     pear2_opt::OptStats stats = pear2_opt::optimize_module(&mod);
     uint rewrites = stats.rewrites;
-    if (rewrites != 50 || stats.constant_folds != 15 || stats.operand_rewrites != 21 || stats.strength_reductions != 8 ||
+    if (rewrites != 51 || stats.constant_folds != 15 || stats.operand_rewrites != 21 || stats.strength_reductions != 9 ||
         stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 2)
     {
         printf("FAIL: unexpected optimizer counters (total=%u folds=%u operands=%u strength=%u shifts=%u branches=%u lets=%u)\n",
@@ -941,7 +962,9 @@ fn int main()
     }
     if (multiply_by_eight.bop != ABIN_SHL || multiply_by_eight.subs[1] == scale_factor ||
         multiply_by_eight.subs[1].ival != 3 || scale_factor.ival != 8 ||
-        multiply_by_six.bop != ABIN_MUL || non_power_factor.ival != 6)
+        multiply_by_eight_left.bop != ABIN_SHL || multiply_by_eight_left.subs[0] != scale_value ||
+        multiply_by_eight_left.subs[1] == left_scale_factor || multiply_by_eight_left.subs[1].ival != 3 || left_scale_factor.ival != 8 ||
+        multiply_by_six.bop != ABIN_MUL || multiply_by_six_left.bop != ABIN_MUL || non_power_factor.ival != 6)
     {
         printf("FAIL: power-of-two multiplication rewrite changed semantics or a shared constant\n");
         arena.destroy(); return 1;

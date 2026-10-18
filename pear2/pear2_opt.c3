@@ -347,22 +347,34 @@ fn void OptStats.rewrite_to_unary(OptStats* s, AirPrd* operation, AirPrd* value,
 }
 
 // Rewrite x * 2^k to x << k only when both operations have the same
-// resolved integer representation. Allocate a fresh shift literal instead of
-// mutating the multiplication constant, since AIR products may be shared.
+// x * 2^k is the same fixed-width bit operation as x << k. Accept the
+// constant on either side, but allocate a fresh shift literal so shared AIR
+// products are never mutated. Moving x across a literal preserves effects.
 fn bool OptStats.strength_reduce_mul(OptStats* s, AirPrd* p)
 {
     if (s == null || s.arena == null || p == null || p.tag != APRD_BINOP || p.bop != ABIN_MUL || p.sub_count != 2 ||
-        p.subs[0] == null || p.subs[1] == null || p.subs[1].tag != APRD_INT || p.subs[0].tag == APRD_INT) { return false; }
+        p.subs[0] == null || p.subs[1] == null) { return false; }
+    AirPrd* value = null;
+    AirPrd* factor_node = null;
+    if (p.subs[1].tag == APRD_INT && p.subs[0].tag != APRD_INT)
+    {
+        value = p.subs[0]; factor_node = p.subs[1];
+    }
+    else if (p.subs[0].tag == APRD_INT && p.subs[1].tag != APRD_INT)
+    {
+        value = p.subs[1]; factor_node = p.subs[0];
+    }
+    else { return false; }
     AirTyp* operation_type = opt_resolved_integer_type(p);
-    AirTyp* value_type = opt_resolved_integer_type(p.subs[0]);
-    AirTyp* factor_type = opt_resolved_integer_type(p.subs[1]);
+    AirTyp* value_type = opt_resolved_integer_type(value);
+    AirTyp* factor_type = opt_resolved_integer_type(factor_node);
     if (operation_type == null) { operation_type = value_type; }
     if (operation_type == null || value_type == null) { return false; }
     int bits = opt_integer_bits(operation_type);
     bool uns = opt_unsigned(operation_type);
     if (bits <= 0 || bits > 64 || opt_integer_bits(value_type) != bits || opt_unsigned(value_type) != uns) { return false; }
     if (factor_type != null && (opt_integer_bits(factor_type) != bits || opt_unsigned(factor_type) != uns)) { return false; }
-    long factor = p.subs[1].ival;
+    long factor = factor_node.ival;
     if (factor <= 1 || !opt_integer_fits(factor, bits, uns) || (factor & (factor - 1)) != 0) { return false; }
     int shift = 0;
     while (factor > 1) { factor >>= 1; shift++; }
@@ -370,7 +382,8 @@ fn bool OptStats.strength_reduce_mul(OptStats* s, AirPrd* p)
     if (shift_count == null) { return false; }
     shift_count.tag = APRD_INT;
     shift_count.ival = shift;
-    shift_count.ty = p.subs[1].ty;
+    shift_count.ty = factor_node.ty;
+    p.subs[0] = value;
     p.subs[1] = shift_count;
     p.bop = ABIN_SHL;
     s.rewrites++;

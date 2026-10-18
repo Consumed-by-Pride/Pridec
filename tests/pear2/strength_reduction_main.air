@@ -77,6 +77,10 @@ def multiply_all_ones_u32(x : u32) : u32 =
   mu~ %ret.
     <(mul x : u32 4294967295 : u32) : u32 | %ret>;
 
+def multiply8_left(x : i32) : i32 =
+  mu~ %ret.
+    <(mul 8 : i32 x : i32) : i32 | %ret>;
+
 def multiply_zero_right(x : i32) : i32 =
   mu~ %ret.
     <(mul x : i32 0) : i32 | %ret>;
