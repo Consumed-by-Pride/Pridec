@@ -187,11 +187,13 @@ test-pear2: $(PEAR2_BIN) $(PEAR2_OPT_TEST)
 	bash tests/pear2/run.sh ./$(PEAR2_BIN)
 
 # Syntax/type-check PEAR2 and the structural optimizer harness without linking
-# LLVM. This is useful on no-LLVM hosts; it does not replace runtime tests.
+# LLVM, then run LLVM-independent arithmetic model tests. This does not replace
+# executing the optimizer or backend fixtures.
 check-pear2: | c3c
 	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_opt.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
 	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
 	bash -n tests/pear2/run.sh
+	python3 tests/pear2/signed_division_model_test.py
 
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
 # (canonical re-print, validity ledger) and the write->read round trip.

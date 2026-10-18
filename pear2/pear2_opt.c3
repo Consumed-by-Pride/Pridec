@@ -465,6 +465,76 @@ fn bool OptStats.strength_reduce_remainder_one(OptStats* s, AirPrd* p)
     return true;
 }
 
+fn AirPrd* OptStats.new_binary_product(OptStats* s, AirBinop op, AirTyp* type, AirPrd* left, AirPrd* right)
+{
+    if (s == null || s.arena == null || left == null || right == null) { return null; }
+    AirPrd* p = air_ir::air_new_AirPrd(s.arena);
+    if (p == null) { return null; }
+    AirPrd** operands = (AirPrd**)s.arena.alloc(16, 8);
+    if (operands == null) { return null; }
+    operands[0] = left;
+    operands[1] = right;
+    p.tag = APRD_BINOP;
+    p.bop = op;
+    p.ty = type;
+    p.subs = operands;
+    p.sub_count = 2;
+    p.sub_cap = 2;
+    return p;
+}
+
+fn AirPrd* OptStats.new_integer_literal(OptStats* s, long value, AirTyp* type)
+{
+    if (s == null || s.arena == null) { return null; }
+    AirPrd* p = air_ir::air_new_AirPrd(s.arena);
+    if (p == null) { return null; }
+    p.tag = APRD_INT;
+    p.ival = value;
+    p.ty = type;
+    return p;
+}
+
+// Signed truncating division by 2^k uses a sign-derived bias before arithmetic
+// shift. Restrict to SSA variables so the dividend is not duplicated if it can
+// have effects; the adjustment remains in-range for every signed dividend.
+fn bool OptStats.strength_reduce_signed_div(OptStats* s, AirPrd* p)
+{
+    if (s == null || s.arena == null || p == null || p.tag != APRD_BINOP || p.bop != ABIN_DIV || p.sub_count != 2 ||
+        p.subs[0] == null || p.subs[0].tag != APRD_VAR || p.subs[1] == null || p.subs[1].tag != APRD_INT) { return false; }
+    AirTyp* operation_type = opt_resolved_integer_type(p);
+    AirTyp* value_type = opt_resolved_integer_type(p.subs[0]);
+    AirTyp* divisor_type = opt_resolved_integer_type(p.subs[1]);
+    if (operation_type == null) { operation_type = value_type; }
+    if (operation_type == null || value_type == null || opt_unsigned(operation_type)) { return false; }
+    int bits = opt_integer_bits(operation_type);
+    if (bits <= 1 || bits > 64 || opt_integer_bits(value_type) != bits || opt_unsigned(value_type)) { return false; }
+    if (divisor_type != null && (opt_integer_bits(divisor_type) != bits || opt_unsigned(divisor_type))) { return false; }
+    long divisor = p.subs[1].ival;
+    if (divisor <= 1 || !opt_integer_fits(divisor, bits, false) || (divisor & (divisor - 1)) != 0) { return false; }
+    int shift = 0;
+    long scan = divisor;
+    while (scan > 1) { scan >>= 1; shift++; }
+    if (shift <= 0 || shift >= bits) { return false; }
+
+    AirPrd* sign_count = s.new_integer_literal((long)(bits - 1), operation_type);
+    AirPrd* bias_mask = s.new_integer_literal(divisor - 1, operation_type);
+    AirPrd* quotient_shift = s.new_integer_literal((long)shift, operation_type);
+    if (sign_count == null || bias_mask == null || quotient_shift == null) { return false; }
+    AirPrd* sign = s.new_binary_product(ABIN_SHR, operation_type, p.subs[0], sign_count);
+    if (sign == null) { return false; }
+    AirPrd* bias = s.new_binary_product(ABIN_AND, operation_type, sign, bias_mask);
+    if (bias == null) { return false; }
+    AirPrd* adjusted = s.new_binary_product(ABIN_ADD, operation_type, p.subs[0], bias);
+    if (adjusted == null) { return false; }
+
+    p.bop = ABIN_SHR;
+    p.subs[0] = adjusted;
+    p.subs[1] = quotient_shift;
+    s.rewrites++;
+    s.strength_reductions++;
+    return true;
+}
+
 // For unsigned integers, division by 2^k is a logical right shift. Preserve
 // the value operand (and therefore poison propagation) and only reduce known
 // unsigned widths with an in-range nonzero power-of-two divisor.
@@ -681,6 +751,7 @@ fn void OptStats.fold_binary(OptStats* s, AirPrd* p)
     if (p.bop == ABIN_MUL && s.strength_reduce_mul(p)) { return; }
     if (p.bop == ABIN_MOD && s.strength_reduce_remainder_one(p)) { return; }
     if (p.bop == ABIN_MOD && s.strength_reduce_unsigned_mod(p)) { return; }
+    if (p.bop == ABIN_DIV && s.strength_reduce_signed_div(p)) { return; }
     if (p.bop == ABIN_DIV && s.strength_reduce_unsigned_div(p)) { return; }
     if ((p.bop == ABIN_SHL || p.bop == ABIN_SHR) && s.combine_nested_shift(p)) { return; }
 

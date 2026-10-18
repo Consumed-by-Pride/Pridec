@@ -489,13 +489,13 @@ fn int main()
     signed_div_value.tag = APRD_VAR;
     signed_div_value.name = (char*)"signed_div_value";
     signed_div_value.ty = mod.t_i32;
-    AirPrd* signed_quotient = make_binop(&arena, ABIN_DIV, mod.t_i32, signed_div_value, make_int(&arena, 8, null));
+    AirPrd* signed_quotient = make_binop(&arena, ABIN_DIV, mod.t_i32, signed_div_value, make_int(&arena, 6, null));
     AirCmd* signed_div_ret = air_ir::air_new_AirCmd(&arena);
     signed_div_ret.tag = ACMD_RET;
     signed_div_ret.prd = signed_quotient;
     AirDecl* signed_div_decl = air_ir::air_new_AirDecl(&arena);
     signed_div_decl.tag = ADECL_DEF;
-    signed_div_decl.name = (char*)"signed_division_not_shifted";
+    signed_div_decl.name = (char*)"signed_division_non_power_of_two";
     signed_div_decl.def_body = signed_div_ret;
     mod.decls[33] = signed_div_decl;
 
@@ -975,6 +975,37 @@ fn int main()
     chain_decl.def_body = chain_outer_let;
     mod.decls[69] = chain_decl;
 
+    AirPrd* signed_power_two_div = make_binop(&arena, ABIN_DIV, mod.t_i32, signed_div_value, make_int(&arena, 8, null));
+    AirCmd* signed_power_two_ret = air_ir::air_new_AirCmd(&arena);
+    signed_power_two_ret.tag = ACMD_RET;
+    signed_power_two_ret.prd = signed_power_two_div;
+    AirDecl* signed_power_two_decl = air_ir::air_new_AirDecl(&arena);
+    signed_power_two_decl.tag = ADECL_DEF;
+    signed_power_two_decl.name = (char*)"signed_division_by_power_of_two";
+    signed_power_two_decl.def_body = signed_power_two_ret;
+    mod.decls[70] = signed_power_two_decl;
+
+    AirPrd* negative_divisor = make_binop(&arena, ABIN_DIV, mod.t_i32, signed_div_value, make_int(&arena, -8, null));
+    AirCmd* negative_divisor_ret = air_ir::air_new_AirCmd(&arena);
+    negative_divisor_ret.tag = ACMD_RET;
+    negative_divisor_ret.prd = negative_divisor;
+    AirDecl* negative_divisor_decl = air_ir::air_new_AirDecl(&arena);
+    negative_divisor_decl.tag = ADECL_DEF;
+    negative_divisor_decl.name = (char*)"signed_division_by_negative_power_of_two";
+    negative_divisor_decl.def_body = negative_divisor_ret;
+    mod.decls[71] = negative_divisor_decl;
+
+    AirPrd* computed_dividend = make_binop(&arena, ABIN_ADD, mod.t_i32, signed_div_value, make_int(&arena, 1, null));
+    AirPrd* computed_division = make_binop(&arena, ABIN_DIV, mod.t_i32, computed_dividend, make_int(&arena, 8, null));
+    AirCmd* computed_division_ret = air_ir::air_new_AirCmd(&arena);
+    computed_division_ret.tag = ACMD_RET;
+    computed_division_ret.prd = computed_division;
+    AirDecl* computed_division_decl = air_ir::air_new_AirDecl(&arena);
+    computed_division_decl.tag = ADECL_DEF;
+    computed_division_decl.name = (char*)"signed_division_computed_operand";
+    computed_division_decl.def_body = computed_division_ret;
+    mod.decls[72] = computed_division_decl;
+
     // Refuse a narrow signed overflow rather than baking host or wrapping
     // semantics into a constant, and leave division-by-zero untouched.
     AirPrd* narrow_sum = air_ir::air_new_AirPrd(&arena);
@@ -1040,11 +1071,11 @@ fn int main()
     range_decl.name = (char*)"out_of_range";
     range_decl.def_body = range_ret;
     mod.decls[6] = range_decl;
-    mod.decl_count = 70;
+    mod.decl_count = 73;
 
     pear2_opt::OptStats stats = pear2_opt::optimize_module(&mod);
     uint rewrites = stats.rewrites;
-    if (rewrites != 63 || stats.constant_folds != 21 || stats.operand_rewrites != 25 || stats.strength_reductions != 9 ||
+    if (rewrites != 64 || stats.constant_folds != 21 || stats.operand_rewrites != 25 || stats.strength_reductions != 10 ||
         stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 4)
     {
         printf("FAIL: unexpected optimizer counters (total=%u folds=%u operands=%u strength=%u shifts=%u branches=%u lets=%u)\n",
@@ -1073,7 +1104,13 @@ fn int main()
     if (unsigned_modulo.bop != ABIN_AND || unsigned_modulo.subs[1].ival != 7 ||
         signed_modulo.bop != ABIN_MOD || irregular_mod.bop != ABIN_MOD ||
         unsigned_quotient.bop != ABIN_SHR || unsigned_quotient.subs[1].ival != 3 ||
-        signed_quotient.bop != ABIN_DIV || irregular_div.bop != ABIN_DIV ||
+        signed_quotient.bop != ABIN_DIV || signed_power_two_div.bop != ABIN_SHR || signed_power_two_div.subs[1].ival != 3 ||
+        signed_power_two_div.subs[0].bop != ABIN_ADD || signed_power_two_div.subs[0].subs[0] != signed_div_value ||
+        signed_power_two_div.subs[0].subs[1].bop != ABIN_AND ||
+        signed_power_two_div.subs[0].subs[1].subs[0].bop != ABIN_SHR ||
+        signed_power_two_div.subs[0].subs[1].subs[0].subs[1].ival != 31 ||
+        signed_power_two_div.subs[0].subs[1].subs[1].ival != 7 ||
+        negative_divisor.bop != ABIN_DIV || computed_division.bop != ABIN_DIV || irregular_div.bop != ABIN_DIV ||
         signed_mask.tag != APRD_VAR || signed_mask.name != signed_mask_value.name ||
         unsigned_mask.tag != APRD_VAR || unsigned_mask.name != unsigned_mask_value.name ||
         signed_xor.tag != APRD_UNOP || signed_xor.uop != AUN_BITNOT || signed_xor.subs[0] != signed_mask_value || signed_xor.ty != mod.t_i32 ||

@@ -13,6 +13,10 @@ def quotient8(x : u32) : u32 =
   mu~ %ret.
     <(div x : u32 8) : u32 | %ret>;
 
+def signed_quotient8(x : i32) : i32 =
+  mu~ %ret.
+    <(div x : i32 8) : i32 | %ret>;
+
 def remainder_one_i32(x : i32) : i32 =
   mu~ %ret.
     <(mod x : i32 1) : i32 | %ret>;
