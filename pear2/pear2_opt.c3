@@ -169,7 +169,7 @@ fn bool opt_condition_tree(AirPrd* p, int depth)
         return p.uop == AUN_NOT && p.sub_count == 1 && opt_condition_tree(p.subs[0], depth + 1);
     }
     if (p.tag == APRD_BINOP && p.sub_count == 2 &&
-        (p.bop == ABIN_EQ || p.bop == ABIN_NEQ || p.bop == ABIN_AND || p.bop == ABIN_OR || p.bop == ABIN_XOR))
+        (p.bop == ABIN_EQ || p.bop == ABIN_NEQ || p.bop == ABIN_AND || p.bop == ABIN_OR || p.bop == ABIN_XOR || p.bop == ABIN_LAND || p.bop == ABIN_LOR))
     {
         return opt_condition_tree(p.subs[0], depth + 1) && opt_condition_tree(p.subs[1], depth + 1);
     }
@@ -189,7 +189,7 @@ fn bool OptStats.substitute_bool_var(OptStats* s, AirPrd* p, char* name, AirPrd*
         return s.substitute_bool_var(p.subs[0], name, value, depth + 1);
     }
     if (p.tag == APRD_BINOP && p.sub_count == 2 &&
-        (p.bop == ABIN_EQ || p.bop == ABIN_NEQ || p.bop == ABIN_AND || p.bop == ABIN_OR || p.bop == ABIN_XOR))
+        (p.bop == ABIN_EQ || p.bop == ABIN_NEQ || p.bop == ABIN_AND || p.bop == ABIN_OR || p.bop == ABIN_XOR || p.bop == ABIN_LAND || p.bop == ABIN_LOR))
     {
         bool left = s.substitute_bool_var(p.subs[0], name, value, depth + 1);
         bool right = s.substitute_bool_var(p.subs[1], name, value, depth + 1);
@@ -631,8 +631,10 @@ fn void OptStats.fold_binary(OptStats* s, AirPrd* p)
         }
         if (p.bop == ABIN_AND && left.tag == APRD_BOOL && left.bval) { s.replace_with_prd(p, right); return; }
         if (p.bop == ABIN_AND && right.tag == APRD_BOOL && right.bval) { s.replace_with_prd(p, left); return; }
-        if (p.bop == ABIN_OR && left.tag == APRD_BOOL && !left.bval) { s.replace_with_prd(p, right); return; }
-        if (p.bop == ABIN_OR && right.tag == APRD_BOOL && !right.bval) { s.replace_with_prd(p, left); return; }
+        if ((p.bop == ABIN_OR || p.bop == ABIN_LOR) && left.tag == APRD_BOOL && !left.bval) { s.replace_with_prd(p, right); return; }
+        if ((p.bop == ABIN_OR || p.bop == ABIN_LOR) && right.tag == APRD_BOOL && !right.bval) { s.replace_with_prd(p, left); return; }
+        if (p.bop == ABIN_LAND && left.tag == APRD_BOOL && left.bval) { s.replace_with_prd(p, right); return; }
+        if (p.bop == ABIN_LAND && right.tag == APRD_BOOL && right.bval) { s.replace_with_prd(p, left); return; }
         if (p.bop == ABIN_XOR && left.tag == APRD_BOOL && left.bval) { s.rewrite_to_unary(p, right, AUN_NOT, false); return; }
         if (p.bop == ABIN_XOR && right.tag == APRD_BOOL && right.bval) { s.rewrite_to_unary(p, left, AUN_NOT, false); return; }
         if (p.bop == ABIN_XOR && left.tag == APRD_BOOL && !left.bval) { s.replace_with_prd(p, right); return; }

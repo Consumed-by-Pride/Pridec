@@ -1,0 +1,14 @@
+// Logical identities should erase supported bool land/lor operations.
+air 2.2 Main "bool_logic_identity.pie";
+
+def land_true(x : bool) : bool =
+  mu~ %ret.
+    <(land x : bool true : bool) : bool | %ret>;
+
+def lor_false(x : bool) : bool =
+  mu~ %ret.
+    <(lor false : bool x : bool) : bool | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

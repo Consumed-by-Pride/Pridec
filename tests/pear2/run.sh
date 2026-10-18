@@ -553,6 +553,14 @@ cp tests/pear2/coerce_bool_constants.air "$W/coerce_bool_constants.air"
 grep -Eq '(^| )folds=4( |$)' "$W/coerce_bool_constants.stats" || { echo "FAIL: expected four bool/integer coercion folds"; cat "$W/coerce_bool_constants.stats"; exit 1; }
 [ -f "$W/coerce_bool_constants.bc" ] || { echo "FAIL: coerced-constant AIR did not emit bitcode"; exit 1; }
 
+# Logical identities remove the bool-only land/lor forms from codegen while
+# preserving their variable operand and the final module verification gate.
+cp tests/pear2/bool_logic_identity.air "$W/bool_logic_identity.air"
+"$PEAR2" "$W/bool_logic_identity.air" -O1 --stats --quiet >"$W/bool_logic_identity.stats"
+grep -Eq '(^| )rewrites=2( |$)' "$W/bool_logic_identity.stats" || { echo "FAIL: expected two logical identity rewrites"; cat "$W/bool_logic_identity.stats"; exit 1; }
+grep -Eq '(^| )operands=2( |$)' "$W/bool_logic_identity.stats" || { echo "FAIL: expected two logical operand rewrites"; cat "$W/bool_logic_identity.stats"; exit 1; }
+[ -f "$W/bool_logic_identity.bc" ] || { echo "FAIL: logical-identity AIR did not emit bitcode"; exit 1; }
+
 # Exercise PEAR2's AIR optimizer switch on nested constant arithmetic. The
 # default pipeline must report rewrites; -O0 must bypass the pass entirely.
 for level in 1 2 3; do

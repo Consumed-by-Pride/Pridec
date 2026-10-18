@@ -172,7 +172,7 @@ fn int main()
     let_condition.ty = mod.t_bool;
     AirPrd* let_compare = air_ir::air_new_AirPrd(&arena);
     let_compare.tag = APRD_BINOP;
-    let_compare.bop = ABIN_EQ;
+    let_compare.bop = ABIN_LAND;
     let_compare.ty = mod.t_bool;
     let_compare.sub_count = 2;
     let_compare.subs[0] = let_condition;
@@ -923,6 +923,30 @@ fn int main()
     even_to_bool_decl.def_body = even_to_bool_ret;
     mod.decls[66] = even_to_bool_decl;
 
+    AirPrd* logic_value = air_ir::air_new_AirPrd(&arena);
+    logic_value.tag = APRD_VAR;
+    logic_value.name = (char*)"logical_value";
+    logic_value.ty = mod.t_bool;
+    AirPrd* logical_and_true = make_binop(&arena, ABIN_LAND, mod.t_bool, logic_value, make_bool(&arena, true, mod.t_bool));
+    AirCmd* logical_and_true_ret = air_ir::air_new_AirCmd(&arena);
+    logical_and_true_ret.tag = ACMD_RET;
+    logical_and_true_ret.prd = logical_and_true;
+    AirDecl* logical_and_true_decl = air_ir::air_new_AirDecl(&arena);
+    logical_and_true_decl.tag = ADECL_DEF;
+    logical_and_true_decl.name = (char*)"logical_and_true_identity";
+    logical_and_true_decl.def_body = logical_and_true_ret;
+    mod.decls[67] = logical_and_true_decl;
+
+    AirPrd* logical_or_false = make_binop(&arena, ABIN_LOR, mod.t_bool, make_bool(&arena, false, mod.t_bool), logic_value);
+    AirCmd* logical_or_false_ret = air_ir::air_new_AirCmd(&arena);
+    logical_or_false_ret.tag = ACMD_RET;
+    logical_or_false_ret.prd = logical_or_false;
+    AirDecl* logical_or_false_decl = air_ir::air_new_AirDecl(&arena);
+    logical_or_false_decl.tag = ADECL_DEF;
+    logical_or_false_decl.name = (char*)"logical_or_false_identity";
+    logical_or_false_decl.def_body = logical_or_false_ret;
+    mod.decls[68] = logical_or_false_decl;
+
     // Refuse a narrow signed overflow rather than baking host or wrapping
     // semantics into a constant, and leave division-by-zero untouched.
     AirPrd* narrow_sum = air_ir::air_new_AirPrd(&arena);
@@ -988,11 +1012,11 @@ fn int main()
     range_decl.name = (char*)"out_of_range";
     range_decl.def_body = range_ret;
     mod.decls[6] = range_decl;
-    mod.decl_count = 67;
+    mod.decl_count = 69;
 
     pear2_opt::OptStats stats = pear2_opt::optimize_module(&mod);
     uint rewrites = stats.rewrites;
-    if (rewrites != 55 || stats.constant_folds != 19 || stats.operand_rewrites != 21 || stats.strength_reductions != 9 ||
+    if (rewrites != 57 || stats.constant_folds != 19 || stats.operand_rewrites != 23 || stats.strength_reductions != 9 ||
         stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 2)
     {
         printf("FAIL: unexpected optimizer counters (total=%u folds=%u operands=%u strength=%u shifts=%u branches=%u lets=%u)\n",
@@ -1045,6 +1069,8 @@ fn int main()
         unsigned_mul_all_ones.tag != APRD_UNOP || unsigned_mul_all_ones.uop != AUN_NEG || unsigned_mul_all_ones.subs[0] != unsigned_neg_value || unsigned_mul_all_ones.ty != mod.t_u32 ||
         true_to_i32.tag != APRD_INT || true_to_i32.ival != 1 || false_to_u8.tag != APRD_INT || false_to_u8.ival != 0 ||
         odd_to_bool.tag != APRD_BOOL || !odd_to_bool.bval || even_to_bool.tag != APRD_BOOL || even_to_bool.bval ||
+        logical_and_true.tag != APRD_VAR || logical_and_true.name != logic_value.name ||
+        logical_or_false.tag != APRD_VAR || logical_or_false.name != logic_value.name ||
         remainder_one.bop != ABIN_AND || remainder_one.subs[0] != remainder_one_value || remainder_one.subs[1].ival != 0 ||
         remainder_zero.bop != ABIN_MOD || remainder_zero.subs[0] != remainder_one_value || remainder_zero.subs[1].ival != 0 ||
         mul_zero_right.bop != ABIN_AND || mul_zero_right.subs[0] != mul_zero_right_value || mul_zero_right.subs[1].ival != 0 ||
