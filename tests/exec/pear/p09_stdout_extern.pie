@@ -1,0 +1,8 @@
+-- EXPECT: A
+-- EXIT: 0
+-- Scalar external call supplies a positive stdout baseline for backend runners.
+extern fn putchar(c: i64) -> i64
+fn main(_) -> i64 {
+  let ignored = putchar(65i64);
+  return 0;
+}

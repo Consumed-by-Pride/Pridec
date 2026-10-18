@@ -1,11 +1,130 @@
 #!/bin/bash
-# PEAR 2 bootstrap tests: untyped AIR 2.x -> verified LLVM bitcode, fail closed.
+# PEAR 2 CLI/end-to-end tests: untyped AIR 2.x -> executable or verified bitcode.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-PEAR2="${1:-./pear2c}"
-[ -x "$PEAR2" ] || { echo "pear2c not found at $PEAR2"; exit 1; }
+PEAR2_BIN="${1:-./pear2c}"
+[ -x "$PEAR2_BIN" ] || { echo "pear2c not found at $PEAR2_BIN"; exit 1; }
+LLVM23_BIN=${LLVM23_BIN:-$HOME/.cache/llvm23/bin}
+LLVM23_LIBDIR=${LLVM23_LIBDIR:-$(dirname "$LLVM23_BIN")}
+export LD_LIBRARY_PATH="$LLVM23_LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+linked_llvm=$(ldd "$PEAR2_BIN" 2>/dev/null | awk '/libLLVM-23\.so/ { print $1; exit }' || true)
+[ -n "$linked_llvm" ] || { echo "FAIL: $PEAR2_BIN is not dynamically linked to LLVM 23 C API"; exit 1; }
+echo "PEAR2 LLVM C API: $linked_llvm"
+find_llvm_tool() {
+    local name=$1
+    if [ -x "$LLVM23_BIN/$name" ]; then printf '%s' "$LLVM23_BIN/$name"; else command -v "$name" || return 1; fi
+}
+LLVM_OPT=${LLVM_OPT:-$(find_llvm_tool opt || true)}
+PEAR2_CLANG=${PEAR2_CLANG:-$(find_llvm_tool clang || true)}
+[ -x "$LLVM_OPT" ] || { echo "FAIL: LLVM opt not found; set LLVM_OPT or LLVM23_BIN"; exit 1; }
+[ -x "$PEAR2_CLANG" ] || { echo "FAIL: LLVM clang not found; set PEAR2_CLANG or LLVM23_BIN"; exit 1; }
+if [ -n "${C3C:-}" ] && [ -x "$C3C" ]; then echo "C3 compiler: $("$C3C" --version | head -1) ($C3C)"; fi
+for tool in "$LLVM_OPT" "$PEAR2_CLANG"; do
+    version=$("$tool" --version 2>&1 || true)
+    printf '%s\n' "$version" | python3 -c 'import re,sys; s=sys.stdin.read(); m=re.search(r"(?:LLVM|clang) version (\d+)", s); sys.exit(0 if m and m.group(1)=="23" else 1)' || {
+        echo "FAIL: expected LLVM 23 tool, got: $(printf '%s' "$version" | head -1) ($tool)"; exit 1;
+    }
+    echo "LLVM tool: $tool — $(printf '%s' "$version" | grep -m1 -E 'LLVM version|clang version' | xargs)"
+done
+export LLVM_OPT PEAR2_CLANG
 W=tmp/pear2-test
 rm -rf "$W" && mkdir -p "$W"
+
+# Exercise mode selection and the process contract before the bitcode suite.
+cp tests/pear2/literal_main.air "$W/default.air"
+set +e
+"$PEAR2_BIN" "$W/default.air" --quiet >"$W/default.log" 2>&1
+rc=$?
+set -e
+[ "$rc" = 0 ] && [ -x "$W/default" ] || { echo "FAIL: default mode did not emit executable (rc=$rc)"; cat "$W/default.log"; exit 1; }
+[ ! -e "$W/default.bc" ] || { echo "FAIL: default executable mode unexpectedly published bitcode"; exit 1; }
+[ ! -s "$W/default.log" ] || { echo "FAIL: --quiet printed output on success"; cat "$W/default.log"; exit 1; }
+timeout 5 "$W/default" >/dev/null 2>&1; rc=$?
+[ "$rc" = 42 ] || { echo "FAIL: default executable returned $rc, expected 42"; exit 1; }
+echo "PASS: default executable mode links and runs (exit 42)"
+rm -f "$W/default"
+cp "$W/default.air" "$W/path's with spaces.air"
+"$PEAR2_BIN" "$W/path's with spaces.air" --quiet || { echo "FAIL: shell-sensitive input/output path rejected"; exit 1; }
+timeout 5 "$W/path's with spaces" >/dev/null 2>&1; rc=$?
+[ "$rc" = 42 ] || { echo "FAIL: quoted-path executable returned $rc, expected 42"; exit 1; }
+rm -f "$W/path's with spaces"
+printf stale > "$W/default.bc"
+"$PEAR2_BIN" "$W/default.air" --emit-exe -O0 --quiet || { echo "FAIL: explicit --emit-exe -O0 rejected"; exit 1; }
+[ ! -e "$W/default.bc" ] || { echo "FAIL: executable mode retained stale bitcode"; exit 1; }
+timeout 5 "$W/default" >/dev/null 2>&1; rc=$?
+[ "$rc" = 42 ] || { echo "FAIL: explicit --emit-exe returned $rc, expected 42"; exit 1; }
+rm -f "$W/default"
+printf stale > "$W/default"
+"$PEAR2_BIN" "$W/default.air" --emit-bc -O3 --quiet || { echo "FAIL: explicit --emit-bc -O3 rejected"; exit 1; }
+[ -f "$W/default.bc" ] && [ ! -e "$W/default" ] || { echo "FAIL: --emit-bc did not produce only the bitcode artifact"; exit 1; }
+"$LLVM_OPT" -passes=verify -disable-output "$W/default.bc" || { echo "FAIL: LLVM opt did not parse and verify emitted bitcode"; exit 1; }
+echo "PASS: explicit --emit-bc emits verifiable bitcode"
+
+# Exit 2: usage/option errors. Exit 1: invalid AIR. Exit 3: valid AIR outside
+# the supported backend subset. Every failure must remove a stale artifact.
+set +e
+"$PEAR2_BIN" --unknown-option >"$W/usage.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: option error returned $rc, expected 2"; exit 1; }
+printf stale > "$W/default"
+set +e
+"$PEAR2_BIN" "$W/default.air" --bad-option >"$W/bad_option.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] && [ ! -e "$W/default" ] && [ ! -e "$W/default.bc" ] || { echo "FAIL: bad option returned $rc or retained stale outputs"; exit 1; }
+printf 'not AIR\n' > "$W/invalid.air"
+printf stale > "$W/invalid"
+set +e
+"$PEAR2_BIN" "$W/invalid.air" --quiet >"$W/invalid.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 1 ] && [ ! -e "$W/invalid" ] || { echo "FAIL: invalid AIR returned $rc or retained stale executable"; exit 1; }
+cp "$W/invalid.air" "$W/invalid_bc.air"
+printf stale > "$W/invalid_bc.bc"
+set +e
+"$PEAR2_BIN" "$W/invalid_bc.air" --emit-bc --quiet >"$W/invalid_bc.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 1 ] && [ ! -e "$W/invalid_bc.bc" ] || { echo "FAIL: invalid AIR/bitcode mode returned $rc or retained stale bitcode"; exit 1; }
+cp tests/pear2/unsupported_main.air "$W/unsupported_cli.air"
+printf stale > "$W/unsupported_cli"
+set +e
+"$PEAR2_BIN" "$W/unsupported_cli.air" --emit-exe --quiet >"$W/unsupported_cli.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] && [ ! -e "$W/unsupported_cli" ] || { echo "FAIL: unsupported AIR returned $rc or retained stale executable"; cat "$W/unsupported_cli.log"; exit 1; }
+cat > "$W/fail-linker" <<'FAKE_CLANG'
+#!/usr/bin/env bash
+printf partial > "$4"
+exit 9
+FAKE_CLANG
+chmod +x "$W/fail-linker"
+printf stale > "$W/default"
+set +e
+PEAR2_CLANG="$W/fail-linker" "$PEAR2_BIN" "$W/default.air" --quiet >"$W/link_failure.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] && [ ! -e "$W/default" ] || { echo "FAIL: linker failure returned $rc or retained stale executable"; cat "$W/link_failure.log"; exit 1; }
+printf stale > "$W/default"
+printf stale > "$W/default.bc"
+set +e
+"$PEAR2_BIN" "$W/default.air" --emit-exe --emit-bc >"$W/conflict.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] && [ ! -e "$W/default" ] && [ ! -e "$W/default.bc" ] || { echo "FAIL: conflicting output modes returned $rc or retained stale outputs"; exit 1; }
+find "$W" -maxdepth 1 -name '*.pear2-*' -print -quit | grep -q . && { echo "FAIL: temporary artifact leaked after CLI failures"; exit 1; } || true
+echo "PASS: CLI exit codes 0/1/2/3 and failure cleanup"
+
+# All remaining cases explicitly exercise the bitcode mode and independently
+# parse/verify every successful artifact with LLVM 23 opt.
+cat > "$W/pear2-bc-wrapper" <<'WRAPPER'
+#!/usr/bin/env bash
+set +e
+input=$1
+"$PEAR2_REAL" "$@" --emit-bc
+rc=$?
+if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+bc="${input%.*}.bc"
+"$LLVM_OPT" -passes=verify -disable-output "$bc"
+exit $?
+WRAPPER
+chmod +x "$W/pear2-bc-wrapper"
+export PEAR2_REAL="$PEAR2_BIN"
+PEAR2="$W/pear2-bc-wrapper"
 cp tests/pear2/literal_main.air "$W/literal.air"
 if ! "$PEAR2" "$W/literal.air" --quiet; then echo "FAIL: literal main rejected"; exit 1; fi
 [ -f "$W/literal.bc" ] || { echo "FAIL: no bitcode written"; exit 1; }
@@ -601,3 +720,25 @@ grep -q 'optimization disabled; rewrites=0' "$W/no_opt.stats" || { echo "FAIL: -
 grep -q 'level=0 passes=0' "$W/no_opt.stats" || { echo "FAIL: -O0 reported unexpected optimizer passes"; cat "$W/no_opt.stats"; exit 1; }
 [ -f "$W/no_opt.bc" ] || { echo "FAIL: -O0 AIR did not emit bitcode"; exit 1; }
 echo "PASS: PEAR2 optimization default, rewrite stats, and -O0 opt-out"
+
+link_and_run() {
+    local name=$1 expected_rc=$2 expected_stdout=${3:-}
+    local exe="$W/$name.linked" output="$W/$name.stdout" rc got
+    "$PEAR2_CLANG" -Wno-override-module "$W/$name.bc" -o "$exe" >"$W/$name.link.log" 2>&1 || {
+        echo "FAIL: LLVM 23 clang could not link $name.bc"; cat "$W/$name.link.log"; return 1;
+    }
+    set +e
+    timeout 10 "$exe" >"$output" 2>"$W/$name.run.err"
+    rc=$?
+    set -e
+    got=$(cat "$output")
+    [ "$rc" = "$expected_rc" ] || { echo "FAIL: $name returned $rc, expected $expected_rc"; return 1; }
+    [ "$got" = "$expected_stdout" ] || { echo "FAIL: $name stdout mismatch: got '$got', expected '$expected_stdout'"; return 1; }
+    echo "PASS: LLVM 23 linked/runs $name (exit=$rc, stdout baseline matched)"
+}
+link_and_run literal 42
+link_and_run arithmetic 42
+link_and_run direct_call 42
+link_and_run if_compare 42
+link_and_run while 9
+link_and_run binding_optimizer 42

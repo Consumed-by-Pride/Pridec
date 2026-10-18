@@ -20,6 +20,8 @@ extern fn int remove(char* path);
 extern fn int rename(char* old_path, char* new_path);
 extern fn int snprintf(char* buf, usz cap, char* fmt, ...);
 extern fn int getpid();
+extern fn int system(char* command) @cname("system");
+extern fn char* getenv(char* name) @cname("getenv");
 
 // LLVM C API: parse the generated textual module, verify it, then serialize
 // the verified module as LLVM bitcode. PEAR 2 owns this path; it does not call
@@ -2368,7 +2370,60 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     return true;
 }
 
-fn bool make_paths(char* input, char* out, usz cap, char* temp_ll, char* temp_bc)
+fn bool append_text(char* out, usz cap, usz* length, char* text)
+{
+    for (usz i = 0; text[i] != 0; i++)
+    {
+        if (*length + 1 >= cap) { return false; }
+        out[*length] = text[i];
+        (*length)++;
+    }
+    out[*length] = 0;
+    return true;
+}
+
+fn bool append_shell_word(char* out, usz cap, usz* length, char* word)
+{
+    if (*length + 2 >= cap) { return false; }
+    out[*length] = '\'';
+    (*length)++;
+    for (usz i = 0; word[i] != 0; i++)
+    {
+        if (word[i] == '\'')
+        {
+            if (*length + 4 >= cap) { return false; }
+            out[*length] = '\''; out[*length + 1] = '\\'; out[*length + 2] = '\''; out[*length + 3] = '\'';
+            *length += 4;
+        }
+        else
+        {
+            if (*length + 1 >= cap) { return false; }
+            out[*length] = word[i];
+            (*length)++;
+        }
+    }
+    if (*length + 2 >= cap) { return false; }
+    out[*length] = '\'';
+    (*length)++;
+    out[*length] = 0;
+    return true;
+}
+
+fn bool make_executable(char* bitcode, char* output)
+{
+    char* clang = getenv((char*)"PEAR2_CLANG");
+    if (clang == null || clang[0] == 0) { clang = (char*)"clang"; }
+    char[16384] command;
+    usz length = 0;
+    if (!append_shell_word(&command[0], 16384, &length, clang) ||
+        !append_text(&command[0], 16384, &length, (char*)" -Wno-override-module ") ||
+        !append_shell_word(&command[0], 16384, &length, bitcode) ||
+        !append_text(&command[0], 16384, &length, (char*)" -o ") ||
+        !append_shell_word(&command[0], 16384, &length, output)) { return false; }
+    return system(&command[0]) == 0;
+}
+
+fn bool make_paths(char* input, bool emit_exe, char* out, usz cap, char* temp_ll, char* temp_bc, char* temp_exe)
 {
     int slash = -1;
     int dot = -1;
@@ -2382,49 +2437,94 @@ fn bool make_paths(char* input, char* out, usz cap, char* temp_ll, char* temp_bc
     usz stem = (usz)(dot > slash ? dot : (int)n);
     if (stem + 4 >= cap) { return false; }
     for (usz i = 0; i < stem; i++) { out[i] = input[i]; }
-    out[stem] = '.'; out[stem + 1] = 'b'; out[stem + 2] = 'c'; out[stem + 3] = 0;
+    if (emit_exe) { out[stem] = 0; }
+    else { out[stem] = '.'; out[stem + 1] = 'b'; out[stem + 2] = 'c'; out[stem + 3] = 0; }
     long pid = (long)getpid();
     int ll_n = snprintf(temp_ll, cap, (char*)"%s.pear2-%ld.ll", out, pid);
-    int bc_n = snprintf(temp_bc, cap, (char*)"%s.pear2-%ld.tmp", out, pid);
-    return ll_n >= 0 && (usz)ll_n < cap && bc_n >= 0 && (usz)bc_n < cap;
+    int bc_n = snprintf(temp_bc, cap, (char*)"%s.pear2-%ld.tmp.bc", out, pid);
+    int exe_n = snprintf(temp_exe, cap, (char*)"%s.pear2-%ld.tmp.exe", out, pid);
+    return ll_n >= 0 && (usz)ll_n < cap && bc_n >= 0 && (usz)bc_n < cap && exe_n >= 0 && (usz)exe_n < cap;
+}
+
+fn void clear_stale_outputs(char* input)
+{
+    for (int mode = 0; mode <= 1; mode++)
+    {
+        char[4096] out_path;
+        char[4096] ll_path;
+        char[4096] bc_tmp;
+        char[4096] exe_tmp;
+        if (make_paths(input, mode == 1, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0]))
+        {
+            (void)remove(&out_path[0]);
+            (void)remove(&ll_path[0]);
+            (void)remove(&bc_tmp[0]);
+            (void)remove(&exe_tmp[0]);
+        }
+    }
 }
 
 fn int main(String[] args)
 {
     char* input = null;
     bool quiet = false;
-    int opt_level = 1;
+    bool emit_exe = true;
+    bool mode_seen = false;
+    int opt_level = 2;
     bool show_opt_stats = false;
+    bool usage_error = false;
+    char* bad_option = null;
     for (usz i = 1; i < args.len; i++)
     {
         char* a = (char*)args[i].ptr;
         if (same(a, "--quiet")) { quiet = true; }
-        else if (same(a, "--emit-bc")) { }
+        else if (same(a, "--emit-exe"))
+        {
+            if (mode_seen && !emit_exe) { usage_error = true; }
+            else { emit_exe = true; mode_seen = true; }
+        }
+        else if (same(a, "--emit-bc"))
+        {
+            if (mode_seen && emit_exe) { usage_error = true; }
+            else { emit_exe = false; mode_seen = true; }
+        }
         else if (same(a, "-O0")) { opt_level = 0; }
         else if (same(a, "-O1")) { opt_level = 1; }
         else if (same(a, "-O2")) { opt_level = 2; }
         else if (same(a, "-O3")) { opt_level = 3; }
         else if (same(a, "--stats")) { show_opt_stats = true; }
-        else if (a[0] != '-') { input = a; }
-        else { printf("pear2c: unsupported option `%s` in PEAR2\n", a); return 2; }
+        else if (a[0] != '-')
+        {
+            if (input != null) { usage_error = true; }
+            else { input = a; }
+        }
+        else { usage_error = true; bad_option = a; }
+    }
+    if (usage_error)
+    {
+        if (input != null) { clear_stale_outputs(input); }
+        if (bad_option != null) { printf("pear2c: unsupported option `%s` in PEAR2\n", bad_option); }
+        else { printf("pear2c: invalid arguments; choose one input and one output mode\n"); }
+        return 2;
     }
     if (input == null)
     {
-        printf("usage: pear2c FILE.air [--emit-bc] [-O0|-O1|-O2|-O3] [--stats] [--quiet]\n");
+        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc] [-O0|-O1|-O2|-O3] [--stats] [--quiet]\n");
         return 2;
     }
 
+    // Clear artifacts from either output mode before any validation can fail.
+    clear_stale_outputs(input);
     char[4096] out_path;
     char[4096] ll_path;
     char[4096] bc_tmp;
-    if (!make_paths(input, &out_path[0], 4096, &ll_path[0], &bc_tmp[0]))
+    char[4096] exe_tmp;
+    if (!make_paths(input, emit_exe, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0]))
     {
         printf("pear2c: output path too long\n"); return 2;
     }
-    // Clear stale output before parsing or validating, so no failure can leave
-    // an artifact from an earlier successful build looking current.
-    (void)remove(&out_path[0]); (void)remove(&ll_path[0]); (void)remove(&bc_tmp[0]);
-
+    // clear_stale_outputs above removes the published and temporary paths for
+    // both modes before parsing, so no failure can leave a prior artifact.
     AirArena arena;
     if (!arena.init()) { printf("pear2c: out of memory\n"); return 3; }
     AirModule mod;
@@ -2578,8 +2678,27 @@ fn int main(String[] args)
     if (m != null) { ll_module_dispose(m); }
     if (ctx != null) { ll_context_dispose(ctx); }
     (void)remove(&ll_path[0]);
-    if (rc == 0 && rename(&bc_tmp[0], &out_path[0]) != 0) { printf("pear2c: could not publish bitcode atomically\n"); rc = 3; }
-    if (rc != 0) { (void)remove(&bc_tmp[0]); (void)remove(&out_path[0]); }
+    if (rc == 0 && emit_exe)
+    {
+        if (!make_executable(&bc_tmp[0], &exe_tmp[0]))
+        {
+            printf("pear2c: native linker failed (set PEAR2_CLANG to an LLVM-compatible clang)\n");
+            rc = 3;
+        }
+        else if (rename(&exe_tmp[0], &out_path[0]) != 0)
+        {
+            printf("pear2c: could not publish executable atomically\n");
+            rc = 3;
+        }
+    }
+    else if (rc == 0 && rename(&bc_tmp[0], &out_path[0]) != 0)
+    {
+        printf("pear2c: could not publish bitcode atomically\n");
+        rc = 3;
+    }
+    (void)remove(&bc_tmp[0]);
+    (void)remove(&exe_tmp[0]);
+    if (rc != 0) { (void)remove(&out_path[0]); }
     else if (!quiet) { printf("pear2c: wrote %s\n", &out_path[0]); }
     arena.destroy();
     return rc;

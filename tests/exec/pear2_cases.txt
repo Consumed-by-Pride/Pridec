@@ -1,0 +1,9 @@
+tests/exec/pear/p01_return_42.pie
+tests/exec/pear/p02_arith.pie
+tests/exec/pear/p03_fib.pie
+tests/exec/pear/p04_loop_sum.pie
+tests/exec/pear/p05_call_chain.pie
+tests/exec/pear/p07_mut_reassign.pie
+tests/exec/pear/p08_if_else.pie
+tests/exec/pear/p09_stdout_extern.pie
+tests/exec/pear/p99_forward_call.pie
