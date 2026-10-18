@@ -947,6 +947,34 @@ fn int main()
     logical_or_false_decl.def_body = logical_or_false_ret;
     mod.decls[68] = logical_or_false_decl;
 
+    AirPrd* chain_base_ref = air_ir::air_new_AirPrd(&arena);
+    chain_base_ref.tag = APRD_VAR;
+    chain_base_ref.name = (char*)"chain_base";
+    chain_base_ref.ty = mod.t_i64;
+    AirPrd* chain_initializer = make_binop(&arena, ABIN_ADD, mod.t_i64, chain_base_ref, make_int(&arena, 2, null));
+    AirPrd* chain_value_ref = air_ir::air_new_AirPrd(&arena);
+    chain_value_ref.tag = APRD_VAR;
+    chain_value_ref.name = (char*)"chain_value";
+    chain_value_ref.ty = mod.t_i64;
+    AirCmd* chain_ret = air_ir::air_new_AirCmd(&arena);
+    chain_ret.tag = ACMD_RET;
+    chain_ret.prd = make_binop(&arena, ABIN_ADD, mod.t_i64, chain_value_ref, make_int(&arena, 3, null));
+    AirCmd* chain_inner_let = air_ir::air_new_AirCmd(&arena);
+    chain_inner_let.tag = ACMD_LET;
+    chain_inner_let.binder = (char*)"chain_value";
+    chain_inner_let.prd = chain_initializer;
+    chain_inner_let.body = chain_ret;
+    AirCmd* chain_outer_let = air_ir::air_new_AirCmd(&arena);
+    chain_outer_let.tag = ACMD_LET;
+    chain_outer_let.binder = (char*)"chain_base";
+    chain_outer_let.prd = make_int(&arena, 39, mod.t_i64);
+    chain_outer_let.body = chain_inner_let;
+    AirDecl* chain_decl = air_ir::air_new_AirDecl(&arena);
+    chain_decl.tag = ADECL_DEF;
+    chain_decl.name = (char*)"chained_integer_let_specialization";
+    chain_decl.def_body = chain_outer_let;
+    mod.decls[69] = chain_decl;
+
     // Refuse a narrow signed overflow rather than baking host or wrapping
     // semantics into a constant, and leave division-by-zero untouched.
     AirPrd* narrow_sum = air_ir::air_new_AirPrd(&arena);
@@ -1012,12 +1040,12 @@ fn int main()
     range_decl.name = (char*)"out_of_range";
     range_decl.def_body = range_ret;
     mod.decls[6] = range_decl;
-    mod.decl_count = 69;
+    mod.decl_count = 70;
 
     pear2_opt::OptStats stats = pear2_opt::optimize_module(&mod);
     uint rewrites = stats.rewrites;
-    if (rewrites != 57 || stats.constant_folds != 19 || stats.operand_rewrites != 23 || stats.strength_reductions != 9 ||
-        stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 2)
+    if (rewrites != 63 || stats.constant_folds != 21 || stats.operand_rewrites != 25 || stats.strength_reductions != 9 ||
+        stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 4)
     {
         printf("FAIL: unexpected optimizer counters (total=%u folds=%u operands=%u strength=%u shifts=%u branches=%u lets=%u)\n",
                rewrites, stats.constant_folds, stats.operand_rewrites, stats.strength_reductions,
@@ -1103,6 +1131,12 @@ fn int main()
     if (int_let_decl.def_body != int_let || int_let_cut.prd.tag != APRD_INT || int_let_cut.prd.ival != 42)
     {
         printf("FAIL: integer let expression was not substituted and folded safely\n"); arena.destroy(); return 1;
+    }
+    if (chain_decl.def_body != chain_outer_let || chain_outer_let.body != chain_inner_let ||
+        chain_inner_let.prd.tag != APRD_INT || chain_inner_let.prd.ival != 41 ||
+        chain_inner_let.body != chain_ret || chain_ret.prd.tag != APRD_INT || chain_ret.prd.ival != 44)
+    {
+        printf("FAIL: chained integer-let constants did not propagate through pure initializers and return values\n"); arena.destroy(); return 1;
     }
     if (bool_identity_ret.prd.tag != APRD_VAR || bool_identity_ret.prd.name == null ||
         bool_identity_ret.prd.name[0] != 'f' || bool_identity_ret.prd.name[1] != 'l' ||

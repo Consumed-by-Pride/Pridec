@@ -913,6 +913,22 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
             s.let_specializations++;
         }
     }
+    if (c.tag == ACMD_LET && c.binder != null && c.prd != null && c.prd.tag == APRD_INT &&
+        opt_integer_hint(c.prd.ty) && c.body != null && c.body.tag == ACMD_LET && c.body.binder != null &&
+        c.body.prd != null && opt_integer_expr_tree(c.body.prd, 0) &&
+        opt_validate_integer_substitution(c.body.prd, c.binder, c.prd, 0))
+    {
+        // Propagate through one immediate nested initializer only. The inner
+        // let is optimized recursively afterward and can propagate its own
+        // constant; neither binding is removed, and unsupported/effectful
+        // initializer forms are left alone.
+        if (s.substitute_integer_var(c.body.prd, c.binder, c.prd, 0))
+        {
+            c.body.prd = s.optimize_prd(c.body.prd, depth + 1);
+            s.rewrites++;
+            s.let_specializations++;
+        }
+    }
     if (c.tag == ACMD_IF && c.prd != null && c.prd.tag == APRD_BOOL)
     {
         AirCmd* selected = c.prd.bval ? c.then_c : c.else_c;

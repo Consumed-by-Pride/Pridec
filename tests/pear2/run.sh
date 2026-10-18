@@ -524,6 +524,14 @@ print(f"PASS: integer-let optimization reported {match.group(1)} rewrites")
 PY
 [ -f "$W/binding_optimizer.bc" ] || { echo "FAIL: optimized binding AIR did not emit bitcode"; exit 1; }
 
+# A pure integer constant should cross a nested let initializer and fold the
+# terminal result without deleting either binding.
+cp tests/pear2/integer_let_chain.air "$W/integer_let_chain.air"
+"$PEAR2" "$W/integer_let_chain.air" --stats --quiet >"$W/integer_let_chain.stats"
+grep -Eq '(^| )folds=2( |$)' "$W/integer_let_chain.stats" || { echo "FAIL: expected two folds through the integer-let chain"; cat "$W/integer_let_chain.stats"; exit 1; }
+grep -Eq '(^| )let-specializations=2( |$)' "$W/integer_let_chain.stats" || { echo "FAIL: expected two chained integer-let specializations"; cat "$W/integer_let_chain.stats"; exit 1; }
+[ -f "$W/integer_let_chain.bc" ] || { echo "FAIL: chained-let AIR did not emit bitcode"; exit 1; }
+
 # Exercise PEAR2's AIR optimizer on a real bool-let/if fixture. The comparison,
 # negation, let-condition specialization, and literal branch should all reduce.
 cp tests/pear2/if_compare_main.air "$W/if_optimizer.air"
