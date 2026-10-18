@@ -546,6 +546,13 @@ grep -Eq '(^| )strength=9( |$)' "$W/strength_reduction.stats" || { echo "FAIL: p
 grep -Eq '(^| )operands=13( |$)' "$W/strength_reduction.stats" || { echo "FAIL: integer/boolean identities and same-representation coercion reductions were not all applied"; cat "$W/strength_reduction.stats"; exit 1; }
 [ -f "$W/strength_reduction.bc" ] || { echo "FAIL: strength-reduced AIR did not emit bitcode"; exit 1; }
 
+# Boolean/integer literal coercions must respect the backend's i1 low-bit
+# conversion semantics while preserving the final module verifier gate.
+cp tests/pear2/coerce_bool_constants.air "$W/coerce_bool_constants.air"
+"$PEAR2" "$W/coerce_bool_constants.air" --stats --quiet >"$W/coerce_bool_constants.stats"
+grep -Eq '(^| )folds=4( |$)' "$W/coerce_bool_constants.stats" || { echo "FAIL: expected four bool/integer coercion folds"; cat "$W/coerce_bool_constants.stats"; exit 1; }
+[ -f "$W/coerce_bool_constants.bc" ] || { echo "FAIL: coerced-constant AIR did not emit bitcode"; exit 1; }
+
 # Exercise PEAR2's AIR optimizer switch on nested constant arithmetic. The
 # default pipeline must report rewrites; -O0 must bypass the pass entirely.
 for level in 1 2 3; do

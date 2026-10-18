@@ -883,6 +883,46 @@ fn int main()
     non_power_left_decl.def_body = non_power_left_ret;
     mod.decls[62] = non_power_left_decl;
 
+    AirPrd* true_to_i32 = make_coerce(&arena, mod.t_i32, make_bool(&arena, true, mod.t_bool));
+    AirCmd* true_to_i32_ret = air_ir::air_new_AirCmd(&arena);
+    true_to_i32_ret.tag = ACMD_RET;
+    true_to_i32_ret.prd = true_to_i32;
+    AirDecl* true_to_i32_decl = air_ir::air_new_AirDecl(&arena);
+    true_to_i32_decl.tag = ADECL_DEF;
+    true_to_i32_decl.name = (char*)"boolean_true_to_integer";
+    true_to_i32_decl.def_body = true_to_i32_ret;
+    mod.decls[63] = true_to_i32_decl;
+
+    AirPrd* false_to_u8 = make_coerce(&arena, mod.t_u8, make_bool(&arena, false, mod.t_bool));
+    AirCmd* false_to_u8_ret = air_ir::air_new_AirCmd(&arena);
+    false_to_u8_ret.tag = ACMD_RET;
+    false_to_u8_ret.prd = false_to_u8;
+    AirDecl* false_to_u8_decl = air_ir::air_new_AirDecl(&arena);
+    false_to_u8_decl.tag = ADECL_DEF;
+    false_to_u8_decl.name = (char*)"boolean_false_to_unsigned";
+    false_to_u8_decl.def_body = false_to_u8_ret;
+    mod.decls[64] = false_to_u8_decl;
+
+    AirPrd* odd_to_bool = make_coerce(&arena, mod.t_bool, make_int(&arena, 3, mod.t_i16));
+    AirCmd* odd_to_bool_ret = air_ir::air_new_AirCmd(&arena);
+    odd_to_bool_ret.tag = ACMD_RET;
+    odd_to_bool_ret.prd = odd_to_bool;
+    AirDecl* odd_to_bool_decl = air_ir::air_new_AirDecl(&arena);
+    odd_to_bool_decl.tag = ADECL_DEF;
+    odd_to_bool_decl.name = (char*)"odd_integer_to_boolean";
+    odd_to_bool_decl.def_body = odd_to_bool_ret;
+    mod.decls[65] = odd_to_bool_decl;
+
+    AirPrd* even_to_bool = make_coerce(&arena, mod.t_bool, make_int(&arena, 4, mod.t_i16));
+    AirCmd* even_to_bool_ret = air_ir::air_new_AirCmd(&arena);
+    even_to_bool_ret.tag = ACMD_RET;
+    even_to_bool_ret.prd = even_to_bool;
+    AirDecl* even_to_bool_decl = air_ir::air_new_AirDecl(&arena);
+    even_to_bool_decl.tag = ADECL_DEF;
+    even_to_bool_decl.name = (char*)"even_integer_to_boolean";
+    even_to_bool_decl.def_body = even_to_bool_ret;
+    mod.decls[66] = even_to_bool_decl;
+
     // Refuse a narrow signed overflow rather than baking host or wrapping
     // semantics into a constant, and leave division-by-zero untouched.
     AirPrd* narrow_sum = air_ir::air_new_AirPrd(&arena);
@@ -948,11 +988,11 @@ fn int main()
     range_decl.name = (char*)"out_of_range";
     range_decl.def_body = range_ret;
     mod.decls[6] = range_decl;
-    mod.decl_count = 63;
+    mod.decl_count = 67;
 
     pear2_opt::OptStats stats = pear2_opt::optimize_module(&mod);
     uint rewrites = stats.rewrites;
-    if (rewrites != 51 || stats.constant_folds != 15 || stats.operand_rewrites != 21 || stats.strength_reductions != 9 ||
+    if (rewrites != 55 || stats.constant_folds != 19 || stats.operand_rewrites != 21 || stats.strength_reductions != 9 ||
         stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 2)
     {
         printf("FAIL: unexpected optimizer counters (total=%u folds=%u operands=%u strength=%u shifts=%u branches=%u lets=%u)\n",
@@ -1003,6 +1043,8 @@ fn int main()
         mismatch_i32_coerce.tag != APRD_COERCE ||
         signed_mul_neg_one.tag != APRD_UNOP || signed_mul_neg_one.uop != AUN_NEG || signed_mul_neg_one.subs[0] != signed_neg_value || signed_mul_neg_one.ty != mod.t_i32 ||
         unsigned_mul_all_ones.tag != APRD_UNOP || unsigned_mul_all_ones.uop != AUN_NEG || unsigned_mul_all_ones.subs[0] != unsigned_neg_value || unsigned_mul_all_ones.ty != mod.t_u32 ||
+        true_to_i32.tag != APRD_INT || true_to_i32.ival != 1 || false_to_u8.tag != APRD_INT || false_to_u8.ival != 0 ||
+        odd_to_bool.tag != APRD_BOOL || !odd_to_bool.bval || even_to_bool.tag != APRD_BOOL || even_to_bool.bval ||
         remainder_one.bop != ABIN_AND || remainder_one.subs[0] != remainder_one_value || remainder_one.subs[1].ival != 0 ||
         remainder_zero.bop != ABIN_MOD || remainder_zero.subs[0] != remainder_one_value || remainder_zero.subs[1].ival != 0 ||
         mul_zero_right.bop != ABIN_AND || mul_zero_right.subs[0] != mul_zero_right_value || mul_zero_right.subs[1].ival != 0 ||

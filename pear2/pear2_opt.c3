@@ -760,6 +760,22 @@ fn void OptStats.fold_coerce(OptStats* s, AirPrd* p)
         s.replace_with_prd(p, operand);
         return;
     }
+    if (operand.tag == APRD_BOOL && opt_bool_hint(operand.ty) && target_type != null)
+    {
+        int target_bits = opt_integer_bits(target_type);
+        if (target_bits > 0 && target_bits <= 64) { s.set_int(p, operand.bval ? 1 : 0); }
+        return;
+    }
+    if (operand.tag == APRD_INT && p.ty.tag == ATYP_BOOL && source_type != null)
+    {
+        int source_bits = opt_integer_bits(source_type);
+        bool source_unsigned = opt_unsigned(source_type);
+        if (source_bits > 0 && source_bits <= 64 && opt_integer_fits(operand.ival, source_bits, source_unsigned))
+        {
+            s.set_bool(p, ((ulong)operand.ival & 1UL) != 0);
+        }
+        return;
+    }
     if (operand.tag != APRD_INT || source_type == null || target_type == null) { return; }
     int source_bits = opt_integer_bits(source_type);
     int target_bits = opt_integer_bits(target_type);
