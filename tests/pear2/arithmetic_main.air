@@ -1,0 +1,6 @@
+// PEAR 2 M1: infer the scalar representation; no type annotations required.
+air 2.2 Main "arithmetic_main.pie";
+
+def main() =
+  mu~ %ret.
+    <(add 40 (mul 2 1)) | %ret>;

@@ -1,0 +1,22 @@
+// Boolean/integer literal coercions fold to their low-bit representation.
+air 2.2 Main "coerce_bool_constants.pie";
+
+def true_to_i32() : i32 =
+  mu~ %ret.
+    <coerce(true, i32) | %ret>;
+
+def false_to_u8() : u8 =
+  mu~ %ret.
+    <coerce(false, u8) | %ret>;
+
+def odd_i16_to_bool() : bool =
+  mu~ %ret.
+    <coerce(3 : i16, bool) | %ret>;
+
+def even_i16_to_bool() : bool =
+  mu~ %ret.
+    <coerce(4 : i16, bool) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

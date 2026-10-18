@@ -1,0 +1,9 @@
+// PEAR 2 M2: boolean match lowers to a one-bit LLVM switch.
+air 2.2 Main "match_bool_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    match true {
+      false -> <0 | %ret>;
+      _ -> <42 | %ret>;
+    };

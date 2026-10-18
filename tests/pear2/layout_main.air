@@ -1,0 +1,30 @@
+// PEAR2: scalar and fixed-array size/alignment queries fold without runtime operations.
+air 2.2 Main "layout_main.pie";
+
+def size_i32() : i64 =
+  mu~ %ret.
+    <sizeof(i32) | %ret>;
+
+def align_pointer() : i64 =
+  mu~ %ret.
+    <alignof(ptr(i8)) | %ret>;
+
+def array_size() : i64 =
+  mu~ %ret.
+    <sizeof(array#4(i16)) | %ret>;
+
+def large_array_size() : i64 =
+  mu~ %ret.
+    <sizeof(array#16(i16)) | %ret>;
+
+def empty_tuple_size() : i64 =
+  mu~ %ret.
+    <sizeof(tuple(unit, unit)) | %ret>;
+
+def unit_alignment() : i64 =
+  mu~ %ret.
+    <alignof(unit) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <sizeof(i64) | %ret>;

@@ -1,0 +1,20 @@
+// PEAR 2 M2/M3: construct nested tuples, extract scalar fields, and branch on them.
+air 2.2 Main "tuple_local_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    <tuple(tuple(42 : i32, true) : tuple(i32, bool), 3.5 : f32) : tuple(tuple(i32, bool), f32) | comu pair.
+      <pair | proj 0 · comu inner.
+        <inner | fst · comu first.
+          <inner | snd · comu flag.
+            <pair | proj 1 · comu second.
+              if (eq first 42 : i32) then
+                if flag then
+                  if (eq second 3.5 : f32) then
+                    <42 | %ret>
+                  else
+                    <0 | %ret>
+                else
+                  <0 | %ret>
+              else
+                <0 | %ret>>>>>>;

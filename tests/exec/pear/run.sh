@@ -10,19 +10,32 @@
 set -u
 cd "$(dirname "$0")/../../.."
 ROOT="$PWD"
-PF="${1:-scripts/pie-exe.sh}"   # chain: pfrontc -> .air -> legacy pear1c
+PF="${1:-scripts/pie-exe.sh}"   # chain: pfrontc -> .air -> backend selected by BACKEND
+BACKEND=${BACKEND:-legacy/pear1/pear1c}
+PEAR2_MODE=0
+[ "$(basename "$BACKEND")" = "pear2c" ] && PEAR2_MODE=1
 PEAR_OPT=${PEAR_OPT:--O2}
 TIMEOUT=${TIMEOUT:-5}
 case "$PEAR_OPT" in -O0|-O1|-O2|-O3) ;; *) echo "invalid PEAR_OPT: $PEAR_OPT"; exit 2 ;; esac
-export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu}"
 
 if [ ! -x "$PF" ]; then
     echo "chain driver not found at $PF"
     exit 1
 fi
+if [ "$PEAR2_MODE" -eq 1 ] && [ ! -x "$BACKEND" ]; then
+    echo "PEAR2 backend not found at $BACKEND (build with make pear2c)"
+    exit 2
+fi
 
 pass=0; fail=0; xfail=0; xpass=0
 TDIR="tests/exec/pear"
+if [ "$PEAR2_MODE" -eq 1 ]; then
+    case_files=$(grep -v '^#' tests/exec/pear2_cases.txt)
+    echo "PEAR2 supported-case set: tests/exec/pear2_cases.txt"
+else
+    case_files=$(printf '%s\n' "$TDIR"/p*.pie)
+fi
 # Clean stale binaries from prior runs.
 find "$TDIR" -maxdepth 1 -type f -executable -not -name '*.pie' -not -name '*.sh' -not -name '*.txt' -delete 2>/dev/null
 # Also clean the common case where pfrontc writes the binary next to the
@@ -32,10 +45,12 @@ for f in "$TDIR"/p*.pie; do
     if [ -f "$b" ] && [ ! -x "$b" ]; then rm -f "$b"; fi
 done
 
-for src in "$TDIR"/p*.pie; do
+for src in $case_files; do
     [ -f "$src" ] || continue
     name=$(basename "$src" .pie)
     expect=$(grep '^-- EXIT:' "$src" | head -1 | awk '{print $3}')
+    expect_out_raw=$(grep -m1 '^-- EXPECT:' "$src" | sed 's/^-- EXPECT: *//' || true)
+    expect_out=$(printf '%b' "$expect_out_raw")
     if [ -z "$expect" ]; then
         echo "SKIP $name (no -- EXIT: marker)"
         continue
@@ -44,6 +59,7 @@ for src in "$TDIR"/p*.pie; do
     if grep -q 'BLOCKER (XFAIL)' "$src"; then is_xfail=1; fi
     bin="${src%.pie}"
     errlog="/tmp/pear_${name}_$$.err"
+    outlog="/tmp/pear_${name}_$$.out"
     "$PF" "$src" --emit-exe "$PEAR_OPT" --quiet >"$errlog" 2>&1
     compile_rc=$?
     # pfrontc returns 0 on clean compile, 1 if warnings only, 2+ on errors.
@@ -66,9 +82,10 @@ for src in "$TDIR"/p*.pie; do
         fail=$((fail+1))
         continue
     fi
-    timeout "$TIMEOUT" "$bin" >/dev/null 2>&1; got=$?
-    rm -f "$bin" "$errlog"
-    if [ "$got" = "$expect" ]; then
+    timeout "$TIMEOUT" "$bin" >"$outlog" 2>/dev/null; got=$?
+    got_out=$(cat "$outlog" 2>/dev/null)
+    rm -f "$bin" "$errlog" "$outlog"
+    if [ "$got" = "$expect" ] && [ "$got_out" = "$expect_out" ]; then
         if [ $is_xfail -eq 1 ]; then
             echo "UNXPASS $name (expect=$expect got=$got, was XFAIL — promote!)"
             xpass=$((xpass+1))
@@ -81,15 +98,19 @@ for src in "$TDIR"/p*.pie; do
             echo "XFAIL $name (expect=$expect got=$got, as expected)"
             xfail=$((xfail+1))
         else
-            echo "FAIL $name (expect=$expect got=$got)"
+            echo "FAIL $name (expect=$expect got=$got stdout='${got_out}' expected='${expect_out}')"
             fail=$((fail+1))
         fi
     fi
 done
 
-echo "==> p112 clause-binding optimization-tier regression"
-if ! bash tests/exec/pear/p112_tiers.sh "$PF"; then
-    fail=$((fail+1))
+if [ "$PEAR2_MODE" -eq 1 ]; then
+    echo "==> PEAR2 tier matrix is exercised by tests/exec/run.sh"
+else
+    echo "==> p112 clause-binding optimization-tier regression"
+    if ! bash tests/exec/pear/p112_tiers.sh "$PF"; then
+        fail=$((fail+1))
+    fi
 fi
 
 echo ""

@@ -1,0 +1,14 @@
+// PEAR 2 subset: unsigned i16 division/comparison and zeroext ABI.
+air 2.2 Main "uint16_main.pie";
+
+def divide16(a : u16, b : u16) : u16 =
+  mu~ %ret.
+    <(div a b) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <divide16 | call · 100 : u16 · 5 : u16 · comu quotient.
+      if (gt quotient 10 : u16) then
+        <42 | %ret>
+      else
+        <0 | %ret>>;

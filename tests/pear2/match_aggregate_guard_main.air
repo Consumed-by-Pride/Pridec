@@ -1,0 +1,15 @@
+// PEAR2: aggregate destructuring binders are available to scalar guards with ordered fallback.
+air 2.2 Main "match_aggregate_guard_main.pie";
+
+def choose(value : tuple(i32, bool)) : i64 =
+  mu~ %ret.
+    match value {
+      as(tuple(bind number, bind enabled), whole) guard {
+        <enabled | %guard>
+      } -> <coerce(number, i64) | %ret>;
+      _ -> <0 | %ret>;
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <choose | call · tuple(42 : i32, true : bool) : tuple(i32, bool) · %ret>;

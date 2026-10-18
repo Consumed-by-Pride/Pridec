@@ -1,0 +1,14 @@
+// PEAR 2 M3/M2 subset: opaque pointer edge values use typed pointer slots.
+air 2.2 Main "label_pointer_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      label choose(value : ptr(u8)).
+        if (eq value null : bool) then
+          <42 | %ret>
+        else
+          <0 | %ret>;
+      let initial = null in
+        jump choose(initial)
+    };

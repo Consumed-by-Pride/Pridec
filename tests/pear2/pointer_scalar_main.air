@@ -1,0 +1,19 @@
+// PEAR 2 M3 subset: opaque pointer ABI, null values, and pointer equality.
+air 2.2 Main "pointer_scalar_main.pie";
+
+def identity(p : ptr(u8)) : ptr(u8) =
+  mu~ %ret.
+    <p | %ret>;
+
+def is_null(p : ptr(u8)) : bool =
+  mu~ %ret.
+    <(eq p null : bool) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <identity | call · null · comu value.
+      <is_null | call · value · comu condition.
+        if condition then
+          <42 | %ret>
+        else
+          <0 | %ret>>>;

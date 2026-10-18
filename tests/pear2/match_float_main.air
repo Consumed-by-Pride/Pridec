@@ -1,0 +1,21 @@
+// PEAR2: floating-point match patterns use ordered equality tests and default fallthrough.
+air 2.2 Main "match_float_main.pie";
+
+def classify_f64(value : f64) : i64 =
+  mu~ %ret.
+    match value {
+      1.5 -> <15 | %ret>;
+      2.5 -> <25 | %ret>;
+      _ -> <0 | %ret>;
+    };
+
+def classify_f32(value : f32) : i64 =
+  mu~ %ret.
+    match value {
+      3.5 -> <35 | %ret>;
+      _ -> <0 | %ret>;
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <classify_f64 | call · 2.5 : f64 · %ret>;

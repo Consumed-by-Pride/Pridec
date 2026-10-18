@@ -1,0 +1,6 @@
+// PEAR 2 M1: explicit ret command is a terminal i64 return.
+air 2.2 Main "ret_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    ret(42);

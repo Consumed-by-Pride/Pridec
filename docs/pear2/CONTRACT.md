@@ -11,7 +11,7 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 | | |
 |---|---|
 | `--emit-exe` (default) | write the executable `FILE` (the path with its last extension removed, next to the input) |
-| `--emit-bc` | write LLVM bitcode `FILE.bc` — optional for a backend that does not use LLVM; then exit 2 with a message |
+| `--emit-bc` | write verified LLVM bitcode `FILE.bc`; a backend without bitcode support exits 2 |
 | `-On` | optimisation tier; default `-O2` |
 | exit 0 | the artifact was written |
 | exit 1 | the `.air` was rejected (syntax, version, limits) — message `file:line:col: …`, **no artifact** |
@@ -19,6 +19,9 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 | exit 3 | the file was valid but the backend produced nothing (unsupported form, internal failure) — message names the form and the definition, **no artifact** |
 
 A stale artifact from a previous run must not survive a failure: delete the output first or write atomically.
+PEAR2 emits and verifies temporary bitcode through the LLVM C API; default executable mode links it with LLVM 23
+`clang` (override its path with `PEAR2_CLANG`). A link failure is exit 3 and must leave no executable or temporary
+artifact. Explicit `--emit-bc` does not invoke clang.
 Warnings go to stdout/stderr and never change the exit status of a successful emit. The wrapper
 `scripts/pie-exe.sh` forwards both stages' output; `BACKEND=… scripts/pie-exe.sh FILE.pie --emit-exe -O2` is the
 whole chain.

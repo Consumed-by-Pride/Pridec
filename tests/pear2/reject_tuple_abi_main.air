@@ -1,0 +1,8 @@
+// PEAR2 permits direct aggregate ABIs only for internal AIR definitions, not C externs.
+air 2.2 Main "reject_tuple_abi_main.pie";
+
+link "pear2_consume_pair" extern declare consume_pair(p : tuple(i32, bool)) : i64;
+
+def main() : i64 =
+  mu~ %ret.
+    <consume_pair | call · tuple(42 : i32, true) : tuple(i32, bool) · %ret>;

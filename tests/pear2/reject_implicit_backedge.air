@@ -1,0 +1,12 @@
+// PEAR 2 M2: changed lexical state must be passed as an explicit label argument.
+air 2.2 Main "reject_implicit_backedge.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let i = 0 : i64 in
+      seq {
+        label loop().
+          let i = (add i 1 : i64) in
+            jump loop();
+        jump loop()
+      };

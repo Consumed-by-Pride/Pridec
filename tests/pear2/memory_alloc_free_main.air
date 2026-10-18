@@ -1,0 +1,13 @@
+// PEAR 2 M3 integration: malloc/free ABI, pointer continuations, and i64 cell memory.
+air 2.2 Main "memory_alloc_free_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare free(p : ptr(i64)) : unit;
+
+def main() : i64 =
+  mu~ %ret.
+    <malloc | call · 8 : i64 · comu buffer.
+      <buffer | store(42 : i64; 8) · comu _.
+        <buffer | deref · comu loaded.
+          <free | call · buffer · comu _.
+            <loaded | %ret>>>>>;

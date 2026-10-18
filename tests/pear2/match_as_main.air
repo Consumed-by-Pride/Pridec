@@ -1,0 +1,21 @@
+// PEAR2: scalar aliases and one-arm aggregate aliases in match patterns.
+air 2.2 Main "match_as_main.pie";
+
+def scalar_alias(value : i32) : i32 =
+  mu~ %ret.
+    match value {
+      as(2, original) -> <original | %ret>;
+      _ -> <0 | %ret>;
+    };
+
+def aggregate_alias(value : tuple(i32, bool)) : i64 =
+  mu~ %ret.
+    match value {
+      as(tuple(bind number, bind flag), whole) ->
+        <whole | proj 0 · comu from_whole.
+          <coerce(from_whole, i64) | %ret>>;
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <aggregate_alias | call · tuple(42 : i32, true : bool) : tuple(i32, bool) · %ret>;
