@@ -69,6 +69,14 @@ def same_f32_coercion(x : f32) : f32 =
   mu~ %ret.
     <coerce(x : f32, f32) | %ret>;
 
+def multiply_negative_one_i32(x : i32) : i32 =
+  mu~ %ret.
+    <(mul x : i32 -1 : i32) : i32 | %ret>;
+
+def multiply_all_ones_u32(x : u32) : u32 =
+  mu~ %ret.
+    <(mul x : u32 4294967295 : u32) : u32 | %ret>;
+
 def multiply_zero_right(x : i32) : i32 =
   mu~ %ret.
     <(mul x : i32 0) : i32 | %ret>;

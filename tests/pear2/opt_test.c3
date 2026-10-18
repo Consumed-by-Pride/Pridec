@@ -834,6 +834,34 @@ fn int main()
     mismatch_i32_decl.def_body = mismatch_i32_ret;
     mod.decls[58] = mismatch_i32_decl;
 
+    AirPrd* signed_neg_value = air_ir::air_new_AirPrd(&arena);
+    signed_neg_value.tag = APRD_VAR;
+    signed_neg_value.name = (char*)"signed_neg_value";
+    signed_neg_value.ty = mod.t_i32;
+    AirPrd* signed_mul_neg_one = make_binop(&arena, ABIN_MUL, mod.t_i32, signed_neg_value, make_int(&arena, -1, mod.t_i32));
+    AirCmd* signed_mul_neg_one_ret = air_ir::air_new_AirCmd(&arena);
+    signed_mul_neg_one_ret.tag = ACMD_RET;
+    signed_mul_neg_one_ret.prd = signed_mul_neg_one;
+    AirDecl* signed_mul_neg_one_decl = air_ir::air_new_AirDecl(&arena);
+    signed_mul_neg_one_decl.tag = ADECL_DEF;
+    signed_mul_neg_one_decl.name = (char*)"signed_multiply_by_negative_one";
+    signed_mul_neg_one_decl.def_body = signed_mul_neg_one_ret;
+    mod.decls[59] = signed_mul_neg_one_decl;
+
+    AirPrd* unsigned_neg_value = air_ir::air_new_AirPrd(&arena);
+    unsigned_neg_value.tag = APRD_VAR;
+    unsigned_neg_value.name = (char*)"unsigned_neg_value";
+    unsigned_neg_value.ty = mod.t_u32;
+    AirPrd* unsigned_mul_all_ones = make_binop(&arena, ABIN_MUL, mod.t_u32, unsigned_neg_value, make_int(&arena, 4294967295L, mod.t_u32));
+    AirCmd* unsigned_mul_all_ones_ret = air_ir::air_new_AirCmd(&arena);
+    unsigned_mul_all_ones_ret.tag = ACMD_RET;
+    unsigned_mul_all_ones_ret.prd = unsigned_mul_all_ones;
+    AirDecl* unsigned_mul_all_ones_decl = air_ir::air_new_AirDecl(&arena);
+    unsigned_mul_all_ones_decl.tag = ADECL_DEF;
+    unsigned_mul_all_ones_decl.name = (char*)"unsigned_multiply_by_all_ones";
+    unsigned_mul_all_ones_decl.def_body = unsigned_mul_all_ones_ret;
+    mod.decls[60] = unsigned_mul_all_ones_decl;
+
     // Refuse a narrow signed overflow rather than baking host or wrapping
     // semantics into a constant, and leave division-by-zero untouched.
     AirPrd* narrow_sum = air_ir::air_new_AirPrd(&arena);
@@ -899,11 +927,11 @@ fn int main()
     range_decl.name = (char*)"out_of_range";
     range_decl.def_body = range_ret;
     mod.decls[6] = range_decl;
-    mod.decl_count = 59;
+    mod.decl_count = 61;
 
     pear2_opt::OptStats stats = pear2_opt::optimize_module(&mod);
     uint rewrites = stats.rewrites;
-    if (rewrites != 48 || stats.constant_folds != 15 || stats.operand_rewrites != 21 || stats.strength_reductions != 6 ||
+    if (rewrites != 50 || stats.constant_folds != 15 || stats.operand_rewrites != 21 || stats.strength_reductions != 8 ||
         stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 2)
     {
         printf("FAIL: unexpected optimizer counters (total=%u folds=%u operands=%u strength=%u shifts=%u branches=%u lets=%u)\n",
@@ -950,6 +978,8 @@ fn int main()
         same_bool_coerce.tag != APRD_VAR || same_bool_coerce.name != same_bool_value.name ||
         same_f32_coerce.tag != APRD_VAR || same_f32_coerce.name != same_f32_value.name ||
         mismatch_i32_coerce.tag != APRD_COERCE ||
+        signed_mul_neg_one.tag != APRD_UNOP || signed_mul_neg_one.uop != AUN_NEG || signed_mul_neg_one.subs[0] != signed_neg_value || signed_mul_neg_one.ty != mod.t_i32 ||
+        unsigned_mul_all_ones.tag != APRD_UNOP || unsigned_mul_all_ones.uop != AUN_NEG || unsigned_mul_all_ones.subs[0] != unsigned_neg_value || unsigned_mul_all_ones.ty != mod.t_u32 ||
         remainder_one.bop != ABIN_AND || remainder_one.subs[0] != remainder_one_value || remainder_one.subs[1].ival != 0 ||
         remainder_zero.bop != ABIN_MOD || remainder_zero.subs[0] != remainder_one_value || remainder_zero.subs[1].ival != 0 ||
         mul_zero_right.bop != ABIN_AND || mul_zero_right.subs[0] != mul_zero_right_value || mul_zero_right.subs[1].ival != 0 ||

@@ -322,7 +322,7 @@ fn void OptStats.replace_with_prd(OptStats* s, AirPrd* dst, AirPrd* src)
     s.operand_rewrites++;
 }
 
-fn void OptStats.replace_with_unary(OptStats* s, AirPrd* operation, AirPrd* value, AirUnop unary)
+fn void OptStats.rewrite_to_unary(OptStats* s, AirPrd* operation, AirPrd* value, AirUnop unary, bool strength)
 {
     if (s == null || operation == null || value == null || operation.subs == null) { return; }
     operation.tag = APRD_UNOP;
@@ -342,7 +342,8 @@ fn void OptStats.replace_with_unary(OptStats* s, AirPrd* operation, AirPrd* valu
     operation.bop = ABIN_ADD;
     operation.uop = unary;
     s.rewrites++;
-    s.operand_rewrites++;
+    if (strength) { s.strength_reductions++; }
+    else { s.operand_rewrites++; }
 }
 
 // Rewrite x * 2^k to x << k only when both operations have the same
@@ -604,14 +605,14 @@ fn void OptStats.fold_binary(OptStats* s, AirPrd* p)
             {
                 bool keep = (p.bop == ABIN_EQ) == left.bval;
                 if (keep) { s.replace_with_prd(p, right); }
-                else { s.replace_with_unary(p, right, AUN_NOT); }
+                else { s.rewrite_to_unary(p, right, AUN_NOT, false); }
                 return;
             }
             if (right.tag == APRD_BOOL)
             {
                 bool keep = (p.bop == ABIN_EQ) == right.bval;
                 if (keep) { s.replace_with_prd(p, left); }
-                else { s.replace_with_unary(p, left, AUN_NOT); }
+                else { s.rewrite_to_unary(p, left, AUN_NOT, false); }
                 return;
             }
         }
@@ -619,8 +620,8 @@ fn void OptStats.fold_binary(OptStats* s, AirPrd* p)
         if (p.bop == ABIN_AND && right.tag == APRD_BOOL && right.bval) { s.replace_with_prd(p, left); return; }
         if (p.bop == ABIN_OR && left.tag == APRD_BOOL && !left.bval) { s.replace_with_prd(p, right); return; }
         if (p.bop == ABIN_OR && right.tag == APRD_BOOL && !right.bval) { s.replace_with_prd(p, left); return; }
-        if (p.bop == ABIN_XOR && left.tag == APRD_BOOL && left.bval) { s.replace_with_unary(p, right, AUN_NOT); return; }
-        if (p.bop == ABIN_XOR && right.tag == APRD_BOOL && right.bval) { s.replace_with_unary(p, left, AUN_NOT); return; }
+        if (p.bop == ABIN_XOR && left.tag == APRD_BOOL && left.bval) { s.rewrite_to_unary(p, right, AUN_NOT, false); return; }
+        if (p.bop == ABIN_XOR && right.tag == APRD_BOOL && right.bval) { s.rewrite_to_unary(p, left, AUN_NOT, false); return; }
         if (p.bop == ABIN_XOR && left.tag == APRD_BOOL && !left.bval) { s.replace_with_prd(p, right); return; }
         if (p.bop == ABIN_XOR && right.tag == APRD_BOOL && !right.bval) { s.replace_with_prd(p, left); return; }
     }
@@ -646,9 +647,21 @@ fn void OptStats.fold_binary(OptStats* s, AirPrd* p)
     if (p.bop == ABIN_DIV && opt_literal_one(b) && opt_can_return_operand(p, a)) { s.replace_with_prd(p, a); return; }
     if (p.bop == ABIN_AND && opt_all_ones_literal(p, a) && opt_can_return_operand(p, b)) { s.replace_with_prd(p, b); return; }
     if (p.bop == ABIN_AND && opt_all_ones_literal(p, b) && opt_can_return_operand(p, a)) { s.replace_with_prd(p, a); return; }
-    if (p.bop == ABIN_XOR && opt_all_ones_literal(p, a) && opt_can_return_operand(p, b)) { s.replace_with_unary(p, b, AUN_BITNOT); return; }
-    if (p.bop == ABIN_XOR && opt_all_ones_literal(p, b) && opt_can_return_operand(p, a)) { s.replace_with_unary(p, a, AUN_BITNOT); return; }
+    if (p.bop == ABIN_XOR && opt_all_ones_literal(p, a) && opt_can_return_operand(p, b)) { s.rewrite_to_unary(p, b, AUN_BITNOT, false); return; }
+    if (p.bop == ABIN_XOR && opt_all_ones_literal(p, b) && opt_can_return_operand(p, a)) { s.rewrite_to_unary(p, a, AUN_BITNOT, false); return; }
     if ((p.bop == ABIN_SHL || p.bop == ABIN_SHR || p.bop == ABIN_OR || p.bop == ABIN_XOR) && opt_literal_zero(b) && opt_can_return_operand(p, a)) { s.replace_with_prd(p, a); return; }
+    if (p.bop == ABIN_MUL && a.tag == APRD_INT && b.tag != APRD_INT &&
+        opt_all_ones_literal(p, a) && opt_can_return_operand(p, b))
+    {
+        s.rewrite_to_unary(p, b, AUN_NEG, true);
+        return;
+    }
+    if (p.bop == ABIN_MUL && b.tag == APRD_INT && a.tag != APRD_INT &&
+        opt_all_ones_literal(p, b) && opt_can_return_operand(p, a))
+    {
+        s.rewrite_to_unary(p, a, AUN_NEG, true);
+        return;
+    }
     if (p.bop == ABIN_MUL && s.strength_reduce_mul_zero(p)) { return; }
     if (p.bop == ABIN_MUL && s.strength_reduce_mul(p)) { return; }
     if (p.bop == ABIN_MOD && s.strength_reduce_remainder_one(p)) { return; }
