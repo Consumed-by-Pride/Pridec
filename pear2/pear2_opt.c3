@@ -494,6 +494,22 @@ fn AirPrd* OptStats.new_integer_literal(OptStats* s, long value, AirTyp* type)
     return p;
 }
 
+fn AirPrd* OptStats.new_signed_power_two_quotient(OptStats* s, AirTyp* type, AirPrd* value, int bits, long divisor, int shift)
+{
+    if (s == null || type == null || value == null || bits <= 1 || shift <= 0) { return null; }
+    AirPrd* sign_count = s.new_integer_literal((long)(bits - 1), type);
+    AirPrd* bias_mask = s.new_integer_literal(divisor - 1, type);
+    AirPrd* quotient_shift = s.new_integer_literal((long)shift, type);
+    if (sign_count == null || bias_mask == null || quotient_shift == null) { return null; }
+    AirPrd* sign = s.new_binary_product(ABIN_SHR, type, value, sign_count);
+    if (sign == null) { return null; }
+    AirPrd* bias = s.new_binary_product(ABIN_AND, type, sign, bias_mask);
+    if (bias == null) { return null; }
+    AirPrd* adjusted = s.new_binary_product(ABIN_ADD, type, value, bias);
+    if (adjusted == null) { return null; }
+    return s.new_binary_product(ABIN_SHR, type, adjusted, quotient_shift);
+}
+
 // Signed truncating division by 2^k uses a sign-derived bias before arithmetic
 // shift. Restrict to SSA variables so the dividend is not duplicated if it can
 // have effects; the adjustment remains in-range for every signed dividend.
@@ -516,20 +532,46 @@ fn bool OptStats.strength_reduce_signed_div(OptStats* s, AirPrd* p)
     while (scan > 1) { scan >>= 1; shift++; }
     if (shift <= 0 || shift >= bits) { return false; }
 
-    AirPrd* sign_count = s.new_integer_literal((long)(bits - 1), operation_type);
-    AirPrd* bias_mask = s.new_integer_literal(divisor - 1, operation_type);
-    AirPrd* quotient_shift = s.new_integer_literal((long)shift, operation_type);
-    if (sign_count == null || bias_mask == null || quotient_shift == null) { return false; }
-    AirPrd* sign = s.new_binary_product(ABIN_SHR, operation_type, p.subs[0], sign_count);
-    if (sign == null) { return false; }
-    AirPrd* bias = s.new_binary_product(ABIN_AND, operation_type, sign, bias_mask);
-    if (bias == null) { return false; }
-    AirPrd* adjusted = s.new_binary_product(ABIN_ADD, operation_type, p.subs[0], bias);
-    if (adjusted == null) { return false; }
+    AirPrd* quotient = s.new_signed_power_two_quotient(operation_type, p.subs[0], bits, divisor, shift);
+    if (quotient == null) { return false; }
 
     p.bop = ABIN_SHR;
-    p.subs[0] = adjusted;
-    p.subs[1] = quotient_shift;
+    p.subs[0] = quotient.subs[0];
+    p.subs[1] = quotient.subs[1];
+    s.rewrites++;
+    s.strength_reductions++;
+    return true;
+}
+
+// Signed remainder can be recovered from the same truncating quotient. The
+// SSA dividend may be reused because it has no evaluation effects.
+fn bool OptStats.strength_reduce_signed_mod(OptStats* s, AirPrd* p)
+{
+    if (s == null || s.arena == null || p == null || p.tag != APRD_BINOP || p.bop != ABIN_MOD || p.sub_count != 2 ||
+        p.subs[0] == null || p.subs[0].tag != APRD_VAR || p.subs[1] == null || p.subs[1].tag != APRD_INT) { return false; }
+    AirTyp* operation_type = opt_resolved_integer_type(p);
+    AirTyp* value_type = opt_resolved_integer_type(p.subs[0]);
+    AirTyp* divisor_type = opt_resolved_integer_type(p.subs[1]);
+    if (operation_type == null) { operation_type = value_type; }
+    if (operation_type == null || value_type == null || opt_unsigned(operation_type)) { return false; }
+    int bits = opt_integer_bits(operation_type);
+    if (bits <= 1 || bits > 64 || opt_integer_bits(value_type) != bits || opt_unsigned(value_type)) { return false; }
+    if (divisor_type != null && (opt_integer_bits(divisor_type) != bits || opt_unsigned(divisor_type))) { return false; }
+    long divisor = p.subs[1].ival;
+    if (divisor <= 1 || !opt_integer_fits(divisor, bits, false) || (divisor & (divisor - 1)) != 0) { return false; }
+    int shift = 0;
+    long scan = divisor;
+    while (scan > 1) { scan >>= 1; shift++; }
+    if (shift <= 0 || shift >= bits) { return false; }
+
+    AirPrd* quotient = s.new_signed_power_two_quotient(operation_type, p.subs[0], bits, divisor, shift);
+    AirPrd* shift_count = s.new_integer_literal((long)shift, operation_type);
+    if (quotient == null || shift_count == null) { return false; }
+    AirPrd* scaled_quotient = s.new_binary_product(ABIN_SHL, operation_type, quotient, shift_count);
+    if (scaled_quotient == null) { return false; }
+
+    p.bop = ABIN_SUB;
+    p.subs[1] = scaled_quotient;
     s.rewrites++;
     s.strength_reductions++;
     return true;
@@ -750,6 +792,7 @@ fn void OptStats.fold_binary(OptStats* s, AirPrd* p)
     if (p.bop == ABIN_MUL && s.strength_reduce_mul_zero(p)) { return; }
     if (p.bop == ABIN_MUL && s.strength_reduce_mul(p)) { return; }
     if (p.bop == ABIN_MOD && s.strength_reduce_remainder_one(p)) { return; }
+    if (p.bop == ABIN_MOD && s.strength_reduce_signed_mod(p)) { return; }
     if (p.bop == ABIN_MOD && s.strength_reduce_unsigned_mod(p)) { return; }
     if (p.bop == ABIN_DIV && s.strength_reduce_signed_div(p)) { return; }
     if (p.bop == ABIN_DIV && s.strength_reduce_unsigned_div(p)) { return; }

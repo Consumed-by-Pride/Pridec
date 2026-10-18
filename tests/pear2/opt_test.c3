@@ -451,13 +451,13 @@ fn int main()
     signed_mod_value.tag = APRD_VAR;
     signed_mod_value.name = (char*)"signed_mod_value";
     signed_mod_value.ty = mod.t_i32;
-    AirPrd* signed_modulo = make_binop(&arena, ABIN_MOD, mod.t_i32, signed_mod_value, make_int(&arena, 8, null));
+    AirPrd* signed_modulo = make_binop(&arena, ABIN_MOD, mod.t_i32, signed_mod_value, make_int(&arena, 6, null));
     AirCmd* signed_mod_ret = air_ir::air_new_AirCmd(&arena);
     signed_mod_ret.tag = ACMD_RET;
     signed_mod_ret.prd = signed_modulo;
     AirDecl* signed_mod_decl = air_ir::air_new_AirDecl(&arena);
     signed_mod_decl.tag = ADECL_DEF;
-    signed_mod_decl.name = (char*)"signed_remainder_not_masked";
+    signed_mod_decl.name = (char*)"signed_remainder_non_power_of_two";
     signed_mod_decl.def_body = signed_mod_ret;
     mod.decls[30] = signed_mod_decl;
 
@@ -1006,6 +1006,26 @@ fn int main()
     computed_division_decl.def_body = computed_division_ret;
     mod.decls[72] = computed_division_decl;
 
+    AirPrd* signed_power_two_mod = make_binop(&arena, ABIN_MOD, mod.t_i32, signed_mod_value, make_int(&arena, 8, null));
+    AirCmd* signed_power_two_mod_ret = air_ir::air_new_AirCmd(&arena);
+    signed_power_two_mod_ret.tag = ACMD_RET;
+    signed_power_two_mod_ret.prd = signed_power_two_mod;
+    AirDecl* signed_power_two_mod_decl = air_ir::air_new_AirDecl(&arena);
+    signed_power_two_mod_decl.tag = ADECL_DEF;
+    signed_power_two_mod_decl.name = (char*)"signed_remainder_by_power_of_two";
+    signed_power_two_mod_decl.def_body = signed_power_two_mod_ret;
+    mod.decls[73] = signed_power_two_mod_decl;
+
+    AirPrd* negative_mod_divisor = make_binop(&arena, ABIN_MOD, mod.t_i32, signed_mod_value, make_int(&arena, -8, null));
+    AirCmd* negative_mod_ret = air_ir::air_new_AirCmd(&arena);
+    negative_mod_ret.tag = ACMD_RET;
+    negative_mod_ret.prd = negative_mod_divisor;
+    AirDecl* negative_mod_decl = air_ir::air_new_AirDecl(&arena);
+    negative_mod_decl.tag = ADECL_DEF;
+    negative_mod_decl.name = (char*)"signed_remainder_by_negative_power_of_two";
+    negative_mod_decl.def_body = negative_mod_ret;
+    mod.decls[74] = negative_mod_decl;
+
     // Refuse a narrow signed overflow rather than baking host or wrapping
     // semantics into a constant, and leave division-by-zero untouched.
     AirPrd* narrow_sum = air_ir::air_new_AirPrd(&arena);
@@ -1071,11 +1091,11 @@ fn int main()
     range_decl.name = (char*)"out_of_range";
     range_decl.def_body = range_ret;
     mod.decls[6] = range_decl;
-    mod.decl_count = 73;
+    mod.decl_count = 75;
 
     pear2_opt::OptStats stats = pear2_opt::optimize_module(&mod);
     uint rewrites = stats.rewrites;
-    if (rewrites != 64 || stats.constant_folds != 21 || stats.operand_rewrites != 25 || stats.strength_reductions != 10 ||
+    if (rewrites != 65 || stats.constant_folds != 21 || stats.operand_rewrites != 25 || stats.strength_reductions != 11 ||
         stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 4)
     {
         printf("FAIL: unexpected optimizer counters (total=%u folds=%u operands=%u strength=%u shifts=%u branches=%u lets=%u)\n",
@@ -1102,7 +1122,10 @@ fn int main()
         arena.destroy(); return 1;
     }
     if (unsigned_modulo.bop != ABIN_AND || unsigned_modulo.subs[1].ival != 7 ||
-        signed_modulo.bop != ABIN_MOD || irregular_mod.bop != ABIN_MOD ||
+        signed_modulo.bop != ABIN_MOD || signed_power_two_mod.bop != ABIN_SUB ||
+        signed_power_two_mod.subs[0] != signed_mod_value || signed_power_two_mod.subs[1].bop != ABIN_SHL ||
+        signed_power_two_mod.subs[1].subs[1].ival != 3 || signed_power_two_mod.subs[1].subs[0].bop != ABIN_SHR ||
+        signed_power_two_mod.subs[1].subs[0].subs[0].bop != ABIN_ADD || negative_mod_divisor.bop != ABIN_MOD || irregular_mod.bop != ABIN_MOD ||
         unsigned_quotient.bop != ABIN_SHR || unsigned_quotient.subs[1].ival != 3 ||
         signed_quotient.bop != ABIN_DIV || signed_power_two_div.bop != ABIN_SHR || signed_power_two_div.subs[1].ival != 3 ||
         signed_power_two_div.subs[0].bop != ABIN_ADD || signed_power_two_div.subs[0].subs[0] != signed_div_value ||

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exhaustively validate the signed power-of-two division bias formula."""
+"""Validate signed power-of-two quotient and remainder strength-reduction formulas."""
 
 import random
 
@@ -21,6 +21,14 @@ def check_value(bits: int, value: int, shift: int) -> None:
     actual = adjusted >> shift
     expected = truncating_division(value, divisor)
     assert actual == expected, (bits, value, divisor, actual, expected)
+
+    # Signed remainder is x - trunc(x / d) * d; the shifted product is
+    # representable for every signed x and positive power-of-two d.
+    remainder = value - (actual << shift)
+    expected_remainder = value - (expected * divisor)
+    assert remainder == expected_remainder, (bits, value, divisor, remainder, expected_remainder)
+    assert abs(remainder) < divisor, (bits, value, divisor, remainder)
+    assert remainder == 0 or (remainder < 0) == (value < 0), (bits, value, divisor, remainder)
 
 
 def main() -> None:
@@ -65,7 +73,7 @@ def main() -> None:
             for value in values:
                 check_value(bits, value, shift)
 
-    print("PASS: signed power-of-two division bias matches truncation for widths 3..64")
+    print("PASS: signed power-of-two quotient/remainder formulas match truncation for widths 3..64")
 
 
 if __name__ == "__main__":

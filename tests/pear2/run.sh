@@ -550,7 +550,7 @@ PY
 # optimizer, verifier, and bitcode writer.
 cp tests/pear2/strength_reduction_main.air "$W/strength_reduction.air"
 "$PEAR2" "$W/strength_reduction.air" --stats --quiet >"$W/strength_reduction.stats"
-grep -Eq '(^| )strength=10( |$)' "$W/strength_reduction.stats" || { echo "FAIL: power-of-two reductions, zero multiplication, or multiply-by-all-ones negation was not applied"; cat "$W/strength_reduction.stats"; exit 1; }
+grep -Eq '(^| )strength=11( |$)' "$W/strength_reduction.stats" || { echo "FAIL: signed/unsigned power-of-two arithmetic or multiply strength reductions were not applied"; cat "$W/strength_reduction.stats"; exit 1; }
 grep -Eq '(^| )operands=13( |$)' "$W/strength_reduction.stats" || { echo "FAIL: integer/boolean identities and same-representation coercion reductions were not all applied"; cat "$W/strength_reduction.stats"; exit 1; }
 [ -f "$W/strength_reduction.bc" ] || { echo "FAIL: strength-reduced AIR did not emit bitcode"; exit 1; }
 
