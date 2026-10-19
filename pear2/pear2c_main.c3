@@ -280,6 +280,9 @@ fn bool m1_llvm_type_append(char* out, usz cap, usz* used, AirTyp* t, int depth)
         return m1_llvm_type_append(out, cap, used, t.args[0], depth + 1) && m1_type_text_append(out, cap, used, (char*)"]");
     }
     if (t.tag != ATYP_TUPLE) { return m1_type_text_append(out, cap, used, m1_llvm_scalar(t)); }
+    // The zero-field tuple is the canonical empty LLVM struct, also used for
+    // unit values in aggregate fields and as internal by-value parameters.
+    if (t.arg_count == 0) { return m1_type_text_append(out, cap, used, (char*)"{ }"); }
     if (*used + 2 >= cap) { return false; }
     out[*used] = '{'; out[*used + 1] = ' '; *used += 2;
     for (usz i = 0; i < t.arg_count; i++)
@@ -496,6 +499,7 @@ fn AirTyp* M1Gen.expr_type(M1Gen* g, AirPrd* p)
 {
     if (p == null) { return null; }
     if (p.tag == APRD_UNIT) { return p.ty != null ? p.ty : air_ir::air_mk_typ_simple(g.arena, ATYP_UNIT); }
+    if (p.tag == APRD_SIZEOF || p.tag == APRD_ALIGNOF) { return g.int_repr(g.default_bits, g.default_unsigned); }
     if (p.ty != null && p.ty.tag != ATYP_INFER) { return p.ty; }
     if (p.tag == APRD_VAR) { return g.lookup_type(p.name); }
     if (p.tag == APRD_UNOP && p.sub_count == 1) { return g.expr_type(p.subs[0]); }
@@ -837,6 +841,10 @@ fn char* M1Gen.llvm_value_type_text(M1Gen* g, AirTyp* t)
     return m1_llvm_scalar(t);
 }
 
+// Internal PEAR2 functions use LLVM's default ccc convention consistently at
+// both definitions and direct calls. Tuples/arrays are passed and returned as
+// first-class LLVM aggregates; unit returns are void, while unit values retain
+// the empty-struct representation in parameters and aggregate fields.
 fn char* M1Gen.llvm_abi_return_text(M1Gen* g, AirTyp* t)
 {
     if (t != null && (t.tag == ATYP_TUPLE || t.tag == ATYP_ARRAY)) { return g.llvm_type_text(t); }
@@ -898,7 +906,7 @@ fn char* M1Gen.prd(M1Gen* g, AirPrd* p)
         if (byte_type == null || (byte_type.tag != ATYP_I8 && byte_type.tag != ATYP_U8)) { g.failed = true; return null; }
         char* aggregate_ir = g.llvm_type_text(p.ty);
         if (g.failed || aggregate_ir == null) { return null; }
-        char* aggregate = (char*)"undef";
+        char* aggregate = p.ty.ival == 0 ? (char*)"zeroinitializer" : (char*)"undef";
         for (usz i = 0; i < (usz)p.ty.ival; i++)
         {
             int byte = i < p.bytes_len ? (int)bytes[i] : 0;
@@ -919,7 +927,7 @@ fn char* M1Gen.prd(M1Gen* g, AirPrd* p)
         if (!shape_ok) { g.failed = true; return null; }
         char* aggregate_type = g.llvm_type_text(p.ty);
         if (g.failed || aggregate_type == null) { return null; }
-        char* aggregate = (char*)"undef";
+        char* aggregate = p.sub_count == 0 ? (char*)"zeroinitializer" : (char*)"undef";
         for (usz i = 0; i < p.sub_count; i++)
         {
             AirPrd* part = p.subs[i];
@@ -1471,6 +1479,12 @@ fn bool M1Gen.consume(M1Gen* g, char* value, bool is_bool, bool is_ptr, AirTyp* 
             if (g.return_type != null && (g.return_type.tag == ATYP_TUPLE || g.return_type.tag == ATYP_ARRAY))
             {
                 if (!m1_value_type_compatible(g.return_type, value_type, 0)) { return false; }
+            }
+            else if (m1_integer_type(g.return_type) && m1_integer_type(value_type) && m1_int_bits(g.return_type) > m1_int_bits(value_type))
+            {
+                value = g.convert_integer_width(value, value_type, g.return_type);
+                if (g.failed || value == null) { return false; }
+                value_type = g.return_type;
             }
             else if (!m1_scalar_compatible(g.return_type, value_type)) { return false; }
         }

@@ -13,7 +13,7 @@ def main() : i64 =
               else
                 <0 | %ret>
             else
-              <0 | %ret>>>>;
+              <0 | %ret>>>;
       let initial = tuple(42 : i32, true) : tuple(i32, bool) in
         jump done(initial)
     };

@@ -4,7 +4,7 @@ air 2.2 Main "match_guard_main.pie";
 def guarded_binder(value : i32) : i32 =
   mu~ %ret.
     match value {
-      item guard {
+      bind item guard {
         if (gt item 3 : i32) then
           <true | %guard>
         else

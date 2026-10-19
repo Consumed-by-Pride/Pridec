@@ -3,8 +3,8 @@ air 2.2 Main "bytes_local_main.pie";
 
 def main() : i64 =
   mu~ %ret.
-    <"OK" : array#3(i8) | comu bytes.
-      match bytes {
+    <"OK" : array#3(i8) | comu raw_bytes.
+      match raw_bytes {
         array(bind first, bind second, bind terminator) ->
           if (eq first 79 : i8) then
             if (eq second 75 : i8) then

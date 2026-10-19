@@ -63,7 +63,7 @@ PASS pear/p07_mut_reassign ok (exit 21)
 PASS pear/p08_if_else    ok (exit 7)
 PASS pear/p09_stdout_extern ok (exit 0)
 PASS pear/p99_forward_call ok (exit 42)
-exec suite: pass=11 fail=0 xfail=0 xpass=0
+exec suite: pass=13 fail=0 xfail=0 xpass=0
 ```
 
 `p09_stdout_extern.pie` additionally asserts stdout exactly `A`; the runner passed that check. The PEAR2-specific case list is `tests/exec/pear2_cases.txt`, now including `p04_loop_sum` and `p07_mut_reassign`. Their result codes were **186** and **21**, respectively; both are executed in the PEAR2 runner. The four optimization-tier canaries still return 42.
@@ -84,4 +84,4 @@ Observed: bitcode magic `4243c0de`, clang verification exit **0**, native execut
 
 ## Scope of the test result
 
-The result above proves native execution for the listed PEAR2 subset and all four optimization-tier canaries; it is not a claim that every AIR or every `tests/exec` fixture is supported. `make test-pear2` is the broader AIR/CLI suite, separate from `test-pear2-exec`. `roundtrip_nested_array` now emits LLVM 23-verifiable bitcode and a native C harness calls it successfully, returning 3 after construction, store, and nested projection. The broader suite proceeds beyond that fixture but still fails at the separate `unit_aggregate_main` ABI fixture; do not treat the full suite as passing.
+`make test-pear2` is the broader AIR/CLI and native fixture suite, separate from `test-pear2-exec`. It returned **0** with **76 PASS checks and no failures**. Its LLVM 23 native runs include `internal_aggregate_abi_main` (exit **42**) and `unit_aggregate_main` (exit **42**); the latter exercises empty-tuple arguments/returns, a unit argument, and a unit field in a composite tuple. `roundtrip_nested_array` emits LLVM 23-verifiable bitcode and a native harness confirms it returns **3** after nested array construction, store, and projection. These results cover the fixtures listed in the suite, not every AIR form or every `tests/exec` case.

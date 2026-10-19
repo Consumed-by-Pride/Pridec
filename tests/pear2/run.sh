@@ -412,7 +412,7 @@ python3 - "$W/unit_aggregate.bc" <<'PY'
 import pathlib, sys
 if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"BC\xc0\xde":
     raise SystemExit("FAIL: unit-aggregate output is not LLVM bitcode")
-print("PASS: unit fields and standalone unit parameters survive internal aggregate calls")
+print("PASS: empty tuple and unit values survive internal aggregate arguments and returns")
 PY
 cp tests/pear2/tuple_label_main.air "$W/tuple_label.air"
 if ! "$PEAR2" "$W/tuple_label.air" --quiet; then echo "FAIL: aggregate label/jump parameter AIR rejected"; exit 1; fi
@@ -634,15 +634,21 @@ if p.read_bytes()[:4] != b"BC\xc0\xde":
     raise SystemExit("FAIL: loop output does not have LLVM bitcode magic")
 print("PASS: scalar loop-carried state emitted LLVM bitcode")
 PY
-cp tests/pear2/reject_implicit_backedge.air "$W/implicit_backedge.air"
-printf 'stale bitcode' > "$W/implicit_backedge.bc"
+cp tests/pear2/loop_state_backedge.air "$W/loop_state_backedge.air"
+if ! "$PEAR2" "$W/loop_state_backedge.air" --quiet; then echo "FAIL: mutable implicit-backedge AIR rejected"; exit 1; fi
+python3 - "$W/loop_state_backedge.bc" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+if p.read_bytes()[:4] != b"BC\xc0\xde":
+    raise SystemExit("FAIL: implicit-backedge output is not LLVM bitcode")
+print("PASS: mutable local state crosses an implicit label backedge")
+PY
+"$PEAR2_BIN" "$W/loop_state_backedge.air" --emit-exe --quiet
 set +e
-"$PEAR2" "$W/implicit_backedge.air" --quiet >"$W/implicit_backedge.log" 2>&1
-rc=$?
+"$W/loop_state_backedge"; rc=$?
 set -e
-[ "$rc" = 3 ] || { echo "FAIL: implicit-state backedge returned $rc, expected rejection"; cat "$W/implicit_backedge.log"; exit 1; }
-[ ! -e "$W/implicit_backedge.bc" ] || { echo "FAIL: rejected backedge left a bitcode artifact"; exit 1; }
-echo "PASS: changed loop state requires an explicit label argument"
+[ "$rc" = 3 ] || { echo "FAIL: implicit-backedge executable returned $rc, expected 3"; exit 1; }
+echo "PASS: implicit-backedge native execution returned 3"
 cp tests/pear2/unsupported_main.air "$W/unsupported.air"
 printf 'stale bitcode' > "$W/unsupported.bc"
 set +e
@@ -766,3 +772,5 @@ link_and_run direct_call 42
 link_and_run if_compare 42
 link_and_run while 9
 link_and_run binding_optimizer 42
+link_and_run internal_aggregate_abi 42
+link_and_run unit_aggregate 42

@@ -1,0 +1,15 @@
+// PEAR2: a mutable local is carried through an implicit label backedge.
+air 2.2 Main "loop_state_backedge.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let i = 0 : i64 in
+      seq {
+        label loop().
+          if (lt i 3 : i64) then
+            let i = (add i 1 : i64) in
+              jump loop()
+          else
+            <i | %ret>;
+        jump loop()
+      };

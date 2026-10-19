@@ -6,5 +6,5 @@ def main() : i64 =
     seq {
       label exit().
         <42 | %ret>;
-      jump exit();
+      jump exit()
     };

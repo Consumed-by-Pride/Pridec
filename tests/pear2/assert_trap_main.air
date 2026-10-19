@@ -8,7 +8,6 @@ def explicit_trap() : unit =
 def main() : i64 =
   mu~ %ret.
     seq {
-      assume(true);
-      assert(eq 1 : i64 1 : i64);
+      assert((eq 1 1 : i64));
       <42 | %ret>
     };
