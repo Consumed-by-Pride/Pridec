@@ -1,3 +1,5 @@
+# Current PEAR2 native execution subset. Cases cover returns, arithmetic,
+# recursion, direct calls, conditionals, scalar externs, and loop-carried mutable locals.
 tests/exec/pear/p01_return_42.pie
 tests/exec/pear/p02_arith.pie
 tests/exec/pear/p03_fib.pie

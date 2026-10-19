@@ -30,9 +30,8 @@ fn AirPrd* make_binop(AirArena* arena, AirBinop op, AirTyp* ty, AirPrd* left, Ai
     p.tag = APRD_BINOP;
     p.bop = op;
     p.ty = ty;
-    p.sub_count = 2;
-    p.subs[0] = left;
-    p.subs[1] = right;
+    p.add_sub(left);
+    p.add_sub(right);
     return p;
 }
 
@@ -41,8 +40,7 @@ fn AirPrd* make_coerce(AirArena* arena, AirTyp* target, AirPrd* source)
     AirPrd* p = air_ir::air_new_AirPrd(arena);
     p.tag = APRD_COERCE;
     p.ty = target;
-    p.sub_count = 1;
-    p.subs[0] = source;
+    p.add_sub(source);
     return p;
 }
 
@@ -60,9 +58,8 @@ fn int main()
     sum.tag = APRD_BINOP;
     sum.bop = ABIN_ADD;
     sum.ty = mod.t_i64;
-    sum.sub_count = 2;
-    sum.subs[0] = lhs;
-    sum.subs[1] = rhs;
+    sum.add_sub(lhs);
+    sum.add_sub(rhs);
     sum.id = 91;
     AirCmd* ret = air_ir::air_new_AirCmd(&arena);
     ret.tag = ACMD_RET;
@@ -84,9 +81,8 @@ fn int main()
     subtract.tag = APRD_BINOP;
     subtract.bop = ABIN_SUB;
     subtract.ty = mod.t_i64;
-    subtract.sub_count = 2;
-    subtract.subs[0] = variable;
-    subtract.subs[1] = zero;
+    subtract.add_sub(variable);
+    subtract.add_sub(zero);
     AirCmd* identity_ret = air_ir::air_new_AirCmd(&arena);
     identity_ret.tag = ACMD_RET;
     identity_ret.prd = subtract;
@@ -102,21 +98,18 @@ fn int main()
     comparison.tag = APRD_BINOP;
     comparison.bop = ABIN_LT;
     comparison.ty = mod.t_bool;
-    comparison.sub_count = 2;
-    comparison.subs[0] = make_int(&arena, 1, mod.t_i64);
-    comparison.subs[1] = make_int(&arena, 2, mod.t_i64);
+    comparison.add_sub(make_int(&arena, 1, mod.t_i64));
+    comparison.add_sub(make_int(&arena, 2, mod.t_i64));
     AirPrd* logical_not = air_ir::air_new_AirPrd(&arena);
     logical_not.tag = APRD_UNOP;
     logical_not.uop = AUN_NOT;
     logical_not.ty = mod.t_bool;
-    logical_not.sub_count = 1;
-    logical_not.subs[0] = comparison;
+    logical_not.add_sub(comparison);
     AirPrd* negation = air_ir::air_new_AirPrd(&arena);
     negation.tag = APRD_UNOP;
     negation.uop = AUN_NEG;
     negation.ty = mod.t_i32;
-    negation.sub_count = 1;
-    negation.subs[0] = make_int(&arena, 17, mod.t_i32);
+    negation.add_sub(make_int(&arena, 17, mod.t_i32));
     AirCmd* neg_ret = air_ir::air_new_AirCmd(&arena);
     neg_ret.tag = ACMD_RET;
     neg_ret.prd = negation;
@@ -130,8 +123,7 @@ fn int main()
     bitnot.tag = APRD_UNOP;
     bitnot.uop = AUN_BITNOT;
     bitnot.ty = mod.t_u8;
-    bitnot.sub_count = 1;
-    bitnot.subs[0] = make_int(&arena, 0, mod.t_u8);
+    bitnot.add_sub(make_int(&arena, 0, mod.t_u8));
     AirCmd* bitnot_ret = air_ir::air_new_AirCmd(&arena);
     bitnot_ret.tag = ACMD_RET;
     bitnot_ret.prd = bitnot;
@@ -164,8 +156,7 @@ fn int main()
     let_not.tag = APRD_UNOP;
     let_not.uop = AUN_NOT;
     let_not.ty = mod.t_bool;
-    let_not.sub_count = 1;
-    let_not.subs[0] = air_ir::air_mk_prd_bool(&arena, false);
+    let_not.add_sub(air_ir::air_mk_prd_bool(&arena, false));
     AirPrd* let_condition = air_ir::air_new_AirPrd(&arena);
     let_condition.tag = APRD_VAR;
     let_condition.name = (char*)"known";
@@ -174,9 +165,8 @@ fn int main()
     let_compare.tag = APRD_BINOP;
     let_compare.bop = ABIN_LAND;
     let_compare.ty = mod.t_bool;
-    let_compare.sub_count = 2;
-    let_compare.subs[0] = let_condition;
-    let_compare.subs[1] = air_ir::air_mk_prd_bool(&arena, false);
+    let_compare.add_sub(let_condition);
+    let_compare.add_sub(air_ir::air_mk_prd_bool(&arena, false));
     AirCmd* let_then = air_ir::air_new_AirCmd(&arena);
     let_then.tag = ACMD_RET;
     let_then.prd = make_int(&arena, 3, mod.t_i64);
@@ -585,14 +575,12 @@ fn int main()
     inner_bool_not.tag = APRD_UNOP;
     inner_bool_not.uop = AUN_NOT;
     inner_bool_not.ty = mod.t_bool;
-    inner_bool_not.sub_count = 1;
-    inner_bool_not.subs[0] = bool_not_value;
+    inner_bool_not.add_sub(bool_not_value);
     AirPrd* double_bool_not = air_ir::air_new_AirPrd(&arena);
     double_bool_not.tag = APRD_UNOP;
     double_bool_not.uop = AUN_NOT;
     double_bool_not.ty = mod.t_bool;
-    double_bool_not.sub_count = 1;
-    double_bool_not.subs[0] = inner_bool_not;
+    double_bool_not.add_sub(inner_bool_not);
     AirCmd* double_bool_not_ret = air_ir::air_new_AirCmd(&arena);
     double_bool_not_ret.tag = ACMD_RET;
     double_bool_not_ret.prd = double_bool_not;
@@ -610,14 +598,12 @@ fn int main()
     inner_int_not.tag = APRD_UNOP;
     inner_int_not.uop = AUN_BITNOT;
     inner_int_not.ty = mod.t_i16;
-    inner_int_not.sub_count = 1;
-    inner_int_not.subs[0] = int_not_value;
+    inner_int_not.add_sub(int_not_value);
     AirPrd* double_int_not = air_ir::air_new_AirPrd(&arena);
     double_int_not.tag = APRD_UNOP;
     double_int_not.uop = AUN_BITNOT;
     double_int_not.ty = mod.t_i16;
-    double_int_not.sub_count = 1;
-    double_int_not.subs[0] = inner_int_not;
+    double_int_not.add_sub(inner_int_not);
     AirCmd* double_int_not_ret = air_ir::air_new_AirCmd(&arena);
     double_int_not_ret.tag = ACMD_RET;
     double_int_not_ret.prd = double_int_not;
@@ -635,14 +621,12 @@ fn int main()
     narrow_inner_not.tag = APRD_UNOP;
     narrow_inner_not.uop = AUN_BITNOT;
     narrow_inner_not.ty = mod.t_u8;
-    narrow_inner_not.sub_count = 1;
-    narrow_inner_not.subs[0] = narrow_not_value;
+    narrow_inner_not.add_sub(narrow_not_value);
     AirPrd* mismatched_double_not = air_ir::air_new_AirPrd(&arena);
     mismatched_double_not.tag = APRD_UNOP;
     mismatched_double_not.uop = AUN_BITNOT;
     mismatched_double_not.ty = mod.t_i16;
-    mismatched_double_not.sub_count = 1;
-    mismatched_double_not.subs[0] = narrow_inner_not;
+    mismatched_double_not.add_sub(narrow_inner_not);
     AirCmd* mismatched_not_ret = air_ir::air_new_AirCmd(&arena);
     mismatched_not_ret.tag = ACMD_RET;
     mismatched_not_ret.prd = mismatched_double_not;
@@ -1032,9 +1016,8 @@ fn int main()
     narrow_sum.tag = APRD_BINOP;
     narrow_sum.bop = ABIN_ADD;
     narrow_sum.ty = mod.t_i8;
-    narrow_sum.sub_count = 2;
-    narrow_sum.subs[0] = make_int(&arena, 127, mod.t_i8);
-    narrow_sum.subs[1] = make_int(&arena, 1, mod.t_i8);
+    narrow_sum.add_sub(make_int(&arena, 127, mod.t_i8));
+    narrow_sum.add_sub(make_int(&arena, 1, mod.t_i8));
     AirCmd* narrow_ret = air_ir::air_new_AirCmd(&arena);
     narrow_ret.tag = ACMD_RET;
     narrow_ret.prd = narrow_sum;
@@ -1048,9 +1031,8 @@ fn int main()
     div_zero.tag = APRD_BINOP;
     div_zero.bop = ABIN_DIV;
     div_zero.ty = mod.t_i64;
-    div_zero.sub_count = 2;
-    div_zero.subs[0] = make_int(&arena, 9, mod.t_i64);
-    div_zero.subs[1] = make_int(&arena, 0, mod.t_i64);
+    div_zero.add_sub(make_int(&arena, 9, mod.t_i64));
+    div_zero.add_sub(make_int(&arena, 0, mod.t_i64));
     AirCmd* div_ret = air_ir::air_new_AirCmd(&arena);
     div_ret.tag = ACMD_RET;
     div_ret.prd = div_zero;
@@ -1064,9 +1046,8 @@ fn int main()
     mixed_width.tag = APRD_BINOP;
     mixed_width.bop = ABIN_ADD;
     mixed_width.ty = mod.t_i64;
-    mixed_width.sub_count = 2;
-    mixed_width.subs[0] = make_int(&arena, 1, mod.t_i64);
-    mixed_width.subs[1] = make_int(&arena, 2, mod.t_i32);
+    mixed_width.add_sub(make_int(&arena, 1, mod.t_i64));
+    mixed_width.add_sub(make_int(&arena, 2, mod.t_i32));
     AirCmd* mixed_ret = air_ir::air_new_AirCmd(&arena);
     mixed_ret.tag = ACMD_RET;
     mixed_ret.prd = mixed_width;
@@ -1080,9 +1061,8 @@ fn int main()
     out_of_range.tag = APRD_BINOP;
     out_of_range.bop = ABIN_ADD;
     out_of_range.ty = mod.t_i8;
-    out_of_range.sub_count = 2;
-    out_of_range.subs[0] = make_int(&arena, 1, mod.t_i8);
-    out_of_range.subs[1] = make_int(&arena, 200, null);
+    out_of_range.add_sub(make_int(&arena, 1, mod.t_i8));
+    out_of_range.add_sub(make_int(&arena, 200, null));
     AirCmd* range_ret = air_ir::air_new_AirCmd(&arena);
     range_ret.tag = ACMD_RET;
     range_ret.prd = out_of_range;
@@ -1172,9 +1152,9 @@ fn int main()
     {
         printf("FAIL: constant fold changed value, id, or type\n"); arena.destroy(); return 1;
     }
-    if (identity_ret.prd != variable)
+    if (identity_ret.prd.tag != APRD_VAR || identity_ret.prd.name != variable.name || identity_ret.prd.ty != mod.t_i64)
     {
-        printf("FAIL: typed integer identity did not retain its operand\n"); arena.destroy(); return 1;
+        printf("FAIL: typed integer identity did not preserve its operand value\n"); arena.destroy(); return 1;
     }
     if (branch_decl.def_body != else_ret || logical_not.tag != APRD_BOOL || logical_not.bval)
     {

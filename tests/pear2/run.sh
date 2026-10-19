@@ -5,9 +5,12 @@ cd "$(dirname "$0")/../.."
 PEAR2_BIN="${1:-./pear2c}"
 [ -x "$PEAR2_BIN" ] || { echo "pear2c not found at $PEAR2_BIN"; exit 1; }
 LLVM23_BIN=${LLVM23_BIN:-$HOME/.cache/llvm23/bin}
-LLVM23_LIBDIR=${LLVM23_LIBDIR:-$(dirname "$LLVM23_BIN")}
+if [ -z "${LLVM23_LIBDIR:-}" ]; then
+    _llvm_root=$(dirname "$LLVM23_BIN")
+    if [ -f "$_llvm_root/lib/libLLVM-23.so" ]; then LLVM23_LIBDIR="$_llvm_root/lib"; else LLVM23_LIBDIR="$_llvm_root"; fi
+fi
 export LD_LIBRARY_PATH="$LLVM23_LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-linked_llvm=$(ldd "$PEAR2_BIN" 2>/dev/null | awk '/libLLVM-23\.so/ { print $1; exit }' || true)
+linked_llvm=$(ldd "$PEAR2_BIN" 2>/dev/null | awk '/libLLVM(-|\.so\.)23/ { print $1; exit }' || true)
 [ -n "$linked_llvm" ] || { echo "FAIL: $PEAR2_BIN is not dynamically linked to LLVM 23 C API"; exit 1; }
 echo "PEAR2 LLVM C API: $linked_llvm"
 find_llvm_tool() {
@@ -16,10 +19,10 @@ find_llvm_tool() {
 }
 LLVM_OPT=${LLVM_OPT:-$(find_llvm_tool opt || true)}
 PEAR2_CLANG=${PEAR2_CLANG:-$(find_llvm_tool clang || true)}
-[ -x "$LLVM_OPT" ] || { echo "FAIL: LLVM opt not found; set LLVM_OPT or LLVM23_BIN"; exit 1; }
 [ -x "$PEAR2_CLANG" ] || { echo "FAIL: LLVM clang not found; set PEAR2_CLANG or LLVM23_BIN"; exit 1; }
 if [ -n "${C3C:-}" ] && [ -x "$C3C" ]; then echo "C3 compiler: $("$C3C" --version | head -1) ($C3C)"; fi
-for tool in "$LLVM_OPT" "$PEAR2_CLANG"; do
+if [ -n "$LLVM_OPT" ] && [ -x "$LLVM_OPT" ]; then tools=("$LLVM_OPT" "$PEAR2_CLANG"); else LLVM_OPT=""; tools=("$PEAR2_CLANG"); echo "LLVM opt: absent; verifying bitcode by compiling with LLVM clang"; fi
+for tool in "${tools[@]}"; do
     version=$("$tool" --version 2>&1 || true)
     printf '%s\n' "$version" | python3 -c 'import re,sys; s=sys.stdin.read(); m=re.search(r"(?:LLVM|clang) version (\d+)", s); sys.exit(0 if m and m.group(1)=="23" else 1)' || {
         echo "FAIL: expected LLVM 23 tool, got: $(printf '%s' "$version" | head -1) ($tool)"; exit 1;
@@ -27,6 +30,13 @@ for tool in "$LLVM_OPT" "$PEAR2_CLANG"; do
     echo "LLVM tool: $tool — $(printf '%s' "$version" | grep -m1 -E 'LLVM version|clang version' | xargs)"
 done
 export LLVM_OPT PEAR2_CLANG
+verify_bitcode() {
+    if [ -n "$LLVM_OPT" ]; then
+        "$LLVM_OPT" -passes=verify -disable-output "$1"
+    else
+        "$PEAR2_CLANG" -Wno-override-module -c -x ir "$1" -o /dev/null
+    fi
+}
 W=tmp/pear2-test
 rm -rf "$W" && mkdir -p "$W"
 
@@ -39,25 +49,31 @@ set -e
 [ "$rc" = 0 ] && [ -x "$W/default" ] || { echo "FAIL: default mode did not emit executable (rc=$rc)"; cat "$W/default.log"; exit 1; }
 [ ! -e "$W/default.bc" ] || { echo "FAIL: default executable mode unexpectedly published bitcode"; exit 1; }
 [ ! -s "$W/default.log" ] || { echo "FAIL: --quiet printed output on success"; cat "$W/default.log"; exit 1; }
+set +e
 timeout 5 "$W/default" >/dev/null 2>&1; rc=$?
+set -e
 [ "$rc" = 42 ] || { echo "FAIL: default executable returned $rc, expected 42"; exit 1; }
 echo "PASS: default executable mode links and runs (exit 42)"
 rm -f "$W/default"
 cp "$W/default.air" "$W/path's with spaces.air"
 "$PEAR2_BIN" "$W/path's with spaces.air" --quiet || { echo "FAIL: shell-sensitive input/output path rejected"; exit 1; }
+set +e
 timeout 5 "$W/path's with spaces" >/dev/null 2>&1; rc=$?
+set -e
 [ "$rc" = 42 ] || { echo "FAIL: quoted-path executable returned $rc, expected 42"; exit 1; }
 rm -f "$W/path's with spaces"
 printf stale > "$W/default.bc"
 "$PEAR2_BIN" "$W/default.air" --emit-exe -O0 --quiet || { echo "FAIL: explicit --emit-exe -O0 rejected"; exit 1; }
 [ ! -e "$W/default.bc" ] || { echo "FAIL: executable mode retained stale bitcode"; exit 1; }
+set +e
 timeout 5 "$W/default" >/dev/null 2>&1; rc=$?
+set -e
 [ "$rc" = 42 ] || { echo "FAIL: explicit --emit-exe returned $rc, expected 42"; exit 1; }
 rm -f "$W/default"
 printf stale > "$W/default"
 "$PEAR2_BIN" "$W/default.air" --emit-bc -O3 --quiet || { echo "FAIL: explicit --emit-bc -O3 rejected"; exit 1; }
 [ -f "$W/default.bc" ] && [ ! -e "$W/default" ] || { echo "FAIL: --emit-bc did not produce only the bitcode artifact"; exit 1; }
-"$LLVM_OPT" -passes=verify -disable-output "$W/default.bc" || { echo "FAIL: LLVM opt did not parse and verify emitted bitcode"; exit 1; }
+verify_bitcode "$W/default.bc" || { echo "FAIL: LLVM 23 did not parse and verify emitted bitcode"; exit 1; }
 echo "PASS: explicit --emit-bc emits verifiable bitcode"
 
 # Exit 2: usage/option errors. Exit 1: invalid AIR. Exit 3: valid AIR outside
@@ -110,7 +126,7 @@ find "$W" -maxdepth 1 -name '*.pear2-*' -print -quit | grep -q . && { echo "FAIL
 echo "PASS: CLI exit codes 0/1/2/3 and failure cleanup"
 
 # All remaining cases explicitly exercise the bitcode mode and independently
-# parse/verify every successful artifact with LLVM 23 opt.
+# Parse and verify every successful artifact with LLVM 23 opt, or clang if opt is absent.
 cat > "$W/pear2-bc-wrapper" <<'WRAPPER'
 #!/usr/bin/env bash
 set +e
@@ -119,7 +135,11 @@ input=$1
 rc=$?
 if [ "$rc" -ne 0 ]; then exit "$rc"; fi
 bc="${input%.*}.bc"
-"$LLVM_OPT" -passes=verify -disable-output "$bc"
+if [ -n "$LLVM_OPT" ]; then
+    "$LLVM_OPT" -passes=verify -disable-output "$bc"
+else
+    "$PEAR2_CLANG" -Wno-override-module -c -x ir "$bc" -o /dev/null
+fi
 exit $?
 WRAPPER
 chmod +x "$W/pear2-bc-wrapper"
@@ -166,7 +186,7 @@ cp tests/pear2/untyped_function_main.air "$W/untyped_function.air"
 if ! "$PEAR2" "$W/untyped_function.air" --quiet; then echo "FAIL: unannotated internal function AIR rejected"; exit 1; fi
 python3 - "$W/untyped_function.bc" <<'PY'
 import pathlib, sys
-if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"BC\\xc0\\xde":
+if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"BC\xc0\xde":
     raise SystemExit("FAIL: untyped-function output is not LLVM bitcode")
 print("PASS: unannotated internal integer defaults and branch/literal result inference emitted LLVM bitcode")
 PY
@@ -374,6 +394,10 @@ if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"BC\xc0\xde":
     raise SystemExit("FAIL: pointer-index output is not LLVM bitcode")
 print("PASS: dynamic indexing, width-converting integer stores, pointer load/store, and f32/f64 memory emitted LLVM bitcode")
 PY
+"$PEAR2_CLANG" -shared -fPIC -Wno-override-module "$W/pointer_index.bc" -o "$W/libpointer_index.so"
+"$PEAR2_CLANG" tests/pear2/roundtrip_nested_array_harness.c -L"$W" -Wl,-rpath,"$PWD/$W" -lpointer_index -o "$W/roundtrip_nested_array_harness"
+"$W/roundtrip_nested_array_harness"
+echo "PASS: roundtrip_nested_array constructs, stores, and projects the nested array (returns 3)"
 cp tests/pear2/internal_aggregate_abi_main.air "$W/internal_aggregate_abi.air"
 if ! "$PEAR2" "$W/internal_aggregate_abi.air" --quiet; then echo "FAIL: internal tuple argument/result ABI AIR rejected"; exit 1; fi
 python3 - "$W/internal_aggregate_abi.bc" <<'PY'

@@ -54,11 +54,13 @@ struct M1Label
     usz param_count;
     char*[64] env_names;
     char*[64] env_values;
+    char*[64] env_slots;
     bool[64] env_bools;
     bool[64] env_ptrs;
     AirTyp*[64] env_types;
     usz env_count;
     bool captured;
+    bool has_jump;
 }
 
 struct M1Gen
@@ -69,6 +71,7 @@ struct M1Gen
     usz decl_count;
     char*[256] env_names;
     char*[256] env_values;
+    char*[256] env_slots;
     bool[256] env_bools;
     bool[256] env_ptrs;
     AirTyp*[256] env_types;
@@ -85,10 +88,12 @@ struct M1Gen
     bool return_ptr;
     bool return_unit;
     bool guard_active;
+    char* guard_name;
     char* guard_true_label;
     char* guard_false_label;
     bool has_for;
     int for_depth;
+    int seq_depth;
     bool terminated;
     bool failed;
 }
@@ -412,7 +417,7 @@ fn bool m1_function_signature(AirDecl* d)
         }
         return true;
     }
-    if (!m1_scalar_type(d.ret_ty)) { return false; }
+    if (!m1_scalar_type(d.ret_ty) && !m1_unit_type(d.ret_ty)) { return false; }
     for (usz i = 0; i < d.param_count; i++) { if (d.params[i] == null || !m1_scalar_type(d.params[i].ty)) { return false; } }
     return d.is_extern && d.def_body == null && !d.is_fastcc && !d.is_varargs && d.attr_count == 0 &&
            (d.extern_link == null || m1_safe_name(d.extern_link));
@@ -424,15 +429,34 @@ fn char* m1_link_name(AirDecl* d)
     return d.extern_link == null ? d.name : d.extern_link;
 }
 
-fn char* M1Gen.lookup(M1Gen* g, char* name)
+fn int M1Gen.env_index(M1Gen* g, char* name)
 {
     long i = (long)g.env_count - 1;
     while (i >= 0)
     {
-        if (same(g.env_names[(usz)i], name)) { return g.env_values[(usz)i]; }
+        if (same(g.env_names[(usz)i], name)) { return (int)i; }
         i--;
     }
-    return null;
+    return -1;
+}
+
+fn char* M1Gen.lookup_slot(M1Gen* g, char* name)
+{
+    int i = g.env_index(name);
+    return i < 0 ? null : g.env_slots[(usz)i];
+}
+
+fn char* M1Gen.lookup(M1Gen* g, char* name)
+{
+    int i = g.env_index(name);
+    if (i < 0) { return null; }
+    char* slot = g.env_slots[(usz)i];
+    if (slot == null) { return g.env_values[(usz)i]; }
+    char* value = g.tmp();
+    char* ty = g.llvm_value_type_text(g.env_types[(usz)i]);
+    if (value == null || ty == null) { g.failed = true; return null; }
+    fprintf(g.out, "  %s = load %s, ptr %s, align 1\n", value, ty, slot);
+    return value;
 }
 
 fn bool M1Gen.lookup_bool(M1Gen* g, char* name)
@@ -499,6 +523,7 @@ fn bool M1Gen.bind_rep(M1Gen* g, char* name, char* value, bool is_bool, bool is_
     if (name == null || value == null || (is_bool && is_ptr) || g.env_count >= 256) { return false; }
     g.env_names[g.env_count] = name;
     g.env_values[g.env_count] = value;
+    g.env_slots[g.env_count] = null;
     g.env_bools[g.env_count] = is_bool;
     g.env_ptrs[g.env_count] = is_ptr;
     g.env_types[g.env_count] = ty;
@@ -508,6 +533,18 @@ fn bool M1Gen.bind_rep(M1Gen* g, char* name, char* value, bool is_bool, bool is_
 
 fn bool M1Gen.bind_typed(M1Gen* g, char* name, char* value, bool is_bool, bool is_ptr, AirTyp* ty)
 {
+    char* slot = g.lookup_slot(name);
+    if (slot != null)
+    {
+        AirTyp* previous_type = g.lookup_type(name);
+        if (previous_type == null || !m1_value_type_compatible(previous_type, ty, 0)) { return false; }
+        char* llvm_ty = g.llvm_value_type_text(ty);
+        if (llvm_ty == null) { return false; }
+        fprintf(g.out, "  store %s %s, ptr %s, align 1\n", llvm_ty, value, slot);
+        if (!g.bind_rep(name, value, is_bool, is_ptr, ty)) { return false; }
+        g.env_slots[g.env_count - 1] = slot;
+        return true;
+    }
     return g.bind_rep(name, value, is_bool, is_ptr, ty);
 }
 
@@ -664,7 +701,8 @@ fn char* M1Gen.convert_integer_width(M1Gen* g, char* value, AirTyp* from_type, A
 
 fn int M1Gen.label_index(M1Gen* g, char* name)
 {
-    for (usz i = 0; i < g.label_count; i++) { if (same(g.labels[i].name, name)) { return (int)i; } }
+    char* normalized = name != null && name[0] == '%' ? name + 1 : name;
+    for (usz i = 0; i < g.label_count; i++) { if (same(g.labels[i].name, normalized)) { return (int)i; } }
     return -1;
 }
 
@@ -679,8 +717,17 @@ fn bool M1Gen.label_environment_unchanged(M1Gen* g, M1Label* target)
             if (target.params[p] != null && same(target.params[p].name, target.env_names[j])) { is_param = true; break; }
         }
         if (is_param) { continue; }
-        char* current = g.lookup(target.env_names[j]);
-        if (current == null || !same(current, target.env_values[j]) || g.lookup_bool(target.env_names[j]) != target.env_bools[j] || g.lookup_ptr(target.env_names[j]) != target.env_ptrs[j]) { return false; }
+        char* current_slot = g.lookup_slot(target.env_names[j]);
+        if (target.env_slots[j] != null)
+        {
+            if (current_slot == null || !same(current_slot, target.env_slots[j])) { return false; }
+        }
+        else
+        {
+            char* current = g.lookup(target.env_names[j]);
+            if (current == null || !same(current, target.env_values[j])) { return false; }
+        }
+        if (g.lookup_bool(target.env_names[j]) != target.env_bools[j] || g.lookup_ptr(target.env_names[j]) != target.env_ptrs[j]) { return false; }
         if (!target.env_bools[j] && !target.env_ptrs[j] && !m1_value_type_compatible(target.env_types[j], g.lookup_type(target.env_names[j]), 0)) { return false; }
     }
     return true;
@@ -717,9 +764,10 @@ fn bool M1Gen.collect_cmd(M1Gen* g, AirCmd* c)
     if (c.tag == ACMD_FOR) { g.has_for = true; }
     if (c.tag == ACMD_LABEL)
     {
-        if (!m1_safe_name(c.binder) || same(c.binder, "entry") || c.mbinder_count > 16 || g.label_count >= 32 || g.label_index(c.binder) >= 0) { return false; }
+        char* normalized_label = c.binder != null && c.binder[0] == '%' ? c.binder + 1 : c.binder;
+        if (!m1_safe_name(normalized_label) || same(normalized_label, "entry") || c.mbinder_count > 16 || g.label_count >= 32 || g.label_index(c.binder) >= 0) { return false; }
         M1Label* info = &g.labels[g.label_count];
-        info.cmd = c; info.name = c.binder; info.param_count = c.mbinder_count;
+        info.cmd = c; info.name = normalized_label; info.param_count = c.mbinder_count;
         info.env_count = 0; info.captured = false;
         for (usz i = 0; i < c.mbinder_count; i++)
         {
@@ -1118,7 +1166,10 @@ fn char* M1Gen.prd(M1Gen* g, AirPrd* p)
 fn bool M1Gen.is_pointer_value(M1Gen* g, AirPrd* p)
 {
     if (p == null) { return false; }
-    if (p.tag == APRD_NULL) { return p.ty == null || p.ty.tag == ATYP_INFER || m1_pointer_type(p.ty); }
+    // AIR's null literal is contextually typed by its use. Some valid untyped
+    // comparisons retain the enclosing bool result type on the literal node;
+    // the APRD_NULL tag itself is the reliable pointer discriminator.
+    if (p.tag == APRD_NULL) { return true; }
     if (p.tag == APRD_VAR)
     {
         return g.lookup_ptr(p.name) && (p.ty == null || p.ty.tag == ATYP_INFER || m1_pointer_type(p.ty));
@@ -1269,7 +1320,7 @@ fn bool M1Gen.consume(M1Gen* g, char* value, bool is_bool, bool is_ptr, AirTyp* 
     if (k == null || value == null || (is_bool && is_ptr)) { return false; }
     if (k.tag == ACNS_PROJ || k.tag == ACNS_FST || k.tag == ACNS_SND)
     {
-        if (k.tail == null || k.tail.tag != ACNS_COMU || value_type == null) { return false; }
+        if (k.tail == null || value_type == null) { return false; }
         bool is_tuple = value_type.tag == ATYP_TUPLE;
         bool is_array = value_type.tag == ATYP_ARRAY && k.tag == ACNS_PROJ && value_type.arg_count == 1;
         if (!is_tuple && !is_array) { return false; }
@@ -1406,7 +1457,7 @@ fn bool M1Gen.consume(M1Gen* g, char* value, bool is_bool, bool is_ptr, AirTyp* 
     }
     if (k.tag == ACNS_COVAR)
     {
-        if (g.guard_active && same(k.name, "%guard") && same(ret_name, "%guard"))
+        if (g.guard_active && g.guard_name != null && same(k.name, g.guard_name) && same(ret_name, g.guard_name))
         {
             if (!is_bool || is_ptr || g.guard_true_label == null || g.guard_false_label == null) { return false; }
             fprintf(g.out, "  br i1 %s, label %%%s, label %%%s\n", value, g.guard_true_label, g.guard_false_label);
@@ -1441,7 +1492,9 @@ fn bool M1Gen.consume(M1Gen* g, char* value, bool is_bool, bool is_ptr, AirTyp* 
         if (!is_bool && !is_ptr) { value_type = g.int_rep_type(value_type); }
         if (!g.bind_typed(k.bind, value, is_bool, is_ptr, value_type)) { return false; }
         bool ok = g.command(k.body, ret_name);
-        g.env_count = saved;
+        // Bindings introduced by a continuation in ACMD_SEQ remain visible to
+        // that sequence's `next`; the sequence restores its environment at exit.
+        if (g.seq_depth == 0 || !ok) { g.env_count = saved; }
         return ok;
     }
     return false;
@@ -1452,13 +1505,20 @@ fn bool M1Gen.consume_unit(M1Gen* g, AirCns* k, char* ret_name)
     if (k == null) { return false; }
     if (k.tag == ACNS_COVAR)
     {
+        // The middot continuation is AIR's discard hole, not the function
+        // return continuation. A unit value sent here is an ordinary no-op.
+        if (same(k.name, (char*)"\xc2\xb7") || g.seq_depth > 0) { return true; }
         if (!g.return_unit || !same(k.name, ret_name)) { return false; }
         fprintf(g.out, "  ret void\n");
         g.terminated = true;
         return true;
     }
-    if (k.tag == ACNS_COMU && (k.bind == null || same(k.bind, "_")))
+    if (k.tag == ACNS_COMU)
     {
+        // A unit continuation may name its ignored unit result (for example
+        // an administrative AIR binder). Unit has no LLVM value to materialize;
+        // leaving the name unbound makes any attempted scalar use fail closed.
+        if (k.bind != null && !same(k.bind, "_") && g.lookup(k.bind) != null) { return false; }
         return g.command(k.body, ret_name);
     }
     return false;
@@ -1757,15 +1817,18 @@ fn bool M1Gen.match_guarded_cmd(M1Gen* g, AirCmd* c, char* ret_name)
         {
             if (next_label == null) { g.env_count = saved; return false; }
             bool saved_guard_active = g.guard_active;
+            char* saved_guard_name = g.guard_name;
             char* saved_guard_true = g.guard_true_label;
             char* saved_guard_false = g.guard_false_label;
             char* body_label = g.label((char*)"match.guard.body.");
             if (body_label == null) { g.env_count = saved; return false; }
             g.guard_active = true;
+            g.guard_name = (char*)"%guard";
             g.guard_true_label = body_label;
             g.guard_false_label = next_label;
             bool guard_ok = g.command(branch.guard, (char*)"%guard");
             g.guard_active = saved_guard_active;
+            g.guard_name = saved_guard_name;
             g.guard_true_label = saved_guard_true;
             g.guard_false_label = saved_guard_false;
             if (!guard_ok || !g.terminated) { g.env_count = saved; return false; }
@@ -1833,15 +1896,18 @@ fn bool M1Gen.match_aggregate_guarded_cmd(M1Gen* g, AirCmd* c, char* ret_name)
         {
             if (next_label == null) { g.env_count = saved; return false; }
             bool saved_guard_active = g.guard_active;
+            char* saved_guard_name = g.guard_name;
             char* saved_guard_true = g.guard_true_label;
             char* saved_guard_false = g.guard_false_label;
             char* body_label = g.label((char*)"match.aggregate.body.");
             if (body_label == null) { g.env_count = saved; return false; }
             g.guard_active = true;
+            g.guard_name = (char*)"%guard";
             g.guard_true_label = body_label;
             g.guard_false_label = next_label;
             bool guard_ok = g.command(branch.guard, (char*)"%guard");
             g.guard_active = saved_guard_active;
+            g.guard_name = saved_guard_name;
             g.guard_true_label = saved_guard_true;
             g.guard_false_label = saved_guard_false;
             if (!guard_ok || !g.terminated) { g.env_count = saved; return false; }
@@ -2025,8 +2091,13 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
     if (g.terminated && c.tag != ACMD_LABEL && c.tag != ACMD_SEQ && c.tag != ACMD_BLOCK && c.tag != ACMD_UNSAFE) { return false; }
     if (c.tag == ACMD_SEQ)
     {
-        if (!g.command(c.body, ret_name)) { return false; }
-        return g.command(c.next, ret_name);
+        usz saved_env = g.env_count;
+        g.seq_depth++;
+        bool first_ok = g.command(c.body, ret_name);
+        bool next_ok = first_ok && g.command(c.next, ret_name);
+        g.seq_depth--;
+        g.env_count = saved_env;
+        return next_ok;
     }
     if (c.tag == ACMD_LABEL)
     {
@@ -2036,8 +2107,21 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         if (info.captured || g.env_count > 64) { return false; }
         for (usz i = 0; i < g.env_count; i++)
         {
+            if (g.env_slots[i] == null)
+            {
+                char[32] slot_name;
+                int slot_len = snprintf(&slot_name[0], 32, (char*)"%%slot%d", g.next_slot);
+                g.next_slot++;
+                char* llvm_ty = g.llvm_value_type_text(g.env_types[i]);
+                if (slot_len < 0 || slot_len >= 32 || llvm_ty == null) { return false; }
+                char* slot = g.arena.dup(&slot_name[0], (usz)slot_len);
+                fprintf(g.out, "  %s = alloca %s\n", slot, llvm_ty);
+                fprintf(g.out, "  store %s %s, ptr %s, align 1\n", llvm_ty, g.env_values[i], slot);
+                g.env_slots[i] = slot;
+            }
             info.env_names[i] = g.env_names[i];
             info.env_values[i] = g.env_values[i];
+            info.env_slots[i] = g.env_slots[i];
             info.env_bools[i] = g.env_bools[i];
             info.env_ptrs[i] = g.env_ptrs[i];
             info.env_types[i] = g.env_types[i];
@@ -2265,6 +2349,51 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
     if (c.tag == ACMD_CUT)
     {
         if (c.prd == null || c.cns == null) { return false; }
+        if (c.prd.tag == APRD_MU && c.cns.tag == ACNS_CASE)
+        {
+            if (c.prd.name == null || c.prd.body == null || c.cns.branch_count != 2) { return false; }
+            char* true_label = g.label((char*)"case.true.");
+            char* false_label = g.label((char*)"case.false.");
+            if (true_label == null || false_label == null) { return false; }
+            AirBranch* true_branch = null;
+            AirBranch* false_branch = null;
+            for (usz i = 0; i < c.cns.branch_count; i++)
+            {
+                AirBranch* branch = c.cns.branches[i];
+                if (branch == null || branch.guard != null || branch.pat == null || branch.pat.tag != APAT_BOOL) { return false; }
+                if (branch.pat.ival != 0)
+                {
+                    if (true_branch != null) { return false; }
+                    true_branch = branch;
+                }
+                else
+                {
+                    if (false_branch != null) { return false; }
+                    false_branch = branch;
+                }
+            }
+            if (true_branch == null || false_branch == null) { return false; }
+            bool saved_guard_active = g.guard_active;
+            char* saved_guard_name = g.guard_name;
+            char* saved_guard_true = g.guard_true_label;
+            char* saved_guard_false = g.guard_false_label;
+            g.guard_active = true;
+            g.guard_name = c.prd.name;
+            g.guard_true_label = true_label;
+            g.guard_false_label = false_label;
+            bool condition_ok = g.command(c.prd.body, c.prd.name) && g.terminated;
+            g.guard_active = saved_guard_active;
+            g.guard_name = saved_guard_name;
+            g.guard_true_label = saved_guard_true;
+            g.guard_false_label = saved_guard_false;
+            if (!condition_ok) { return false; }
+            fprintf(g.out, "%s:\n", true_label);
+            g.terminated = false;
+            if (!g.command(true_branch.body, ret_name) || !g.terminated) { return false; }
+            fprintf(g.out, "%s:\n", false_label);
+            g.terminated = false;
+            return g.command(false_branch.body, ret_name) && g.terminated;
+        }
         if (c.cns.tag == ACNS_CALL) { return g.call(c.prd, c.cns, ret_name); }
         if (c.prd.tag == APRD_UNIT) { return g.consume_unit(c.cns, ret_name); }
         bool is_bool = g.is_condition(c.prd);
@@ -2290,6 +2419,7 @@ fn bool M1Gen.emit_label_block(M1Gen* g, M1Label* info, char* ret_name)
     {
         g.env_names[i] = info.env_names[i];
         g.env_values[i] = info.env_values[i];
+        g.env_slots[i] = info.env_slots[i];
         g.env_bools[i] = info.env_bools[i];
         g.env_ptrs[i] = info.env_ptrs[i];
         g.env_types[i] = info.env_types[i];
@@ -2304,7 +2434,7 @@ fn bool M1Gen.emit_label_block(M1Gen* g, M1Label* info, char* ret_name)
         bool is_bool = info.param_bools[i];
         bool is_ptr = info.param_ptrs[i];
         fprintf(g.out, "  %s = load %s, ptr %s\n", value, g.llvm_value_type_text(p.ty), info.slots[i]);
-        if (p.name != null && !same(p.name, "_") && !g.bind_typed(p.name, value, is_bool, is_ptr, p.ty)) { return false; }
+        if (p.name != null && !same(p.name, "_") && !g.bind_rep(p.name, value, is_bool, is_ptr, p.ty)) { return false; }
     }
     return g.command(info.cmd.body, ret_name) && g.terminated;
 }
@@ -2315,9 +2445,9 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0;
     g.default_unsigned = m1_unsigned(d.ret_ty);
     g.default_bits = m1_integer_type(d.ret_ty) ? m1_int_bits(d.ret_ty) : 64;
-    g.guard_active = false; g.guard_true_label = null; g.guard_false_label = null;
+    g.guard_active = false; g.guard_name = null; g.guard_true_label = null; g.guard_false_label = null;
     g.terminated = false;
-    g.has_for = false; g.for_depth = 0;
+    g.has_for = false; g.for_depth = 0; g.seq_depth = 0;
     AirCmd* body = d.def_body;
     char* ret_name = null;
     if (body != null && body.tag == ACMD_MUTILDE) { ret_name = body.binder; body = body.body; }
@@ -2336,15 +2466,18 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
 
     char* return_type_ir = g.llvm_abi_return_text(g.return_type);
     if (return_type_ir == null) { return false; }
+    usz emitted_param_count = d.param_count;
+    if (same(d.name, "main") && d.param_count == 1 && d.params[0] != null && same(d.params[0].name, "_") &&
+        (d.params[0].ty == null || d.params[0].ty.tag == ATYP_INFER)) { emitted_param_count = 0; }
     AirTyp*[64] parameter_types;
-    for (usz i = 0; i < d.param_count; i++)
+    for (usz i = 0; i < emitted_param_count; i++)
     {
         if (d.params[i] == null) { return false; }
         parameter_types[i] = g.decl_value_type(d.params[i].ty, g.return_type);
         if (!m1_value_type(parameter_types[i], 0)) { return false; }
     }
     fprintf(g.out, "define %s @%s(", return_type_ir, d.name);
-    for (usz i = 0; i < d.param_count; i++)
+    for (usz i = 0; i < emitted_param_count; i++)
     {
         AirBinder* p = d.params[i];
         if (i != 0) { fprintf(g.out, ", "); }
@@ -2355,7 +2488,7 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     {
         for (usz j = 0; j < g.labels[i].param_count; j++) { fprintf(g.out, "  %s = alloca %s\n", g.labels[i].slots[j], g.llvm_value_type_text(g.labels[i].params[j].ty)); }
     }
-    for (usz i = 0; i < d.param_count; i++)
+    for (usz i = 0; i < emitted_param_count; i++)
     {
         AirBinder* p = d.params[i];
         char[32] arg;
@@ -2592,9 +2725,18 @@ fn int main(String[] args)
     // on the exact post-optimization graph consumed by the lowering pass.
     air_facts::validate_module(&mod);
 
+    // The program entry module is the declarations before the first module
+    // record. PEAR2 M1 lowers this module's functions; imported/prelude modules
+    // remain available in parsed AIR but are not emitted as unrelated bodies.
+    usz root_decl_count = mod.decl_count;
+    for (usz i = 0; i < mod.decl_count; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d != null && d.tag == ADECL_MODULE) { root_decl_count = i; break; }
+    }
     AirDecl* main_decl = null;
     int main_count = 0;
-    for (usz i = 0; i < mod.decl_count; i++)
+    for (usz i = 0; i < root_decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
         if (d == null || d.tag == ADECL_MODULE) { continue; }
@@ -2616,7 +2758,11 @@ fn int main(String[] args)
         }
         if (same(d.name, "main")) { main_decl = d; main_count++; }
     }
-    if (main_count != 1 || main_decl == null || main_decl.param_count != 0 || main_decl.ret_ty == null || !m1_integer_type(main_decl.ret_ty) || m1_int_bits(main_decl.ret_ty) != 64)
+    bool ignored_main_parameter = main_decl != null && main_decl.param_count == 1 && main_decl.params[0] != null &&
+                                  same(main_decl.params[0].name, "_") &&
+                                  (main_decl.params[0].ty == null || main_decl.params[0].ty.tag == ATYP_INFER);
+    if (main_count != 1 || main_decl == null || (main_decl.param_count != 0 && !ignored_main_parameter) ||
+        (main_decl.ret_ty != null && main_decl.ret_ty.tag != ATYP_INFER && (!m1_integer_type(main_decl.ret_ty) || m1_int_bits(main_decl.ret_ty) != 64)))
     {
         printf("pear2c: M1 requires exactly one zero-argument definition of `main`\n");
         arena.destroy(); return 3;
@@ -2627,7 +2773,7 @@ fn int main(String[] args)
     fprintf(f, "; PEAR 2: scalar and local aggregate lowering with direct calls\n");
     fprintf(f, "declare void @llvm.trap()\ndeclare void @llvm.assume(i1 noundef)\ndeclare ptr @llvm.stacksave()\ndeclare void @llvm.stackrestore(ptr)\n");
     M1Gen g;
-    g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = mod.decl_count;
+    g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = root_decl_count;
     g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0; g.default_unsigned = false; g.default_bits = 64; g.return_type = null; g.return_bool = false; g.return_ptr = false; g.return_unit = false; g.terminated = false; g.failed = false;
     if (!g.emit_extern_declarations())
     {
@@ -2636,10 +2782,15 @@ fn int main(String[] args)
         arena.destroy(); return 3;
     }
     bool emitted = true;
-    for (usz i = 0; i < mod.decl_count; i++)
+    for (usz i = 0; i < root_decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
-        if (d != null && d.tag == ADECL_DEF && !g.emit_function(d)) { emitted = false; break; }
+        if (d != null && d.tag == ADECL_DEF && !g.emit_function(d))
+        {
+            printf("pear2c: could not lower function `%s` in the supported PEAR2 subset\n", d.name == null ? (char*)"?" : d.name);
+            emitted = false;
+            break;
+        }
     }
     if (!emitted)
     {

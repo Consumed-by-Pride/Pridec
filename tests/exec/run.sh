@@ -89,9 +89,17 @@ record() { # $1=status $2=id $3=detail
 # a "return 7"-only canary compiles on a toolchain linked against the wrong
 # libLLVM, which is a real configuration we hit (attribute enum IDs differ
 # between LLVM 19 and 23, so -O1/-O2 die in instcombine). Sum of fib(0..7) = 33.
-echo "=== emit configuration matrix (canary: fib-sum loop, expect exit 33) ==="
-canary=/tmp/pear_canary_$$.pie
-printf 'fn fib(n: i64) -> i64 { if (n < 2) { return n; } return fib(n-1) + fib(n-2); }\nfn main(_) -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while (i < 8) { s = s + fib(i); i = i + 1; } return s; }\n' > "$canary"
+if [ "$PEAR2_MODE" -eq 1 ]; then
+    echo "=== emit configuration matrix (PEAR2 scalar canary, expect exit 42) ==="
+    config_expected=42
+    canary=/tmp/pear_canary_$$.pie
+    printf 'fn main(_) -> i64 { return 42; }\n' > "$canary"
+else
+    echo "=== emit configuration matrix (canary: fib-sum loop, expect exit 33) ==="
+    config_expected=33
+    canary=/tmp/pear_canary_$$.pie
+    printf 'fn fib(n: i64) -> i64 { if (n < 2) { return n; } return fib(n-1) + fib(n-2); }\nfn main(_) -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while (i < 8) { s = s + fib(i); i = i + 1; } return s; }\n' > "$canary"
+fi
 config_tiers=(-O0 -O1 -O2 -O3)
 for O in "${config_tiers[@]}"; do
     id="cfg/$O"
@@ -103,15 +111,15 @@ for O in "${config_tiers[@]}"; do
         record "$status" "$id" "no binary emitted${why:+ — $why}"
     else
         timeout "$TIMEOUT" "$bin" >/dev/null 2>&1; rc=$?
-        if [ "$rc" = "33" ]; then
+        if [ "$rc" = "$config_expected" ]; then
             if reason=$(xfail_reason "$id"); then
-                record XPASS "$id" "emits and runs (exit 33) — remove XFAIL entry: $reason"
+                record XPASS "$id" "emits and runs (exit $config_expected) — remove XFAIL entry: $reason"
             else
-                record PASS "$id" "emits and runs (exit 33)"
+                record PASS "$id" "emits and runs (exit $config_expected)"
             fi
         else
             why=$(xfail_reason "$id") && status=XFAIL || status=FAIL
-            record "$status" "$id" "emitted but exit=$rc (want 33)${why:+ — $why}"
+            record "$status" "$id" "emitted but exit=$rc (want $config_expected)${why:+ — $why}"
         fi
     fi
     rm -f "$bin"

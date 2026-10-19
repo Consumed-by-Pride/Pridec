@@ -1,9 +1,10 @@
-// PEAR 2 rejects a store whose value width conflicts with the pointee width.
+// PEAR 2 rejects a store whose declared byte count conflicts with the pointee.
+// Integer values may be explicitly truncated or extended by the memory backend.
 air 2.2 Main "reject_memory_width_main.pie";
 
 def bad_store(p : ptr(i32)) : unit =
   mu~ %ret.
-    <p | store(42 : i64; 4) · comu _.
+    <p | store(42 : i64; 8) · comu _.
       <unit | %ret>>;
 
 def main() : i64 =

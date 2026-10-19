@@ -33,4 +33,4 @@ def main() : i64 =
                 <0 | %ret>
             else
               <0 | %ret>;
-        }>;
+        }>>;
