@@ -1,0 +1,19 @@
+// AIR 3 globals: typed constants, pooled-string decay, and explicit C linkage.
+air 3.0 Main "global_string_main.pie";
+
+global base : i64 = 40;
+global message : ptr(u8) = "hi";
+global bytes_blob : ptr(u8) = b"\x01";
+extern link "pear2_external_global" global mut external_value : i64;
+
+def main() : i64 =
+  mu~ %ret.
+    <load(base) : i64 | comu base_value.
+      <load(external_value) : i64 | comu external.
+        <load(message) : ptr(u8) | comu text.
+          <gep[u8](text, 0 : i64) : ptr(u8) | comu first.
+            <load(first) : u8 | comu ch.
+              <load(bytes_blob) : ptr(u8) | comu blob_ptr.
+                <gep[u8](blob_ptr, 0 : i64) : ptr(u8) | comu byte_ptr.
+                  <load(byte_ptr) : u8 | comu byte_value.
+                    <(add (add base_value external) 1) : i64 | %ret>>>>>>>>>;

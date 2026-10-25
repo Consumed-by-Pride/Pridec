@@ -26,6 +26,14 @@ Warnings go to stdout/stderr and never change the exit status of a successful em
 `scripts/pie-exe.sh` forwards both stages' output; `BACKEND=… scripts/pie-exe.sh FILE.pie --emit-exe -O2` is the
 whole chain.
 
+### PEAR 2 aggregate ABI boundary (current implementation)
+
+PEAR 2 lowers plain, non-generic, non-packed, single-constructor product declarations as LLVM named structs. AIR `record` construction and `field` projection are supported for those declarations; sum types, constructor patterns, and record patterns are not implied by that support. External by-value aggregates are limited to non-empty tuples and these plain records whose fields have C-compatible LLVM representations. AIR `bool` and `unit` fields are rejected in external aggregates, as are unsupported declaration attributes and aggregate shapes. Native interoperability is verified with the checked-in C fixture on x86-64 Linux/LLVM 23 only; LLVM's `ccc` lowering is not a promise of cross-target C ABI compatibility. Unsupported AIR forms such as recursive `letrec` bindings must still fail with exit 3, name the construct and enclosing function where known, and publish no artifact.
+
+### PEAR 2 AIR 3 low-profile globals and memory
+
+The bounded AIR 3 low-profile slice lowers typed globals with constant initializers, mutability, alignment, `extern`, and explicit `link "symbol"` names. String and byte literals used as pointer constants are pooled as private unnamed-address LLVM constants with a trailing NUL for strings; pointer decay and constant GEP are emitted explicitly. Typed `alloca`, statically sized `malloc` (positive, at most 1 MiB), `free`, typed `load`/`store`, and constant typed GEP are supported for types with known size/alignment and tracked provenance. A free must receive the live base pointer of a known heap allocation; stores through immutable globals, out-of-bounds or misaligned accesses, stale/freed pointers, unknown provenance, dynamic GEP indices, and dynamic/unsupported allocation forms fail closed with exit 3 and a source-located diagnostic. The fixture-backed acceptance cases are `tests/pear2/global_string_main.air` and `tests/pear2/typed_memory_main.air`; negative provenance and dynamic-form checks live beside them under `tests/pear2/reject_*.air`.
+
 ## 2 Obligations
 
 1. **Strict input.** Reject, do not recover from: unknown keywords, other versions, over-limit counts, trailing text.

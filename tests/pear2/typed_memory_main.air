@@ -1,0 +1,22 @@
+// AIR 3 typed stack and heap allocation, pointer offsets, loads, stores and free.
+air 3.0 Main "typed_memory_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare free(p : ptr(i64)) : unit;
+
+def main() : i64 =
+  mu~ %ret.
+    <alloca(array#2(i64)) : ptr(array#2(i64)) | comu stack.
+      <gep[array#2(i64)](stack, 0 : i64, 1 : i64) : ptr(i64) | comu stack_element.
+        seq {
+          store(stack_element, 40 : i64);
+          <malloc | call · 8 : i64 · comu heap.
+            seq {
+              store(heap, 2 : i64);
+              <load(heap) : i64 | comu heap_value.
+                <load(stack_element) : i64 | comu stack_value.
+                  <free | call · heap · comu _.
+                    <(add stack_value heap_value) : i64 | %ret>>>>
+            }>
+        }
+    >>;

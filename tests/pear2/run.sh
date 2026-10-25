@@ -105,6 +105,7 @@ set +e
 "$PEAR2_BIN" "$W/unsupported_cli.air" --emit-exe --quiet >"$W/unsupported_cli.log" 2>&1; rc=$?
 set -e
 [ "$rc" = 3 ] && [ ! -e "$W/unsupported_cli" ] || { echo "FAIL: unsupported AIR returned $rc or retained stale executable"; cat "$W/unsupported_cli.log"; exit 1; }
+grep -q 'unsupported AIR construct `letrec` in function `main`' "$W/unsupported_cli.log" || { echo "FAIL: unsupported letrec diagnostic did not name the form and definition"; cat "$W/unsupported_cli.log"; exit 1; }
 cat > "$W/fail-linker" <<'FAKE_CLANG'
 #!/usr/bin/env bash
 printf partial > "$4"
@@ -145,6 +146,43 @@ WRAPPER
 chmod +x "$W/pear2-bc-wrapper"
 export PEAR2_REAL="$PEAR2_BIN"
 PEAR2="$W/pear2-bc-wrapper"
+
+# AIR 3 global/string and typed-memory slice. These compile to verified bitcode,
+# then execute to prove external symbol names, pooled strings, and provenance.
+cp tests/pear2/global_string_main.air "$W/global_string_main.air"
+"$PEAR2" "$W/global_string_main.air" --quiet || { echo "FAIL: AIR 3 global/string fixture rejected"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/global_string_main.bc" tests/pear2/global_string_helper.c -o "$W/global_string_main" || { echo "FAIL: AIR 3 external global failed to link"; exit 1; }
+set +e
+"$W/global_string_main"
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: AIR 3 global/string fixture returned $rc, expected 42"; exit 1; }
+echo "PASS: AIR 3 typed globals, linked external symbol, pooled string and GEP execute (42)"
+
+cp tests/pear2/typed_memory_main.air "$W/typed_memory_main.air"
+"$PEAR2" "$W/typed_memory_main.air" --quiet || { echo "FAIL: AIR 3 typed-memory fixture rejected"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/typed_memory_main.bc" -o "$W/typed_memory_main" || { echo "FAIL: AIR 3 typed-memory fixture failed to link"; exit 1; }
+set +e
+"$W/typed_memory_main"
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: AIR 3 typed-memory fixture returned $rc, expected 42"; exit 1; }
+echo "PASS: AIR 3 stack/heap allocation, typed GEP/load/store and free execute (42)"
+
+for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main; do
+    cp "tests/pear2/$fixture.air" "$W/$fixture.air"
+    printf 'stale bitcode' > "$W/$fixture.bc"
+    set +e
+    "$PEAR2_BIN" "$W/$fixture.air" --emit-bc --quiet >"$W/$fixture.log" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" = 3 ] && [ ! -e "$W/$fixture.bc" ] || { echo "FAIL: $fixture did not fail closed with exit 3 and clean output"; cat "$W/$fixture.log"; exit 1; }
+    grep -Eq "$W/$fixture.air:[0-9]+:[0-9]+: pear2c:" "$W/$fixture.log" || { echo "FAIL: $fixture lacked a file:line:col diagnostic"; cat "$W/$fixture.log"; exit 1; }
+done
+grep -q 'dynamic pointer offsets are unsupported' "$W/reject_dynamic_gep_main.log" || { echo "FAIL: dynamic GEP rejection was not specific"; cat "$W/reject_dynamic_gep_main.log"; exit 1; }
+grep -q 'heap allocation requires a positive constant size' "$W/reject_dynamic_malloc_main.log" || { echo "FAIL: dynamic malloc rejection was not specific"; cat "$W/reject_dynamic_malloc_main.log"; exit 1; }
+echo "PASS: AIR 3 dynamic/provenance/alignment violations fail closed with source locations"
+
 cp tests/pear2/literal_main.air "$W/literal.air"
 if ! "$PEAR2" "$W/literal.air" --quiet; then echo "FAIL: literal main rejected"; exit 1; fi
 [ -f "$W/literal.bc" ] || { echo "FAIL: no bitcode written"; exit 1; }
@@ -414,6 +452,14 @@ if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"BC\xc0\xde":
     raise SystemExit("FAIL: unit-aggregate output is not LLVM bitcode")
 print("PASS: empty tuple and unit values survive internal aggregate arguments and returns")
 PY
+cp tests/pear2/external_record_abi_main.air "$W/external_record_abi.air"
+if ! "$PEAR2" "$W/external_record_abi.air" --quiet; then echo "FAIL: struct/external aggregate ABI AIR rejected"; exit 1; fi
+"$PEAR2_CLANG" -Wno-override-module "$W/external_record_abi.bc" tests/pear2/external_record_abi_helper.c -o "$W/external_record_abi"
+set +e
+timeout 5 "$W/external_record_abi" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: external record ABI returned $rc, expected 42"; exit 1; }
+echo "PASS: record construction/projection and C by-value aggregate argument/result ABI"
 cp tests/pear2/tuple_label_main.air "$W/tuple_label.air"
 if ! "$PEAR2" "$W/tuple_label.air" --quiet; then echo "FAIL: aggregate label/jump parameter AIR rejected"; exit 1; fi
 python3 - "$W/tuple_label.bc" <<'PY'

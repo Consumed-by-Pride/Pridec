@@ -1,0 +1,10 @@
+// Heap allocation must use a statically known positive size.
+air 3.0 Main "reject_dynamic_malloc_main.pie";
+
+extern declare malloc(size : i64) : ptr(i8);
+
+def bad_size(size : i64) : ptr(i8) =
+  mu~ %ret.
+    <malloc | call · size · %ret>;
+
+def main() : i64 = mu~ %ret. <0 : i64 | %ret>;

@@ -1,0 +1,12 @@
+// Free accepts only a live heap base pointer, not stack storage.
+air 3.0 Main "reject_bad_free_main.pie";
+
+extern declare free(p : ptr(i64)) : unit;
+
+def bad_free() : i64 =
+  mu~ %ret.
+    <alloca(i64) : ptr(i64) | comu stack.
+      <free | call · stack · comu _.
+        <0 : i64 | %ret>>>;
+
+def main() : i64 = mu~ %ret. <0 : i64 | %ret>;

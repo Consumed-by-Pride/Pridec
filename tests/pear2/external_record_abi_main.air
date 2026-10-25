@@ -1,0 +1,44 @@
+// Exercises record construction/projection, internal aggregate calls, and by-value C aggregate arguments/results.
+air 2.2 Main "external_record_abi_main.pie";
+
+data Pair {
+  ctor Pair(left : i64, right : i64) : nominal Pair;
+};
+
+link "pear2_make_pair" extern declare pair_make(left : i64, right : i64) : nominal Pair;
+link "pear2_pair_sum" extern declare pair_sum(value : nominal Pair) : i64;
+link "pear2_tuple_sum" extern declare tuple_sum(value : tuple(i64, i64)) : i64;
+link "pear2_tuple_make" extern declare tuple_make(left : i64, right : i64) : tuple(i64, i64);
+
+def identity_pair(value : nominal Pair) : nominal Pair =
+  mu~ %ret.
+    <value | %ret>;
+
+def record_sum(value : nominal Pair) : i64 =
+  mu~ %ret.
+    <value | field left #0 · comu left.
+      <value | field right #1 · comu right.
+        <(add left right : i64) | %ret>>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <pair_sum | call · record { left = 19 : i64, right = 23 : i64 } : nominal Pair · comu literal_sum.
+      <tuple_make | call · 19 : i64 · 23 : i64 · comu tuple_made.
+        <tuple_sum | call · tuple_made · comu tuple_sum.
+          <pair_make | call · 20 : i64 · 22 : i64 · comu made.
+          <identity_pair | call · made · comu roundtrip.
+            <pair_sum | call · roundtrip · comu returned_sum.
+              <record_sum | call · roundtrip · comu internal_sum.
+                if (eq literal_sum 42 : i64) then
+                  if (eq tuple_sum 42 : i64) then
+                    if (eq returned_sum 42 : i64) then
+                      if (eq internal_sum 42 : i64) then
+                        <42 | %ret>
+                      else
+                        <1 | %ret>
+                    else
+                      <2 | %ret>
+                  else
+                    <3 | %ret>
+                else
+                  <0 | %ret>>>>>>>>;
