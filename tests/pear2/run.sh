@@ -169,7 +169,17 @@ set -e
 [ "$rc" = 42 ] || { echo "FAIL: AIR 3 typed-memory fixture returned $rc, expected 42"; exit 1; }
 echo "PASS: AIR 3 stack/heap allocation, typed GEP/load/store and free execute (42)"
 
-for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main; do
+cp tests/pear2/typed_pointer_cell_main.air "$W/typed_pointer_cell_main.air"
+"$PEAR2" "$W/typed_pointer_cell_main.air" --quiet || { echo "FAIL: AIR 3 pointer-cell provenance fixture rejected"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/typed_pointer_cell_main.bc" -o "$W/typed_pointer_cell_main" || { echo "FAIL: AIR 3 pointer-cell fixture failed to link"; exit 1; }
+set +e
+"$W/typed_pointer_cell_main"
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: AIR 3 pointer-cell fixture returned $rc, expected 42"; exit 1; }
+echo "PASS: AIR 3 pointer-cell provenance survives store/load and free (42)"
+
+for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main; do
     cp "tests/pear2/$fixture.air" "$W/$fixture.air"
     printf 'stale bitcode' > "$W/$fixture.bc"
     set +e
@@ -181,7 +191,10 @@ for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_fre
 done
 grep -q 'dynamic pointer offsets are unsupported' "$W/reject_dynamic_gep_main.log" || { echo "FAIL: dynamic GEP rejection was not specific"; cat "$W/reject_dynamic_gep_main.log"; exit 1; }
 grep -q 'heap allocation requires a positive constant size' "$W/reject_dynamic_malloc_main.log" || { echo "FAIL: dynamic malloc rejection was not specific"; cat "$W/reject_dynamic_malloc_main.log"; exit 1; }
-echo "PASS: AIR 3 dynamic/provenance/alignment violations fail closed with source locations"
+grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/reject_use_after_free_main.log" || { echo "FAIL: pointer-cell use-after-free was not rejected"; cat "$W/reject_use_after_free_main.log"; exit 1; }
+grep -q 'free requires the live base pointer' "$W/reject_interior_free_main.log" || { echo "FAIL: interior-pointer free was not rejected"; cat "$W/reject_interior_free_main.log"; exit 1; }
+grep -q 'free requires the live base pointer' "$W/reject_double_free_main.log" || { echo "FAIL: double free was not rejected"; cat "$W/reject_double_free_main.log"; exit 1; }
+echo "PASS: AIR 3 dynamic/provenance/alignment/lifetime violations fail closed with source locations"
 
 cp tests/pear2/literal_main.air "$W/literal.air"
 if ! "$PEAR2" "$W/literal.air" --quiet; then echo "FAIL: literal main rejected"; exit 1; fi
