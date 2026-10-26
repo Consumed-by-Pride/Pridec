@@ -6,4 +6,4 @@
 subtype	47	0	semantic-subtyping spec cases
 exec	46	0	exec cases that must pass (xfail excluded)
 conformance	162	100	current pfront; see conformance/KNOWN_FAILURES.tsv and docs/dev/CONFORMANCE_GATE_REPAIR.md
-pfront	173	5	5 known: 63_modsys megaload cfg_backedge opt_cascade modsys
+pfront	178	0	triaged 2026-10-26: 63_modsys+modsys = missing helper fixtures (created tests/pfront/modsys/{lib,sub/deep}.pie); megaload = stdlib header violations fixed (iter.iter, iter.range); cfg_backedge+opt_cascade = stale probes rewritten

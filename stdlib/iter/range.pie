@@ -1,4 +1,4 @@
-mod range
+mod iter.range
 
 -- stdlib/iter/range.pie — integer range primitives written without first-class
 -- function arguments (which pfront does not yet lower). These are enough to

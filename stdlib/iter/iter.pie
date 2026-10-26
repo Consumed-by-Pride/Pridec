@@ -1,4 +1,4 @@
-mod iter
+mod iter.iter
 
 -- stdlib/iter/iter.pie — minimal iterator trait / range helpers.
 -- A full iterator protocol requires generic traits; until those land this
