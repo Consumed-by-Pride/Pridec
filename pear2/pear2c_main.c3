@@ -166,11 +166,18 @@ struct M1Gen
     int for_depth;
     int seq_depth;
     char*[8] mu_covars; int mu_depth; int infer_let_depth; int infer_decl_active; int failed_fn_trace;
+    // comu-temp inference re-enters infer_prd_type through chain typing; bound
+    // the mutual recursion (index-store element rules recurse on producers).
+    int comu_infer_depth;
     // Label-replay mu drains: a mu body whose CFG is realized through buffered
     // label blocks delivers to its binder inside a replay, after the intercept
     // stack has unwound.  Record binder->continuation per def so replay-time
     // deliveries run the drain (see match_cmd/consume_unit).
     char*[8] mu_drain_names; AirCns*[8] mu_drain_cns; int mu_drain_count;
+    // Value deliveries `<v | %k>` to an active statement-mu binder redirect
+    // into that mu's own cut continuation (registered at interception): the
+    // continuation consumes the value in place, then runs to termination.
+    AirCns*[8] mu_vcns;
     bool in_label_replay;
     bool terminated;
     M1String[256] strings; int string_count;
@@ -1229,7 +1236,7 @@ fn char* m1_cmd_return_covar(AirCmd* c, int depth)
         {
             if (k.tag == ACNS_COVAR) { return k.name; }
             if (k.tag == ACNS_ASCRIBE || k.tag == ACNS_STACK || k.tag == ACNS_CALL || k.tag == ACNS_FIELD ||
-                k.tag == ACNS_PROJ || k.tag == ACNS_FST || k.tag == ACNS_SND) { k = k.tail; d++; continue; }
+                k.tag == ACNS_PROJ || k.tag == ACNS_FST || k.tag == ACNS_SND || k.tag == ACNS_INDEX || k.tag == ACNS_STORE || k.tag == ACNS_DEREF) { k = k.tail; d++; continue; }
             if (k.tag == ACNS_COMU) { return m1_cmd_return_covar(k.body, depth + 1); }
             return null;
         }
@@ -1318,7 +1325,7 @@ fn bool M1Gen.mu_unit_terminals_ok(M1Gen* g, AirCmd* c, char* covar, int depth)
         if (c.cns == null) { return true; }
         if (c.cns.tag == ACNS_COMU) { return g.mu_unit_terminals_ok(c.cns.body, covar, depth + 1); }
         if (c.cns.tag == ACNS_COVAR)
-        { return !same(c.cns.name, covar) || (c.tag == ACMD_SYSCALL && c.prd_count == 1); }
+        { return !same(c.cns.name, covar) || c.tag == ACMD_SYSCALL; }
         return false;
     }
     if (c.tag == ACMD_HANDLE) { return c.body != null && c.handled != null && g.mu_unit_terminals_ok(c.body, covar, depth + 1) && g.mu_unit_terminals_ok(c.handled, covar, depth + 1); }
@@ -1418,6 +1425,175 @@ fn AirPrd* m1_infer_find_let(AirCmd* c, char* name, int depth)
     }
     return null;
 }
+// Walk a command tree for the CUT whose consumer chain binds `name` through a
+// comu — continuation-temp counterpart of m1_infer_find_let for lambda/chain
+// result inference (e.g. `<buf | index(0; 1) · comu _x1. ...>` binds _x1).
+fn AirCmd* m1_find_comu_binding(AirCmd* c, char* name, int depth)
+{
+    if (c == null || name == null || depth >= 32) { return null; }
+    if (c.tag == ACMD_CUT && c.cns != null)
+    {
+        AirCns* k = c.cns; int d2 = 0;
+        while (k != null && d2 < 12)
+        {
+            if (k.tag == ACNS_COMU) { if (k.bind != null && same(k.bind, name)) { return c; } break; }
+            if (k.tag == ACNS_ASCRIBE || k.tag == ACNS_INDEX || k.tag == ACNS_STORE || k.tag == ACNS_STACK)
+            { k = k.tail; d2++; continue; }
+            break;
+        }
+    }
+    if (c.tag == ACMD_CUT && c.prd != null && c.prd.tag == APRD_MU)
+    {
+        AirCmd* r = m1_find_comu_binding(c.prd.body, name, depth + 1);
+        if (r != null) { return r; }
+    }
+    if (c.tag == ACMD_CUT && c.cns != null)
+    {
+        AirCns* k = c.cns; int d2 = 0;
+        while (k != null && d2 < 12)
+        {
+            if (k.tag == ACNS_COMU && k.body != null)
+            {
+                AirCmd* r = m1_find_comu_binding(k.body, name, depth + 1);
+                if (r != null) { return r; }
+            }
+            if (k.label_body != null)
+            {
+                AirCmd* r = m1_find_comu_binding(k.label_body, name, depth + 1);
+                if (r != null) { return r; }
+            }
+            k = (k.tag == ACNS_COMU) ? null : k.tail; d2++;
+        }
+    }
+    if (c.tag == ACMD_MU || c.tag == ACMD_MUTILDE)
+    {
+        AirCmd* r = m1_find_comu_binding(c.body, name, depth + 1);
+        if (r != null) { return r; }
+    }
+    AirCmd* r = m1_find_comu_binding(c.body, name, depth + 1);
+    if (r != null) { return r; }
+    r = m1_find_comu_binding(c.next, name, depth + 1);
+    if (r != null) { return r; }
+    r = m1_find_comu_binding(c.then_c, name, depth + 1);
+    if (r != null) { return r; }
+    r = m1_find_comu_binding(c.else_c, name, depth + 1);
+    if (r != null) { return r; }
+    for (usz i = 0; i < c.branch_count; i++)
+    {
+        if (c.branches[i] == null) { continue; }
+        r = m1_find_comu_binding(c.branches[i].body, name, depth + 1);
+        if (r != null) { return r; }
+    }
+    r = m1_find_comu_binding(c.handled, name, depth + 1);
+    return r;
+}
+
+// Locate a CUT whose producer is VAR `name` with an Index->Store chain; the
+// payload's inferred type is the element convention for malloc'd ptr(u8)
+// buffers (AIR loses the pointee, stores carry the truth).
+fn AirTyp* m1_store_elem_walk(AirCmd* c, char* name, M1Gen* g, AirDecl* d, int depth)
+{
+    if (c == null || depth >= 32) { return null; }
+    if (c.tag == ACMD_CUT && c.prd != null && c.prd.tag == APRD_VAR && same(c.prd.name, name) && c.cns != null)
+    {
+        AirCns* k = c.cns; int d2 = 0;
+        bool saw_index = false;
+        while (k != null && d2 < 12)
+        {
+            if (k.tag == ACNS_INDEX) { saw_index = true; }
+            if (k.tag == ACNS_STORE && saw_index && k.prd != null)
+            {
+                AirTyp* pt = g.infer_prd_type(d, k.prd, 0);
+                if (pt != null && pt.tag != ATYP_INFER) { return pt; }
+            }
+            k = k.tail; d2++;
+        }
+    }
+    if (c.tag == ACMD_CUT && c.cns != null)
+    {
+        // walk consumer continuation bodies (comu binders, label thunk bodies)
+        AirCns* k = c.cns; int d2 = 0;
+        while (k != null && d2 < 12)
+        {
+            if (k.tag == ACNS_COMU && k.body != null)
+            {
+                AirTyp* r = m1_store_elem_walk(k.body, name, g, d, depth + 1);
+                if (r != null) { return r; }
+            }
+            if (k.label_body != null)
+            {
+                AirTyp* r = m1_store_elem_walk(k.label_body, name, g, d, depth + 1);
+                if (r != null) { return r; }
+            }
+            k = k.tail; d2++;
+        }
+    }
+    if (c.tag == ACMD_CUT && c.prd != null && c.prd.tag == APRD_MU)
+    {
+        AirTyp* r = m1_store_elem_walk(c.prd.body, name, g, d, depth + 1);
+        if (r != null) { return r; }
+    }
+    if (c.tag == ACMD_MU || c.tag == ACMD_MUTILDE)
+    {
+        AirTyp* r = m1_store_elem_walk(c.body, name, g, d, depth + 1);
+        if (r != null) { return r; }
+    }
+    AirTyp* r = m1_store_elem_walk(c.body, name, g, d, depth + 1);
+    if (r != null) { return r; }
+    r = m1_store_elem_walk(c.next, name, g, d, depth + 1);
+    if (r != null) { return r; }
+    r = m1_store_elem_walk(c.then_c, name, g, d, depth + 1);
+    if (r != null) { return r; }
+    r = m1_store_elem_walk(c.else_c, name, g, d, depth + 1);
+    if (r != null) { return r; }
+    for (usz i = 0; i < c.branch_count; i++)
+    {
+        if (c.branches[i] == null) { continue; }
+        r = m1_store_elem_walk(c.branches[i].body, name, g, d, depth + 1);
+        if (r != null) { return r; }
+    }
+    return m1_store_elem_walk(c.handled, name, g, d, depth + 1);
+}
+
+// Type of the value the chain in `cut` delivers to binder `name`: ascription
+// overrides; index followed immediately by comu loads the pointee; store
+// resolves to unit.
+fn AirTyp* M1Gen.delivered_chain_type(M1Gen* g, AirDecl* d, AirCmd* cut, char* name)
+{
+    if (cut == null || cut.tag != ACMD_CUT || cut.prd == null) { return null; }
+    AirTyp* t = g.infer_prd_type(d, cut.prd, 1);
+    if (t == null) { return null; }
+    AirCns* k = cut.cns; int d2 = 0;
+    while (k != null && d2 < 12)
+    {
+        if (k.tag == ACNS_COMU)
+        { return (k.bind != null && same(k.bind, name)) ? t : null; }
+        if (k.tag == ACNS_ASCRIBE) { if (k.ty == null) { return null; } t = k.ty; k = k.tail; d2++; continue; }
+        if (k.tag == ACNS_INDEX)
+        {
+            if (t == null || t.tag != ATYP_PTR || t.arg_count < 1) { return null; }
+            t = t.args[0];
+            if (t.tag == ATYP_U8 && cut.prd != null && cut.prd.tag == APRD_VAR)
+            {
+                // malloc-style raw ptr: element convention is fixed by the
+                // paired index-store payload, not the declared ptr(u8).
+                AirTyp* st = m1_store_elem_walk(d.def_body, cut.prd.name, g, d, 0);
+                if (st == null && g.current_function != null)
+                {
+                    AirDecl* rd = g.find_function(g.current_function);
+                    if (rd != null && rd.def_body != null && rd.def_body != d.def_body)
+                    { st = m1_store_elem_walk(rd.def_body, cut.prd.name, g, rd, 0); }
+                }
+                if (st != null && st.tag != ATYP_INFER) { t = st; }
+            }
+            k = k.tail; d2++; continue;
+        }
+        if (k.tag == ACNS_STORE) { t = air_ir::air_mk_typ_simple(g.arena, ATYP_UNIT); k = k.tail; d2++; continue; }
+        return null;
+    }
+    return null;
+}
+
 fn AirTyp* M1Gen.infer_prd_type(M1Gen* g, AirDecl* d, AirPrd* p, int depth)
 {
     if (g.infer_let_depth > 0 && p != null && p.tag == APRD_VAR && (p.ty == null || p.ty.tag == ATYP_INFER))
@@ -1442,6 +1618,43 @@ fn AirTyp* M1Gen.infer_prd_type(M1Gen* g, AirDecl* d, AirPrd* p, int depth)
         for (usz i = 0; i < d.param_count; i++)
         {
             if (d.params[i] != null && same(d.params[i].name, p.name)) { return g.decl_value_type(d.params[i].ty, d.ret_ty); }
+        }
+        // Captured/outer bindings: the emitter env already carried typed lets.
+        int eix = g.env_index(p.name);
+        if (eix >= 0 && g.env_types[(usz)eix] != null && g.env_types[(usz)eix].tag != ATYP_INFER)
+        { return g.env_types[(usz)eix]; }
+        if (d.def_body != null && g.comu_infer_depth < 8)
+        {
+            g.comu_infer_depth++;
+            // comu-bound continuation temps (index-load chains inside lambda
+            // bodies) reach their delivered type through the producer chain.
+            AirTyp* resolved_via_chain = null;
+            AirCmd* bcut = m1_find_comu_binding(d.def_body, p.name, 0);
+            if (bcut != null && bcut.prd != null && bcut.prd.tag == APRD_VAR)
+            {
+                // index-load through a raw malloc ptr: the paired store fixes
+                // the element type (AIR only sees ptr(u8)).  The binding may
+                // live outside a lambda body, so also walk the active def.
+                AirCns* bk = bcut.cns; while (bk != null && bk.tag != ACNS_COMU) { bk = bk.tail; }
+                if (bk != null && bcut.cns != null && bcut.cns.tag == ACNS_INDEX)
+                {
+                    AirTyp* st = m1_store_elem_walk(d.def_body, bcut.prd.name, g, d, 0);
+                    if (st == null && g.current_function != null)
+                    {
+                        AirDecl* rd = g.find_function(g.current_function);
+                        if (rd != null && rd.def_body != null && rd.def_body != d.def_body)
+                        { st = m1_store_elem_walk(rd.def_body, bcut.prd.name, g, rd, 0); }
+                    }
+                    if (st != null && st.tag != ATYP_INFER) { resolved_via_chain = st; }
+                }
+            }
+            if (bcut != null)
+            {
+                AirTyp* bt = g.delivered_chain_type(d, bcut, p.name);
+                if (bt != null && bt.tag != ATYP_INFER) { resolved_via_chain = bt; }
+            }
+            g.comu_infer_depth--;
+            if (resolved_via_chain != null) { return resolved_via_chain; }
         }
         return null;
     }
@@ -2182,8 +2395,9 @@ fn bool M1Gen.lambda_scan(M1Gen* g, AirPrd* p, bool diagnose,
         param_types[param_count] = pt; param_count++;
     }
     // Return-type inference: treat binders and captures as synthetic params.
-    AirDecl synth;
+    AirDecl synth = {};
     synth.tag = ADECL_DEF; synth.ret_ty = null; synth.name = (char*)"pear2.lambda";
+    synth.def_body = p.body;  // lets infer resolve comu-temp chains in the body
     synth.param_count = p.binder_count + (usz)cap_count;
     for (usz i = 0; i < p.binder_count; i++) { synth.params[i] = p.binders[i]; }
     for (int i = 0; i < cap_count; i++)
@@ -2308,7 +2522,8 @@ fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
     }
     char* lam_body_ret = m1_cmd_return_covar(p.body, 0);
     if (lam_body_ret == null) { lam_body_ret = (char*)"%ret"; }
-    bool body_ok = g.command(p.body, lam_body_ret) && g.terminated;
+    bool cmd_ok = g.command(p.body, lam_body_ret);
+    bool body_ok = cmd_ok && g.terminated;
     if (body_ok) { fprintf(side, "}\n"); }
     if (fclose(side) != 0) { g.out = saved_out; g.failed = true; return null; }
     // Restore the enclosing emission state before touching its stream again.
@@ -2320,7 +2535,13 @@ fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
     g.watch_branch_depth = saved_watch_depth; g.branch_depth = saved_branch; g.seq_depth = saved_seq;
     g.guard_active = saved_guard; g.guard_name = saved_gn; g.guard_true_label = saved_gt; g.guard_false_label = saved_gf;
     g.env_count = saved_env;
-    if (!body_ok) { free(body_buffer); return null; }
+    if (!body_ok)
+    {
+        // The lifted body failed to emit under the closure subset; the generic
+        // "could not lower" message alone violates fail-closed diagnostics.
+        g.note_failure(p.source_line, p.source_col, (char*)"closure body could not be emitted (captured raw-pointer element type is indeterminate; ascribe element usage or prefer typed load/store)");
+        free(body_buffer); return null;
+    }
     g.lam_buffers[(usz)g.lam_count] = body_buffer; g.lam_sizes[(usz)g.lam_count] = body_size; g.lam_count++;
     // Materialize the environment and the fat closure value in the host stream.
     char* env_operand = (char*)"null";
@@ -3264,6 +3485,11 @@ fn bool M1Gen.consume(M1Gen* g, char* value, bool is_bool, bool is_ptr, AirTyp* 
             fprintf(g.out, "  br i1 %s, label %%%s, label %%%s\n", value, g.guard_true_label, g.guard_false_label);
             g.terminated = true;
             return true;
+        }
+        for (int i = g.mu_depth - 1; i >= 0; i--)
+        {
+            if (g.mu_covars[(usz)i] != null && g.mu_vcns[(usz)i] != null && same(k.name, g.mu_covars[(usz)i]))
+            { return g.consume(value, is_bool, is_ptr, value_type, g.mu_vcns[(usz)i], ret_name); }
         }
         if (!same(k.name, ret_name) || is_bool != g.return_bool || is_ptr != g.return_ptr || g.return_unit) {
  return false; }
@@ -4324,26 +4550,35 @@ fn bool M1Gen.syscall_cmd(M1Gen* g, AirCmd* c, char* ret_name)
     char* dst = g.tmp(); if (dst == null) { return false; }
     fprintf(g.out, "  %s = call i64 asm sideeffect \"syscall\", \"%s\"(%s)\n", dst, &cons[0], &ops[0]);
     if (c.cns == null) { return true; }
-    // A syscall consumed by an active statement-mu covar (the mu walker admits
-    // only the single-argument exit-family shape here) ends the process; the
-    // continuation is dead code. Emit a well-typed terminator and stop.
+    // A syscall delivered straight to a covar is terminal either when it is
+    // the exit-family shape (the mu walker admits only single-argument syscalls
+    // delivered to a mu covar, which end the process) or when it targets the
+    // function's own return covar (statement-position tail; the syscall result
+    // is dead junk pfront routes there). Emit a well-typed terminator and stop.
+    // Any other mu covar delivery is a live value hand-off handled by the
+    // consume() redirect below.
     if (c.cns.tag == ACNS_COVAR)
     {
+        bool mu_active = false;
         for (int i = g.mu_depth - 1; i >= 0; i--)
+        { if (g.mu_covars[(usz)i] != null && same(c.cns.name, g.mu_covars[(usz)i])) { mu_active = true; break; } }
+        // Active mu-binder deliveries terminate only for the exit-arity shape;
+        // multi-argument syscalls there hand the live result to the mu's
+        // continuation via the consume() redirect below.  The function's own
+        // return covar (not shadowed by a mu) is terminal for every shape.
+        bool terminal_covar = (mu_active && c.prd_count == 1) || (!mu_active && same(c.cns.name, ret_name));
+        if (terminal_covar)
         {
-            if (g.mu_covars[(usz)i] != null && same(c.cns.name, g.mu_covars[(usz)i]))
-            {
-                if (g.return_unit)
-                { fprintf(g.out, "  ret void\n"); g.terminated = true; return true; }
-                AirTyp* rt = g.return_type;
-                if (m1_integer_type(rt) && m1_int_bits(rt) != 64)
-                { char* dv = g.convert_integer_width(dst, &i64t, rt); if (g.failed || dv == null) { return false; } dst = dv; }
-                else if (!m1_integer_type(rt))
-                { g.note_failure(c.source_line, c.source_col, (char*)"exit-syscall in a function returning a non-integer compound is unsupported"); return false; }
-                fprintf(g.out, "  ret %s %s\n", m1_llvm_scalar(rt), dst);
-                g.terminated = true;
-                return true;
-            }
+            if (g.return_unit)
+            { fprintf(g.out, "  ret void\n"); g.terminated = true; return true; }
+            AirTyp* rt = g.return_type;
+            if (m1_integer_type(rt) && m1_int_bits(rt) != 64)
+            { char* dv = g.convert_integer_width(dst, &i64t, rt); if (g.failed || dv == null) { return false; } dst = dv; }
+            else if (!m1_integer_type(rt))
+            { g.note_failure(c.source_line, c.source_col, (char*)"syscall delivered to a non-integer compound function return is unsupported"); return false; }
+            fprintf(g.out, "  ret %s %s\n", m1_llvm_scalar(rt), dst);
+            g.terminated = true;
+            return true;
         }
     }
     return g.consume(dst, false, false, &i64t, c.cns, ret_name);
@@ -4926,8 +5161,13 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
             { g.note_failure(c.prd.source_line, c.prd.source_col, (char*)"value-position mu is limited to a direct mu %k. <v | %k> production or a unit-valued statement block"); return false; }
             int saved_mu = g.mu_depth;
             g.mu_covars[(usz)saved_mu] = c.prd.name; g.mu_depth = saved_mu + 1;
+            g.mu_vcns[(usz)saved_mu] = c.cns;
             if (g.mu_drain_count < 8) { g.mu_drain_names[(usz)g.mu_drain_count] = c.prd.name; g.mu_drain_cns[(usz)g.mu_drain_count] = c.cns; g.mu_drain_count++; }
-            bool mu_ok = g.command(c.prd.body, c.prd.name);
+            // Deliveries to the mu binder are routed by mu_covars/mu_vcns in
+            // consume(); the true function return covar must stay visible so
+            // terminal shapes (ret, exit syscalls) still resolve.
+            bool mu_ok = g.command(c.prd.body, ret_name);
+            g.mu_vcns[(usz)saved_mu] = null;
             g.mu_depth = saved_mu;
             if (!mu_ok) { return false; }
             if (g.terminated) { return true; }
