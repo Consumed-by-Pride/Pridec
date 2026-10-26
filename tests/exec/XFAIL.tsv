@@ -14,7 +14,6 @@
 11_step_ranges	Runtime hangs at O0/O1/O2/O3 (>2 s) in this scalar-loop/printing fixture; the scalar sum kernel alone returns 2450 mod 256. Full root cause not yet isolated (Agent-4 §36).
 23_array_rebind_loop	Runtime hangs at all tiers; its i += 1 does not advance beyond 1. Independently reduced to n3_compound_loop (Agent-4 §§36,49); array/I/O defects may remain after that is fixed.
 39_mutable_globals	Compiler crashes (rc 139), emitting no binary, at O0/O1/O2/O3 in this mutable-global/printing fixture. Root cause not yet minimized (Agent-4 §36).
-pear/p115_tuple_clause_block	PEAR v0.9.1 only bypasses clause matching for a single expression body; block-bodied tuple clause reads unbound values and returns 0 instead of 42 at all four tiers.
 # Legacy corpus (clause-style + syscall I/O). Since syscall operands and results are lowered (AIR 2.1) and
 # string literals are decoded, 01_hello passes; these cases still fail for the reason shown (measured at -O2).
 02_fibonacci	Builds but prints nothing: the program's clause-style functions (`fn f : A -> B | x -> …`) are lowered correctly to `match x { bind x_1 -> … }`, but PEAR 1 (legacy) tests that match as a boolean and both arms are `unreachable`. Enabling the irrefutable-bind case exposes invalid IR in ~20 stdlib bodies (PEAR1_DUMP_LL=f.ll shows the verifier findings); needs PEAR 2 or PEAR 1 reachability pruning.
