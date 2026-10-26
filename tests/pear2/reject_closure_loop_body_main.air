@@ -1,0 +1,11 @@
+// PEAR2 M8 fail-closed check: closures cannot be created inside loop bodies
+// while loop-carried phi promotion is active for the surrounding locals.
+air 2.2 Main "reject_closure_loop_body.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let i = 0 : i64 in
+      while (le i 1 : i64) do {
+        let f = lam(y : i64). <(add y i : i64) : i64 | %ret> in
+          <f | call · 1 : i64 · %ret>
+      };

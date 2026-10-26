@@ -1,0 +1,11 @@
+// PEAR2 M8: one closure captures three locals; every field flows through the
+// environment struct at closure creation time.
+air 2.2 Main "closure_multi_capture.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let a = 30 : i64 in
+      let b = 10 : i64 in
+        let c = 2 : i64 in
+          let sum3 = lam(x : i64). <(add (add a b : i64) (mul c x : i64) : i64) : i64 | %ret> in
+            <sum3 | call · 1 : i64 · %ret>;

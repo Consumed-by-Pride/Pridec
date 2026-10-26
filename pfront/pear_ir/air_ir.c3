@@ -129,6 +129,7 @@ struct AirPat {
     AirPat* as_pat; AirPat* or_alt; AirTyp* ty;
 }
 struct AirPrd {
+    int source_line; int source_col;
     uint id; AirPrdTag tag; char* name; long ival; double fval; bool bval; char cval;
     usz bytes_len; char* bytes;
     AirPrd** subs; usz sub_count, sub_cap;   // grown on demand (a wide array/tuple/call has no operand limit)
@@ -138,6 +139,7 @@ struct AirPrd {
     AirBinop bop; AirUnop uop; AirTyp* ty;
 }
 struct AirCns {
+    int source_line; int source_col;
     uint id; AirCnsTag tag; char* name; long idx; AirPrd* prd;
     AirCns* tail;
     AirCns* cont_k;
@@ -149,6 +151,7 @@ struct AirCns {
     char*[16] subst_vars; AirPrd*[16] subst_prds; usz subst_count;
 }
 struct AirCmd {
+    int source_line; int source_col;
     uint id; AirCmdTag tag; AirPrd* prd; AirCns* cns;
     AirPrd*[64] prds; usz prd_count;
     char* binder; AirBinder*[16] mbinders; usz mbinder_count;
@@ -165,6 +168,7 @@ struct AirCmd {
     bool vol; char* asm_cons; AirTyp* asm_ret;   // AIR 3.0: volatile store; asm constraints (LLVM syntax) and result type
 }
 struct AirDecl {
+    int source_line; int source_col;
     uint id; AirDeclTag tag; char* name;
     AirBinder*[16] typarams; usz typaram_count; AirMult mult;
     AirCtorDecl*[64] ctors; usz ctor_count;
@@ -300,7 +304,7 @@ fn void AirPrd.push_sub(AirPrd* p, AirPrd* s)   // like add_sub, but a null oper
     if (p.sub_count >= p.sub_cap)
     {
         usz nc = p.sub_cap == 0 ? 4 : p.sub_cap * 2;
-        AirPrd** ns = (AirPrd**)malloc(nc * 8);
+        AirPrd** ns = (AirPrd**)malloc(nc * @sizeof(p.subs));
         if (ns == null) return;
         for (usz i = 0; i < nc; i++) ns[i] = null;
         for (usz i = 0; i < p.sub_count; i++) ns[i] = p.subs[i];
@@ -315,7 +319,7 @@ fn void AirPrd.push_rec(AirPrd* p, AirFieldInit* f)
     if (p.rec_init_count >= p.rec_init_cap)
     {
         usz nc = p.rec_init_cap == 0 ? 4 : p.rec_init_cap * 2;
-        AirFieldInit** ns = (AirFieldInit**)malloc(nc * 8);
+        AirFieldInit** ns = (AirFieldInit**)malloc(nc * @sizeof(p.rec_inits));
         if (ns == null) return;
         for (usz i = 0; i < nc; i++) ns[i] = null;
         for (usz i = 0; i < p.rec_init_count; i++) ns[i] = p.rec_inits[i];

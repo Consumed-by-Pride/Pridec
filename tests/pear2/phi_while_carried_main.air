@@ -1,0 +1,21 @@
+// PEAR2 M9: loop-carried promoted locals. The accumulator and counter are
+// captured by the `done` label and reassigned inside the while body; header
+// phis replace the old alloca spill/reload at the loop backedge.
+air 2.2 Main "phi_while_carried.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let i = 0 : i64 in
+      let acc = 0 : i64 in
+        seq {
+          label done().
+            <acc | %ret>;
+          seq {
+            while (lt i 6 : i64) do {
+              let acc = (add acc 7 : i64) in
+                let i = (add i 1 : i64) in
+                  nop
+            };
+            jump done()
+          }
+        };

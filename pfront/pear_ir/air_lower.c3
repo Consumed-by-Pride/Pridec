@@ -3978,6 +3978,15 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     break;
                 }
             }
+            if (body == null && d.param_count > 1)
+            {
+                // Fail closed: the legacy single-scrutinee match below is only
+                // valid for 0/1 parameters; for multi-parameter clause
+                // functions whose clause bodies are statements (not a single
+                // expression) it used to UB-prune the body and silently return
+                // 0. Tuple-match lowering is pending, so report instead.
+                body = lr.poison_cmd(lr.dup("multi-parameter clause function with a statement clause body is not supported yet (tuple-match lowering pending)"));
+            }
             if (body == null)
             {
                 AirBranch*[64] bs; usz bc = 0;

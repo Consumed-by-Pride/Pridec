@@ -56,3 +56,12 @@ is reported XPASS and fails the run, so the list can only shrink honestly.
 Rule of the road: **a form you do not implement must produce a diagnostic and a non-zero exit, never a binary that
 quietly does something else.** The old backend's silent fall-backs (a call to address 0, an ignored `syscall`) are
 exactly the bugs this rule prevents.
+
+### Phi and closure fixtures
+
+`phi_*` fixtures assert multi-block SSA promotion at joins and loop headers
+(phi presence, alloca caps, `-O0..-O3` exit-code equality, a positioned 16-edge
+overflow rejection). `closure_*` fixtures exercise M8 first-class closures:
+scalar capture, multi-variable capture, nested closure invocation through the
+`{ code, env }` fat-pointer ABI, and positioned fail-closed rejections for
+loop-body creation and capturing label-carried bindings.

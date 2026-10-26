@@ -1,0 +1,29 @@
+// PEAR2 M9: nested loop phi accumulation. The carried accumulator and both
+// counters are captured by the `done` label and reassigned inside two nested
+// while loops; every level gets its own header phis.
+air 2.2 Main "phi_nested_while.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let i = 0 : i64 in
+      let j = 0 : i64 in
+        let acc = 0 : i64 in
+          seq {
+            label done().
+              <acc | %ret>;
+            seq {
+              while (lt i 3 : i64) do {
+                seq {
+                  while (lt j 2 : i64) do {
+                    let acc = (add acc 7 : i64) in
+                      let j = (add j 1 : i64) in
+                        nop
+                  };
+                  let i = (add i 1 : i64) in
+                    let j = 0 : i64 in
+                      nop
+                }
+              };
+              jump done()
+            }
+          };

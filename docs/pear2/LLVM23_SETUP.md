@@ -85,3 +85,33 @@ Observed: bitcode magic `4243c0de`, clang verification exit **0**, native execut
 ## Scope of the test result
 
 `make test-pear2` is the broader AIR/CLI and native fixture suite, separate from `test-pear2-exec`. It returned **0** with **76 PASS checks and no failures**. Its LLVM 23 native runs include `internal_aggregate_abi_main` (exit **42**) and `unit_aggregate_main` (exit **42**); the latter exercises empty-tuple arguments/returns, a unit argument, and a unit field in a composite tuple. `roundtrip_nested_array` emits LLVM 23-verifiable bitcode and a native harness confirms it returns **3** after nested array construction, store, and projection. These results cover the fixtures listed in the suite, not every AIR form or every `tests/exec` case.
+
+### Phi promotion and first-class closures
+
+M9 promotes locals crossing basic-block joins to LLVM `phi` nodes in textual
+IR, bypassing alloca/load/store slots: `jump`/`break`/`continue` edges record
+their predecessor block plus live environment values, label bodies are buffered
+so sibling labels (loop bodies jumping to outer exit labels) compose phis from
+complete edge sets, and `while`/`for` loop-carried mutable bindings become
+header phis via a scoped watch registry. Fail-closed with source positions
+when a label exceeds 16 incoming edges or a loop tracks more than 32 carried
+locals per nesting depth. The fixtures `phi_diamond_join_main`,
+`phi_while_carried_main`, `phi_nested_while_main`, `phi_for_index_main`, and
+`phi_label_ladder_main` assert phi presence, alloca caps, and identical exit
+codes across `-O0..-O3`; `reject_label_edge_overflow_main` asserts the
+positioned rejection.
+
+M8 lowers AIR `lam` producers to first-class closures: free variables
+resolving in the enclosing scope are packed into an environment struct, the
+body lambda-lifts to a buffered module-level `define internal ... @pear2.lam.*`
+taking a hidden leading `ptr %env`, and the closure value is the fat-pointer
+aggregate `{ ptr, ptr }` (AIR-typed `tuple(arrow(tuple(ptr u8, params..) -> ret), ptr u8)`).
+Closure calls extract code and environment and pass `%env` as the first
+argument; nested closure invocation (a closure capturing and calling another
+closure) is supported, including result-type inference through call tails.
+Unsupported shapes fail closed with source positions: closures inside loop
+bodies, captures of label-captured (phi-promoted) bindings, bodies outside the
+straight-line subset, aggregate captures/params/results, and >16 captures.
+Fixtures: `closure_scalar_capture_main`, `closure_multi_capture_main`,
+`closure_nested_main`, `reject_closure_loop_body_main`,
+`reject_closure_carried_capture_main`.

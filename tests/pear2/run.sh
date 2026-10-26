@@ -774,3 +774,80 @@ link_and_run while 9
 link_and_run binding_optimizer 42
 link_and_run internal_aggregate_abi 42
 link_and_run unit_aggregate 42
+
+# --- M9/M8: phi promotion + first-class closures -----------------------------
+# Phi fixtures must show `= phi` in emitted IR with alloca-free promoted
+# bindings and identical exit codes across -O0..-O3; closure fixtures must lift
+# `lam` producers into buffered module-level functions (`@pear2.lam.*` taking
+# `ptr %env` first) and materialize `{ ptr, ptr }` fat closure values.
+m9_expect() {
+    local fixture=$1 expected_rc=$2 max_alloca=$3
+    local name level allocas rc
+    name=$(basename "$fixture" .air)
+    rm -f "$W/$name.air" "$W/$name" "$W/$name.bc" "$W/$name.ll"
+    cp "$fixture" "$W/$name.air"
+    for level in 0 1 2 3; do
+        "$PEAR2_BIN" "$W/$name.air" --emit-ll -O$level --quiet || { echo "FAIL: $name rejected at -O$level"; exit 1; }
+        grep -q '= phi ' "$W/$name.ll" || { echo "FAIL: $name emitted no phi node at -O$level"; exit 1; }
+        allocas=$(grep -c '= alloca' "$W/$name.ll" || true)
+        [ "$allocas" -le "$max_alloca" ] || { echo "FAIL: $name kept $allocas allocas at -O$level (cap $max_alloca)"; exit 1; }
+        "$PEAR2_BIN" "$W/$name.air" --emit-bc -O$level --quiet || { echo "FAIL: $name -O$level bitcode rejected"; exit 1; }
+        "$PEAR2_CLANG" -Wno-override-module "$W/$name.bc" -o "$W/$name.O$level" >"$W/$name.O$level.link.log" 2>&1 || { echo "FAIL: clang link $name -O$level"; cat "$W/$name.O$level.link.log"; exit 1; }
+        set +e
+        timeout 5 "$W/$name.O$level" >/dev/null 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = "$expected_rc" ] || { echo "FAIL: $name at -O$level returned $rc, expected $expected_rc"; exit 1; }
+    done
+    echo "PASS: LLVM 23 linked/runs $name (exit=$expected_rc, phi-promoted, alloca cap $max_alloca, -O0..-O3)"
+}
+m9_expect tests/pear2/phi_diamond_join_main.air 42 0
+m9_expect tests/pear2/phi_while_carried_main.air 42 0
+m9_expect tests/pear2/phi_nested_while_main.air 42 0
+m9_expect tests/pear2/phi_for_index_main.air 42 1
+m9_expect tests/pear2/phi_label_ladder_main.air 20 0
+
+m8_expect() {
+    local fixture=$1 expected_rc=$2
+    local name level rc
+    name=$(basename "$fixture" .air)
+    rm -f "$W/$name.air" "$W/$name" "$W/$name.bc" "$W/$name.ll"
+    cp "$fixture" "$W/$name.air"
+    "$PEAR2_BIN" "$W/$name.air" --emit-ll -O0 --quiet || { echo "FAIL: $name -O0 --emit-ll rejected"; exit 1; }
+    grep -q 'define internal .* @pear2.lam\.' "$W/$name.ll" || { echo "FAIL: $name emitted no lifted lambda function"; exit 1; }
+    grep -q 'insertvalue { ptr, ptr }' "$W/$name.ll" || { echo "FAIL: $name emitted no fat closure value"; exit 1; }
+    for level in 0 1 2 3; do
+        "$PEAR2_BIN" "$W/$name.air" --emit-bc -O$level --quiet || { echo "FAIL: $name -O$level bitcode rejected"; exit 1; }
+        "$PEAR2_CLANG" -Wno-override-module "$W/$name.bc" -o "$W/$name.O$level" >"$W/$name.O$level.link.log" 2>&1 || { echo "FAIL: clang link $name -O$level"; cat "$W/$name.O$level.link.log"; exit 1; }
+        set +e
+        timeout 5 "$W/$name.O$level" >/dev/null 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = "$expected_rc" ] || { echo "FAIL: $name at -O$level returned $rc, expected $expected_rc"; exit 1; }
+    done
+    echo "PASS: LLVM 23 linked/runs $name (exit=$expected_rc, lambda-lifted closure, -O0..-O3)"
+}
+m8_expect tests/pear2/closure_scalar_capture_main.air 42
+m8_expect tests/pear2/closure_multi_capture_main.air 42
+m8_expect tests/pear2/closure_nested_main.air 42
+
+m8_reject() {
+    local name=$1 src=$2 message=$3
+    rm -f "$W/$name.air" "$W/$name" "$W/$name.bc" "$W/$name.ll"
+    cp "$src" "$W/$name.air"
+    set +e
+    "$PEAR2_BIN" "$W/$name.air" >"$W/$name.log" 2>&1
+    local rc=$?
+    set -e
+    [ "$rc" = 3 ] || { echo "FAIL: $name returned $rc, expected 3"; cat "$W/$name.log"; exit 1; }
+    grep -Eq "$name.air:[0-9]+:[0-9]+" "$W/$name.log" || { echo "FAIL: $name diagnostic lacks a source position"; cat "$W/$name.log"; exit 1; }
+    grep -q "$message" "$W/$name.log" || { echo "FAIL: $name diagnostic differs"; cat "$W/$name.log"; exit 1; }
+    [ ! -e "$W/$name" ] && [ ! -e "$W/$name.bc" ] && [ ! -e "$W/$name.ll" ] || { echo "FAIL: $name retained a stale artifact"; exit 1; }
+    echo "PASS: $name fails closed with a positioned diagnostic"
+}
+m8_reject reject_label_edge_overflow tests/pear2/reject_label_edge_overflow_main.air 'label has too many incoming control-flow edges for phi promotion'
+echo "PASS: M9 phi edge-overflow rejects with source position"
+m8_reject reject_closure_loop_body tests/pear2/reject_closure_loop_body_main.air 'closures cannot be created inside loop bodies yet'
+echo "PASS: M8 closure creation inside a loop body rejects with source position"
+m8_reject reject_closure_carried_capture tests/pear2/reject_closure_carried_capture_main.air 'closure captures a label-captured (phi-promoted) binding'
+echo "PASS: M8 carried-binding capture rejects with source position"
