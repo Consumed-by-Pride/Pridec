@@ -1,0 +1,11 @@
+-- EXIT: 42
+-- A closure returned from one def flows as a first-class value into another:
+-- adder returns the {code, env} fat closure; main applies it indirectly.
+fn adder : i64 -> fn(i64) -> i64
+  | base ->
+      fn (x: i64) -> i64 { x + base }
+
+fn main : () -> () ! [IO]
+  | () ->
+      let f = adder(41)
+      syscall(231, f(1))
