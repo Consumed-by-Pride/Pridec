@@ -35,6 +35,7 @@ extern fn int ll_verify_module(void* m, int action, char** msg) @cname("LLVMVeri
 extern fn int ll_write_bitcode(void* m, char* path) @cname("LLVMWriteBitcodeToFile");
 extern fn void ll_module_dispose(void* m) @cname("LLVMDisposeModule");
 extern fn void ll_message_dispose(char* msg) @cname("LLVMDisposeMessage");
+extern fn void ll_set_source_file_name(void* m, char* name, usz len) @cname("LLVMSetSourceFileName");
 fn bool same(char* a, char* b)
 {
     if (a == null || b == null) { return a == b; }
@@ -6667,6 +6668,11 @@ fn int main(String[] args)
     void* m = null;
     char* msg = null;
     int rc = 0;
+    // Determinism: LLVMParseIRInContext stamps the module's source identifier
+    // with the pid-suffixed temp path; normalize it to the input name so
+    // published bitcode is byte-identical across runs.
+    usz input_name_len = 0;
+    while (input[input_name_len] != 0) { input_name_len++; }
     if (ctx == null || ll_buffer_from_file(&ll_path[0], &mb, &msg) != 0)
     {
         printf("pear2c: LLVM could not read generated IR%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
@@ -6677,15 +6683,20 @@ fn int main(String[] args)
         printf("pear2c: generated LLVM IR did not parse%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
         rc = 3;
     }
-    else if (ll_verify_module(m, 1, &msg) != 0)
+    else
     {
-        printf("pear2c: LLVM verifier rejected generated module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
-        rc = 3;
-    }
-    else if (!emit_ll && ll_write_bitcode(m, &bc_tmp[0]) != 0)
-    {
-        printf("pear2c: LLVM failed to write bitcode\n");
-        rc = 3;
+        // Parsed OK: normalize the source identifier, then verify and write.
+        ll_set_source_file_name(m, input, input_name_len);
+        if (ll_verify_module(m, 1, &msg) != 0)
+        {
+            printf("pear2c: LLVM verifier rejected generated module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
+            rc = 3;
+        }
+        else if (!emit_ll && ll_write_bitcode(m, &bc_tmp[0]) != 0)
+        {
+            printf("pear2c: LLVM failed to write bitcode\n");
+            rc = 3;
+        }
     }
     if (msg != null) { ll_message_dispose(msg); }
     if (m != null) { ll_module_dispose(m); }
