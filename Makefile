@@ -175,7 +175,7 @@ $(AIRTOOL): $(AIR_CORE) | c3c
 # PEAR 2 bootstrap backend. It is a separate executable and links the shared
 # AIR reader/verifier plus LLVM 23; it does not link PEAR 1 or pfrontc.
 PEAR2_BIN := pear2/pear2c
-PEAR2_SRC := $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_opt.c3 pear2/pear2c_main.c3
+PEAR2_SRC := $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_opt.c3 pear2/pear2c_main.c3
 PEAR2_LDFLAGS ?= -L $(LLVM23_LIBDIR) -l LLVM-23
 LLVM23_BIN ?= $(LLVM23_DIR)/bin
 PEAR2_CLANG ?= $(LLVM23_BIN)/clang
@@ -204,7 +204,7 @@ test-pear2-exec: $(BINARY) $(PEAR2_BIN) $(PEAR2_OPT_TEST) pear2c
 # LLVM, then run LLVM-independent arithmetic model tests. This does not replace
 # executing the optimizer or backend fixtures.
 check-pear2: | c3c
-	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_opt.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_opt.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
 	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
 	bash -n tests/pear2/run.sh
 	python3 tests/pear2/signed_division_model_test.py
