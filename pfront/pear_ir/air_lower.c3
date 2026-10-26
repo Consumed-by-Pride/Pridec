@@ -3678,6 +3678,29 @@ fn AirDecl* AirLower.decl(AirLower* lr, Node* n)
     }
 }
 
+// Multi-argument clause parameters are positional in the call ABI. A clause
+// body can bypass pattern dispatch only when every component is a binder or
+// wildcard; literal/constructor patterns require a decision tree and must not
+// be treated as unconditional bodies.
+fn bool clause_bindings_arity(Node* pat, usz* arity)
+{
+    if (pat == null || arity == null) return false;
+    if (pat.kind == Nk.N_PAT_IDENT || pat.kind == Nk.N_PAT_WILDCARD)
+    {
+        *arity = *arity + 1;
+        return true;
+    }
+    if (pat.kind == Nk.N_PAT_TUPLE)
+    {
+        for (usz i = 0; i < pat.child_count; i++)
+        {
+            if (!clause_bindings_arity(pat.children[i], arity)) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
 // reg_clause_pat_params — recurse into a clause pattern (tuple/wild/ident)
 // and register one AirDecl param per leaf binder. Fixes clause-style
 // `fn add : (i64,i64)->i64 | (a,b) -> a+b` which previously called
@@ -3704,11 +3727,21 @@ fn void AirLower.reg_clause_pat_params(AirLower* lr, AirDecl* dd, Node* pat)
             dd.add_param(wpb);
             return;
         }
-        default:
+        case Nk.N_PAT_IDENT:
         {
             char* pnm = node_text(pat, lr.it);
             if (pnm == null) pnm = (char*)"_";
             char* an = lr.scope.bind_var(pnm, pat);
+            AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, lr.mod.t_infer, AMULT_UNR);
+            dd.add_param(pb);
+            return;
+        }
+        default:
+        {
+            // Refutable patterns consume a positional argument but do not name
+            // it. Never turn literal/constructor text into an LLVM parameter
+            // name; dispatch support (or an explicit diagnostic) handles them.
+            char* an = lr.fresh_x();
             AirBinder* pb = air_ir::air_mk_binder(lr.arena, an, lr.mod.t_infer, AMULT_UNR);
             dd.add_param(pb);
             return;
@@ -3937,55 +3970,65 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
         {
             if (ccnt == 1 && d.param_count > 1)
             {
-                // Single-clause MULTI-ARG fn (e.g. `(a,b) -> a+b`): params
-                // are already registered in outer scope by reg_clause_pat_params.
-                //
-                // For simple expression-bodied fns (no BLOCK/stmt list), emit
-                // body directly without building a match (which would call
-                // lr.pat → lr.scope.enter() → shadow-rename a→a_1, leaving
-                // the body reading unbound 0). This covers the common
-                // "tuple-lambda arithmetic" shape (adders, mul64_hi, etc.).
-                //
-                // Multi-arg clause fns with a block/stmt body fall through to
-                // the legacy match path — their tuple-pattern matching is
-                // TODO.
+                // The parameters have already been registered from this clause.
+                // For an irrefutable tuple of binders/wildcards, a dispatch
+                // would be redundant and the current backend cannot destructure
+                // a runtime tuple. Lower the complete body directly, including
+                // statement/block bodies; reject refutable patterns instead of
+                // silently compiling them as unconditional code.
                 for (usz i = 0; i < n.child_count; i++)
                 {
                     Node* cl = n.children[i];
                     if (cl == null || cl.kind != Nk.N_CLAUSE) continue;
+                    usz arity = 0;
+                    bool irrefutable = true;
+                    bool has_guard = false;
                     Node* body_n = null;
-                    bool all_expr = true;
                     usz bcnt = 0;
                     for (usz j = 0; j < cl.child_count; j++)
                     {
                         Node* cp = cl.children[j];
                         if (cp == null) continue;
-                        if (pfront_core::is_pattern(cp.kind)) continue;
+                        if (cp.kind == Nk.N_GUARD) { has_guard = true; continue; }
+                        if (pfront_core::is_pattern(cp.kind))
+                        {
+                            if (!clause_bindings_arity(cp, &arity)) irrefutable = false;
+                            continue;
+                        }
                         bcnt++;
                         body_n = cp;
-                        if (!pfront_core::is_expr(cp.kind)) { all_expr = false; }
                     }
-                    if (bcnt == 1 && all_expr && body_n != null
-                        && pfront_core::is_expr(body_n.kind))
+                    bool supported_body = body_n != null
+                        && (pfront_core::is_expr(body_n.kind) || body_n.kind == Nk.N_BLOCK
+                            || body_n.kind == Nk.N_STMT_EXPR || body_n.kind == Nk.N_STMT_ASSIGN
+                            || body_n.kind == Nk.N_STMT_COMPOUND_ASSIGN || body_n.kind == Nk.N_STMT_RETURN
+                            || body_n.kind == Nk.N_STMT_BREAK || body_n.kind == Nk.N_STMT_CONTINUE
+                            || body_n.kind == Nk.N_STMT_DEFER);
+                    if (irrefutable && !has_guard && arity == d.param_count
+                        && bcnt == 1 && supported_body)
                     {
-                        body = lr.expr_to_cns(body_n, lr.cns_k(ret));
+                        if (pfront_core::is_expr(body_n.kind))
+                        {
+                            body = lr.expr_to_cns(body_n, lr.cns_k(ret));
+                        }
+                        else
+                        {
+                            body = lr.cmd(body_n, ret);
+                        }
                     }
-                    // else: fall through to legacy multi-clause match path
-                    // (which will produce a 1-arg scrutinee match on param0
-                    // and UB-prune the body since params>1 — conservatively
-                    // safe but returns 0 for complex multi-arg clause fns
-                    // until proper tuple-match is implemented).
+                    else
+                    {
+                        body = lr.poison_cmd(lr.dup("multi-parameter clause requires tuple pattern matching; only an unguarded tuple of binders/wildcards is supported by this backend"));
+                    }
                     break;
                 }
             }
             if (body == null && d.param_count > 1)
             {
-                // Fail closed: the legacy single-scrutinee match below is only
-                // valid for 0/1 parameters; for multi-parameter clause
-                // functions whose clause bodies are statements (not a single
-                // expression) it used to UB-prune the body and silently return
-                // 0. Tuple-match lowering is pending, so report instead.
-                body = lr.poison_cmd(lr.dup("multi-parameter clause function with a statement clause body is not supported yet (tuple-match lowering pending)"));
+                // Fail closed: the legacy match below has one scrutinee and
+                // cannot implement positional multi-argument clause dispatch.
+                // Never let it prune unmatched parameters into a dummy return.
+                body = lr.poison_cmd(lr.dup("multi-parameter clause dispatch requires tuple-pattern lowering; unsupported clause form"));
             }
             if (body == null)
             {
