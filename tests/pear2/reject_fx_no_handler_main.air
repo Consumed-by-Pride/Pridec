@@ -1,0 +1,10 @@
+// M10 reject: perform without any lexically enclosing handler.
+air 2.2 Main "reject_no_handler.pie";
+
+effect E {
+  op `op` : i64;
+};
+
+def main() : i64 =
+  mu~ %ret_2.
+    perform `E.op`(1 : i64) · comu _k1. <_k1 : i64 | %ret_2>;

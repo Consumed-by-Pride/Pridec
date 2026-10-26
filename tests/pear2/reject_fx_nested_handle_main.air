@@ -1,0 +1,19 @@
+// M10 reject: a nested `handle` inside a handler arm escapes the subset.
+air 2.2 Main "reject_nested_handle.pie";
+
+effect E {
+  op `op` : i64;
+};
+
+def main() : i64 =
+  mu~ %ret_2.
+    handle {
+      perform `E.op`(1 : i64) · comu _k1. <_k1 : i64 | %ret_2>
+    } {
+      ctor `E.op`(bind x, bind k) ->
+        handle {
+          nop
+        } {
+          ctor `E.op`(bind y, _) -> <y : i64 | %ret_2>;
+        };
+    };

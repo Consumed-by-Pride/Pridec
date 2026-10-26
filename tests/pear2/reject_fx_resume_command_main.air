@@ -1,0 +1,14 @@
+// M10 reject: the `resume` command itself is outside the one-shot subset.
+air 2.2 Main "reject_resume_command.pie";
+
+effect E {
+  op `op` : i64;
+};
+
+def main() : i64 =
+  mu~ %ret_2.
+    handle {
+      perform `E.op`(1 : i64) · comu _k1. <_k1 : i64 | %ret_2>
+    } {
+      ctor `E.op`(bind x, _) -> resume(x);
+    };

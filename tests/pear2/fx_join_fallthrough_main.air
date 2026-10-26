@@ -1,0 +1,19 @@
+// PEAR 2 M10: a handled computation that completes normally joins the
+// post-handler continuation; the (never performed) arm stays a dead
+// well-formed block. Returns 7.
+air 2.2 Main "fx_join.pie";
+
+effect Console {
+  op `emit` : i64;
+};
+
+def main() : i64 =
+  mu~ %ret_2.
+    seq {
+      handle {
+        nop
+      } {
+        ctor `Console.emit`(bind c, bind k) -> <(add c 2 : i64) | %ret_2>;
+      };
+      <7 : i64 | %ret_2>
+    };

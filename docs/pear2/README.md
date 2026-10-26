@@ -65,3 +65,18 @@ overflow rejection). `closure_*` fixtures exercise M8 first-class closures:
 scalar capture, multi-variable capture, nested closure invocation through the
 `{ code, env }` fat-pointer ABI, and positioned fail-closed rejections for
 loop-body creation and capturing label-carried bindings.
+
+## M10: target profiles and escape-only effects
+
+- `--target=x86_64` (default) / `--target=wasm32-freestanding` select the
+  emitted module's datalayout/triple and the `isz`/`usz`/pointer widths.
+- `fastcc`, `attr callconv`, `attr export`, `attr section`, and the
+  optimization hint attributes (`noinline`, `alwaysinline`, `cold`, `naked`)
+  are preserved on definitions and their call sites; unsupported combinations
+  are positioned errors, never silent drops.
+- One-shot (escape-only) effect handlers lower to payload slots plus
+  branch-to-arm control flow; anything resuming or multi-shot, handler-less
+  performs, and all effect forms under wasm32-freestanding reject with
+  file:line:col diagnostics. Fixtures: `fx_escape_main.air`,
+  `fx_join_fallthrough_main.air`, `abi_callconv_export_main.air`,
+  `target_profile_main.air`, and `reject_{fx,abi,wasm32}_*_main.air`.

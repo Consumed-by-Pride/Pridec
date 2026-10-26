@@ -115,3 +115,33 @@ straight-line subset, aggregate captures/params/results, and >16 captures.
 Fixtures: `closure_scalar_capture_main`, `closure_multi_capture_main`,
 `closure_nested_main`, `reject_closure_loop_body_main`,
 `reject_closure_carried_capture_main`.
+
+## Target profiles and effect lowering (M10)
+
+`pear2c` accepts `--target=x86_64` (default) or `--target=wasm32-freestanding`.
+The profile is stamped onto the emitted module as `target datalayout` +
+`target triple`, and the pointer representation, `isz`, and `usz` follow the
+profile's pointer width (i64/8-byte under x86_64, i32/4-byte under
+wasm32-freestanding). Integer literal inference stays at the function's
+default width on both profiles; only explicit `isz`/`usz` annotations track
+the target. The freestanding profile emits `--emit-ll`/`--emit-bc` output only
+— executable mode exits 2 with guidance to link with a wasm toolchain.
+
+Definition/declaration ABI markers survive emission deterministically:
+`fastcc` (keyword or `attr callconv "fastcc"`) appears on both the `define`
+line and every direct call site; `attr export "symbol"` renames the emitted
+symbol everywhere it is referenced; `attr noinline|alwaysinline|cold|naked`
+and `attr section "name"` are carried onto the definition. Unknown attributes
+or calling conventions, an export/cc marker on `main`, or a first-class use of
+a non-default-cc function are positioned hard errors (exit 3) rather than
+silently dropped markers.
+
+Algebraic effects lower in the one-shot escape subset only: `handle` emits
+its body inline and one arm block per operation; a `perform` stores the
+payload into a handler-owned slot (allocated at the handler entry so it
+dominates every use) and branches to the arm. Arms that resume, reference
+`%resume`, nest handlers, guard their patterns, bind payloads on unit-typed
+operations, use their continuation binder, or rely on `infer` operation types
+all fail closed with file:line:col diagnostics, as does a `perform` with no
+enclosing handler. Effect constructs are rejected outright under the
+freestanding wasm32 profile (no host stack/continuation runtime).

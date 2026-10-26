@@ -851,3 +851,91 @@ m8_reject reject_closure_loop_body tests/pear2/reject_closure_loop_body_main.air
 echo "PASS: M8 closure creation inside a loop body rejects with source position"
 m8_reject reject_closure_carried_capture tests/pear2/reject_closure_carried_capture_main.air 'closure captures a label-captured (phi-promoted) binding'
 echo "PASS: M8 carried-binding capture rejects with source position"
+
+# --- M10: target profiles, ABI attributes, escape-only effects -------------
+# Target profiles: --target stamps the module datalayout/triple and sizes
+# isz/usz by the pointer width (i64 on x86_64, i32 on wasm32-freestanding).
+# ABI: fastcc/attr markers on definitions survive into define/call lines and
+# `export` renames the symbol. Effects: one-shot escape handlers lower to
+# payload slots + arm blocks; resuming/multi-shot shapes reject positioned.
+m10_expect() {
+    local fixture=$1 expected_rc=$2
+    local name level rc
+    name=$(basename "$fixture" .air)
+    rm -f "$W/$name.air" "$W/$name" "$W/$name.bc" "$W/$name.ll"
+    cp "$fixture" "$W/$name.air"
+    for level in 0 1 2 3; do
+        "$PEAR2_BIN" "$W/$name.air" --emit-ll -O$level --quiet || { echo "FAIL: $name rejected at -O$level"; exit 1; }
+        "$PEAR2_BIN" "$W/$name.air" --emit-bc -O$level --quiet || { echo "FAIL: $name -O$level bitcode rejected"; exit 1; }
+        "$PEAR2_CLANG" -Wno-override-module "$W/$name.bc" -o "$W/$name.O$level" >"$W/$name.O$level.link.log" 2>&1 || { echo "FAIL: clang link $name -O$level"; cat "$W/$name.O$level.link.log"; exit 1; }
+        set +e
+        timeout 5 "$W/$name.O$level" >/dev/null 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = "$expected_rc" ] || { echo "FAIL: $name at -O$level returned $rc, expected $expected_rc"; exit 1; }
+    done
+    echo "PASS: LLVM 23 linked/runs $name (exit=$expected_rc, -O0..-O3)"
+}
+m10_expect tests/pear2/fx_escape_main.air 42
+m10_expect tests/pear2/fx_join_fallthrough_main.air 7
+
+# Escape lowering shape: payload slot + arm block in emitted IR.
+cp tests/pear2/fx_escape_main.air "$W/fx_shape.air"
+"$PEAR2_BIN" "$W/fx_shape.air" --emit-ll -O0 --quiet || { echo "FAIL: fx shape probe rejected"; exit 1; }
+grep -q 'pear2.fx.arm\.' "$W/fx_shape.ll" || { echo "FAIL: fx shape probe emitted no handler arm block"; exit 1; }
+grep -q 'br label %pear2.fx.arm\.' "$W/fx_shape.ll" || { echo "FAIL: fx shape probe perform did not branch to an arm"; exit 1; }
+echo "PASS: escape-only effect lowers to payload slot + branch-to-arm blocks"
+
+# ABI attribute preservation: define+call carry fastcc, export renames the
+# symbol, noinline survives as a function attribute.
+m10_expect tests/pear2/abi_callconv_export_main.air 42
+name=abi_callconv_export_main
+"$PEAR2_BIN" "$W/$name.air" --emit-ll -O0 --quiet || { echo "FAIL: $name emit-ll rejected"; exit 1; }
+grep -q 'define fastcc i64 @pear2_fast_add(i64 %a0, i64 %a1) noinline' "$W/$name.ll" || { echo "FAIL: $name define line lost fastcc/export/noinline"; cat "$W/$name.ll"; exit 1; }
+grep -q 'call fastcc i64 @pear2_fast_add(' "$W/$name.ll" || { echo "FAIL: $name call site lost the fastcc marker"; exit 1; }
+echo "PASS: fastcc/export/noinline markers survive define and call lines"
+
+# Target profiles: the one fixture asserts i64 under x86_64 and i32 under
+# wasm32-freestanding; wasm emits IR/bitcode only.
+name=target_profile_main
+cp tests/pear2/target_profile_main.air "$W/$name.air"
+"$PEAR2_BIN" "$W/$name.air" --emit-ll -O1 --quiet || { echo "FAIL: $name default profile rejected"; exit 1; }
+grep -q 'target triple = "x86_64-unknown-linux-gnu"' "$W/$name.ll" || { echo "FAIL: $name default triple missing"; exit 1; }
+grep -q 'define i64 @widen(i64' "$W/$name.ll" || { echo "FAIL: $name usz not 64-bit on x86_64"; exit 1; }
+"$PEAR2_BIN" "$W/$name.air" --emit-ll -O1 --target=wasm32-freestanding --quiet || { echo "FAIL: $name wasm32 profile rejected"; exit 1; }
+grep -q 'target triple = "wasm32-unknown-unknown"' "$W/$name.ll" || { echo "FAIL: $name wasm32 triple missing"; exit 1; }
+grep -q 'define i32 @widen(i32' "$W/$name.ll" || { echo "FAIL: $name usz not pointer-sized (i32) on wasm32"; exit 1; }
+"$PEAR2_BIN" "$W/$name.air" --emit-bc -O1 --target=wasm32-freestanding --quiet || { echo "FAIL: $name wasm32 bitcode rejected"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/$name.air" --target=wasm32-freestanding --quiet >"$W/$name.exe.log" 2>&1
+rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: $name wasm32 executable mode returned $rc, expected 2"; exit 1; }
+grep -q 'wasm toolchain' "$W/$name.exe.log" || { echo "FAIL: $name wasm32 executable denial lacks guidance"; cat "$W/$name.exe.log"; exit 1; }
+echo "PASS: target profiles stamp datalayout/triple and size isz/usz per profile (wasm32 is IR/bitcode only)"
+
+m10_reject() {
+    local name=$1 src=$2 message=$3
+    shift 3
+    rm -f "$W/$name.air" "$W/$name" "$W/$name.bc" "$W/$name.ll"
+    cp "$src" "$W/$name.air"
+    set +e
+    "$PEAR2_BIN" "$W/$name.air" "$@" >"$W/$name.log" 2>&1
+    local rc=$?
+    set -e
+    [ "$rc" = 3 ] || { echo "FAIL: $name returned $rc, expected 3"; cat "$W/$name.log"; exit 1; }
+    grep -Eq "$name.air:[0-9]+:[0-9]+" "$W/$name.log" || { echo "FAIL: $name diagnostic lacks a source position"; cat "$W/$name.log"; exit 1; }
+    grep -q "$message" "$W/$name.log" || { echo "FAIL: $name diagnostic differs"; cat "$W/$name.log"; exit 1; }
+    [ ! -e "$W/$name" ] && [ ! -e "$W/$name.bc" ] && [ ! -e "$W/$name.ll" ] || { echo "FAIL: $name retained a stale artifact"; exit 1; }
+    echo "PASS: $name fails closed with a positioned diagnostic"
+}
+m10_reject reject_fx_multishot_binder tests/pear2/reject_fx_multishot_binder_main.air 'continuation binder'
+m10_reject reject_fx_no_handler tests/pear2/reject_fx_no_handler_main.air 'no enclosing handler'
+m10_reject reject_fx_nested_handle tests/pear2/reject_fx_nested_handle_main.air 'nested `handle` inside an effect handler arm'
+m10_reject reject_fx_resume_continuation tests/pear2/reject_fx_resume_continuation_main.air '%resume` continuation'
+m10_reject reject_fx_infer_payload tests/pear2/reject_fx_infer_payload_main.air 'instead of `infer`'
+m10_reject reject_fx_resume_command tests/pear2/reject_fx_resume_command_main.air '`resume` escapes the supported effect subset'
+m10_reject reject_abi_callconv tests/pear2/reject_abi_callconv_main.air 'unsupported calling convention'
+m10_reject reject_abi_main_export tests/pear2/reject_abi_main_export_main.air 'entry point `main` keeps the default calling convention'
+m10_reject reject_wasm32_effects tests/pear2/reject_wasm32_effects_main.air 'freestanding wasm32 target profile' --target=wasm32-freestanding --emit-ll
+echo "PASS: M10 rejects (multi-shot/resume/no-handler/nested-handler/infer-payload/bad-callconv/main-pinning/wasm32-effects) all fail closed with source positions"

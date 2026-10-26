@@ -86,6 +86,31 @@ const int M1PROV_PARAM = 5;
 struct M1String { char* data; usz len; char* name; char* symbol; bool terminate; }
 struct M1Provenance { char* value; char* allocation; AirTyp* pointee; int kind; int alignment; long extent; long offset; bool offset_known; bool freed; bool writable; }
 struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; }
+// M10 target profile: pointer width, triple and datalayout follow --target.
+// wasm32-freestanding narrows isz/usz and the pointer representation to 32
+// bits; the default x86_64 profile keeps the historical 64-bit layout so
+// emitted IR is byte-identical to earlier slices.
+usz g_m1_target_ptr_bits = 64;
+bool g_m1_target_freestanding = false;
+char* g_m1_target_triple = (char*)"x86_64-unknown-linux-gnu";
+char* g_m1_target_datalayout = (char*)"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
+fn int m1_target_ptr_bytes() { return (int)(g_m1_target_ptr_bits / 8); }
+fn bool m1_has_prefix(char* s, char* prefix)
+{
+    if (s == null || prefix == null) { return false; }
+    usz i = 0;
+    while (prefix[i] != 0)
+    {
+        if (s[i] != prefix[i]) { return false; }
+        i++;
+    }
+    return true;
+}
+// M10 escape-only effect frames: each lexically enclosing `handle` owns one
+// frame; a `perform` resolves its operation innermost-first. Resuming or
+// multi-shot arms are rejected with source positions before any emission.
+struct M1FxArm { char* op; char* label; char* slot; AirTyp* slot_ty; char* payload; AirCmd* body; bool has_slot; }
+struct M1FxFrame { M1FxArm[16] arms; usz arm_count; char* post; }
 struct M1Gen
 {
     AirArena* arena;
@@ -144,13 +169,15 @@ struct M1Gen
     M1Provenance[1024] provenance; int provenance_count;
     M1PointerCell[512] pointer_cells; int pointer_cell_count;
     bool low_profile; char* input_path; char* current_function;
+    M1FxFrame[8] fx_stack; usz fx_depth;
     int fail_line; int fail_col; int last_line; int last_col; char* fail_form;
     bool failed;
     char* error;
 }
 fn int m1_int_bits(AirTyp* t)
 {
-    if (t == null || t.tag == ATYP_INFER || t.tag == ATYP_I64 || t.tag == ATYP_U64 || t.tag == ATYP_ISZ || t.tag == ATYP_USZ) { return 64; }
+    if (t == null || t.tag == ATYP_INFER || t.tag == ATYP_I64 || t.tag == ATYP_U64) { return 64; }
+    if (t.tag == ATYP_ISZ || t.tag == ATYP_USZ) { return (int)g_m1_target_ptr_bits; }
     switch (t.tag)
     {
         case ATYP_I8: case ATYP_U8: return 8;
@@ -198,7 +225,7 @@ fn bool m1_supported_memory_width(int bytes)
 fn int m1_memory_bytes(AirTyp* t)
 {
     if (m1_bool_type(t)) { return 1; }
-    if (m1_pointer_repr_type(t)) { return 8; }
+    if (m1_pointer_repr_type(t)) { return m1_target_ptr_bytes(); }
     if (m1_float_type(t)) { return t.tag == ATYP_F32 ? 4 : 8; }
     if (m1_known_type(t) && m1_integer_type(t)) { int bits = m1_int_bits(t); return bits >= 8 && bits <= 64 ? bits / 8 : 0; }
     if (t != null && t.tag == ATYP_ARRAY && t.arg_count == 1 && t.ival > 0 && t.ival <= 1024)
@@ -215,7 +242,7 @@ fn int m1_value_size(AirTyp* t, int depth)
     if (t == null || depth >= 16) { return -1; }
     if (t.tag == ATYP_UNIT) { return 0; }
     if (m1_bool_type(t)) { return 1; }
-    if (m1_pointer_repr_type(t)) { return 8; }
+    if (m1_pointer_repr_type(t)) { return m1_target_ptr_bytes(); }
     if (m1_float_type(t)) { return t.tag == ATYP_F32 ? 4 : 8; }
     if (m1_known_type(t) && m1_integer_type(t))
     {
@@ -613,7 +640,7 @@ fn bool m1_function_signature(AirDecl* d)
     if (d.tag == ADECL_DEF)
     {
         if (d.ret_ty != null && d.ret_ty.tag != ATYP_INFER && !m1_return_type(d.ret_ty)) { return false; }
-        if (d.is_extern || d.is_fastcc || d.is_varargs || d.extern_link != null || d.def_body == null) { return false; }
+        if (d.is_extern || d.is_varargs || d.extern_link != null || d.def_body == null) { return false; }
         for (usz i = 0; i < d.param_count; i++)
         {
             if (d.params[i] == null || (d.params[i].ty != null && d.params[i].ty.tag != ATYP_INFER && !m1_value_type(d.params[i].ty, 0))) { return false; }
@@ -627,13 +654,108 @@ fn bool m1_function_signature(AirDecl* d)
         if (d.params[i] == null || (!m1_scalar_type(d.params[i].ty) &&
             (d.params[i].ty == null || (d.params[i].ty.tag != ATYP_TUPLE && d.params[i].ty.tag != ATYP_NOMINAL)))) { return false; }
     }
-    return d.is_extern && d.def_body == null && !d.is_fastcc && !d.is_varargs && d.attr_count == 0 &&
+    return d.is_extern && d.def_body == null && !d.is_varargs && m1_decl_callconv(d) >= 0 && m1_extern_attrs_ok(d) &&
            (d.extern_link == null || m1_safe_name(d.extern_link));
 }
+// M10 calling conventions: 0 = default (ccc), 1 = fastcc;
+// -1 = conflicting markers, -2 = unsupported value or value-less attribute.
+fn int m1_decl_callconv(AirDecl* d)
+{
+    if (d == null) { return 0; }
+    int cc = d.is_fastcc ? 1 : 0;
+    bool cc_seen = d.is_fastcc;
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        if (!same(d.attr_name[i], "callconv")) { continue; }
+        if (d.attr_str[i] == null || d.attr_has_int[i]) { return -2; }
+        int acc = -2;
+        if (same(d.attr_str[i], "cdecl") || same(d.attr_str[i], "c")) { acc = 0; }
+        if (same(d.attr_str[i], "fastcc")) { acc = 1; }
+        if (acc < 0) { return -2; }
+        if (cc_seen && acc != cc) { return -1; }
+        cc = acc; cc_seen = true;
+    }
+    return cc;
+}
+fn char* m1_decl_attr_string(AirDecl* d, char* name)
+{
+    if (d == null || name == null) { return null; }
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        if (same(d.attr_name[i], name) && d.attr_str[i] != null && !d.attr_has_int[i]) { return d.attr_str[i]; }
+    }
+    return null;
+}
+fn bool m1_decl_flag(AirDecl* d, char* name)
+{
+    if (d == null || name == null) { return false; }
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        if (same(d.attr_name[i], name) && d.attr_str[i] == null && !d.attr_has_int[i]) { return true; }
+    }
+    return false;
+}
+fn bool m1_section_name_ok(char* s)
+{
+    if (s == null || s[0] == 0) { return false; }
+    usz n = 0;
+    while (s[n] != 0)
+    {
+        char ch = s[n];
+        bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+                  ch == '.' || ch == '_' || ch == '-';
+        if (!ok) { return false; }
+        n++;
+        if (n >= 64) { return false; }
+    }
+    return true;
+}
+// Function-attribute policy for definitions: unknown attributes are rejected
+// (positioned, at the module gate) instead of being silently dropped.
+fn char* m1_def_attr_problem(AirDecl* d)
+{
+    if (d == null) { return null; }
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        char* nm = d.attr_name[i];
+        if (nm == null) { return (char*)"malformed function attribute"; }
+        if (same(nm, "callconv")) { continue; }
+        if (same(nm, "noinline") || same(nm, "alwaysinline") || same(nm, "cold") || same(nm, "naked"))
+        {
+            if (d.attr_str[i] != null || d.attr_has_int[i]) { return (char*)"function attributes `noinline`, `alwaysinline`, `cold` and `naked` take no value"; }
+            continue;
+        }
+        if (same(nm, "section"))
+        {
+            if (d.attr_str[i] == null || d.attr_has_int[i] || !m1_section_name_ok(d.attr_str[i])) { return (char*)"function attribute `section` requires a section-name string (letters, digits, `.`, `_`, `-`)"; }
+            continue;
+        }
+        if (same(nm, "export"))
+        {
+            if (d.attr_str[i] == null || d.attr_has_int[i] || !m1_safe_name(d.attr_str[i])) { return (char*)"function attribute `export` requires a symbol-safe string name"; }
+            continue;
+        }
+        return (char*)"unsupported function attribute (supported: callconv, noinline, alwaysinline, cold, naked, section, export)";
+    }
+    return null;
+}
+fn bool m1_extern_attrs_ok(AirDecl* d)
+{
+    if (d == null) { return false; }
+    for (usz i = 0; i < d.attr_count; i++)
+    {
+        if (!same(d.attr_name[i], "callconv")) { return false; }
+    }
+    return true;
+}
+// M10: an exported definition renames its symbol; every definitional and
+// referential site flows through m1_link_name so the rename is deterministic.
 fn char* m1_link_name(AirDecl* d)
 {
     if (d == null) { return null; }
-    return d.extern_link == null ? d.name : d.extern_link;
+    if (d.extern_link != null) { return d.extern_link; }
+    char* ex = m1_decl_attr_string(d, "export");
+    return ex == null ? d.name : ex;
 }
 fn AirDecl* M1Gen.find_global(M1Gen* g, char* name)
 {
@@ -717,11 +839,12 @@ fn int M1Gen.type_alignment(M1Gen* g, AirTyp* t, int depth)
 {
     if (t == null || depth >= 16) { return 0; }
     if (t.tag == ATYP_UNIT) { return 1; }
-    if (t.tag == ATYP_PTR || t.tag == ATYP_ARROW) { return 8; }
+    if (t.tag == ATYP_PTR || t.tag == ATYP_ARROW) { return m1_target_ptr_bytes(); }
     if (t.tag == ATYP_BOOL || t.tag == ATYP_I8 || t.tag == ATYP_U8) { return 1; }
     if (t.tag == ATYP_I16 || t.tag == ATYP_U16) { return 2; }
     if (t.tag == ATYP_I32 || t.tag == ATYP_U32 || t.tag == ATYP_F32 || t.tag == ATYP_CHAR) { return 4; }
-    if (t.tag == ATYP_I64 || t.tag == ATYP_U64 || t.tag == ATYP_ISZ || t.tag == ATYP_USZ || t.tag == ATYP_F64) { return 8; }
+    if (t.tag == ATYP_ISZ || t.tag == ATYP_USZ) { return m1_target_ptr_bytes(); }
+    if (t.tag == ATYP_I64 || t.tag == ATYP_U64 || t.tag == ATYP_F64) { return 8; }
     if (t.tag == ATYP_I128 || t.tag == ATYP_U128) { return 16; }
     if (t.tag == ATYP_ARRAY && t.arg_count == 1) { return g.type_alignment(t.args[0], depth + 1); }
     if (t.tag == ATYP_TUPLE)
@@ -764,7 +887,8 @@ fn long M1Gen.type_size(M1Gen* g, AirTyp* t, int depth)
     if (t.tag == ATYP_BOOL || t.tag == ATYP_I8 || t.tag == ATYP_U8) { return 1; }
     if (t.tag == ATYP_I16 || t.tag == ATYP_U16) { return 2; }
     if (t.tag == ATYP_I32 || t.tag == ATYP_U32 || t.tag == ATYP_F32 || t.tag == ATYP_CHAR) { return 4; }
-    if (t.tag == ATYP_I64 || t.tag == ATYP_U64 || t.tag == ATYP_ISZ || t.tag == ATYP_USZ || t.tag == ATYP_F64 || t.tag == ATYP_PTR || t.tag == ATYP_ARROW) { return 8; }
+    if (t.tag == ATYP_I64 || t.tag == ATYP_U64 || t.tag == ATYP_F64) { return 8; }
+    if (t.tag == ATYP_ISZ || t.tag == ATYP_USZ || t.tag == ATYP_PTR || t.tag == ATYP_ARROW) { return m1_target_ptr_bytes(); }
     if (t.tag == ATYP_I128 || t.tag == ATYP_U128) { return 16; }
     if (t.tag == ATYP_ARRAY && t.arg_count == 1 && t.ival >= 0 && t.ival <= 1024)
     {
@@ -2691,6 +2815,11 @@ fn char* M1Gen.pointer_value(M1Gen* g, AirPrd* p)
         {
             g.note_failure(p.source_line, p.source_col, (char*)"function value does not match its declared function signature"); return null;
         }
+        if (m1_decl_callconv(target) != 0)
+        {
+            g.note_failure(p.source_line, p.source_col, "a function with a non-default calling convention cannot be used as a first-class value (closures and indirect calls use the default convention)");
+            return null;
+        }
         char[512] symbol;
         int n = snprintf(&symbol[0], 512, (char*)"@%s", m1_link_name(target));
         if (n < 0 || n >= 512) { g.failed = true; return null; }
@@ -3353,13 +3482,14 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
     char* call_result_type = sret_result ? (char*)"void" : g.llvm_abi_return_text(target_return);
     if (call_result_type == null) {
  return false; }
-    if (result_unit || sret_result) { fprintf(g.out, "  call void "); }
+    char* call_cc_text = direct && target != null && m1_decl_callconv(target) == 1 ? "fastcc " : "";
+    if (result_unit || sret_result) { fprintf(g.out, "  call %svoid ", call_cc_text); }
     else
     {
         dst = g.tmp();
         if (dst == null) {
  return false; }
-        fprintf(g.out, "  %s = call %s ", dst, call_result_type);
+        fprintf(g.out, "  %s = call %s%s ", dst, call_cc_text, call_result_type);
     }
     if (direct) { fprintf(g.out, "@%s(", m1_link_name(target)); }
     else { fprintf(g.out, "%s(", indirect_value); }
@@ -3766,7 +3896,8 @@ fn bool M1Gen.emit_extern_declarations(M1Gen* g)
         char* return_ir = sret_result ? (char*)"void" : g.llvm_abi_return_text(d.ret_ty);
         if (return_ir == null) {
  return false; }
-        fprintf(g.out, "declare %s @%s(", return_ir, m1_link_name(d));
+        int ext_cc = m1_decl_callconv(d);
+        fprintf(g.out, "declare %s%s @%s(", ext_cc == 1 ? "fastcc " : "", return_ir, m1_link_name(d));
         bool have_param = false;
         if (sret_result)
         {
@@ -4986,6 +5117,419 @@ fn bool M1Gen.emit_loop_phi(M1Gen* g, char* phi, AirTyp* ty, char* entry_value, 
 }
 // Command slice: return expressions, bindings, direct calls, guarded scalar
 // matches, structured while loops, terminal if/else, and label/jump CFG.
+// ---- M10 escape-only effect lowering helpers ----
+// Backquote-quoted AIR names (`Eff.op`) normalize to their bare form.
+fn char* m1_fx_norm(char* s, char* buf, usz cap)
+{
+    if (s == null || buf == null || cap < 2) { return null; }
+    usz n = 0;
+    while (s[n] != 0 && n + 1 < cap) { buf[n] = s[n]; n++; }
+    if (n >= 2 && (int)buf[0] == 96 && (int)buf[n - 1] == 96) { buf[n - 1] = 0; return buf + 1; }
+    buf[n] = 0;
+    return buf;
+}
+// Resolve `Eff.op` (or bare `op`) to a declared effect operation.
+fn AirDecl* m1_find_effect_op(AirDecl** decls, usz count, char* qname, AirEffectOp** found_op)
+{
+    if (found_op != null) { *found_op = null; }
+    if (qname == null || qname[0] == 0) { return null; }
+    int dot = -1;
+    for (usz i = 0; qname[i] != 0; i++) { if (qname[i] == '.') { dot = (int)i; } }
+    for (usz i = 0; i < count; i++)
+    {
+        AirDecl* e = decls[i];
+        if (e == null || e.tag != ADECL_EFFECT || e.name == null) { continue; }
+        for (usz j = 0; j < e.op_count && j < 16; j++)
+        {
+            AirEffectOp* o = e.ops[j];
+            if (o == null || o.name == null) { continue; }
+            if (dot >= 0)
+            {
+                usz plen = 0;
+                while (e.name[plen] != 0) { plen++; }
+                if (plen != (usz)dot) { continue; }
+                bool prefix_ok = true;
+                for (usz cix = 0; cix < plen; cix++) { if (e.name[cix] != qname[cix]) { prefix_ok = false; break; } }
+                if (!prefix_ok || !same(o.name, qname + dot + 1)) { continue; }
+            }
+            else if (!same(o.name, qname)) { continue; }
+            if (found_op != null) { *found_op = o; }
+            return e;
+        }
+    }
+    return null;
+}
+// Handler-arm soundness scan: 0 ok, 1 nested `handle` (escapes the subset),
+// 2 `resume` command, 3 `%resume` continuation reference.
+fn int m1_fx_prd_problem(AirPrd* p, int depth)
+{
+    if (p == null) { return 0; }
+    if (depth > 48) { return 1; }
+    int pp = 0;
+    if (p.body != null) { pp = m1_fx_cmd_problem(p.body, depth + 1); if (pp != 0) { return pp; } }
+    if (p.subs != null)
+    {
+        for (usz i = 0; i < p.sub_count; i++)
+        {
+            pp = m1_fx_prd_problem(p.subs[i], depth + 1);
+            if (pp != 0) { return pp; }
+        }
+    }
+    if (p.rec_inits != null)
+    {
+        for (usz i = 0; i < p.rec_init_count; i++)
+        {
+            if (p.rec_inits[i] == null) { continue; }
+            pp = m1_fx_prd_problem(p.rec_inits[i].value, depth + 1);
+            if (pp != 0) { return pp; }
+        }
+    }
+    return 0;
+}
+fn int m1_fx_cmd_problem(AirCmd* c, int depth)
+{
+    if (c == null) { return 0; }
+    if (depth > 48) { return 1; }
+    if (c.tag == ACMD_HANDLE) { return 1; }
+    if (c.tag == ACMD_RESUME) { return 2; }
+    AirCns* k = c.cns;
+    while (k != null)
+    {
+        if (k.name != null && same(k.name, "%resume")) { return 3; }
+        int kp = m1_fx_prd_problem(k.prd, depth + 1);
+        if (kp != 0) { return kp; }
+        k = k.tail;
+    }
+    int pp = m1_fx_prd_problem(c.prd, depth + 1);
+    if (pp != 0) { return pp; }
+    for (usz i = 0; i < c.prd_count && i < 64; i++)
+    {
+        pp = m1_fx_prd_problem(c.prds[i], depth + 1);
+        if (pp != 0) { return pp; }
+    }
+    for (usz i = 0; i < c.branch_count && i < 64; i++)
+    {
+        if (c.branches[i] == null) { continue; }
+        pp = m1_fx_cmd_problem(c.branches[i].guard, depth + 1);
+        if (pp != 0) { return pp; }
+        pp = m1_fx_cmd_problem(c.branches[i].body, depth + 1);
+        if (pp != 0) { return pp; }
+    }
+    pp = m1_fx_cmd_problem(c.body, depth + 1);
+    if (pp != 0) { return pp; }
+    pp = m1_fx_cmd_problem(c.next, depth + 1);
+    if (pp != 0) { return pp; }
+    pp = m1_fx_cmd_problem(c.then_c, depth + 1);
+    if (pp != 0) { return pp; }
+    return m1_fx_cmd_problem(c.else_c, depth + 1);
+}
+// Conservative continuation-binder usage scan; deep trees assume a use.
+fn bool m1_prd_uses_name(AirPrd* p, char* name, int depth)
+{
+    if (p == null || name == null) { return false; }
+    if (depth > 48) { return true; }
+    if (p.tag == APRD_VAR && p.name != null && same(p.name, name)) { return true; }
+    if (m1_cmd_uses_name(p.body, name, depth + 1)) { return true; }
+    if (p.subs != null)
+    {
+        for (usz i = 0; i < p.sub_count; i++) { if (m1_prd_uses_name(p.subs[i], name, depth + 1)) { return true; } }
+    }
+    if (p.rec_inits != null)
+    {
+        for (usz i = 0; i < p.rec_init_count; i++)
+        {
+            if (p.rec_inits[i] == null) { continue; }
+            if (m1_prd_uses_name(p.rec_inits[i].value, name, depth + 1)) { return true; }
+        }
+    }
+    return false;
+}
+fn bool m1_cmd_uses_name(AirCmd* c, char* name, int depth)
+{
+    if (c == null || name == null) { return false; }
+    if (depth > 48) { return true; }
+    AirCns* k = c.cns;
+    while (k != null)
+    {
+        if (m1_prd_uses_name(k.prd, name, 0)) { return true; }
+        k = k.tail;
+    }
+    if (m1_prd_uses_name(c.prd, name, 0)) { return true; }
+    for (usz i = 0; i < c.prd_count && i < 64; i++) { if (m1_prd_uses_name(c.prds[i], name, 0)) { return true; } }
+    for (usz i = 0; i < c.jump_arg_count && i < 16; i++) { if (c.jump_args[i] != null && same(c.jump_args[i], name)) { return true; } }
+    for (usz i = 0; i < c.branch_count && i < 64; i++)
+    {
+        if (c.branches[i] == null) { continue; }
+        if (m1_cmd_uses_name(c.branches[i].guard, name, depth + 1)) { return true; }
+        if (m1_cmd_uses_name(c.branches[i].body, name, depth + 1)) { return true; }
+    }
+    if (m1_cmd_uses_name(c.body, name, depth + 1)) { return true; }
+    if (m1_cmd_uses_name(c.next, name, depth + 1)) { return true; }
+    if (m1_cmd_uses_name(c.then_c, name, depth + 1)) { return true; }
+    return m1_cmd_uses_name(c.else_c, name, depth + 1);
+}
+
+// A `handle` emits its body inline; each arm becomes a block that a matching
+// `perform` branches to after storing the payload into a shared slot. Arms
+// that resume, reference `%resume`, nest handlers, guard their patterns, bind
+// a payload for a unit-typed operation, or use their continuation binder fail
+// closed with a source position. The handled computation's own continuation
+// is untouched; the post-handle block joins arm (and fall-through) outcomes.
+fn bool M1Gen.effect_handle(M1Gen* g, AirCmd* c, char* ret_name)
+{
+    if (g_m1_target_freestanding)
+    {
+        g.note_failure(c.source_line, c.source_col, "effect handlers are not lowerable under the freestanding wasm32 target profile (no host stack/continuation runtime)");
+        return false;
+    }
+    if (c.handled == null || c.branch_count == 0) { return false; }
+    if (g.fx_depth >= 8)
+    {
+        g.note_failure(c.source_line, c.source_col, "effect handlers nested deeper than the supported maximum of 8");
+        return false;
+    }
+    if (c.branch_count > 16)
+    {
+        g.note_failure(c.source_line, c.source_col, "effect handler covers more operations than supported (max 16)");
+        return false;
+    }
+    M1FxFrame* fr = &g.fx_stack[g.fx_depth];
+    fr.arm_count = 0;
+    fr.post = g.label("fx.post.");
+    if (fr.post == null) { return false; }
+    for (usz i = 0; i < c.branch_count; i++)
+    {
+        AirBranch* br = c.branches[i];
+        if (br == null || br.guard != null || br.body == null || br.pat == null ||
+            br.pat.tag != APAT_VARIANT || br.pat.name == null || br.pat.sub_count < 1 || br.pat.sub_count > 2)
+        {
+            g.note_failure(c.source_line, c.source_col, "effect handler arm must be a plain `Effect.op(payload[, k])` operation pattern without a guard");
+            return false;
+        }
+        char[256] opbuf;
+        char* opn = m1_fx_norm(br.pat.name, &opbuf[0], 256);
+        AirEffectOp* op = null;
+        if (m1_find_effect_op(g.decls, g.decl_count, opn, &op) == null || op == null)
+        {
+            g.note_failure(br.body.source_line, br.body.source_col, "effect handler arm does not name a declared effect operation");
+            return false;
+        }
+        char* payload_name = null;
+        char* kont_name = null;
+        bool binders_ok = true;
+        for (usz b = 0; b < br.pat.sub_count; b++)
+        {
+            AirPat* sp = br.pat.sub[b];
+            if (sp == null || (sp.tag != APAT_BIND && sp.tag != APAT_WILD)) { binders_ok = false; break; }
+            if (sp.tag == APAT_BIND && sp.name != null)
+            {
+                if (b == 0) { payload_name = sp.name; }
+                else { kont_name = sp.name; }
+            }
+        }
+        if (!binders_ok)
+        {
+            g.note_failure(c.source_line, c.source_col, "effect handler arm binders must be `bind name` or wildcard `_` patterns");
+            return false;
+        }
+        AirTyp* slot_ty = op.op_ty;
+        if (slot_ty == null || slot_ty.tag == ATYP_INFER || !m1_backend_type(slot_ty, g.decls, g.decl_count, 0))
+        {
+            g.note_failure(c.source_line, c.source_col, "effect operation payload type is not backend-lowerable; declare an explicit scalar/pointer type instead of `infer`");
+            return false;
+        }
+        bool unit_payload = m1_unit_type(slot_ty);
+        if (unit_payload && payload_name != null)
+        {
+            g.note_failure(c.source_line, c.source_col, "effect operation declares no payload but the handler arm binds one");
+            return false;
+        }
+        for (usz e = 0; e < fr.arm_count; e++)
+        {
+            char[256] ebuf;
+            char* en = m1_fx_norm(fr.arms[e].op, &ebuf[0], 256);
+            if (en != null && opn != null && same(en, opn))
+            {
+                g.note_failure(c.source_line, c.source_col, "duplicate effect operation arm in the same handler");
+                return false;
+            }
+        }
+        int prob = m1_fx_cmd_problem(br.body, 0);
+        if (prob == 1)
+        {
+            g.note_failure(br.body.source_line, br.body.source_col, "a nested `handle` inside an effect handler arm is not lowerable");
+            return false;
+        }
+        if (prob == 2)
+        {
+            g.note_failure(br.body.source_line, br.body.source_col, "`resume` escapes the supported effect subset: only one-shot, non-resuming handlers are lowerable");
+            return false;
+        }
+        if (prob == 3)
+        {
+            g.note_failure(br.body.source_line, br.body.source_col, "handler arm references the `%resume` continuation; resuming handlers are not lowerable");
+            return false;
+        }
+        if (kont_name != null && m1_cmd_uses_name(br.body, kont_name, 0))
+        {
+            g.note_failure(br.body.source_line, br.body.source_col, "handler arm uses its continuation binder; resuming or multi-shot continuations are not lowerable");
+            return false;
+        }
+        M1FxArm* arm = &fr.arms[fr.arm_count];
+        arm.op = null;
+        if (opn != null)
+        {
+            usz on = 0;
+            while (opn[on] != 0) { on++; }
+            arm.op = g.arena.dup(opn, on);
+        }
+        arm.label = g.label("fx.arm.");
+        if (arm.op == null || arm.label == null) { return false; }
+        arm.body = br.body;
+        arm.payload = payload_name;
+        arm.slot_ty = slot_ty;
+        arm.has_slot = !unit_payload;
+        arm.slot = null;
+        fr.arm_count++;
+    }
+    // Payload slots are allocated at the handler's entry point so they
+    // dominate every perform store and every arm block load.
+    for (usz i = 0; i < fr.arm_count; i++)
+    {
+        if (!fr.arms[i].has_slot) { continue; }
+        char* slot = g.tmp();
+        char* ty = g.llvm_type_text(fr.arms[i].slot_ty);
+        int align = g.type_alignment(fr.arms[i].slot_ty, 0);
+        if (slot == null || ty == null || align <= 0) { return false; }
+        fr.arms[i].slot = slot;
+        fprintf(g.out, "  %s = alloca %s, align %d\n", slot, ty, align);
+    }
+    usz saved_env = g.env_count;
+    g.fx_depth++;
+    bool body_ok = g.command(c.handled, ret_name);
+    g.fx_depth--;
+    g.env_count = saved_env;
+    if (!body_ok) { return false; }
+    bool body_fell = !g.terminated;
+    if (body_fell)
+    {
+        fprintf(g.out, "  br label %%%s\n", fr.post);
+        g.terminated = true;
+    }
+    bool any_arm_fell = false;
+    for (usz i = 0; i < fr.arm_count; i++)
+    {
+        M1FxArm* arm = &fr.arms[i];
+        g.begin_block(arm.label);
+        g.terminated = false;
+        usz arm_env = g.env_count;
+        if (arm.payload != null)
+        {
+            char* ty = g.llvm_type_text(arm.slot_ty);
+            int align = g.type_alignment(arm.slot_ty, 0);
+            char* ld = g.tmp();
+            if (ty == null || align <= 0 || ld == null || arm.slot == null) { return false; }
+            fprintf(g.out, "  %s = load %s, ptr %s, align %d\n", ld, ty, arm.slot, align);
+            bool pb = m1_bool_type(arm.slot_ty);
+            bool ppayload = !pb && m1_pointer_repr_type(arm.slot_ty);
+            if (!g.bind_typed(arm.payload, ld, pb, ppayload, arm.slot_ty)) { return false; }
+        }
+        bool arm_ok = g.command(arm.body, ret_name);
+        g.env_count = arm_env;
+        if (!arm_ok) { return false; }
+        if (!g.terminated)
+        {
+            any_arm_fell = true;
+            fprintf(g.out, "  br label %%%s\n", fr.post);
+            g.terminated = true;
+        }
+    }
+    // The post-handle block exists only when some path actually reaches it;
+    // an all-terminal handler would otherwise leave a terminator-less block.
+    if (body_fell || any_arm_fell)
+    {
+        g.begin_block(fr.post);
+        g.terminated = false;
+    }
+    else { g.terminated = true; }
+    return true;
+}
+fn bool M1Gen.effect_perform(M1Gen* g, AirCmd* c)
+{
+    if (g_m1_target_freestanding)
+    {
+        g.note_failure(c.source_line, c.source_col, "effect operations are not lowerable under the freestanding wasm32 target profile");
+        return false;
+    }
+    char[256] nbuf;
+    char* opn = m1_fx_norm(c.eff_op, &nbuf[0], 256);
+    M1FxArm* arm = null;
+    for (usz d = g.fx_depth; d > 0 && arm == null; d--)
+    {
+        M1FxFrame* fr = &g.fx_stack[d - 1];
+        for (usz i = 0; i < fr.arm_count; i++)
+        {
+            char[256] abuf;
+            char* an = m1_fx_norm(fr.arms[i].op, &abuf[0], 256);
+            if (an != null && opn != null && same(an, opn)) { arm = &fr.arms[i]; break; }
+        }
+    }
+    if (arm == null)
+    {
+        char[384] mb;
+        int mn = snprintf(&mb[0], 384, "perform of effect op `%s` has no enclosing handler in this scope", opn == null ? (char*)"?" : opn);
+        if (mn > 0 && mn < 384) { g.note_failure(c.source_line, c.source_col, g.arena.dup(&mb[0], (usz)mn)); }
+        return false;
+    }
+    if (arm.has_slot)
+    {
+        if (c.prd == null || c.prd.tag == APRD_UNIT)
+        {
+            g.note_failure(c.source_line, c.source_col, "effect operation expects a payload but the perform passes unit");
+            return false;
+        }
+        bool is_bool = m1_bool_type(arm.slot_ty);
+        bool is_ptr = !is_bool && m1_pointer_repr_type(arm.slot_ty);
+        AirTyp* vt = g.expr_type(c.prd);
+        bool type_ok = vt != null && (m1_value_type_compatible(arm.slot_ty, vt, 0) ||
+            (!is_bool && m1_integer_type(arm.slot_ty) && g.integer_value_compatible(c.prd, arm.slot_ty)));
+        if (is_bool && !g.is_condition(c.prd)) { type_ok = false; }
+        if (!type_ok)
+        {
+            g.note_failure(c.source_line, c.source_col, "effect payload type does not match the declared operation type");
+            return false;
+        }
+        if (m1_integer_type(arm.slot_ty) && !m1_contextual_int_fits(c.prd, arm.slot_ty)) { return false; }
+        char* value = is_bool ? g.condition(c.prd) : (is_ptr ? g.pointer_value(c.prd) : g.prd(c.prd));
+        if (g.failed || value == null) { return false; }
+        if (!is_bool && !is_ptr && vt != null && m1_integer_type(vt) && m1_int_bits(vt) != m1_int_bits(arm.slot_ty))
+        {
+            value = g.convert_integer_width(value, vt, arm.slot_ty);
+            if (g.failed || value == null) { return false; }
+        }
+        if (g.low_profile && is_ptr && c.prd.tag != APRD_NULL)
+        {
+            M1Provenance* vp = g.prov(value);
+            if (vp == null || vp.freed)
+            {
+                g.note_failure(c.source_line, c.source_col, "effect payload pointer has no live provenance");
+                return false;
+            }
+        }
+        char* ty = g.llvm_type_text(arm.slot_ty);
+        int align = g.type_alignment(arm.slot_ty, 0);
+        if (ty == null || align <= 0 || arm.slot == null) { return false; }
+        fprintf(g.out, "  store %s %s, ptr %s, align %d\n", ty, value, arm.slot, align);
+    }
+    else if (c.prd != null && c.prd.tag != APRD_UNIT)
+    {
+        g.note_failure(c.source_line, c.source_col, "effect operation declares no payload but the perform passes one");
+        return false;
+    }
+    fprintf(g.out, "  br label %%%s\n", arm.label);
+    g.terminated = true;
+    return true;
+}
 fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
 {
     if (c == null) {
@@ -5476,6 +6020,13 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         }
         return g.consume(value, is_bool, is_ptr, value_type, c.cns, ret_name);
     }
+    if (c.tag == ACMD_HANDLE) { return g.effect_handle(c, ret_name); }
+    if (c.tag == ACMD_PERFORM) { return g.effect_perform(c); }
+    if (c.tag == ACMD_RESUME)
+    {
+        g.note_failure(c.source_line, c.source_col, "`resume` escapes the supported effect subset: only one-shot, non-resuming effect handlers are lowerable");
+        return false;
+    }
     return false;
 }
 fn bool M1Gen.buffer_label_body(M1Gen* g, M1Label* info, char* ret_name)
@@ -5604,7 +6155,7 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     g.default_bits = m1_integer_type(d.ret_ty) ? m1_int_bits(d.ret_ty) : 64;
     g.guard_active = false; g.guard_name = null; g.guard_true_label = null; g.guard_false_label = null;
     g.terminated = false;
-    g.has_for = false; g.for_depth = 0; g.seq_depth = 0;
+    g.has_for = false; g.for_depth = 0; g.seq_depth = 0; g.fx_depth = 0;
     g.watch_active = false; g.watch_count = 0; g.branch_depth = 0; g.watch_branch_depth = 0;
     AirCmd* body = d.def_body;
     char* ret_name = null;
@@ -5634,14 +6185,22 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
         parameter_types[i] = g.decl_value_type(d.params[i].ty, g.return_type);
         if (!m1_value_type(parameter_types[i], 0)) { return false; }
     }
-    fprintf(g.out, "define %s @%s(", return_type_ir, d.name);
+    int fn_cc = m1_decl_callconv(d);
+    fprintf(g.out, "define %s%s @%s(", fn_cc == 1 ? "fastcc " : "", return_type_ir, m1_link_name(d));
     for (usz i = 0; i < emitted_param_count; i++)
     {
         AirBinder* p = d.params[i];
         if (i != 0) { fprintf(g.out, ", "); }
         fprintf(g.out, "%s %%a%d", g.llvm_abi_argument_text(parameter_types[i]), (int)i);
     }
-    fprintf(g.out, ") {\nentry:\n");
+    fprintf(g.out, ")");
+    if (m1_decl_flag(d, "noinline")) { fprintf(g.out, " noinline"); }
+    if (m1_decl_flag(d, "alwaysinline")) { fprintf(g.out, " alwaysinline"); }
+    if (m1_decl_flag(d, "cold")) { fprintf(g.out, " cold"); }
+    if (m1_decl_flag(d, "naked")) { fprintf(g.out, " naked"); }
+    char* fn_section = m1_decl_attr_string(d, "section");
+    if (fn_section != null) { fprintf(g.out, " section \"%s\"", fn_section); }
+    fprintf(g.out, " {\nentry:\n");
     g.cur_block = (char*)"entry";
     for (usz i = 0; i < emitted_param_count; i++)
     {
@@ -5807,6 +6366,25 @@ fn int main(String[] args)
         else if (same(a, "-O2")) { opt_level = 2; }
         else if (same(a, "-O3")) { opt_level = 3; }
         else if (same(a, "--stats")) { show_opt_stats = true; }
+        else if (m1_has_prefix(a, "--target="))
+        {
+            char* tname = a + 9;
+            if (same(tname, "x86_64"))
+            {
+                g_m1_target_ptr_bits = 64;
+                g_m1_target_freestanding = false;
+                g_m1_target_triple = (char*)"x86_64-unknown-linux-gnu";
+                g_m1_target_datalayout = (char*)"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
+            }
+            else if (same(tname, "wasm32-freestanding"))
+            {
+                g_m1_target_ptr_bits = 32;
+                g_m1_target_freestanding = true;
+                g_m1_target_triple = (char*)"wasm32-unknown-unknown";
+                g_m1_target_datalayout = (char*)"e-m:e-p:32:32-i64:64-n32:64-S128";
+            }
+            else { usage_error = true; bad_option = a; }
+        }
         else if (a[0] != '-')
         {
             if (input != null) { usage_error = true; }
@@ -5823,7 +6401,13 @@ fn int main(String[] args)
     }
     if (input == null)
     {
-        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-ll] [-O0|-O1|-O2|-O3] [--stats] [--quiet]\n");
+        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-ll] [-O0|-O1|-O2|-O3] [--target=x86_64|wasm32-freestanding] [--stats] [--quiet]\n");
+        return 2;
+    }
+    if (g_m1_target_freestanding && emit_exe)
+    {
+        clear_stale_outputs(input);
+        printf("pear2c: --target=wasm32-freestanding emits LLVM IR or bitcode only; use --emit-ll/--emit-bc and link with a wasm toolchain\n");
         return 2;
     }
     // Clear artifacts from either output mode before any validation can fail.
@@ -5914,6 +6498,22 @@ fn int main(String[] args)
         AirDecl* d = mod.decls[i];
         if (d == null || d.tag == ADECL_MODULE) { continue; }
         if (d.tag == ADECL_DECLARE) { continue; } // unused runtime declarations do not affect this module's emitted ABI
+        if (d.tag == ADECL_EFFECT)
+        {
+            bool effect_ok = d.op_count >= 1 && d.op_count <= 16 && d.typaram_count == 0;
+            for (usz oi = 0; effect_ok && oi < d.op_count; oi++)
+            {
+                AirEffectOp* eo = d.ops[oi];
+                if (eo == null || eo.name == null || eo.op_ty == null) { effect_ok = false; break; }
+                if (eo.op_ty.tag != ATYP_INFER && !m1_backend_type(eo.op_ty, &mod.decls[0], root_decl_count, 0)) { effect_ok = false; break; }
+            }
+            if (!effect_ok)
+            {
+                printf("%s:%d:%d: pear2c: unsupported effect declaration: operations need declared names and backend-lowerable payload types\n", input, d.source_line, d.source_col);
+                arena.destroy(); return 3;
+            }
+            continue;
+        }
         if (d.tag == ADECL_GLOBAL)
         {
             if (!mod.low || !m1_safe_name(d.name) || !m1_safe_name(m1_link_name(d)) || d.typaram_count != 0 ||
@@ -5981,6 +6581,25 @@ fn int main(String[] args)
             printf("pear2c: unsupported signature for function `%s`\n", d.name == null ? (char*)"?" : d.name);
             arena.destroy(); return 3;
         }
+        int def_cc = m1_decl_callconv(d);
+        if (def_cc == -1 || def_cc == -2)
+        {
+            printf("%s:%d:%d: pear2c: %s in function `%s`\n", input, d.source_line, d.source_col,
+                   def_cc == -1 ? (char*)"conflicting calling-convention markers" : (char*)"unsupported calling convention (supported: cdecl (default), fastcc)",
+                   d.name == null ? (char*)"?" : d.name);
+            arena.destroy(); return 3;
+        }
+        char* def_attr_issue = m1_def_attr_problem(d);
+        if (def_attr_issue != null)
+        {
+            printf("%s:%d:%d: pear2c: %s\n", input, d.source_line, d.source_col, def_attr_issue);
+            arena.destroy(); return 3;
+        }
+        if (same(d.name, "main") && (def_cc != 0 || m1_decl_attr_string(d, "export") != null))
+        {
+            printf("%s:%d:%d: pear2c: entry point `main` keeps the default calling convention and symbol name (calling-convention/export attributes on `main` are unsupported)\n", input, d.source_line, d.source_col);
+            arena.destroy(); return 3;
+        }
         if (same(d.name, "main")) { main_decl = d; main_count++; }
     }
     bool ignored_main_parameter = main_decl != null && main_decl.param_count == 1 && main_decl.params[0] != null &&
@@ -5995,11 +6614,12 @@ fn int main(String[] args)
     void* f = fopen(&ll_path[0], "w");
     if (f == null) { printf("pear2c: cannot create temporary LLVM IR\n"); arena.destroy(); return 3; }
     fprintf(f, mod.low ? (char*)"; PEAR 2: AIR 3 globals, strings and typed-memory lowering\n" : (char*)"; PEAR 2: scalar and local aggregate lowering with direct calls\n");
+    fprintf(f, "target datalayout = \"%s\"\ntarget triple = \"%s\"\n", g_m1_target_datalayout, g_m1_target_triple);
     fprintf(f, "declare void @llvm.trap()\ndeclare void @llvm.assume(i1 noundef)\ndeclare ptr @llvm.stacksave()\ndeclare void @llvm.stackrestore(ptr)\n");
     M1Gen g;
     g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = root_decl_count;
     g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0; g.default_unsigned = false; g.default_bits = 64; g.return_type = null; g.return_bool = false; g.return_ptr = false; g.return_unit = false; g.terminated = false; g.failed = false;
-    g.low_profile = mod.low; g.input_path = input; g.current_function = null; g.string_count = 0; g.provenance_count = 0; g.fail_line = 0; g.fail_col = 0; g.last_line = 0; g.last_col = 0; g.fail_form = null; g.error = null;
+    g.low_profile = mod.low; g.input_path = input; g.current_function = null; g.string_count = 0; g.provenance_count = 0; g.fx_depth = 0; g.fail_line = 0; g.fail_col = 0; g.last_line = 0; g.last_col = 0; g.fail_form = null; g.error = null;
     if (!g.emit_data_types())
     {
         fclose(f); (void)remove(&ll_path[0]);

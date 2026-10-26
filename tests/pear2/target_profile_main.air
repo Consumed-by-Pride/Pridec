@@ -1,0 +1,16 @@
+// PEAR 2 M10: target profiles size isz/usz by the target pointer width and
+// stamp the module's datalayout/triple. Under the default x86_64 profile
+// these are i64; under --target=wasm32-freestanding they are i32.
+air 2.2 Main "target_profile.pie";
+
+def widen(a : usz) : usz =
+  mu~ %ret_2.
+    <(add a 1 : usz) | %ret_2>;
+
+def narrow(b : isz) : isz =
+  mu~ %ret_2.
+    <(add b 1 : isz) | %ret_2>;
+
+def main() : i64 =
+  mu~ %ret_2.
+    <42 : i64 | %ret_2>;
