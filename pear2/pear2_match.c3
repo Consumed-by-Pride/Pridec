@@ -70,12 +70,11 @@ fn bool M1Gen.bind_record_pattern(M1Gen* g, AirPat* pat, char* value, AirTyp* re
 {
     if (pat == null || pat.tag != APAT_RECORD || value == null || record_type == null || record_type.tag != ATYP_NOMINAL) {
  return false; }
-    AirDecl* data = g.find_data(record_type.name);
-    if (data == null || data.typaram_count != 0 || data.attr_count != 0 || data.ctor_count != 1 || data.ctors[0] == null || data.ctors[0].field_count > 64)
-    { g.note_failure(line, col, (char*)"record patterns currently support only plain single-constructor product records"); return false; }
+    AirDecl* data = m1_find_record_decl(g.decls, g.decl_count, record_type.name);
+    if (data == null || data.typaram_count != 0 || data.attr_count != 0 || (data.tag == ADECL_DATA && (data.ctor_count != 1 || data.ctors[0] == null)) || (data.tag == ADECL_CODATA && !m1_record_codata_decl(data)) || m1_record_field_count(data) > 64)
+    { g.note_failure(line, col, (char*)"record patterns currently support only plain single-constructor product records (and struct codata)"); return false; }
     if (!m1_backend_type(record_type, g.decls, g.decl_count, 0)) {
  return false; }
-    AirCtorDecl* ctor = data.ctors[0];
     char* aggregate_ir = g.llvm_type_text(record_type);
     if (g.failed || aggregate_ir == null) {
  return false; }
@@ -90,13 +89,13 @@ fn bool M1Gen.bind_record_pattern(M1Gen* g, AirPat* pat, char* value, AirTyp* re
             { g.note_failure(line, col, (char*)"duplicate field name in record pattern"); return false; }
         }
         long field_index = -1;
-        for (usz j = 0; j < ctor.field_count; j++)
+        for (usz j = 0; j < m1_record_field_count(data); j++)
         {
-            if (ctor.fields[j] != null && ctor.fields[j].name != null && same(ctor.fields[j].name, field_pat.name)) { field_index = (long)j; break; }
+            if (m1_record_field_name(data, j) != null && same(m1_record_field_name(data, j), field_pat.name)) { field_index = (long)j; break; }
         }
         if (field_index < 0)
         { g.note_failure(line, col, (char*)"record pattern names a field absent from the record"); return false; }
-        AirTyp* field_type = ctor.fields[(usz)field_index].ty;
+        AirTyp* field_type = m1_record_field_ty(data, (usz)field_index);
         if (field_type == null) {
  return false; }
         char* field_ir = g.llvm_type_text(field_type);
