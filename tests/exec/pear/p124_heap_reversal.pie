@@ -1,0 +1,13 @@
+-- EXIT: 40
+-- AIR 2.2 memory: loop-carried reversal of a heap i64 array. The write index
+-- `4 - j` is computed from a loop-carried variable, so the store address is not
+-- an SSA constant; both the GEP and the backedge must survive at every tier.
+fn main(_) -> i64 ! [Alloc] {
+  let s : *i64 = alloc [i64; 5];
+  let d : *i64 = alloc [i64; 5];
+  let mut i: i64 = 0;
+  while i < 5 { s[i] = i * 10; i = i + 1; }
+  let mut j: i64 = 0;
+  while j < 5 { d[j] = s[4 - j]; j = j + 1; }
+  return d[0];
+}

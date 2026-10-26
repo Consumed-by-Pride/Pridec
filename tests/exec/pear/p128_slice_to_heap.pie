@@ -1,0 +1,12 @@
+-- EXIT: 8
+-- AIR 2.2 heap slice: a slice literal copied element-wise into a heap buffer,
+-- with the copy length taken from the slice's own `.len`. Exercises the slice
+-- read, the heap indexed store, and the loop-carried index in one loop.
+fn main(_) -> i64 ! [Alloc] {
+  let s : [i64] = [1, 2, 3];
+  let h : *i64 = alloc [i64; 4];
+  let mut i: i64 = 0;
+  while i < s.len { h[i] = s[i] * 2; i = i + 1; }
+  h[3] = 0;
+  return h[0] + h[2];
+}

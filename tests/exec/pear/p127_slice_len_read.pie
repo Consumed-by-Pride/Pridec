@@ -1,0 +1,23 @@
+-- EXIT: 6
+-- AIR 2.2 slice surface: a slice literal read through a clause-style function
+-- that walks `0..s.len`. No allocation, so this isolates the slice
+-- representation from the heap path.
+--
+-- Regression pin, not an expected pass. pear1c builds it and segfaults at every
+-- tier — the same defect already recorded for tests/exec/33_slice_fn_param and
+-- 34_slice_let_decay in tests/exec/XFAIL.tsv: PEAR 1 tests an irrefutable
+-- `bind` match as a boolean, so both arms become unreachable. pear2c rejects
+-- the form. (Reading a slice literal's elements inline instead — `s.len`,
+-- `s[0]` — is worse than wrong on pear1c: it returns a different garbage value
+-- on each run, which scripts/pie-diff.sh records as `nondeterministic` rather
+-- than baselining a number that will not reproduce.)
+fn sum_slice : [i64] -> i64
+  | s ->
+      let mut acc : i64 = 0
+      for i in 0..s.len
+        acc += s[i]
+      acc
+fn main(_) -> i64 {
+  let s : [i64] = [1, 2, 3];
+  return sum_slice(s);
+}
