@@ -494,6 +494,127 @@ fn AirDecl* m1_find_data_decl(AirDecl** decls, usz decl_count, char* name)
         if (d != null && d.tag == ADECL_DATA && same(d.name, name)) { return d; }
     }
     return null;
+}
+// Product-record view over declarations: a single-constructor `data` is a
+// product record, and a *plain* `codata` decl — non-generic, unqualified,
+// whose destructors are all nullary projections — is a product record too
+// (pfront lowers PEAR struct declarations exactly so; struct construction is
+// a `record{_f0 = T, ...}` producer and field access is `field name #i`).
+// Everything with dtor parameters (real methods), type parameters,
+// multiplicities, or attributes stays outside this view and fails closed.
+fn AirDecl* m1_find_record_decl(AirDecl** decls, usz decl_count, char* name)
+{
+    if (decls == null || name == null) { return null; }
+    for (usz i = 0; i < decl_count; i++)
+    {
+        AirDecl* d = decls[i];
+        if (d != null && (d.tag == ADECL_DATA || d.tag == ADECL_CODATA) && same(d.name, name)) { return d; }
+    }
+    return null;
+}
+fn bool m1_record_codata_decl(AirDecl* d)
+{
+    if (d == null || d.tag != ADECL_CODATA || !m1_safe_name(d.name) || d.typaram_count != 0 ||
+        d.attr_count != 0 || d.mult != AMULT_UNR || d.dtor_count == 0 || d.dtor_count > 64) { return false; }
+    for (usz i = 0; i < d.dtor_count; i++)
+    {
+        AirDtorDecl* dt = d.dtors[i];
+        if (dt == null || !m1_safe_name(dt.name) || dt.param_count != 0) { return false; }
+    }
+    return true;
+}
+fn usz m1_record_field_count(AirDecl* d)
+{
+    if (d == null) { return 0; }
+    if (d.tag == ADECL_CODATA) { return d.dtor_count; }
+    return d.ctor_count == 1 && d.ctors[0] != null ? d.ctors[0].field_count : 0;
+}
+fn char* m1_record_field_name(AirDecl* d, usz i)
+{
+    if (d == null || i >= m1_record_field_count(d)) { return null; }
+    if (d.tag == ADECL_CODATA) { AirDtorDecl* dt = d.dtors[i]; return dt != null ? dt.name : null; }
+    AirField* f = d.ctors[0].fields[i]; return f != null ? f.name : null;
+}
+fn AirTyp* m1_record_field_ty(AirDecl* d, usz i)
+{
+    if (d == null || i >= m1_record_field_count(d)) { return null; }
+    if (d.tag == ADECL_CODATA) { AirDtorDecl* dt = d.dtors[i]; return dt != null ? dt.return_ty : null; }
+    AirField* f = d.ctors[0].fields[i]; return f != null ? f.ty : null;
+}
+// Resolve which record declaration a record producer builds: an explicit
+// `: nominal T` ascription, or the pfront convention of a leading
+// `_f0 = TypeName` marker field (no ascription). *marker is set to 1 when
+// the leading init is the marker and does not name a nominal field.
+fn AirDecl* m1_record_producer_decl(AirPrd* p, AirDecl** decls, usz decl_count, usz* marker)
+{
+    if (marker != null) { *marker = 0; }
+    if (p == null || p.tag != APRD_RECORD) { return null; }
+    if (p.ty != null && p.ty.tag == ATYP_NOMINAL) { return m1_find_record_decl(decls, decl_count, p.ty.name); }
+    if ((p.ty == null || p.ty.tag == ATYP_INFER) && p.rec_init_count >= 1 &&
+        p.rec_inits[0] != null && same(p.rec_inits[0].name, "_f0") &&
+        p.rec_inits[0].value != null && p.rec_inits[0].value.tag == APRD_VAR)
+    {
+        if (marker != null) { *marker = 1; }
+        return m1_find_record_decl(decls, decl_count, p.rec_inits[0].value.name);
+    }
+    return null;
+}
+
+// pfront erases struct parameter annotations to `infer`. Recover them by
+// unique field projection: a bare parameter projected with `field name #i`
+// is pinned to the unique product record (single-constructor data or plain
+// codata) declaring that field at that index. Zero matches leave the
+// parameter alone (a later projection reports a positioned error); two or
+// more matching records keep the parameter ambiguous and fail closed when
+// projected. Only direct `cut(<var | field ...>)` projections starting from a
+// parameter name count — locals rebound through comu are answers, not
+// evidence, because AST names have no shadowing information.
+fn void m1_infer_record_field_at(AirDecl* fn_d, char* var_name, AirCns* k, AirDecl** decls, usz decl_count, AirArena* arena)
+{
+    if (fn_d == null || var_name == null || k == null || k.name == null || k.idx < 0) { return; }
+    AirBinder* param = null;
+    for (usz i = 0; i < fn_d.param_count; i++)
+    {
+        if (fn_d.params[i] != null && same(fn_d.params[i].name, var_name)) { param = fn_d.params[i]; break; }
+    }
+    if (param == null || (param.ty != null && param.ty.tag != ATYP_INFER)) { return; }
+    AirDecl* found = null; bool ambiguous = false;
+    for (usz i = 0; i < decl_count; i++)
+    {
+        AirDecl* cand = decls[i];
+        if (cand == null || (cand.tag != ADECL_DATA && cand.tag != ADECL_CODATA)) { continue; }
+        if (cand.tag == ADECL_CODATA ? !m1_record_codata_decl(cand) : cand.ctor_count != 1) { continue; }
+        if ((usz)k.idx < m1_record_field_count(cand) && same(m1_record_field_name(cand, (usz)k.idx), k.name))
+        {
+            if (found != null && !same(found.name, cand.name)) { ambiguous = true; break; }
+            found = cand;
+        }
+    }
+    if (found == null || ambiguous) { return; }
+    AirTyp* t = air_ir::air_mk_typ_simple(arena, ATYP_NOMINAL);
+    if (t != null) { t.name = found.name; param.ty = t; }
+}
+fn void m1_infer_record_params_walk(AirDecl* fn_d, AirCmd* c, AirDecl** decls, usz decl_count, AirArena* arena, int depth)
+{
+    if (c == null || depth >= 64) { return; }
+    if (c.tag == ACMD_CUT && c.prd != null && c.prd.tag == APRD_VAR && c.cns != null && c.cns.tag == ACNS_FIELD)
+    {
+        m1_infer_record_field_at(fn_d, c.prd.name, c.cns, decls, decl_count, arena);
+    }
+    AirCns* k = c.cns;
+    while (k != null)
+    {
+        if (k.tag == ACNS_COMU) { m1_infer_record_params_walk(fn_d, k.body, decls, decl_count, arena, depth + 1); }
+        for (usz i = 0; i < k.branch_count; i++) { if (k.branches[i] != null) { m1_infer_record_params_walk(fn_d, k.branches[i].body, decls, decl_count, arena, depth + 1); } }
+        for (usz i = 0; i < k.cobranch_count; i++) { if (k.cobranches[i] != null) { m1_infer_record_params_walk(fn_d, k.cobranches[i].body, decls, decl_count, arena, depth + 1); } }
+        k = k.tail;
+    }
+    m1_infer_record_params_walk(fn_d, c.body, decls, decl_count, arena, depth + 1);
+    m1_infer_record_params_walk(fn_d, c.next, decls, decl_count, arena, depth + 1);
+    m1_infer_record_params_walk(fn_d, c.then_c, decls, decl_count, arena, depth + 1);
+    m1_infer_record_params_walk(fn_d, c.else_c, decls, decl_count, arena, depth + 1);
+    m1_infer_record_params_walk(fn_d, c.handled, decls, decl_count, arena, depth + 1);
+    for (usz i = 0; i < c.branch_count; i++) { if (c.branches[i] != null) { m1_infer_record_params_walk(fn_d, c.branches[i].body, decls, decl_count, arena, depth + 1); } }
 }fn bool m1_nullary_enum_decl(AirDecl* d)
 {
     if (d == null || d.tag != ADECL_DATA || d.typaram_count != 0 || d.ctor_count < 2 || d.ctor_count > 64 || d.attr_count != 0 || d.mult != AMULT_UNR) { return false; }
@@ -579,7 +700,7 @@ fn bool m1_backend_type(AirTyp* t, AirDecl** decls, usz decl_count, int depth)
     }
     if (t.tag == ATYP_NOMINAL)
     {
-        AirDecl* d = m1_find_data_decl(decls, decl_count, t.name);        if (d == null || !m1_safe_name(d.name) || d.typaram_count != 0 || d.attr_count != 0) { return false; }
+        AirDecl* d = m1_find_record_decl(decls, decl_count, t.name);        if (d == null || !m1_safe_name(d.name) || d.typaram_count != 0 || d.attr_count != 0) { return false; }
         if (m1_nullary_enum_decl(d)) { return true; }
         if (m1_tagged_sum_decl(d))
         {
@@ -590,6 +711,19 @@ fn bool m1_backend_type(AirTyp* t, AirDecl** decls, usz decl_count, int depth)
                     AirTyp* field_type = d.ctors[i].fields[j].ty;
                     if (!m1_sum_payload_type(field_type, decls, decl_count, depth + 1) || !m1_backend_type(field_type, decls, decl_count, depth + 1)) { return false; }
                 }
+            }
+            return true;
+        }
+        if (d.tag == ADECL_CODATA)
+        {
+            // A codata whose destructors are all nullary is a product record
+            // (a PEAR struct). Parameterized destructors are real methods and
+            // stay outside the fragment.
+            if (!m1_record_codata_decl(d)) { return false; }
+            for (usz i = 0; i < d.dtor_count; i++)
+            {
+                AirTyp* fty = m1_record_field_ty(d, i);
+                if (fty == null || !m1_backend_type(fty, decls, decl_count, depth + 1)) { return false; }
             }
             return true;
         }
@@ -624,11 +758,12 @@ fn bool m1_c_abi_field_type(AirTyp* t, AirDecl** decls, usz decl_count, int dept
     }
     if (t.tag == ATYP_NOMINAL)
     {
-        AirDecl* d = m1_find_data_decl(decls, decl_count, t.name);
-        if (d == null || d.ctor_count != 1 || d.ctors[0] == null || d.ctors[0].field_count == 0) { return false; }
-        for (usz i = 0; i < d.ctors[0].field_count; i++)
+        AirDecl* d = m1_find_record_decl(decls, decl_count, t.name);
+        if (d != null && d.tag == ADECL_CODATA && !m1_record_codata_decl(d)) { return false; }
+        if (m1_record_field_count(d) == 0) { return false; }
+        for (usz i = 0; i < m1_record_field_count(d); i++)
         {
-            if (d.ctors[0].fields[i] == null || !m1_c_abi_field_type(d.ctors[0].fields[i].ty, decls, decl_count, depth + 1)) { return false; }
+            if (m1_record_field_ty(d, i) == null || !m1_c_abi_field_type(m1_record_field_ty(d, i), decls, decl_count, depth + 1)) { return false; }
         }
         return true;
     }
@@ -861,18 +996,20 @@ fn int M1Gen.type_alignment(M1Gen* g, AirTyp* t, int depth)
     }
     if (t.tag == ATYP_NOMINAL)
     {
-        AirDecl* d = g.find_data(t.name);
+        AirDecl* d = m1_find_record_decl(g.decls, g.decl_count, t.name);
         if (m1_nullary_enum_decl(d)) { return 4; }
         if (m1_tagged_sum_decl(d))
         {
             int align; int slot_bits; long payload_offset; long payload_size; long slots; long total_size;
             return g.tagged_sum_layout(d, depth, &align, &payload_offset, &payload_size, &slot_bits, &slots, &total_size) ? align : 0;
         }
-        if (d == null || d.ctor_count != 1 || d.ctors[0] == null || d.ctors[0].field_count > 64) { return 0; }
+        if (d == null || (d.tag == ADECL_CODATA && !m1_record_codata_decl(d))) { return 0; }
+        usz fcount = m1_record_field_count(d);
+        if (fcount > 64 || (d.tag == ADECL_DATA && (d.ctor_count != 1 || d.ctors[0] == null))) { return 0; }
         int max_align = 1;
-        for (usz i = 0; i < d.ctors[0].field_count; i++)
+        for (usz i = 0; i < fcount; i++)
         {
-            int a = g.type_alignment(d.ctors[0].fields[i].ty, depth + 1);
+            int a = g.type_alignment(m1_record_field_ty(d, i), depth + 1);
             if (a == 0) { return 0; }
             if (a > max_align) { max_align = a; }
         }
@@ -904,21 +1041,22 @@ fn long M1Gen.type_size(M1Gen* g, AirTyp* t, int depth)
         usz count = t.arg_count;
         if (t.tag == ATYP_NOMINAL)
         {
-            AirDecl* d = g.find_data(t.name);
+            AirDecl* d = m1_find_record_decl(g.decls, g.decl_count, t.name);
             if (m1_nullary_enum_decl(d)) { return 4; }
             if (m1_tagged_sum_decl(d))
             {
                 int align; int slot_bits; long payload_offset; long payload_size; long slots; long total_size;
                 return g.tagged_sum_layout(d, depth, &align, &payload_offset, &payload_size, &slot_bits, &slots, &total_size) ? total_size : -1;
             }
-            if (d == null || d.ctor_count != 1 || d.ctors[0] == null || d.ctors[0].field_count > 64) { return -1; }
-            count = d.ctors[0].field_count;
+            if (d == null || (d.tag == ADECL_CODATA && !m1_record_codata_decl(d)) || (d.tag == ADECL_DATA && (d.ctor_count != 1 || d.ctors[0] == null))) { return -1; }
+            count = d.tag == ADECL_CODATA ? d.dtor_count : d.ctors[0].field_count;
+            if (count > 64) { return -1; }
         }
         else if (count > 64) { return -1; }
         long offset = 0; int max_align = 1;
         for (usz i = 0; i < count; i++)
         {
-            AirTyp* field = t.tag == ATYP_TUPLE ? t.args[i] : g.find_data(t.name).ctors[0].fields[i].ty;
+            AirTyp* field = t.tag == ATYP_TUPLE ? t.args[i] : m1_record_field_ty(m1_find_record_decl(g.decls, g.decl_count, t.name), i);
             int align = g.type_alignment(field, depth + 1);
             long size = g.type_size(field, depth + 1);
             if (align == 0 || size < 0) { return -1; }
@@ -964,15 +1102,16 @@ fn char* M1Gen.c_abi_field_problem(M1Gen* g, AirTyp* t, int depth)
     }
     if (t.tag == ATYP_NOMINAL)
     {
-        AirDecl* d = g.find_data(t.name);
+        AirDecl* d = m1_find_record_decl(g.decls, g.decl_count, t.name);
         if (d == null || d.typaram_count != 0 || d.attr_count != 0) { return (char*)"nested records must be non-generic, plain, non-empty products"; }
-        if (d.ctor_count != 1) { return (char*)"tagged sums (multi-constructor data) cannot cross the external C boundary"; }
-        if (d.ctors[0] == null || d.ctors[0].field_count == 0)
+        if (d.tag == ADECL_DATA && d.ctor_count != 1) { return (char*)"tagged sums (multi-constructor data) cannot cross the external C boundary"; }
+        if (d.tag == ADECL_CODATA && !m1_record_codata_decl(d)) { return (char*)"codata with parameterized destructors cannot cross the external C boundary"; }
+        if (m1_record_field_count(d) == 0)
         { return (char*)"nested records must be non-generic, plain, non-empty products"; }
-        for (usz i = 0; i < d.ctors[0].field_count; i++)
+        for (usz i = 0; i < m1_record_field_count(d); i++)
         {
-            if (d.ctors[0].fields[i] == null) { return (char*)"record contains a missing field declaration"; }
-            char* problem = g.c_abi_field_problem(d.ctors[0].fields[i].ty, depth + 1);
+            if (m1_record_field_name(d, i) == null) { return (char*)"record contains a missing field declaration"; }
+            char* problem = g.c_abi_field_problem(m1_record_field_ty(d, i), depth + 1);
             if (problem != null) { return problem; }
         }
         return null;
@@ -1020,15 +1159,15 @@ fn long M1Gen.field_offset(M1Gen* g, AirTyp* t, long field_index)
     AirDecl* d = null;
     if (t.tag == ATYP_NOMINAL)
     {
-        d = g.find_data(t.name);
-        if (d == null || d.ctor_count != 1 || d.ctors[0] == null) { return -1; }
-        count = d.ctors[0].field_count;
+        d = m1_find_record_decl(g.decls, g.decl_count, t.name);
+        if (d == null || (d.tag == ADECL_CODATA && !m1_record_codata_decl(d)) || (d.tag == ADECL_DATA && (d.ctor_count != 1 || d.ctors[0] == null))) { return -1; }
+        count = m1_record_field_count(d);
     }
     if (field_index >= (long)count) { return -1; }
     long offset = 0;
     for (long i = 0; i <= field_index; i++)
     {
-        AirTyp* field = t.tag == ATYP_TUPLE ? t.args[(usz)i] : d.ctors[0].fields[(usz)i].ty;
+        AirTyp* field = t.tag == ATYP_TUPLE ? t.args[(usz)i] : m1_record_field_ty(d, (usz)i);
         int align = g.type_alignment(field, 0);
         long size = g.type_size(field, 0);
         if (align == 0 || size < 0) { return -1; }
@@ -1339,6 +1478,16 @@ fn AirTyp* M1Gen.expr_type(M1Gen* g, AirPrd* p)
         AirTyp* right = g.expr_type(p.subs[1]);
         return left != null ? left : right;
     }
+    if (p.tag == APRD_RECORD)
+    {
+        AirDecl* rd = m1_record_producer_decl(p, g.decls, g.decl_count, null);
+        if (rd != null && (rd.tag != ADECL_CODATA || m1_record_codata_decl(rd)))
+        {
+            AirTyp* type = air_ir::air_mk_typ(g.arena, ATYP_NOMINAL);
+            if (type != null) { type.name = rd.name; }
+            return type;
+        }
+    }
     return p.ty != null && p.ty.tag == ATYP_INFER ? null : p.ty;
 }
 fn bool M1Gen.integer_value_compatible(M1Gen* g, AirPrd* p, AirTyp* expected)
@@ -1433,6 +1582,72 @@ fn bool m1_same_inferred_type(AirTyp* left, AirTyp* right)
 {
     return left != null && right != null && m1_value_type_compatible(left, right, 0) && m1_value_type_compatible(right, left, 0);
 }
+// What value actually reaches `%ret` through a projection tail: a cut
+// `<v | field x #i · ... · %ret>` returns the projected FIELD's type, not
+// v's. Walk record/tuple projection and ascription continuations; anything
+// else (stacks, calls, comu binds) is not a return-forwarding chain here.
+fn AirTyp* M1Gen.infer_cut_projected_type(M1Gen* g, AirDecl* d, AirPrd* p, AirCns* k, char* ret_name, int depth)
+{
+    if (p == null || k == null || depth >= 24) { return null; }
+    AirTyp* t = g.infer_prd_type(d, p, 0);
+    while (k != null)
+    {
+        if (k.tag == ACNS_COVAR) { return same(k.name, ret_name) && t != null && t.tag != ATYP_INFER ? t : null; }
+        if (k.tag == ACNS_ASCRIBE)
+        {
+            if (k.ty == null) { return null; }
+            t = k.ty;
+            k = k.tail;
+            continue;
+        }
+        if (k.tag == ACNS_FIELD)
+        {
+            if (k.name == null || k.idx < 0) { return null; }
+            AirDecl* rd = t != null && t.tag == ATYP_NOMINAL ? m1_find_record_decl(g.decls, g.decl_count, t.name) : null;
+            if (rd == null)
+            {
+                // Erased (`infer`) owner annotation: unique (name, index)
+                // declaration match, same discipline as consume().
+                for (usz i = 0; i < g.decl_count; i++)
+                {
+                    AirDecl* cand = g.decls[i];
+                    if (cand == null || (cand.tag != ADECL_DATA && cand.tag != ADECL_CODATA)) { continue; }
+                    if (cand.tag == ADECL_CODATA ? !m1_record_codata_decl(cand) : (cand.ctor_count != 1 || cand.ctors[0] == null)) { continue; }
+                    if ((usz)k.idx < m1_record_field_count(cand) && m1_record_field_name(cand, (usz)k.idx) != null && same(m1_record_field_name(cand, (usz)k.idx), k.name))
+                    {
+                        if (rd != null && !same(rd.name, cand.name)) { return null; }
+                        rd = cand;
+                    }
+                }
+                if (rd == null) { return null; }
+            }
+            if (m1_nullary_enum_decl(rd) || m1_tagged_sum_decl(rd)) { return null; }
+            t = m1_record_field_ty(rd, (usz)k.idx);
+            if (t == null) { return null; }
+            k = k.tail;
+            continue;
+        }
+        if (k.tag == ACNS_PROJ || k.tag == ACNS_FST || k.tag == ACNS_SND)
+        {
+            long ix = k.tag == ACNS_PROJ ? k.idx : (k.tag == ACNS_FST ? 0 : 1);
+            if (t == null || t.tag != ATYP_TUPLE || ix < 0 || (usz)ix >= t.arg_count) { return null; }
+            t = t.args[(usz)ix];
+            k = k.tail;
+            continue;
+        }
+        if (k.tag == ACNS_COMU)
+        {
+            // Projection results bound by a continuation: the inferred return
+            // comes from the continuation body. Binder-typed producers inside
+            // the body simply fall back to the function default when the
+            // bound name is not visible to infer_prd_type.
+            AirTyp* through_body = g.infer_cmd_return_type(d, k.body, ret_name, depth + 1);
+            return through_body;
+        }
+        return null;
+    }
+    return null;
+}
 fn AirTyp* M1Gen.infer_prd_type(M1Gen* g, AirDecl* d, AirPrd* p, int depth)
 {
     if (p == null || depth >= 16) { return null; }
@@ -1468,12 +1683,25 @@ fn AirTyp* M1Gen.infer_prd_type(M1Gen* g, AirDecl* d, AirPrd* p, int depth)
         if (p.uop == AUN_NOT) { return air_ir::air_mk_typ_simple(g.arena, ATYP_BOOL); }
         return g.infer_prd_type(d, p.subs[0], depth + 1);
     }
+    if (p.tag == APRD_RECORD)
+    {
+        AirDecl* rd = m1_record_producer_decl(p, g.decls, g.decl_count, null);
+        if (rd == null || (rd.tag == ADECL_CODATA && !m1_record_codata_decl(rd))) { return null; }
+        AirTyp* t = air_ir::air_mk_typ_simple(g.arena, ATYP_NOMINAL);
+        if (t != null) { t.name = rd.name; }
+        return t;
+    }
     return null;
 }
 fn AirTyp* M1Gen.infer_cmd_return_type(M1Gen* g, AirDecl* d, AirCmd* c, char* ret_name, int depth)
 {
     if (c == null || depth >= 24) { return null; }
-    if (c.tag == ACMD_CUT && m1_cns_returns_to(c.cns, ret_name, 0)) { return g.infer_prd_type(d, c.prd, 0); }
+    if (c.tag == ACMD_CUT)
+    {
+        AirTyp* projected = g.infer_cut_projected_type(d, c.prd, c.cns, ret_name, 0);
+        if (projected != null) { return projected; }
+        if (m1_cns_returns_to(c.cns, ret_name, 0)) { return g.infer_prd_type(d, c.prd, 0); }
+    }
     if (c.tag == ACMD_CUT && c.cns != null && c.cns.tag == ACNS_CALL && m1_cns_tail_returns_to(c.cns.tail, ret_name, 0))
     {
         AirTyp* callee_ty = g.infer_prd_type(d, c.prd, 0);
@@ -1904,16 +2132,16 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
             long field_count = current.tag == ATYP_TUPLE ? (long)current.arg_count : -1;
             if (current.tag == ATYP_NOMINAL)
             {
-                AirDecl* d = g.find_data(current.name);
-                if (d == null || d.ctor_count != 1 || d.ctors[0] == null) { g.note_failure(p.source_line, p.source_col, (char*)"unsupported GEP record layout"); return null; }
-                field_count = (long)d.ctors[0].field_count;
+                AirDecl* d = m1_find_record_decl(g.decls, g.decl_count, current.name);
+                if (d == null || (d.tag == ADECL_CODATA && !m1_record_codata_decl(d)) || (d.tag == ADECL_DATA && (d.ctor_count != 1 || d.ctors[0] == null))) { g.note_failure(p.source_line, p.source_col, (char*)"unsupported GEP record layout"); return null; }
+                field_count = (long)m1_record_field_count(d);
             }
             if (value < 0 || value >= field_count) { g.note_failure(p.source_line, p.source_col, (char*)"record GEP field index is out of bounds"); return null; }
             long field_offset = g.field_offset(current, value);
             if (field_offset < 0) { g.note_failure(p.source_line, p.source_col, (char*)"unsupported GEP field layout"); return null; }
             delta += field_offset; is_field[i] = true;
             if (current.tag == ATYP_TUPLE) { current = current.args[(usz)value]; }
-            else { current = g.find_data(current.name).ctors[0].fields[(usz)value].ty; }
+            else { current = m1_record_field_ty(m1_find_record_decl(g.decls, g.decl_count, current.name), (usz)value); }
         }
         else { g.note_failure(p.source_line, p.source_col, (char*)"GEP index steps into a scalar type"); return null; }
     }
@@ -2435,20 +2663,27 @@ fn char* M1Gen.prd(M1Gen* g, AirPrd* p)
     }
     if (p.tag == APRD_RECORD)
     {
-        AirTyp* record_type = p.ty;
-        if (record_type == null || record_type.tag != ATYP_NOMINAL || !m1_backend_type(record_type, g.decls, g.decl_count, 0)) { g.failed = true; return null; }
-        AirDecl* data = g.find_data(record_type.name);
-        if (data == null || data.ctor_count != 1 || data.ctors[0] == null || data.ctors[0].field_count != p.rec_init_count || p.rec_init_count > 64) { g.failed = true; return null; }
-        AirCtorDecl* ctor = data.ctors[0];
+        // Two shape conventions name the record's nominal type: a plain
+        // `record { f = .. } : nominal T` ascription, or pfront's struct
+        // convention `record{_f0 = T, f = ..}` where `_f0`'s variable names
+        // the (data single-ctor or plain codata) record declaration.
+        usz marker = 0;
+        AirDecl* data = m1_record_producer_decl(p, g.decls, g.decl_count, &marker);
+        if (data == null || (data.tag == ADECL_CODATA && !m1_record_codata_decl(data))) { g.failed = true; return null; }
+        AirTyp nominal_t; nominal_t.tag = ATYP_NOMINAL; nominal_t.name = data.name; nominal_t.arg_count = 0;
+        AirTyp* record_type = p.ty != null ? p.ty : &nominal_t;
+        if (!m1_backend_type(record_type, g.decls, g.decl_count, 0)) { g.failed = true; return null; }
+        usz field_total = m1_record_field_count(data);
+        if (field_total != p.rec_init_count - marker || p.rec_init_count > 64 || field_total > 64) { g.failed = true; return null; }
         char* aggregate_type = g.llvm_type_text(record_type);
         if (g.failed || aggregate_type == null) { return null; }
-        char* aggregate = p.rec_init_count == 0 ? (char*)"zeroinitializer" : (char*)"undef";
-        for (usz i = 0; i < p.rec_init_count; i++)
+        char* aggregate = field_total == 0 ? (char*)"zeroinitializer" : (char*)"undef";
+        for (usz i = 0; i < field_total; i++)
         {
-            AirFieldInit* init = p.rec_inits[i];
-            AirField* field = ctor.fields[i];
-            if (init == null || field == null || !same(init.name, field.name) || init.value == null) { g.failed = true; return null; }
-            AirTyp* expected = field.ty;
+            AirFieldInit* init = p.rec_inits[i + marker];
+            AirTyp* expected = m1_record_field_ty(data, i);
+            char* field_name = m1_record_field_name(data, i);
+            if (init == null || field_name == null || !same(init.name, field_name) || init.value == null) { g.failed = true; return null; }
             bool expected_bool = m1_bool_type(expected);            bool expected_ptr = m1_pointer_repr_type(expected);
             bool actual_bool = g.is_condition(init.value);
             bool actual_ptr = !actual_bool && g.is_pointer_value(init.value);
@@ -2986,21 +3221,56 @@ fn bool M1Gen.consume(M1Gen* g, char* value, bool is_bool, bool is_ptr, AirTyp* 
  return false; }
     if (k.tag == ACNS_FIELD)
     {
-        if (k.tail == null || value_type == null || value_type.tag != ATYP_NOMINAL || k.idx < 0) {
+        if (k.tail == null || k.idx < 0) {
  return false; }
-        AirDecl* data = g.find_data(value_type.name);
-        if (data == null || data.ctor_count != 1 || data.ctors[0] == null || (usz)k.idx >= data.ctors[0].field_count) {
+        // The owner type comes from the value's nominal ascription when it
+        // has one; pfront erases struct parameter annotations (`: infer`), so
+        // otherwise resolve the projection by declaration: exactly one
+        // product record with a field `k.name` at index `k.idx` must exist.
+        AirDecl* data = null;
+        AirTyp nominal_t; nominal_t.tag = ATYP_NOMINAL; nominal_t.arg_count = 0;
+        if (value_type != null && value_type.tag == ATYP_NOMINAL)
+        {
+            data = m1_find_record_decl(g.decls, g.decl_count, value_type.name);
+        }
+        else
+        {
+            for (usz i = 0; i < g.decl_count; i++)
+            {
+                AirDecl* cand = g.decls[i];
+                if (cand == null || (cand.tag != ADECL_DATA && cand.tag != ADECL_CODATA)) { continue; }
+                if (cand.tag == ADECL_CODATA ? !m1_record_codata_decl(cand)
+                                             : (cand.ctor_count != 1 || cand.ctors[0] == null)) { continue; }
+                if ((usz)k.idx < m1_record_field_count(cand) && same(m1_record_field_name(cand, (usz)k.idx), k.name))
+                {
+                    if (data != null && !same(data.name, cand.name))
+                    {
+                        g.note_failure(k.source_line, k.source_col, (char*)"ambiguous record field projection: more than one record declares this field at this index; ascribe the owner type");
+                        return false;
+                    }
+                    data = cand;
+                }
+            }
+            if (data == null)
+            {
+                g.note_failure(k.source_line, k.source_col, (char*)"no product record declares a field with this name at this index");
+                return false;
+            }
+        }
+        if (data == null || (usz)k.idx >= m1_record_field_count(data)) {
  return false; }
-        AirField* field = data.ctors[0].fields[(usz)k.idx];
-        if (field == null || !same(field.name, k.name) || !m1_backend_type(field.ty, g.decls, g.decl_count, 0)) {
- return false; }
-        char* aggregate_ir = g.llvm_type_text(value_type);
-        char* field_ir = g.llvm_type_text(field.ty);
+        nominal_t.name = data.name;
+        AirTyp* field_ty = m1_record_field_ty(data, (usz)k.idx);
+        char* field_name = m1_record_field_name(data, (usz)k.idx);
+        if (field_name == null || !same(field_name, k.name) || field_ty == null || !m1_backend_type(field_ty, g.decls, g.decl_count, 0)) {
+ g.note_failure(k.source_line, k.source_col, (char*)"record field is not a backend-representable projection"); return false; }
+        char* aggregate_ir = g.llvm_type_text(&nominal_t);
+        char* field_ir = g.llvm_type_text(field_ty);
         char* dst = g.tmp();
         if (g.failed || aggregate_ir == null || field_ir == null || dst == null) {
  return false; }
         fprintf(g.out, "  %s = extractvalue %s %s, %ld\n", dst, aggregate_ir, value, k.idx);
-        return g.consume(dst, m1_bool_type(field.ty), m1_pointer_repr_type(field.ty), field.ty, k.tail, ret_name);
+        return g.consume(dst, m1_bool_type(field_ty), m1_pointer_repr_type(field_ty), field_ty, k.tail, ret_name);
     }
     if (k.tag == ACNS_PROJ || k.tag == ACNS_FST || k.tag == ACNS_SND)
     {
@@ -3673,21 +3943,23 @@ fn bool M1Gen.emit_constant(M1Gen* g, AirPrd* p, AirTyp* t, int depth)
     }
     if (p.tag == APRD_RECORD && t.tag == ATYP_NOMINAL)
     {
-        AirDecl* data = g.find_data(t.name);
-        if (data == null || data.ctor_count != 1 || data.ctors[0] == null || data.ctors[0].field_count != p.rec_init_count || p.rec_init_count > 64) {
+        usz marker = 0;
+        AirDecl* data = m1_record_producer_decl(p, g.decls, g.decl_count, &marker);
+        usz fcount = m1_record_field_count(data);
+        if (data == null || (data.tag == ADECL_CODATA && !m1_record_codata_decl(data)) || fcount != p.rec_init_count - marker || p.rec_init_count > 64) {
  return false; }
         fprintf(g.out, "{ ");
-        for (usz i = 0; i < p.rec_init_count; i++)
+        for (usz i = 0; i < fcount; i++)
         {
-            AirField* f = data.ctors[0].fields[i]; AirFieldInit* init = p.rec_inits[i];
+            AirTyp* fty = m1_record_field_ty(data, i); AirFieldInit* init = p.rec_inits[i + marker];
             if (i > 0) { fprintf(g.out, ", "); }
-            if (f == null || init == null || !same(f.name, init.name)) {
+            if (fty == null || init == null || !same(m1_record_field_name(data, i), init.name)) {
  return false; }
-            char* ft = g.llvm_type_text(f.ty);
+            char* ft = g.llvm_type_text(fty);
             if (ft == null) {
  return false; }
             fprintf(g.out, "%s ", ft);
-            if (!g.emit_constant(init.value, f.ty, depth + 1)) {
+            if (!g.emit_constant(init.value, fty, depth + 1)) {
  return false; }
         }
         fprintf(g.out, " }"); return true;
@@ -3722,16 +3994,18 @@ fn bool M1Gen.record_global_cells(M1Gen* g, AirTyp* t, AirPrd* init, char* alloc
  return false; } count = t.arg_count; is_tuple = true; }
     else if (t.tag == ATYP_NOMINAL)
     {
-        data = g.find_data(t.name);
-        if (data == null || data.ctor_count != 1 || data.ctors[0] == null || data.ctors[0].field_count > 64) {
+        data = m1_find_record_decl(g.decls, g.decl_count, t.name);
+        if (data == null || (data.tag == ADECL_CODATA && !m1_record_codata_decl(data)) || (data.tag == ADECL_DATA && (data.ctor_count != 1 || data.ctors[0] == null))) {
  return false; }
-        count = data.ctors[0].field_count;
+        count = m1_record_field_count(data);
+        if (count > 64) {
+ return false; }
     }
     else { return true; }
     long stride = is_array ? m1_align_up(g.type_size(t.args[0], depth + 1), g.type_alignment(t.args[0], depth + 1)) : 0;
     for (usz i = 0; i < count; i++)
     {
-        AirTyp* child_type = is_array ? t.args[0] : (is_tuple ? t.args[i] : data.ctors[0].fields[i].ty);
+        AirTyp* child_type = is_array ? t.args[0] : (is_tuple ? t.args[i] : m1_record_field_ty(data, i));
         AirPrd* child_init = null; long child_offset = 0;
         if (is_array)
         {
@@ -3823,12 +4097,12 @@ fn bool M1Gen.emit_data_types(M1Gen* g)
     for (usz i = 0; i < g.decl_count; i++)
     {
         AirDecl* d = g.decls[i];
-        if (d == null || d.tag != ADECL_DATA) { continue; }
+        if (d == null || (d.tag != ADECL_DATA && !(d.tag == ADECL_CODATA && m1_record_codata_decl(d)))) { continue; }
         bool duplicate = false;
         for (usz j = 0; j < i; j++)
         {
             AirDecl* prior = g.decls[j];
-            if (prior != null && prior.tag == ADECL_DATA && same(prior.name, d.name)) { duplicate = true; break; }
+            if (prior != null && (prior.tag == ADECL_DATA || prior.tag == ADECL_CODATA) && same(prior.name, d.name)) { duplicate = true; break; }
         }
         if (duplicate) { continue; }
         AirTyp nominal; nominal.tag = ATYP_NOMINAL; nominal.name = d.name; nominal.arg_count = 0;
@@ -3850,13 +4124,13 @@ fn bool M1Gen.emit_data_types(M1Gen* g)
             fprintf(g.out, "%%\"%s\" = type { i32, [%ld x %s] }\n", d.name, slots, storage_type);
             continue;
         }
-        if (d.ctors[0].field_count > 64) {
+        if (m1_record_field_count(d) > 64) {
  return false; }
         fprintf(g.out, "%%\"%s\" = type { ", d.name);
-        for (usz j = 0; j < d.ctors[0].field_count; j++)
+        for (usz j = 0; j < m1_record_field_count(d); j++)
         {
             if (j != 0) { fprintf(g.out, ", "); }
-            char* field_type = g.llvm_type_text(d.ctors[0].fields[j].ty);
+            char* field_type = g.llvm_type_text(m1_record_field_ty(d, j));
             if (g.failed || field_type == null) {
  return false; }
             fprintf(g.out, "%s", field_type);
@@ -4021,12 +4295,11 @@ fn bool M1Gen.bind_record_pattern(M1Gen* g, AirPat* pat, char* value, AirTyp* re
 {
     if (pat == null || pat.tag != APAT_RECORD || value == null || record_type == null || record_type.tag != ATYP_NOMINAL) {
  return false; }
-    AirDecl* data = g.find_data(record_type.name);
-    if (data == null || data.typaram_count != 0 || data.attr_count != 0 || data.ctor_count != 1 || data.ctors[0] == null || data.ctors[0].field_count > 64)
-    { g.note_failure(line, col, (char*)"record patterns currently support only plain single-constructor product records"); return false; }
+    AirDecl* data = m1_find_record_decl(g.decls, g.decl_count, record_type.name);
+    if (data == null || data.typaram_count != 0 || data.attr_count != 0 || (data.tag == ADECL_DATA && (data.ctor_count != 1 || data.ctors[0] == null)) || (data.tag == ADECL_CODATA && !m1_record_codata_decl(data)) || m1_record_field_count(data) > 64)
+    { g.note_failure(line, col, (char*)"record patterns currently support only plain single-constructor product records (and struct codata)"); return false; }
     if (!m1_backend_type(record_type, g.decls, g.decl_count, 0)) {
  return false; }
-    AirCtorDecl* ctor = data.ctors[0];
     char* aggregate_ir = g.llvm_type_text(record_type);
     if (g.failed || aggregate_ir == null) {
  return false; }
@@ -4041,13 +4314,13 @@ fn bool M1Gen.bind_record_pattern(M1Gen* g, AirPat* pat, char* value, AirTyp* re
             { g.note_failure(line, col, (char*)"duplicate field name in record pattern"); return false; }
         }
         long field_index = -1;
-        for (usz j = 0; j < ctor.field_count; j++)
+        for (usz j = 0; j < m1_record_field_count(data); j++)
         {
-            if (ctor.fields[j] != null && ctor.fields[j].name != null && same(ctor.fields[j].name, field_pat.name)) { field_index = (long)j; break; }
+            if (m1_record_field_name(data, j) != null && same(m1_record_field_name(data, j), field_pat.name)) { field_index = (long)j; break; }
         }
         if (field_index < 0)
         { g.note_failure(line, col, (char*)"record pattern names a field absent from the record"); return false; }
-        AirTyp* field_type = ctor.fields[(usz)field_index].ty;
+        AirTyp* field_type = m1_record_field_ty(data, (usz)field_index);
         if (field_type == null) {
  return false; }
         char* field_ir = g.llvm_type_text(field_type);
@@ -6759,6 +7032,16 @@ fn int main(String[] args)
     // AIR carries candidate claims, never trusted backend facts; recompute facts
     // on the exact post-optimization graph consumed by the lowering pass.
     air_facts::validate_module(&mod);
+    // Struct/codata pre-pass: recover erased (`infer`) struct parameter types
+    // from unique field projections before any signature is emitted.
+    for (usz i = 0; i < mod.decl_count; i++)
+    {
+        AirDecl* d = mod.decls[i];
+        if (d != null && d.tag == ADECL_DEF && d.def_body != null)
+        {
+            m1_infer_record_params_walk(d, d.def_body, &mod.decls[0], mod.decl_count, &arena, 0);
+        }
+    }
     // The program entry module is the declarations before the first module
     // record. PEAR2 M1 lowers this module's functions; imported/prelude modules
     // remain available in parsed AIR but are not emitted as unrelated bodies.
@@ -6833,6 +7116,21 @@ fn int main(String[] args)
             AirTyp nominal; nominal.tag = ATYP_NOMINAL; nominal.name = d.name; nominal.arg_count = 0;
             if (!m1_backend_type(&nominal, &mod.decls[0], root_decl_count, 0))
             {                printf("%s:%d:%d: pear2c: unsupported data form in declaration `%s`: PEAR2 supports plain product records and nullary tagged enums; payload-bearing, generic, attributed, or otherwise complex variants are unsupported\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
+                arena.destroy(); return 3;
+            }
+            continue;
+        }
+        if (d.tag == ADECL_CODATA)
+        {
+            if (!m1_record_codata_decl(d))
+            {
+                printf("%s:%d:%d: pear2c: unsupported codata declaration `%s`: PEAR2 lowers codata whose destructors are all nullary projections as product records; parameterized destructors (methods), type parameters, multiplicities, and attributes fail closed\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
+                arena.destroy(); return 3;
+            }
+            AirTyp nominal; nominal.tag = ATYP_NOMINAL; nominal.name = d.name; nominal.arg_count = 0;
+            if (!m1_backend_type(&nominal, &mod.decls[0], root_decl_count, 0))
+            {
+                printf("%s:%d:%d: pear2c: unsupported codata record field types in declaration `%s`\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
                 arena.destroy(); return 3;
             }
             continue;

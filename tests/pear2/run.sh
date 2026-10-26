@@ -1056,6 +1056,29 @@ for fixture in atomic_fence_main syscall_main asm_main; do
     done
 done
 echo "PASS: fence/atomic/syscall/asm machine forms emit, verify, and execute (exit=42, -O0..-O3)"
+
+# --- Codata (struct-as-codata) slice ----------------------------------------
+# Plain nullary-dtor codata declarations lower as product records: pfront's
+# `record{_f0 = T, ...}` marker construction, `field name #i` projection on
+# `infer`-typed parameters (unique-declaration resolution; ambiguous owner
+# fails closed), aggregates by value across internal calls and returns.
+for fixture in codata_struct_main; do
+    cp "tests/pear2/$fixture.air" "$W/$fixture.air"
+    for level in 0 1 2 3; do
+        "$PEAR2_BIN" "$W/$fixture.air" --emit-bc -O$level --quiet || { echo "FAIL: $fixture -O$level bitcode rejected"; exit 1; }
+        "$PEAR2_CLANG" -Wno-override-module "$W/$fixture.bc" -o "$W/$fixture.O$level" >"$W/$fixture.O$level.link.log" 2>&1 || { echo "FAIL: clang link $fixture -O$level"; cat "$W/$fixture.O$level.link.log"; exit 1; }
+        set +e
+        timeout 5 "$W/$fixture.O$level" >/dev/null 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = 42 ] || { echo "FAIL: $fixture -O$level returned $rc, expected 42"; exit 1; }
+    done
+done
+echo "PASS: codata struct records construct, project, call, and return by value (exit=42, -O0..-O3)"
+m10_reject reject_codata_method tests/pear2/reject_codata_method_main.air 'unsupported codata declaration'
+m10_reject reject_codata_ambiguous tests/pear2/reject_codata_ambiguous_main.air 'ambiguous record field projection'
+echo "PASS: codata parameterized-dtor declarations and ambiguous projections fail closed with source positions"
+
 m10_reject reject_atomic_cmpxchg tests/pear2/reject_atomic_cmpxchg_main.air 'cmpxchg needs separate success/failure orderings'
 m10_reject reject_atomic_float tests/pear2/reject_atomic_float_main.air 'atomic pointee must be an 8/16/32/64-bit integer'
 m10_reject reject_atomic_load_order tests/pear2/reject_atomic_load_order_main.air 'atomic load ordering must be relaxed, acquire, or seq_cst'

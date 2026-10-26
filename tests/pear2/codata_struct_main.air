@@ -1,0 +1,36 @@
+// Codata-as-record (PEAR struct): plain nullary-dtor codata declaration,
+// pfront's `record{_f0 = T, ...}` construction convention, `field name #i`
+// projection against `infer`-typed parameters (unique-field resolution),
+// aggregates by value across internal calls and returns. exit 42.
+air 2.2 Main "codata_struct_main.pie";
+
+codata Vec2 {
+  op x() : i64;
+  op y() : i64;
+};
+
+def make(a : infer, b : infer) : infer =
+  mu~ %ret.
+    <record{_f0 = Vec2, x = a, y = b} | %ret>;
+
+def flip(v : infer) : infer =
+  mu~ %ret.
+    <v | field x #0 · comu x0.
+      <v | field y #1 · comu y0.
+        <record{x = y0, y = x0} : nominal Vec2 | %ret>>>;
+
+def dot(a : infer, b : infer) : infer =
+  mu~ %ret.
+    <a | field x #0 · comu ax.
+      <b | field x #0 · comu bx.
+        <a | field y #1 · comu ay.
+          <b | field y #1 · comu by.
+            <(add (mul ax bx) (mul ay by)) : i64 | %ret>>>>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <make | call · 6 : i64 · 4 : i64 · comu va.
+      <flip | call · va · comu vb.
+        <dot | call · va · vb · comu d.
+          <va | field x #0 · comu vx.
+            <(sub d vx) : i64 | %ret>>>>>;

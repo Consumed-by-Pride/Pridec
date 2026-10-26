@@ -127,7 +127,7 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 4.12 First-class capture of non-default-cc functions rejects positioned
       (defensive gate; named-fn capture itself is outside the subset today).
 
-## 5. Feature coverage matrix (25)
+## 5. Feature coverage matrix (26)
 
 - [x] 5.1 Integer widths i8/i16/i32/i64/i128, signed + unsigned (fixtures).
 - [x] 5.2 `isz`/`usz` pointer-sized ints, profile-parametric (i64/i32
@@ -188,6 +188,17 @@ bitcode-determinism fix committed with this checklist revision).
       `asm` with template/constraints/result ascription over int/float/pointer
       operands and scalar-or-unit results (bool rejected); fixtures
       atomic_fence/syscall/asm verified -O0..-O3 exit 42 (suite 122 PASS).
+- [x] 5.27 Codata struct slice: plain nullary-dtor codata declarations lower
+      as product records (semantics in docs/pear2/CODATA_SEMANTICS.md):
+      pfront `record{_f0 = T, ...}` marker construction and explicit
+      `record{...} : nominal T` ascription, `field name #i` projection on
+      erased `infer` parameters via unique-declaration resolution
+      (module pre-pass pins params; ambiguous owner rejects positioned),
+      projection-chain return inference through `comu` binds, aggregates by
+      value across internal calls/returns and the external C ABI; fixture
+      codata_struct verified -O0..-O3 exit 42; reject fixtures
+      reject_codata_method (parameterized destructor) and
+      reject_codata_ambiguous positioned (suite 124 PASS).
 
 ## 6. Determinism and equivalence (8)
 
@@ -272,6 +283,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**120 items: 119 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**121 items: 120 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.

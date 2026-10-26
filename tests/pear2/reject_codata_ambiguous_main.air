@@ -1,0 +1,15 @@
+// Rejection: two records declare the same field name at the same index; an
+// `infer`-typed projection cannot pick between them without an ascription.
+air 2.2 Main "reject_codata_ambiguous_main.pie";
+
+codata P1 { op x() : i64; };
+codata P2 { op x() : i64; };
+
+def pick(v : infer) : infer =
+  mu~ %ret.
+    <v | field x #0 · comu r.
+      <r : i64 | %ret>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <42 : i64 | %ret>;

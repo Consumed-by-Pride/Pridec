@@ -1,0 +1,12 @@
+// Rejection: parameterized destructors are object methods, outside the
+// product-record codata fragment.
+air 2.2 Main "reject_codata_method_main.pie";
+
+codata Counter {
+  op get() : i64;
+  op bump(by : i64) : i64;
+};
+
+def main() : i64 =
+  mu~ %ret.
+    <42 : i64 | %ret>;
