@@ -794,6 +794,7 @@ fn void AirW.decl_body(AirW* w, AirDecl* d)
             w.attrs(d);
             if (d.is_pub) { w.s("pub "); }
             if (d.is_extern) { w.s("extern "); }
+            if (d.extern_link != null) { w.s("link "); w.opt_str(d.extern_link); w.c(' '); }
             w.s("global "); if (d.g_mut) { w.s("mut "); }
             w.name(d.name); w.s(" : "); w.typ(d.ret_ty);
             if (d.g_init != null) { w.s(" = "); w.prd(d.g_init, 1); }

@@ -1,0 +1,9 @@
+// Dynamic pointer arithmetic is outside AIR 3's bounded memory slice.
+air 3.0 Main "reject_dynamic_gep_main.pie";
+
+def bad_offset(ix : i64) : ptr(i32) =
+  mu~ %ret.
+    <alloca(array#2(i32)) : ptr(array#2(i32)) | comu base.
+      <gep[array#2(i32)](base, 0 : i64, ix) : ptr(i32) | %ret>>;
+
+def main() : i64 = mu~ %ret. <0 : i64 | %ret>;

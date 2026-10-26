@@ -501,6 +501,7 @@ fn AirPrd* Rd.new_prd(Rd* r, AirPrdTag tag)
 {
     AirPrd* p = air_ir::air_new_AirPrd(r.a);
     if (p == null) { r.fail("out of memory"); return null; }
+    p.source_line = r.tline; p.source_col = r.tcol;
     p.tag = tag;
     p.source_line = r.tline; p.source_col = r.tcol;
     return p;
@@ -878,6 +879,7 @@ fn AirCmd* Rd.new_cmd(Rd* r, AirCmdTag tag)
 {
     AirCmd* c = air_ir::air_new_AirCmd(r.a);
     if (c == null) { r.fail("out of memory"); return null; }
+    c.source_line = r.tline; c.source_col = r.tcol;
     c.tag = tag;
     c.source_line = r.tline; c.source_col = r.tcol;
     return c;
@@ -1180,6 +1182,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
 {
     if (r.failed) { return false; }
     AirArena* a = r.a;
+    int decl_line = r.tline; int decl_col = r.tcol;
     bool is_pub = false; bool is_extern = false; bool is_fastcc = false; bool is_varargs = false;
     bool ro = false; bool facts = false; char* link = null;
     char*[8] pend_attr_n; char*[8] pend_attr_s; long[8] pend_attr_i; bool[8] pend_attr_h; usz pend_attr_c = 0;
@@ -1264,6 +1267,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         r.next();
         AirDecl* d = air_ir::air_mk_decl(a, ADECL_GLOBAL, null);
         if (d != null) { d.source_line = r.tline; d.source_col = r.tcol; }
+        if (d != null) { d.extern_link = link; }
         d.is_pub = is_pub; d.is_extern = is_extern;
         for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         if (r.eat_kw("mut")) { d.g_mut = true; }
