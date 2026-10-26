@@ -1,0 +1,20 @@
+// Nullary enum through a tag-discriminated match with default arm.
+air 2.2 Main "sum_enum_default.pie";
+data Color {
+  ctor Red() : nominal Color;
+  ctor Green() : nominal Color;
+  ctor Blue() : nominal Color;
+};
+def encode(c : nominal Color) : i64 =
+  mu~ %ret.
+    match c {
+      ctor Red -> <1 | %ret>;
+      ctor Green -> <2 | %ret>;
+      ctor Blue -> <3 | %ret>;
+      _ -> <0 | %ret>;
+    };
+def main() : i64 =
+  mu~ %ret.
+    <con Green() | comu g.
+      <encode | call · g · comu e.
+        <(add e 40 : i64) | %ret>>>;

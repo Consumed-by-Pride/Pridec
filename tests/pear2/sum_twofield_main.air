@@ -1,0 +1,14 @@
+// Two-field constructor payload: both fields bind and combine.
+air 2.2 Main "sum_twofield.pie";
+data Pair2 {
+  ctor N() : nominal Pair2;
+  ctor P(a : i64, b : i64) : nominal Pair2;
+};
+def main() : i64 =
+  mu~ %ret.
+    <con P(19 : i64, 23 : i64) | comu r.
+      match r {
+        ctor N -> <0 | %ret>;
+        ctor P(bind a, bind b) -> <(add a b : i64) | %ret>;
+        _ -> <7 | %ret>;
+      }>;

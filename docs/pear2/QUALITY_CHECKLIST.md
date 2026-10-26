@@ -172,6 +172,12 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 5.23 assert/assume/trap/ub lower to LLVM intrinsics.
 - [x] 5.24 Optimizer pass: conservative rewrites bounded to a fixed point,
       re-verified after optimization (`air_verify` on rewritten module).
+- [x] 5.25 Tagged sums (multi-constructor data + nullary enums) lower and
+      execute: `con` construction, `ctor`-pattern matches with payload binds,
+      by-value across internal calls/returns, required wildcard arm enforced
+      positioned, positioned reject at external C boundary; fixtures
+      sum_option64/sum_twofield/sum_enum_default verified -O0..-O3 (suite
+      116 PASS).
 
 ## 6. Determinism and equivalence (8)
 
@@ -256,6 +262,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**118 items: 117 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**119 items: 118 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.

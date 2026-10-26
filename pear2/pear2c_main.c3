@@ -965,7 +965,9 @@ fn char* M1Gen.c_abi_field_problem(M1Gen* g, AirTyp* t, int depth)
     if (t.tag == ATYP_NOMINAL)
     {
         AirDecl* d = g.find_data(t.name);
-        if (d == null || d.typaram_count != 0 || d.ctor_count != 1 || d.ctors[0] == null || d.ctors[0].field_count == 0 || d.attr_count != 0)
+        if (d == null || d.typaram_count != 0 || d.attr_count != 0) { return (char*)"nested records must be non-generic, plain, non-empty products"; }
+        if (d.ctor_count != 1) { return (char*)"tagged sums (multi-constructor data) cannot cross the external C boundary"; }
+        if (d.ctors[0] == null || d.ctors[0].field_count == 0)
         { return (char*)"nested records must be non-generic, plain, non-empty products"; }
         for (usz i = 0; i < d.ctors[0].field_count; i++)
         {
