@@ -939,3 +939,26 @@ m10_reject reject_abi_callconv tests/pear2/reject_abi_callconv_main.air 'unsuppo
 m10_reject reject_abi_main_export tests/pear2/reject_abi_main_export_main.air 'entry point `main` keeps the default calling convention'
 m10_reject reject_wasm32_effects tests/pear2/reject_wasm32_effects_main.air 'freestanding wasm32 target profile' --target=wasm32-freestanding --emit-ll
 echo "PASS: M10 rejects (multi-shot/resume/no-handler/nested-handler/infer-payload/bad-callconv/main-pinning/wasm32-effects) all fail closed with source positions"
+
+# --- External aggregate ABI fixture (records + tuples by value over C) -----
+# Hydrated repository content (docs/pear2/CONTRACT.md aggregate ABI boundary)
+# is backed by this checked-in C driver: record construction/projection,
+# internal aggregate round-trips, and by-value aggregate calls both ways,
+# verified under -O0..-O3. x86-64/Linux + LLVM 23 only.
+abi_ext_expect() {
+    local name=external_record_abi_main level rc
+    rm -f "$W/$name.air" "$W/$name.bc" "$W/$name.ll" "$W/$name.helper.o"
+    cp tests/pear2/$name.air "$W/$name.air"
+    "$PEAR2_CLANG" -c tests/pear2/external_record_abi_helper.c -o "$W/$name.helper.o" || { echo "FAIL: helper.c compile"; exit 1; }
+    for level in 0 1 2 3; do
+        "$PEAR2_BIN" "$W/$name.air" --emit-bc -O$level --quiet || { echo "FAIL: $name -O$level bitcode rejected"; exit 1; }
+        "$PEAR2_CLANG" -Wno-override-module "$W/$name.bc" "$W/$name.helper.o" -o "$W/$name.O$level" >"$W/$name.O$level.link.log" 2>&1 || { echo "FAIL: clang link $name -O$level"; cat "$W/$name.O$level.link.log"; exit 1; }
+        set +e
+        timeout 5 "$W/$name.O$level" >/dev/null 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = 42 ] || { echo "FAIL: $name at -O$level returned $rc, expected 42"; exit 1; }
+    done
+    echo "PASS: LLVM 23 linked/runs $name (exit=42, C aggregate ABI both directions, -O0..-O3)"
+}
+abi_ext_expect

@@ -26,6 +26,10 @@ Warnings go to stdout/stderr and never change the exit status of a successful em
 `scripts/pie-exe.sh` forwards both stages' output; `BACKEND=… scripts/pie-exe.sh FILE.pie --emit-exe -O2` is the
 whole chain.
 
+### PEAR 2 aggregate ABI boundary (current implementation)
+
+PEAR 2 lowers plain, non-generic, non-packed, single-constructor product declarations as LLVM named structs. AIR `record` construction and `field` projection are supported for those declarations; sum types, constructor patterns, record patterns, and globals are not implied by that support. External by-value aggregates are limited to non-empty tuples and these plain records whose fields have C-compatible LLVM representations. AIR `bool` and `unit` fields are rejected in external aggregates, as are unsupported declaration attributes and aggregate shapes. Native interoperability is verified with the checked-in C fixture on x86-64 Linux/LLVM 23 only; LLVM's `ccc` lowering is not a promise of cross-target C ABI compatibility. Unsupported AIR forms such as recursive `letrec` bindings must still fail with exit 3, name the construct and enclosing function where known, and publish no artifact.
+
 ## 2 Obligations
 
 1. **Strict input.** Reject, do not recover from: unknown keywords, other versions, over-limit counts, trailing text.
