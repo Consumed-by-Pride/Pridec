@@ -1506,6 +1506,10 @@ fn AirTyp* M1Gen.infer_cmd_return_type(M1Gen* g, AirDecl* d, AirCmd* c, char* re
         }
         return result;
     }
+    if ((c.tag == ACMD_ATOMIC || c.tag == ACMD_SYSCALL || c.tag == ACMD_ASM) && c.cns != null && c.cns.tag == ACNS_COMU)
+    {
+        return g.infer_cmd_return_type(d, c.cns.body, ret_name, depth + 1);
+    }
     return null;
 }
 fn AirTyp* M1Gen.infer_decl_return_type(M1Gen* g, AirDecl* d)
@@ -5553,6 +5557,255 @@ fn bool M1Gen.effect_perform(M1Gen* g, AirCmd* c)
     g.terminated = true;
     return true;
 }
+// ── AIR 2.1/2.2 machine forms: fence · atomic · syscall · asm ────────────
+// fence/atomic map one-to-one onto LLVM's C11 memory-model instructions.
+// syscall lowers through the pinned-register x86-64 Linux syscall ABI (host
+// profile only). asm is an inline-assembly call. Anything outside this
+// surface fails closed with a positioned diagnostic instead of guessing.
+fn char* m1_air_order_text(int order)
+{
+    switch (order)
+    {
+        case 0: return (char*)"monotonic";
+        case 1: return (char*)"acquire";
+        case 2: return (char*)"release";
+        case 3: return (char*)"acq_rel";
+        case 4: return (char*)"seq_cst";
+        default: return null;
+    }
+}
+fn bool M1Gen.fence_cmd(M1Gen* g, AirCmd* c)
+{
+    // LLVM admits acquire/release/acq_rel/seq_cst on a fence; a relaxed
+    // (monotonic) fence is a no-op in the C11 model with no LLVM spelling.
+    if (c.atomic_order < 1 || c.atomic_order > 4)
+    {
+        g.note_failure(c.source_line, c.source_col, (char*)"fence requires an acquire, release, acq_rel, or seq_cst ordering (a relaxed fence has no LLVM lowering)");
+        return false;
+    }
+    fprintf(g.out, "  fence %s\n", m1_air_order_text(c.atomic_order));
+    return true;
+}
+fn bool M1Gen.atomic_cmd(M1Gen* g, AirCmd* c, char* ret_name)
+{
+    if (!g.low_profile)
+    {
+        g.note_failure(c.source_line, c.source_col, (char*)"atomic operations require an AIR 3 typed pointer operand (alloca/typed gep); untyped pointer atomics are unsupported");
+        return false;
+    }
+    if (c.prd == null) { g.note_failure(c.source_line, c.source_col, (char*)"atomic operation is missing its pointer operand"); return false; }
+    if (c.atomic_op == 13)
+    {
+        g.note_failure(c.source_line, c.source_col, (char*)"atomic cmpxchg is not lowerable: the AIR grammar carries a single ORDER, but cmpxchg needs separate success/failure orderings");
+        return false;
+    }
+    if (c.atomic_op < 0 || c.atomic_op > 12) { g.note_failure(c.source_line, c.source_col, (char*)"unknown atomic operation"); return false; }
+    bool is_load = c.atomic_op == 0; bool is_store = c.atomic_op == 1;
+    int want = is_load ? 0 : 1;
+    if ((int)c.prd_count != want)
+    {
+        g.note_failure(c.source_line, c.source_col, is_load ? (char*)"atomic load takes only its pointer operand" : (char*)"atomic operation takes exactly one value operand");
+        return false;
+    }
+    if (is_load && (c.atomic_order == 2 || c.atomic_order == 3))
+    { g.note_failure(c.source_line, c.source_col, (char*)"atomic load ordering must be relaxed, acquire, or seq_cst"); return false; }
+    if (is_store && (c.atomic_order == 1 || c.atomic_order == 3))
+    { g.note_failure(c.source_line, c.source_col, (char*)"atomic store ordering must be relaxed, release, or seq_cst"); return false; }
+    AirTyp* pty = g.expr_type(c.prd);
+    AirTyp* element = m1_pointee_type(pty);
+    int ebits = m1_int_bits(element);
+    if (element == null || (ebits != 8 && ebits != 16 && ebits != 32 && ebits != 64))
+    { g.note_failure(c.source_line, c.source_col, (char*)"atomic pointee must be an 8/16/32/64-bit integer (pointer, bool, float, and 128-bit atomics are unsupported)"); return false; }
+    char* address = g.pointer_value(c.prd);
+    if (g.failed || address == null) { return false; }
+    if (!g.check_access(address, element, c.source_line, c.source_col, !is_load)) { return false; }
+    char* ety = g.llvm_type_text(element);
+    int align = g.type_alignment(element, 0);
+    char* order = m1_air_order_text(c.atomic_order);
+    if (ety == null || align <= 0 || order == null) { return false; }
+    if (is_load)
+    {
+        char* dst = g.tmp(); if (dst == null) { return false; }
+        fprintf(g.out, "  %s = load atomic %s, ptr %s %s, align %d\n", dst, ety, address, order, align);
+        if (c.cns == null) { return true; }
+        return g.consume(dst, false, false, element, c.cns, ret_name);
+    }
+    AirPrd* vp = c.prds[0];
+    bool vok = vp != null && m1_integer_type(element) &&
+        (m1_value_type_compatible(element, g.expr_type(vp), 0) || g.integer_value_compatible(vp, element));
+    if (!vok)
+    { g.note_failure(c.source_line, c.source_col, (char*)"atomic value operand must be an integer compatible with the pointee type"); return false; }
+    char* value = g.prd(vp);
+    if (g.failed || value == null) { return false; }
+    if (is_store)
+    {
+        fprintf(g.out, "  store atomic %s %s, ptr %s %s, align %d\n", ety, value, address, order, align);
+        if (c.cns == null) { return true; }
+        return g.consume_unit(c.cns, ret_name);
+    }
+    char* opn = null;
+    switch (c.atomic_op)
+    {
+        case 2: opn = (char*)"xchg"; break;
+        case 3: opn = (char*)"add"; break;
+        case 4: opn = (char*)"sub"; break;
+        case 5: opn = (char*)"and"; break;
+        case 6: opn = (char*)"or"; break;
+        case 7: opn = (char*)"xor"; break;
+        case 8: opn = (char*)"nand"; break;
+        case 9: opn = (char*)"max"; break;
+        case 10: opn = (char*)"min"; break;
+        case 11: opn = (char*)"umax"; break;
+        case 12: opn = (char*)"umin"; break;
+        default: break;
+    }
+    if (opn == null) { return false; }
+    char* dst = g.tmp(); if (dst == null) { return false; }
+    fprintf(g.out, "  %s = atomicrmw %s ptr %s, %s %s %s\n", dst, opn, address, ety, value, order);
+    if (c.cns == null) { return true; }
+    return g.consume(dst, false, false, element, c.cns, ret_name);
+}
+fn bool M1Gen.syscall_cmd(M1Gen* g, AirCmd* c, char* ret_name)
+{
+    if (g_m1_target_freestanding)
+    { g.note_failure(c.source_line, c.source_col, (char*)"syscalls are host-platform specific and are not lowerable under the freestanding wasm32 target profile"); return false; }
+    if (c.prd == null) { g.note_failure(c.source_line, c.source_col, (char*)"syscall is missing its number operand"); return false; }
+    if (c.prd_count > 6) { g.note_failure(c.source_line, c.source_col, (char*)"x86-64 Linux syscalls take at most 6 arguments"); return false; }
+    AirTyp i64t = { .tag = ATYP_I64 };
+    AirTyp* nt = g.expr_type(c.prd);
+    if (nt != null && !m1_integer_type(nt))
+    { g.note_failure(c.source_line, c.source_col, (char*)"syscall number must be an integer"); return false; }
+    char* nr = g.prd(c.prd);
+    if (g.failed || nr == null) { return false; }
+    if (m1_integer_type(nt) && m1_int_bits(nt) != 64)
+    { nr = g.convert_integer_width(nr, nt, &i64t); if (g.failed || nr == null) { return false; } }
+    char*[8] args;
+    int nargs = (int)c.prd_count;
+    for (int i = 0; i < nargs; i++)
+    {
+        AirPrd* ap = c.prds[i];
+        AirTyp* at = ap != null ? g.expr_type(ap) : null;
+        if (at != null && !m1_integer_type(at) && !m1_pointer_repr_type(at))
+        { g.note_failure(c.source_line, c.source_col, (char*)"syscall arguments must be integers or pointers (bool/float/aggregate arguments are unsupported)"); return false; }
+        if (at != null && m1_pointer_repr_type(at))
+        {
+            char* pv = g.pointer_value(ap);
+            if (g.failed || pv == null) { return false; }
+            if (g.low_profile && ap.tag != APRD_NULL)
+            {
+                M1Provenance* vp = g.prov(pv);
+                if (vp == null || vp.freed) { g.note_failure(c.source_line, c.source_col, (char*)"syscall pointer argument has no live provenance"); return false; }
+            }
+            char* wi = g.tmp(); if (wi == null) { return false; }
+            fprintf(g.out, "  %s = ptrtoint ptr %s to i64\n", wi, pv);
+            args[i] = wi;
+            continue;
+        }
+        char* av = g.prd(ap);
+        if (g.failed || av == null) { return false; }
+        if (at != null && m1_int_bits(at) != 64)
+        { av = g.convert_integer_width(av, at, &i64t); if (g.failed || av == null) { return false; } }
+        args[i] = av;
+    }
+    char*[6] regs; regs[0] = (char*)"{rdi}"; regs[1] = (char*)"{rsi}"; regs[2] = (char*)"{rdx}";
+    regs[3] = (char*)"{r10}"; regs[4] = (char*)"{r8}"; regs[5] = (char*)"{r9}";
+    char[512] cons; int co = snprintf(&cons[0], 512, (char*)"={rax},{rax}");
+    for (int i = 0; i < nargs; i++) { if (co > 0 && co < 500) { co += snprintf(&cons[0] + co, 512 - (usz)co, (char*)",%s", regs[i]); } }
+    if (co <= 0 || co >= 500) { return false; }
+    snprintf(&cons[0] + co, 512 - (usz)co, (char*)",~{rcx},~{r11},~{flags},~{memory}");
+    char[1024] ops; int oo = snprintf(&ops[0], 1024, (char*)"i64 %s", nr);
+    for (int i = 0; i < nargs; i++) { if (oo > 0 && oo < 1000) { oo += snprintf(&ops[0] + oo, 1024 - (usz)oo, (char*)", i64 %s", args[i]); } }
+    if (oo <= 0 || oo >= 1000) { return false; }
+    char* dst = g.tmp(); if (dst == null) { return false; }
+    fprintf(g.out, "  %s = call i64 asm sideeffect \"syscall\", \"%s\"(%s)\n", dst, &cons[0], &ops[0]);
+    if (c.cns == null) { return true; }
+    return g.consume(dst, false, false, &i64t, c.cns, ret_name);
+}
+fn char* M1Gen.asm_escaped(M1Gen* g, char* text)
+{
+    if (text == null) { return null; }
+    usz tn = 0;
+    for (char* q = text; *q != 0; q++) { tn++; }
+    char* out = (char*)g.arena.alloc(tn * 3 + 1, 1);
+    if (out == null) { return null; }
+    usz w = 0;
+    for (usz i = 0; i < tn; i++)
+    {
+        char ch2 = text[i];
+        if ((int)ch2 >= 32 && (int)ch2 <= 126 && ch2 != '"' && ch2 != '\\')
+        { out[w] = ch2; w++; continue; }
+        int b = (int)ch2 & 255;
+        char[16] hexd = "0123456789ABCDEF";
+        out[w] = '\\'; out[w + 1] = hexd[(usz)(b >> 4)]; out[w + 2] = hexd[(usz)(b & 15)]; w += 3;
+    }
+    out[w] = 0;
+    return out;
+}
+fn bool M1Gen.asm_cmd(M1Gen* g, AirCmd* c, char* ret_name)
+{
+    if (c.asm_text == null)
+    { g.note_failure(c.source_line, c.source_col, (char*)"asm requires a template string literal"); return false; }
+    if (c.prd_count > 8) { g.note_failure(c.source_line, c.source_col, (char*)"asm supports at most 8 operands"); return false; }
+    bool has_sig = c.asm_cons != null && c.asm_ret != null;
+    if (c.prd_count > 0 && !has_sig)
+    {
+        g.note_failure(c.source_line, c.source_col, (char*)"asm with operands requires the AIR 3.0 constraint and result form: asm \"template\" \"constraints\" : [type] (args)");
+        return false;
+    }
+    AirTyp* rt = c.asm_ret;
+    // AIR's verifier requires every asm to carry template+constraints+result
+    // type; a `unit` result is AIR's spelling of a void asm.
+    bool void_result = rt == null;
+    bool ret_ptr = false;
+    if (rt != null && m1_unit_type(rt)) { void_result = true; }
+    else if (rt != null)
+    {
+        if (m1_bool_type(rt))
+        { g.note_failure(c.source_line, c.source_col, (char*)"asm result type must not be bool (coerce to an integer explicitly)"); return false; }
+        if (!m1_integer_type(rt) && !m1_float_type(rt) && !m1_pointer_repr_type(rt))
+        { g.note_failure(c.source_line, c.source_col, (char*)"asm result type must be a supported scalar or unit"); return false; }
+        void_result = false;
+        ret_ptr = m1_pointer_repr_type(rt);
+    }
+    char* rty = void_result ? (char*)"void" : g.llvm_type_text(rt);
+    if (rty == null) { return false; }
+    char[1536] ops; int oo = 0; ops[0] = 0;
+    for (int i = 0; i < (int)c.prd_count; i++)
+    {
+        AirPrd* ap = c.prds[i];
+        AirTyp* at = ap != null ? g.expr_type(ap) : null;
+        bool is_ptr = at != null && m1_pointer_repr_type(at);
+        if (at == null || (!m1_integer_type(at) && !m1_float_type(at) && !is_ptr))
+        { g.note_failure(c.source_line, c.source_col, (char*)"asm operands must be typed integers, floats, or pointers (bool and aggregates are unsupported)"); return false; }
+        char* av = is_ptr ? g.pointer_value(ap) : g.prd(ap);
+        if (g.failed || av == null) { return false; }
+        if (is_ptr && g.low_profile && ap.tag != APRD_NULL)
+        {
+            M1Provenance* vp = g.prov(av);
+            if (vp == null || vp.freed) { g.note_failure(c.source_line, c.source_col, (char*)"asm pointer operand has no live provenance"); return false; }
+        }
+        char* aty = g.llvm_type_text(at);
+        if (aty == null) { return false; }
+        if (oo >= 1400) { return false; }
+        oo += snprintf(&ops[0] + oo, 1536 - (usz)oo, i == 0 ? (char*)"%s %s" : (char*)", %s %s", aty, av);
+    }
+    char* text = g.asm_escaped(c.asm_text);
+    char* cons = g.asm_escaped(c.asm_cons != null ? c.asm_cons : (char*)"");
+    if (text == null || cons == null) { return false; }
+    char* dialect = c.asm_dialect == 1 ? (char*)" asm inteldialect sideeffect " : (char*)" asm sideeffect ";
+    if (void_result)
+    {
+        fprintf(g.out, "  call void%s\"%s\", \"%s\"(%s)\n", dialect, text, cons, &ops[0]);
+        if (g.failed) { return false; }
+        if (c.cns == null) { return true; }
+        return g.consume_unit(c.cns, ret_name);
+    }
+    char* dst = g.tmp(); if (dst == null) { return false; }
+    fprintf(g.out, "  %s = call %s%s\"%s\", \"%s\"(%s)\n", dst, rty, dialect, text, cons, &ops[0]);
+    if (g.failed) { return false; }
+    if (c.cns == null) { return true; }
+    return g.consume(dst, false, ret_ptr, rt, c.cns, ret_name);
+}
 fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
 {    if (c == null) {
  return false; }
@@ -6047,6 +6300,10 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         g.note_failure(c.source_line, c.source_col, "`resume` escapes the supported effect subset: only one-shot, non-resuming effect handlers are lowerable");
         return false;
     }
+    if (c.tag == ACMD_FENCE) { return g.fence_cmd(c); }
+    if (c.tag == ACMD_ATOMIC) { return g.atomic_cmd(c, ret_name); }
+    if (c.tag == ACMD_SYSCALL) { return g.syscall_cmd(c, ret_name); }
+    if (c.tag == ACMD_ASM) { return g.asm_cmd(c, ret_name); }
     return false;
 }
 fn bool M1Gen.buffer_label_body(M1Gen* g, M1Label* info, char* ret_name)

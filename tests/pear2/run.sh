@@ -1040,6 +1040,28 @@ echo "PASS: tagged sums construct, match, bind payloads, and execute (exit=42, -
 m10_reject reject_sum_extern tests/pear2/reject_sum_extern_main.air 'tagged sums (multi-constructor data) cannot cross the external C boundary'
 m10_reject reject_sum_match_partial tests/pear2/reject_sum_match_partial_main.air 'tagged-sum match requires a final wildcard/default arm'
 
+# Machine-form slice (AIR 2.1 fence/atomic/syscall + AIR 3.0 inline asm):
+# atomicrmw/load/store over typed allocas with C11 orderings, raw x86-64
+# syscall ABI through pinned-register inline asm, constraint-checked asm.
+for fixture in atomic_fence_main syscall_main asm_main; do
+    cp "tests/pear2/$fixture.air" "$W/$fixture.air"
+    for level in 0 1 2 3; do
+        "$PEAR2_BIN" "$W/$fixture.air" --emit-bc -O$level --quiet || { echo "FAIL: $fixture -O$level bitcode rejected"; exit 1; }
+        "$PEAR2_CLANG" -Wno-override-module "$W/$fixture.bc" -o "$W/$fixture.O$level" >"$W/$fixture.O$level.link.log" 2>&1 || { echo "FAIL: clang link $fixture -O$level"; cat "$W/$fixture.O$level.link.log"; exit 1; }
+        set +e
+        timeout 5 "$W/$fixture.O$level" >/dev/null 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = 42 ] || { echo "FAIL: $fixture -O$level returned $rc, expected 42"; exit 1; }
+    done
+done
+echo "PASS: fence/atomic/syscall/asm machine forms emit, verify, and execute (exit=42, -O0..-O3)"
+m10_reject reject_atomic_cmpxchg tests/pear2/reject_atomic_cmpxchg_main.air 'cmpxchg needs separate success/failure orderings'
+m10_reject reject_atomic_float tests/pear2/reject_atomic_float_main.air 'atomic pointee must be an 8/16/32/64-bit integer'
+m10_reject reject_atomic_load_order tests/pear2/reject_atomic_load_order_main.air 'atomic load ordering must be relaxed, acquire, or seq_cst'
+m10_reject reject_asm_bool tests/pear2/reject_asm_bool_main.air 'asm result type must not be bool'
+m10_reject reject_syscall_wasm32 tests/pear2/reject_syscall_wasm32_main.air 'not lowerable under the freestanding wasm32 target profile' --emit-bc --target=wasm32-freestanding
+
 # wasm32-freestanding end-to-end validation (AYO-9): the run-time-pinned
 # toolchain ships wasm-ld, so bitcode -> wasm object -> linked module is a
 # hard gate, not a someday item. Skips (with a note, not a pass) only when

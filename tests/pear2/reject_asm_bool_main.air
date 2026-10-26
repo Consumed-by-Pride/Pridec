@@ -1,0 +1,7 @@
+// Rejection: asm results must be scalars; a bool result would need an
+// implicit i8->i1 interpretation, so it fails closed (coerce explicitly).
+air 3.0 Main "reject_asm_bool_main.pie";
+def main() : i64 =
+  mu~ %ret.
+    asm "mov $$1, $0" "=r" : [bool] () · comu flag.
+      <42 : i64 | %ret>;

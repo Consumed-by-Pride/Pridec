@@ -127,7 +127,7 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 4.12 First-class capture of non-default-cc functions rejects positioned
       (defensive gate; named-fn capture itself is outside the subset today).
 
-## 5. Feature coverage matrix (24)
+## 5. Feature coverage matrix (25)
 
 - [x] 5.1 Integer widths i8/i16/i32/i64/i128, signed + unsigned (fixtures).
 - [x] 5.2 `isz`/`usz` pointer-sized ints, profile-parametric (i64/i32
@@ -178,6 +178,16 @@ bitcode-determinism fix committed with this checklist revision).
       positioned, positioned reject at external C boundary; fixtures
       sum_option64/sum_twofield/sum_enum_default verified -O0..-O3 (suite
       116 PASS).
+
+- [x] 5.26 Machine forms lower and execute: `fence` (acquire+; relaxed
+      rejected by the AIR verifier per its ordering law), `atomic`
+      rmw/load/store over AIR 3 typed integer pointees 8/16/32/64 (cmpxchg
+      rejected — single ORDER cannot express paired orderings; load/store
+      ordering laws positioned), x86-64 Linux `syscall` via pinned-register
+      inline asm (rejected under wasm32-freestanding), and AIR 3.0 inline
+      `asm` with template/constraints/result ascription over int/float/pointer
+      operands and scalar-or-unit results (bool rejected); fixtures
+      atomic_fence/syscall/asm verified -O0..-O3 exit 42 (suite 122 PASS).
 
 ## 6. Determinism and equivalence (8)
 
@@ -262,6 +272,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**119 items: 118 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**120 items: 119 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.
