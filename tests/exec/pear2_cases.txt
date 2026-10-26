@@ -9,3 +9,4 @@ tests/exec/pear/p07_mut_reassign.pie
 tests/exec/pear/p08_if_else.pie
 tests/exec/pear/p09_stdout_extern.pie
 tests/exec/pear/p99_forward_call.pie
+tests/exec/pear/p116_closure_capture.pie

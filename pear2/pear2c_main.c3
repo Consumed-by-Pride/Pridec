@@ -386,6 +386,24 @@ fn bool m1_sum_payload_type(AirTyp* t, AirDecl** decls, usz decl_count, int dept
     }
     return false;
 }
+// A closure code pointer: arrow whose first parameter is the environment
+// pointer ptr(u8), with backend-representable explicit parameters and result.
+// Such arrows are legal members of the internal {code, env} fat-closure tuple
+// (the M8 closure ABI); they are not scalars and never valid at the C boundary
+// (guarded separately by m1_c_abi_field_type / external aggregate checks).
+fn bool m1_closure_arrow_type(AirTyp* t, AirDecl** decls, usz decl_count, int depth)
+{
+    if (t == null || t.tag != ATYP_ARROW || t.arg_count != 2 || depth >= 16) { return false; }
+    AirTyp* params = t.args[0];
+    if (params == null || params.tag != ATYP_TUPLE || params.arg_count == 0) { return false; }
+    if (!m1_pointer_repr_type(params.args[0])) { return false; }
+    for (usz i = 1; i < params.arg_count; i++)
+    {
+        if (!m1_backend_type(params.args[i], decls, decl_count, depth + 1)) { return false; }
+    }
+    return m1_unit_type(t.args[1]) || m1_backend_type(t.args[1], decls, decl_count, depth + 1);
+}
+
 fn bool m1_backend_type(AirTyp* t, AirDecl** decls, usz decl_count, int depth)
 {
     if (t == null || depth >= 16) { return false; }
@@ -393,7 +411,11 @@ fn bool m1_backend_type(AirTyp* t, AirDecl** decls, usz decl_count, int depth)
     if (t.tag == ATYP_TUPLE)
     {
         if (t.arg_count > 64) { return false; }
-        for (usz i = 0; i < t.arg_count; i++) { if (!m1_backend_type(t.args[i], decls, decl_count, depth + 1)) { return false; } }
+        for (usz i = 0; i < t.arg_count; i++)
+        {
+            if (!m1_backend_type(t.args[i], decls, decl_count, depth + 1) &&
+                !m1_closure_arrow_type(t.args[i], decls, decl_count, depth + 1)) { return false; }
+        }
         return true;
     }
     if (t.tag == ATYP_ARRAY)
@@ -434,6 +456,7 @@ fn bool m1_backend_type(AirTyp* t, AirDecl** decls, usz decl_count, int depth)
         for (usz i = 0; i < d.ctors[0].field_count; i++)
         {
             AirField* field = d.ctors[0].fields[i];
+            if (field == null || !m1_safe_name(field.name)) { return false; }
             if (field == null || !m1_safe_name(field.name) || !m1_backend_type(field.ty, decls, decl_count, depth + 1)) { return false; }
         }
         return true;
@@ -1060,6 +1083,12 @@ fn AirTyp* M1Gen.expr_type(M1Gen* g, AirPrd* p)
     if (p.ty != null && p.ty.tag != ATYP_INFER) { return p.ty; }
     if (p.tag == APRD_VAR) { return g.lookup_type(p.name); }
     if (p.tag == APRD_LAMBDA) { return g.lambda_closure_type(p); }
+    if (p.tag == APRD_MU)
+    {
+        if (p.name == null || p.body == null || p.body.tag != ACMD_CUT ||
+            p.body.cns == null || p.body.cns.tag != ACNS_COVAR || !same(p.body.cns.name, p.name)) { return null; }
+        return g.expr_type(p.body.prd);
+    }
     if (p.tag == APRD_CON)
     {
         AirDecl* owner = g.find_constructor_owner(p.name);
@@ -1178,6 +1207,31 @@ fn bool m1_cns_tail_returns_to(AirCns* k, char* ret_name, int depth)
     if (k.tag == ACNS_COVAR) { return same(k.name, ret_name); }
     return m1_cns_tail_returns_to(k.tail, ret_name, depth + 1);
 }
+// The covariable a command finally returns into. Lifted lambdas bind their own
+// return covariable (pfront names them %ret, %ret_2, ...), so lambda typing
+// must derive the binder from the body rather than assume a fixed string.
+fn char* m1_cmd_return_covar(AirCmd* c, int depth)
+{
+    if (c == null || depth >= 24) { return null; }
+    if (c.tag == ACMD_CUT && c.cns != null)
+    {
+        AirCns* k = c.cns;
+        int d = 0;
+        while (k != null && d < 24)
+        {
+            if (k.tag == ACNS_COVAR) { return k.name; }
+            if (k.tag == ACNS_ASCRIBE || k.tag == ACNS_STACK || k.tag == ACNS_CALL || k.tag == ACNS_FIELD ||
+                k.tag == ACNS_PROJ || k.tag == ACNS_FST || k.tag == ACNS_SND) { k = k.tail; d++; continue; }
+            if (k.tag == ACNS_COMU) { return m1_cmd_return_covar(k.body, depth + 1); }
+            return null;
+        }
+        return null;
+    }
+    if (c.tag == ACMD_MU || c.tag == ACMD_MUTILDE) { return m1_cmd_return_covar(c.body, depth + 1); }
+    if (c.tag == ACMD_SEQ && c.next != null) { return m1_cmd_return_covar(c.next, depth + 1); }
+    if (c.tag == ACMD_SEQ) { return m1_cmd_return_covar(c.body, depth + 1); }
+    return null;
+}
 fn bool m1_same_inferred_type(AirTyp* left, AirTyp* right)
 {
     return left != null && right != null && m1_value_type_compatible(left, right, 0) && m1_value_type_compatible(right, left, 0);
@@ -1290,6 +1344,13 @@ fn AirTyp* M1Gen.infer_prd_type(M1Gen* g, AirDecl* d, AirPrd* p, int depth)
         AirTyp* t = air_ir::air_mk_typ_simple(g.arena, ATYP_NOMINAL);
         if (t != null) { t.name = rd.name; }
         return t;
+    }
+    if (p.tag == APRD_LAMBDA) { return g.lambda_closure_type(p); }
+    if (p.tag == APRD_MU)
+    {
+        if (p.name == null || p.body == null || p.body.tag != ACMD_CUT ||
+            p.body.cns == null || p.body.cns.tag != ACNS_COVAR || !same(p.body.cns.name, p.name)) { return null; }
+        return g.infer_prd_type(d, p.body.prd, depth + 1);
     }
     return null;
 }
@@ -1736,6 +1797,23 @@ fn bool m1_lambda_cns_ok(AirCns* k, int depth)
             return m1_lambda_cns_ok(k.tail, depth + 1);
     }
 }
+// An if-arm inside a lifted lambda body must be a plain value production: a
+// cut whose consumer terminates at a covariable (possibly through comu binds),
+// with the produced value itself in the lambda subset.
+fn bool m1_lambda_arm_shape_ok(AirCmd* c, int depth)
+{
+    if (c == null || depth >= 24) { return false; }
+    if (c.tag != ACMD_CUT || c.cns == null || !m1_lambda_prd_ok(c.prd, depth + 1)) { return false; }
+    AirCns* k = c.cns; int d = 0;
+    while (k != null && d < 24)
+    {
+        if (k.tag == ACNS_COVAR) { return true; }
+        if (k.tag == ACNS_COMU) { return m1_lambda_arm_shape_ok(k.body, depth + 1); }
+        if (k.tail != null) { k = k.tail; d++; continue; }
+        return false;
+    }
+    return false;
+}
 fn bool m1_lambda_cmd_ok(AirCmd* c, int depth)
 {
     if (c == null || depth >= 24) { return true; }
@@ -1750,6 +1828,12 @@ fn bool m1_lambda_cmd_ok(AirCmd* c, int depth)
         case ACMD_LET:
             return m1_lambda_prd_ok(c.prd, depth + 1) && m1_lambda_cmd_ok(c.body, depth + 1);
         case ACMD_IF:
+            // Value-position if inside a lifted body is supported when every arm
+            // is a direct value production (the shape pfront emits for
+            // if-arms returning closures/scalars): cutting to a covariable that
+            // the enclosing body consumes next. Control-flow inside an arm
+            // (stores, loops, ...) still rejects — that needs real joins.
+            if (!m1_lambda_arm_shape_ok(c.then_c, depth + 1) || !m1_lambda_arm_shape_ok(c.else_c, depth + 1)) { return false; }
             return m1_lambda_prd_ok(c.prd, depth + 1) && m1_lambda_cmd_ok(c.then_c, depth + 1) && m1_lambda_cmd_ok(c.else_c, depth + 1);
         case ACMD_RET:
             return c.prd == null || m1_lambda_prd_ok(c.prd, depth + 1);
@@ -1926,7 +2010,9 @@ fn bool M1Gen.lambda_scan(M1Gen* g, AirPrd* p, bool diagnose,
         if (cb == null) { return false; }
         synth.params[p.binder_count + (usz)i] = cb;
     }
-    AirTyp* ret = g.infer_cmd_return_type(&synth, p.body, (char*)"%ret", 0);
+    char* lam_ret = m1_cmd_return_covar(p.body, 0);
+    if (lam_ret == null) { lam_ret = (char*)"%ret"; }
+    AirTyp* ret = g.infer_cmd_return_type(&synth, p.body, lam_ret, 0);
     if (ret == null)
     { if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"cannot infer the lambda result type; ascribe the returned expression"); } return false; }
     ret = g.decl_value_type(ret, ret);
@@ -2038,7 +2124,9 @@ fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
         if (na < 0 || na >= 16) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return null; }
         if (!g.bind_rep(b.name, g.arena.dup(&an[0], (usz)na), m1_bool_type(params[i]), m1_pointer_repr_type(params[i]), params[i])) { fclose(side); free(body_buffer); g.out = saved_out; return null; }
     }
-    bool body_ok = g.command(p.body, (char*)"%ret") && g.terminated;
+    char* lam_body_ret = m1_cmd_return_covar(p.body, 0);
+    if (lam_body_ret == null) { lam_body_ret = (char*)"%ret"; }
+    bool body_ok = g.command(p.body, lam_body_ret) && g.terminated;
     if (body_ok) { fprintf(side, "}\n"); }
     if (fclose(side) != 0) { g.out = saved_out; g.failed = true; return null; }
     // Restore the enclosing emission state before touching its stream again.
@@ -2095,6 +2183,19 @@ fn char* M1Gen.prd(M1Gen* g, AirPrd* p)
     if (p == null) { g.failed = true; return null; }
     g.last_line = p.source_line; g.last_col = p.source_col;
     if (p.tag == APRD_LAMBDA) { return g.lambda_value(p); }
+    if (p.tag == APRD_MU)
+    {
+        // Value-position mu (pfront's closure-in-if-arm idiom): supported only
+        // as the linear shape `mu %k. <v | %k>`; control flow inside a mu
+        // value stays outside the subset and fails closed.
+        if (p.name == null || p.body == null || p.body.tag != ACMD_CUT ||
+            p.body.cns == null || p.body.cns.tag != ACNS_COVAR || !same(p.body.cns.name, p.name))
+        {
+            g.note_failure(p.source_line, p.source_col, (char*)"value-position mu is limited to a direct mu %k. <v | %k> production");
+            return null;
+        }
+        return g.prd(p.body.prd);
+    }
     if (g.low_profile && p.tag == APRD_ALLOCA) { return g.alloca_prd(p); }
     if (g.low_profile && p.tag == APRD_LOAD) { return g.load_prd(p); }
     if (g.low_profile && p.tag == APRD_GEP) { return g.gep_prd(p); }
