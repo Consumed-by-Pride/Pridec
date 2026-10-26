@@ -222,8 +222,10 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 8.4 No orphan files: former `external_record_abi_*` strays are wired
       into run.sh and tracked.
 - [x] 8.5 Commit messages enumerate scope, gates, and counts.
-- [ ] 8.6 Push pending (AYO-5 → AYO-6): remote == local HEAD unverified
-      (blocked on credentials).
+- [x] 8.6 Pushed and verified: `git ls-remote origin arena/fd318e2a-pridec`
+      == local HEAD `3460fd5` (AYO-5 resolved via ayonex-GOAT collaborator
+      PAT; AYO-6 merged the remote AIR3 typed-memory/provenance line and
+      published 9 commits incl. the merge).
 - [x] 8.7 Recovery parity: recovery mirror refreshed post-commit.
 - [x] 8.8 File modes normalized (all 100755 tracked bits verified).
 - [x] 8.9 Suite scratch (`tmp/`) cleaned of stale outputs.
@@ -238,7 +240,9 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 9.4 Project status update posted, health honestly `atRisk`.
 - [x] 9.5 Milestone mapping visible in issue titles (Reproducible baseline /
       Reliable core execution / Trustworthy optimization).
-- [ ] 9.6 AYO-5 resolution by repo owner (credentials + token rotation).
+- [x] 9.6 AYO-5 resolved: collaborator PAT (ayonex-GOAT) granted; push
+      landed 2026-10-26; owner revokes the session PAT after this session
+      (10.5 stays the tracker for the two earlier exposed tokens).
 
 ## 10. Security and credentials (5)
 
@@ -252,6 +256,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**118 items: 115 complete with evidence, 3 open** — 8.6, 9.6, 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**118 items: 117 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.
