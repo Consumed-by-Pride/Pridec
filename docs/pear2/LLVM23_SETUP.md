@@ -126,6 +126,10 @@ wasm32-freestanding). Integer literal inference stays at the function's
 default width on both profiles; only explicit `isz`/`usz` annotations track
 the target. The freestanding profile emits `--emit-ll`/`--emit-bc` output only
 — executable mode exits 2 with guidance to link with a wasm toolchain.
+  The pinned toolchain ships `wasm-ld` and a wasm32-capable clang, so run.sh
+  additionally gate-checks the chain end-to-end: the
+  `--target=wasm32-freestanding` bitcode is compiled to a WebAssembly object
+  and linked by `wasm-ld` into a valid MVP module (magic-byte verified).
 
 Definition/declaration ABI markers survive emission deterministically:
 `fastcc` (keyword or `attr callconv "fastcc"`) appears on both the `define`

@@ -962,3 +962,26 @@ abi_ext_expect() {
     echo "PASS: LLVM 23 linked/runs $name (exit=42, C aggregate ABI both directions, -O0..-O3)"
 }
 abi_ext_expect
+
+# wasm32-freestanding end-to-end validation (AYO-9): the run-time-pinned
+# toolchain ships wasm-ld, so bitcode -> wasm object -> linked module is a
+# hard gate, not a someday item. Skips (with a note, not a pass) only when
+# wasm-ld is genuinely absent from the environment.
+wasm_obj_link_expect() {
+    local name=target_profile_main
+    if ! command -v wasm-ld >/dev/null 2>&1 && [ ! -x "${LLVM23_BIN:-}/wasm-ld" ]; then
+        echo "SKIP: wasm-ld not present; wasm32 object/link gate not exercised"
+        return 0
+    fi
+    local WASM_LD=wasm-ld
+    [ -x "${LLVM23_BIN:-}/wasm-ld" ] && WASM_LD="${LLVM23_BIN:-}/wasm-ld"
+    rm -f "$W/$name.air" "$W/$name.bc" "$W/$name.o" "$W/$name.wasm"
+    cp tests/pear2/$name.air "$W/$name.air"
+    "$PEAR2_BIN" "$W/$name.air" --target=wasm32-freestanding --emit-bc -O2 --quiet || { echo "FAIL: wasm32 bitcode rejected"; exit 1; }
+    "$PEAR2_CLANG" --target=wasm32-unknown-unknown -c "$W/$name.bc" -o "$W/$name.o" 2>"$W/$name.clang.log" || { echo "FAIL: clang wasm32 object compile"; cat "$W/$name.clang.log"; exit 1; }
+    head -c 4 "$W/$name.o" | grep -q $'\0asm' || { echo "FAIL: $name.o is not a wasm module"; exit 1; }
+    "$WASM_LD" "$W/$name.o" -o "$W/$name.wasm" --no-entry --allow-undefined 2>"$W/$name.ld.log" || { echo "FAIL: wasm-ld link"; cat "$W/$name.ld.log"; exit 1; }
+    [ -s "$W/$name.wasm" ] || { echo "FAIL: empty wasm output"; exit 1; }
+    echo "PASS: wasm32-freestanding bitcode compiled and linked by pinned toolchain (clang+ld -O2)"
+}
+wasm_obj_link_expect

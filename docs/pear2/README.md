@@ -76,7 +76,7 @@ loop-body creation and capturing label-carried bindings.
   are positioned errors, never silent drops.
 - One-shot (escape-only) effect handlers lower to payload slots plus
   branch-to-arm control flow; anything resuming or multi-shot, handler-less
-  performs, and all effect forms under wasm32-freestanding reject with
+  performs, and all effect forms under wasm32-freestanding reject with; object/link end-to-end is gate-checked in run.sh (`PASS: wasm32-freestanding bitcode compiled and linked by pinned toolchain`)
   file:line:col diagnostics. Fixtures: `fx_escape_main.air`,
   `fx_join_fallthrough_main.air`, `abi_callconv_export_main.air`,
   `target_profile_main.air`, and `reject_{fx,abi,wasm32}_*_main.air`.
