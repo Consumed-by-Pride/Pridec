@@ -26,9 +26,13 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 0.10 Recovery backups in `/home/user/recovery/` (41 files) cover the
       driver, pfront pear_ir, legacy pear1, run.sh, docs, and all fixtures;
       `recovery/pear2c_main.c3` sha256 == HEAD blob (verified).
-- [ ] 0.11 Clean-checkout rehearsal: `bootstrap-pear2-llvm23.sh` from an empty
-      cache (documented but not re-run this session — needs network; covered
-      by AYO-5/AYO-6 publish step).
+- [x] 0.11 Clean-checkout rehearsal: **executed for real** — the sandbox was
+      restarted from a workspace snapshot (which excludes `.cache`), wiping the
+      entire LLVM/C3 toolchain mid-session. Re-ran
+      `scripts/bootstrap-pear2-llvm23.sh` from an empty cache: rc=0,
+      C3 headers 23.1.2, runtime+clang 23.1.3, bootstrap's own smoke run
+      exec=9/0; then rebuilt all three binaries, re-generated exec fixtures,
+      and restored full gates (test-pear2 107/0).
 - [x] 0.12 Build is warning-clean: `make pear2c` from a deleted binary,
       0 warnings in output.
 
@@ -60,13 +64,27 @@ bitcode-determinism fix committed with this checklist revision).
       substring + no stale artifacts (m8_reject/m10_reject helpers).
 - [x] 2.7 run.sh passes `bash -n` (check-pear2 gate).
 - [x] 2.8 Suite uses `timeout 5` on every executed binary (no hangs).
-- [ ] 2.9 pfront 5 known failures triaged/encoded as accepted-with-reasons
-      (AYO-8).
-- [ ] 2.10 conformance 100 known failures triaged/encoded (AYO-8).
+- [x] 2.9 pfront known failures triaged AND fixed (AYO-8, commit this slice):
+      63_modsys + modsys = helper fixtures never committed (created
+      tests/pfront/modsys/{lib,sub/deep}.pie → 0 errors, 7 modules, 2 bound);
+      megaload = stdlib header/path-convention violations
+      (stdlib/iter/iter.pie `mod iter`→`mod iter.iter`,
+      stdlib/iter/range.pie `mod range`→`mod iter.range` → 261 modules,
+      errors=0); cfg_backedge = harness multi-line capture bug (max iters);
+      opt_cascade = stale probe label (rewritten to assert cascade RESULT:
+      flatten>=1, unreachable>=2, final sexp == constant-selected then-arm,
+      no `after`). Suite now 178/0; tests/baselines.tsv row updated.
+- [x] 2.10 conformance 100 known failures: manifest `KNOWN_FAILURES.tsv`
+      (case→unmet-contract reasons) is ENFORCED by conformance/run.py —
+      unlisted failure = REGRESSION (rc 1), healed failure = IMPROVED prompt.
+      Re-run this session: pass=162 fail=100, exact set match, OK.
 - [x] 2.11 LLVM IR from every positive fixture parses + verifies +
       bitcode-round-trips through LLVM 23 C API inside the driver itself.
 - [x] 2.12 External aggregate C ABI exercised in both directions with the
       checked-in C helper (external_record_abi, exit 42, -O0..-O3).
+- [x] 2.13 Environment-restoration regression: after toolchain wipe the full
+      suite matrix (107/0, exec 9/0) passes on the bootstrap-rebuilt binaries —
+      the gates depend on no state outside the bootstrap script.
 
 ## 3. CLI contract (10)
 
@@ -141,7 +159,10 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 5.18 Escape-only algebraic effects: payload slot + arm blocks, join
       semantics, exec-verified (exit 42 and 7 fixtures).
 - [x] 5.19 Target profiles: datalayout/triple stamped; isz/usz/pointer widths
-      parametric; wasm32 IR/bitcode-only enforcement.
+      parametric; wasm32 IR/bitcode-only enforcement; object+link gate is REAL since this slice:
+      clang --target=wasm32-unknown-unknown compiles the emitted bitcode to a
+      wasm MVP object and wasm-ld links it (run.sh wasm_obj_link_expect,
+      108/0).
 - [x] 5.20 Calling conventions: fastcc on defs/externs, propagated to
       direct-call sites; cdecl default; conflicts/unknowns rejected.
 - [x] 5.21 Function attributes: export (symbol rename), section, noinline,
@@ -186,8 +207,8 @@ bitcode-determinism fix committed with this checklist revision).
       plan convention; frontend 36,112; tests: 87 fixtures + 964-line runner.
 - [x] 7.8 Every run.sh helper's assertion text named in docs where a user
       could trip it (M8/M9/M10 greps match README sections).
-- [ ] 7.9 COVERAGE.md refresh for M8/M9/M10 fixture classes (counts changed
-      since its last edit — fold into AYO-8 triage).
+- [x] 7.9 COVERAGE.md regenerated via scripts/air-coverage.py over a fresh
+      236-file .air corpus (was 216); counts reflect the current front end.
 - [x] 7.10 In-code comments near M8/M9/M10 machinery describe the actual
       algorithm (spot-checked lambda lifting, phi promotion, fx frames).
 
@@ -231,7 +252,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**117 items: 110 complete with evidence, 7 open** — 0.11, 2.9, 2.10, 7.9,
-8.6, 9.6, 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**118 items: 115 complete with evidence, 3 open** — 8.6, 9.6, 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.
