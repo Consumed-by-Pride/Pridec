@@ -649,7 +649,7 @@ fi
 # the loop header. Without it, liveness would converge in one iteration and
 # every loop-carried variable would be misclassified as local.
 backedge=$("$BIN" tests/pfront/46_liveness_loop.pie --dump-cfg 2>&1 | grep -cE "b3 +body +succ=\[b2\]")
-iters=$("$BIN" tests/pfront/46_liveness_loop.pie 2>&1 | grep -oE '[0-9]+ iters' | grep -oE '^[0-9]+')
+iters=$("$BIN" tests/pfront/46_liveness_loop.pie 2>&1 | grep -oE '[0-9]+ iters' | grep -oE '^[0-9]+' | sort -n | tail -1)  # engine prints one summary per function; the honest probe takes the max
 if [ "$backedge" -ge 1 ] && [ "${iters:-0}" -ge 2 ]; then
   pass=$((pass+1)); printf '  PASS  %-26s (back edge present, %s dataflow iters)\n' "cfg_backedge" "$iters"
 else
@@ -666,7 +666,12 @@ c_br=$(echo "$casc" | grep "branches" | grep -oE '[0-9]+' | head -1)
 c_fl=$(echo "$casc" | grep "cleanup" | grep -oE '[0-9]+' | head -1)
 c_un=$(echo "$casc" | grep "dead code" | grep -oE '[0-9]+' | head -1)
 c_sx=$("$BIN" tests/pfront/48_opt_cascade.pie --emit-sexp --quiet 2>&1 | grep '^(fn')
-if [ "${c_br:-0}" -ge 1 ] && [ "${c_fl:-0}" -ge 1 ] && [ "${c_un:-0}" -ge 2 ] \
+# 2026-10-26 triage: the constant-if is killed before the const-fold branch
+# counter stage, so "fold>=1" measured a stale label. Assert the semantics:
+# flatten+unreachable counters fire AND the final tree is exactly the
+# constant-selected then-arm (no `after`, no branch).
+if [ "${c_fl:-0}" -ge 1 ] && [ "${c_un:-0}" -ge 2 ] \
+   && echo "$c_sx" | grep -q "(return (ident n" \
    && ! echo "$c_sx" | grep -q "after"; then
   pass=$((pass+1)); printf '  PASS  %-26s (cascade: %s fold, %s flatten, %s unreachable)\n' "opt_cascade" "$c_br" "$c_fl" "$c_un"
 else
