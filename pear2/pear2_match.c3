@@ -944,6 +944,25 @@ fn bool M1Gen.match_cmd(M1Gen* g, AirCmd* c, char* ret_name)
             unit_match = true;
             value = (char*)"0";
         }
+        else if (c.prd.tag == APRD_MU && pat.tag == APAT_TUPLE && pat.sub_count == 0 && c.prd.name != null && c.prd.body != null)
+        {
+            // pfront wraps simple def bodies as `match unit { tuple() -> mu %k. body }`.
+            // Linear bodies run directly; block bodies (seq { ... }) take the
+            // unit-protocol path.  Effectful statement mus are not visible to
+            // patterns: this match always selects its single arm.
+            bool linear = c.prd.body.tag == ACMD_CUT && c.prd.body.cns != null &&
+                c.prd.body.cns.tag == ACNS_COVAR && same(c.prd.body.cns.name, c.prd.name);
+            if (!linear && !g.mu_unit_terminals_ok(c.prd.body, c.prd.name, 0)) {
+ return false; }
+            if (g.mu_depth >= 8) {
+ return false; }
+            g.mu_covars[(usz)g.mu_depth] = c.prd.name; g.mu_depth++;
+            bool mu_ok = g.command(c.prd.body, c.prd.name);
+            g.mu_depth--;
+            if (!mu_ok || g.terminated) {
+ return false; }
+            return g.command(branch.body, ret_name);
+        }
         else if (g.is_condition(c.prd))
         {
             bool_match = true;

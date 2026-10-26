@@ -252,9 +252,12 @@ fn bool M1Gen.buffer_label_body(M1Gen* g, M1Label* info, char* ret_name)
     bool saved_watch = g.watch_active;
     int saved_watch_count = g.watch_count;
     g.watch_active = false;
+    bool saved_replay = g.in_label_replay;
+    g.in_label_replay = true;
     g.cur_block = info.name;
     g.terminated = false;
     bool body_ok = g.command(info.cmd.body, ret_name) && g.terminated;
+    g.in_label_replay = saved_replay;
     g.watch_active = saved_watch;
     g.watch_count = saved_watch_count;
     if (fclose(side) != 0) { g.out = real_out; return false; }
@@ -281,7 +284,10 @@ fn bool M1Gen.replay_label_block(M1Gen* g, M1Label* info)
     for (usz i = 0; i < info.env_count; i++)
     {
         if (info.env_phis[i] == null) { continue; }
-        char* ty = g.llvm_value_type_text(info.env_types[i]);
+        // Bool bindings can carry an infer AIR type from `(eq ... : infer)`
+        // producers; the LLVM value track is representational, so the phi
+        // must follow the bool flag rather than the AIR annotation.
+        char* ty = info.env_bools[i] ? (char*)"i1" : g.llvm_value_type_text(info.env_types[i]);
         if (ty == null) { free(body_buffer); return false; }
         if (info.edge_count == 0)
         {

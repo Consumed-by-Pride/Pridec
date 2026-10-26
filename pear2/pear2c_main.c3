@@ -165,6 +165,13 @@ struct M1Gen
     bool has_for;
     int for_depth;
     int seq_depth;
+    char*[8] mu_covars; int mu_depth; int infer_let_depth; int infer_decl_active; int failed_fn_trace;
+    // Label-replay mu drains: a mu body whose CFG is realized through buffered
+    // label blocks delivers to its binder inside a replay, after the intercept
+    // stack has unwound.  Record binder->continuation per def so replay-time
+    // deliveries run the drain (see match_cmd/consume_unit).
+    char*[8] mu_drain_names; AirCns*[8] mu_drain_cns; int mu_drain_count;
+    bool in_label_replay;
     bool terminated;
     M1String[256] strings; int string_count;
     M1Provenance[1024] provenance; int provenance_count;
@@ -1085,9 +1092,10 @@ fn AirTyp* M1Gen.expr_type(M1Gen* g, AirPrd* p)
     if (p.tag == APRD_LAMBDA) { return g.lambda_closure_type(p); }
     if (p.tag == APRD_MU)
     {
-        if (p.name == null || p.body == null || p.body.tag != ACMD_CUT ||
-            p.body.cns == null || p.body.cns.tag != ACNS_COVAR || !same(p.body.cns.name, p.name)) { return null; }
-        return g.expr_type(p.body.prd);
+        if (p.name == null || p.body == null) { return null; }
+        if (p.body.tag == ACMD_CUT && p.body.cns != null && p.body.cns.tag == ACNS_COVAR && same(p.body.cns.name, p.name))
+        { return g.expr_type(p.body.prd); }
+        return g.mu_unit_terminals_ok(p.body, p.name, 0) ? air_ir::air_mk_typ_simple(g.arena, ATYP_UNIT) : null;
     }
     if (p.tag == APRD_CON)
     {
@@ -1232,6 +1240,91 @@ fn char* m1_cmd_return_covar(AirCmd* c, int depth)
     if (c.tag == ACMD_SEQ) { return m1_cmd_return_covar(c.body, depth + 1); }
     return null;
 }
+// Statement-position value-mu gate: pfront lowers statement if-arms and
+// effectful `let`-bound statement sequences as `mu %k. <commands>` whose only
+// deliveries to %k carry `unit`.  A mu with a compound body may occupy a
+// producer position only in that shape: the body then runs as an ordinary
+// command (for effect), the mu's value *is* unit, and the cut's consumer sees
+// the usual unit/discard protocol.  A non-unit delivery to the mu binder --
+// or an unrecognized command shape -- stays outside the subset.
+fn bool M1Gen.mu_unit_terminals_ok(M1Gen* g, AirCmd* c, char* covar, int depth)
+{
+    if (c == null || covar == null || depth >= 24) { return false; }
+    if (c.tag == ACMD_CUT)
+    {
+        if (c.prd == null || c.cns == null) { return false; }
+        if (c.prd.tag == APRD_MU && c.prd.body != null && !g.mu_unit_terminals_ok(c.prd.body, covar, depth + 1)) { return false; }
+        AirCns* k = c.cns;
+        int d = 0;
+        while (k != null && d < 24)
+        {
+            if (k.tag == ACNS_COVAR)
+            {
+                if (!same(k.name, covar)) { return true; }
+                if (c.prd.tag == APRD_UNIT) { return true; }
+                // Terminal reached through a call tail: `<f | call · a · %k>`
+                // delivers the *callee's* result.  Unit when the callee declares
+                // a unit return (e.g. free); exit syscalls never materialize a
+                // value and are admitted by the command-level noreturn rule.
+                if (d > 0 && c.prd.tag == APRD_VAR)
+                {
+                    AirDecl* callee_decl = g.find_function(c.prd.name);
+                    if (callee_decl != null && callee_decl.ret_ty != null && m1_unit_type(callee_decl.ret_ty)) { return true; }
+                }
+                return false;
+            }
+            if (k.tag == ACNS_COMU) { return k.body != null && g.mu_unit_terminals_ok(k.body, covar, depth + 1); }
+            if (k.tag == ACNS_CASE)
+            {
+                for (usz i = 0; i < k.branch_count; i++)
+                {
+                    if (k.branches[i] == null || k.branches[i].guard != null || !g.mu_unit_terminals_ok(k.branches[i].body, covar, depth + 1)) { return false; }
+                }
+                for (usz i = 0; i < k.cobranch_count; i++)
+                {
+                    if (k.cobranches[i] == null || !g.mu_unit_terminals_ok(k.cobranches[i].body, covar, depth + 1)) { return false; }
+                }
+                return true;
+            }
+            if (k.tag == ACNS_ASCRIBE || k.tag == ACNS_STACK || k.tag == ACNS_FIELD || k.tag == ACNS_PROJ ||
+                k.tag == ACNS_FST || k.tag == ACNS_SND || k.tag == ACNS_CALL || k.tag == ACNS_INDEX ||
+                k.tag == ACNS_STORE || k.tag == ACNS_DEREF)
+            { k = k.tail; d++; continue; }
+            return false;
+        }
+        return false;
+    }
+    if (c.tag == ACMD_BLOCK || c.tag == ACMD_UNSAFE || c.tag == ACMD_MU || c.tag == ACMD_MUTILDE) { return g.mu_unit_terminals_ok(c.body, covar, depth + 1); }
+    if (c.tag == ACMD_SEQ) { return g.mu_unit_terminals_ok(c.body, covar, depth + 1) && (c.next == null || g.mu_unit_terminals_ok(c.next, covar, depth + 1)); }
+    if (c.tag == ACMD_LET)
+    {
+        if (c.prd != null && c.prd.tag == APRD_MU && c.prd.body != null && !g.mu_unit_terminals_ok(c.prd.body, covar, depth + 1)) { return false; }
+        return c.body != null && g.mu_unit_terminals_ok(c.body, covar, depth + 1);
+    }
+    if (c.tag == ACMD_IF) { return g.mu_unit_terminals_ok(c.then_c, covar, depth + 1) && g.mu_unit_terminals_ok(c.else_c, covar, depth + 1); }
+    if (c.tag == ACMD_MATCH)
+    {
+        for (usz i = 0; i < c.branch_count; i++)
+        {
+            if (c.branches[i] == null || !g.mu_unit_terminals_ok(c.branches[i].body, covar, depth + 1)) { return false; }
+        }
+        return true;
+    }
+    if (c.tag == ACMD_LABEL) { return c.body != null && g.mu_unit_terminals_ok(c.body, covar, depth + 1); }
+    if (c.tag == ACMD_JUMP || c.tag == ACMD_BREAK || c.tag == ACMD_CONTINUE || c.tag == ACMD_NOP || c.tag == ACMD_RET || c.tag == ACMD_FENCE)
+    { return true; }
+    if (c.tag == ACMD_ATOMIC || c.tag == ACMD_SYSCALL || c.tag == ACMD_ASM)
+    {
+        if (c.cns == null) { return true; }
+        if (c.cns.tag == ACNS_COMU) { return g.mu_unit_terminals_ok(c.cns.body, covar, depth + 1); }
+        if (c.cns.tag == ACNS_COVAR)
+        { return !same(c.cns.name, covar) || (c.tag == ACMD_SYSCALL && c.prd_count == 1); }
+        return false;
+    }
+    if (c.tag == ACMD_HANDLE) { return c.body != null && c.handled != null && g.mu_unit_terminals_ok(c.body, covar, depth + 1) && g.mu_unit_terminals_ok(c.handled, covar, depth + 1); }
+    return false;
+}
+
 fn bool m1_same_inferred_type(AirTyp* left, AirTyp* right)
 {
     return left != null && right != null && m1_value_type_compatible(left, right, 0) && m1_value_type_compatible(right, left, 0);
@@ -1302,8 +1395,41 @@ fn AirTyp* M1Gen.infer_cut_projected_type(M1Gen* g, AirDecl* d, AirPrd* p, AirCn
     }
     return null;
 }
+// Walk the command tree for `let <name> = <prd> in ...` and return the bound
+// producer.  Used during return-type inference where the temp var's annotated
+// type is erased but the producer's type is recoverable.
+fn AirPrd* m1_infer_find_let(AirCmd* c, char* name, int depth)
+{
+    if (c == null || name == null || depth >= 32) { return null; }
+    if (c.tag == ACMD_LET && c.binder != null && same(c.binder, name)) { return c.prd; }
+    AirPrd* r = m1_infer_find_let(c.body, name, depth + 1);
+    if (r != null) { return r; }
+    r = m1_infer_find_let(c.next, name, depth + 1);
+    if (r != null) { return r; }
+    r = m1_infer_find_let(c.then_c, name, depth + 1);
+    if (r != null) { return r; }
+    r = m1_infer_find_let(c.else_c, name, depth + 1);
+    if (r != null) { return r; }
+    for (usz i = 0; i < c.branch_count; i++)
+    {
+        if (c.branches[i] == null) { continue; }
+        r = m1_infer_find_let(c.branches[i].body, name, depth + 1);
+        if (r != null) { return r; }
+    }
+    return null;
+}
 fn AirTyp* M1Gen.infer_prd_type(M1Gen* g, AirDecl* d, AirPrd* p, int depth)
 {
+    if (g.infer_let_depth > 0 && p != null && p.tag == APRD_VAR && (p.ty == null || p.ty.tag == ATYP_INFER))
+    {
+        // Walk the enclosing let-chain on the decl body for this binder.
+        AirPrd* inner = m1_infer_find_let(d.def_body, p.name, 0);
+        if (inner != null)
+        {
+            AirTyp* t = g.infer_prd_type(d, inner, depth + 1);
+            if (t != null && t.tag != ATYP_INFER) { return t; }
+        }
+    }
     if (p == null || depth >= 16) { return null; }
     if (p.ty != null && p.ty.tag != ATYP_INFER) { return p.ty; }
     if (p.tag == APRD_BOOL) { return air_ir::air_mk_typ_simple(g.arena, ATYP_BOOL); }
@@ -1348,9 +1474,10 @@ fn AirTyp* M1Gen.infer_prd_type(M1Gen* g, AirDecl* d, AirPrd* p, int depth)
     if (p.tag == APRD_LAMBDA) { return g.lambda_closure_type(p); }
     if (p.tag == APRD_MU)
     {
-        if (p.name == null || p.body == null || p.body.tag != ACMD_CUT ||
-            p.body.cns == null || p.body.cns.tag != ACNS_COVAR || !same(p.body.cns.name, p.name)) { return null; }
-        return g.infer_prd_type(d, p.body.prd, depth + 1);
+        if (p.name == null || p.body == null) { return null; }
+        if (p.body.tag == ACMD_CUT && p.body.cns != null && p.body.cns.tag == ACNS_COVAR && same(p.body.cns.name, p.name))
+        { return g.infer_prd_type(d, p.body.prd, depth + 1); }
+        return g.mu_unit_terminals_ok(p.body, p.name, 0) ? air_ir::air_mk_typ_simple(g.arena, ATYP_UNIT) : null;
     }
     return null;
 }
@@ -1361,13 +1488,57 @@ fn AirTyp* M1Gen.infer_cmd_return_type(M1Gen* g, AirDecl* d, AirCmd* c, char* re
     {
         AirTyp* projected = g.infer_cut_projected_type(d, c.prd, c.cns, ret_name, 0);
         if (projected != null) { return projected; }
-        if (m1_cns_returns_to(c.cns, ret_name, 0)) { return g.infer_prd_type(d, c.prd, 0); }
-    }
-    if (c.tag == ACMD_CUT && c.cns != null && c.cns.tag == ACNS_CALL && m1_cns_tail_returns_to(c.cns.tail, ret_name, 0))
-    {
-        AirTyp* callee_ty = g.infer_prd_type(d, c.prd, 0);
-        if (m1_function_pointer_type(callee_ty)) { return callee_ty.args[1]; }
-        if (m1_closure_type(callee_ty)) { return callee_ty.args[0].args[1]; }
+        if (c.cns == null) { return null; }
+        // Thread the consumer chain: comu bodies carry the continuation, call
+        // tails deliver the callee's result, case branches each deliver.
+        AirCns* k = c.cns;
+        bool through_call = false;
+        int steps = 0;
+        while (k != null && steps < 32)
+        {
+            if (k.tag == ACNS_CALL) { through_call = true; k = k.tail; steps++; continue; }
+            if (k.tag == ACNS_STACK || k.tag == ACNS_ASCRIBE || k.tag == ACNS_FIELD || k.tag == ACNS_PROJ ||
+                k.tag == ACNS_FST || k.tag == ACNS_SND || k.tag == ACNS_INDEX || k.tag == ACNS_STORE || k.tag == ACNS_DEREF)
+            { k = k.tail; steps++; continue; }
+            if (k.tag == ACNS_COVAR)
+            {
+                if (!same(k.name, ret_name)) { return null; }
+                if (through_call)
+                {
+                    AirTyp* callee_ty = g.infer_prd_type(d, c.prd, 0);
+                    if (m1_function_pointer_type(callee_ty)) { return callee_ty.args[1]; }
+                    if (m1_closure_type(callee_ty)) { return callee_ty.args[0].args[1]; }
+                    if (c.prd.tag == APRD_VAR)
+                    {
+                        AirDecl* callee = g.find_function(c.prd.name);
+                        if (callee != null && !same(callee.name, d.name)) { return g.decl_return_type(callee); }
+                    }
+                    return null;
+                }
+                return g.infer_prd_type(d, c.prd, 0);
+            }
+            if (k.tag == ACNS_COMU) { return k.body != null ? g.infer_cmd_return_type(d, k.body, ret_name, depth + 1) : null; }
+            if (k.tag == ACNS_CASE)
+            {
+                AirTyp* result = null;
+                for (usz i = 0; i < k.branch_count; i++)
+                {
+                    if (k.branches[i] == null) { return null; }
+                    AirTyp* branch_type = g.infer_cmd_return_type(d, k.branches[i].body, ret_name, depth + 1);
+                    if (branch_type == null || (result != null && !m1_same_inferred_type(result, branch_type))) { return null; }
+                    result = branch_type;
+                }
+                for (usz i = 0; i < k.cobranch_count; i++)
+                {
+                    if (k.cobranches[i] == null) { return null; }
+                    AirTyp* branch_type = g.infer_cmd_return_type(d, k.cobranches[i].body, ret_name, depth + 1);
+                    if (branch_type == null || (result != null && !m1_same_inferred_type(result, branch_type))) { return null; }
+                    result = branch_type;
+                }
+                return result;
+            }
+            return null;
+        }
         return null;
     }
     if (c.tag == ACMD_RET) { return g.infer_prd_type(d, c.prd, 0); }
@@ -1377,6 +1548,9 @@ fn AirTyp* M1Gen.infer_cmd_return_type(M1Gen* g, AirDecl* d, AirCmd* c, char* re
         AirTyp* next_type = g.infer_cmd_return_type(d, c.next, ret_name, depth + 1);
         return next_type != null ? next_type : g.infer_cmd_return_type(d, c.body, ret_name, depth + 1);
     }
+    if (c.tag == ACMD_LET) { return g.infer_cmd_return_type(d, c.body, ret_name, depth + 1); }
+    if (c.tag == ACMD_LABEL) { return c.body != null ? g.infer_cmd_return_type(d, c.body, ret_name, depth + 1) : null; }
+    if (c.tag == ACMD_JUMP) { return null; }
     if (c.tag == ACMD_IF)
     {
         AirTyp* then_type = g.infer_cmd_return_type(d, c.then_c, ret_name, depth + 1);
@@ -1412,11 +1586,15 @@ fn AirTyp* M1Gen.infer_decl_return_type(M1Gen* g, AirDecl* d)
     }
     else { g.default_bits = 64; g.default_unsigned = false; }
     AirCmd* body = d.def_body;
+    int saved_let_depth = g.infer_let_depth;
+    g.infer_let_depth = 1;
+    if (g.infer_decl_active >= 24) { return null; }  // mutual-recursion guard
+    g.infer_decl_active++;
     char* ret_name = null;
     if (body != null && body.tag == ACMD_MUTILDE) { ret_name = body.binder; body = body.body; }
     while (body != null && body.tag == ACMD_BLOCK) { body = body.body; }
     AirTyp* result = ret_name == null ? null : g.infer_cmd_return_type(d, body, ret_name, 0);
-    g.default_bits = saved_bits;
+    g.default_bits = saved_bits; g.infer_let_depth = saved_let_depth; g.infer_decl_active--;
     g.default_unsigned = saved_unsigned;
     return result;
 }
@@ -1537,6 +1715,10 @@ fn bool M1Gen.collect_cmd(M1Gen* g, AirCmd* c)
         g.label_count++;
     }
     if (!g.collect_cns(c.cns)) {
+ return false; }
+    // A mu in producer position carries a command body; its labels/jumps feed
+    // the same label table as any other command region.
+    if (c.prd != null && c.prd.tag == APRD_MU && c.prd.body != null && !g.collect_cmd(c.prd.body)) {
  return false; }
     if (!g.collect_cmd(c.body) || !g.collect_cmd(c.next) || !g.collect_cmd(c.then_c) || !g.collect_cmd(c.else_c) || !g.collect_cmd(c.handled)) {
  return false; }
@@ -3113,8 +3295,41 @@ fn bool M1Gen.consume(M1Gen* g, char* value, bool is_bool, bool is_ptr, AirTyp* 
     }
     if (k.tag == ACNS_ASCRIBE)
     {
-        if (k.tail == null || k.ty == null || is_bool != m1_bool_type(k.ty) || is_ptr != m1_pointer_repr_type(k.ty)) {
+        if (k.tail == null || k.ty == null) {
  return false; }
+        if (is_ptr && m1_integer_type(k.ty) && m1_int_bits(k.ty) == 64)
+        {
+            // `p as i64`: pointer -> integer cast per the source-level explicit
+            // `as` contract (address materialized as an integer).
+            char* wi = g.tmp(); if (wi == null) { g.failed = true;
+ return false; }
+            fprintf(g.out, "  %s = ptrtoint ptr %s to i64\n", wi, value);
+            return g.consume(wi, false, false, k.ty, k.tail, ret_name);
+        }
+        if (!is_ptr && !is_bool && m1_integer_type(value_type) && m1_known_type(value_type) && m1_pointer_repr_type(k.ty))
+        {
+            // `v as ptr T`/`v as nominal ``ptr```: integer -> pointer cast.
+            AirTyp i64t2 = { .tag = ATYP_I64 };
+            if (m1_int_bits(value_type) != 64) { value = g.convert_integer_width(value, value_type, &i64t2); if (g.failed || value == null) { return false; } }
+            char* wi2 = g.tmp(); if (wi2 == null) { g.failed = true;
+ return false; }
+            fprintf(g.out, "  %s = inttoptr i64 %s to ptr\n", wi2, value);
+            return g.consume(wi2, false, true, k.ty, k.tail, ret_name);
+        }
+        if (is_bool != m1_bool_type(k.ty) || is_ptr != m1_pointer_repr_type(k.ty)) {
+ return false; }
+        if (!is_bool && !is_ptr && m1_integer_type(k.ty) && m1_integer_type(value_type) && m1_known_type(value_type) && m1_known_type(k.ty) && m1_int_bits(k.ty) != m1_int_bits(value_type))
+        {
+            // `as(T)` width change on a value already materialized at a known
+            // width (memory-byte loads, explicit narrowing): convert at the
+            // ascription per Pride's explicit-cast semantics (zext/sext for
+            // widening, trunc for narrowing).  Unknown (infer) widths already
+            // flow at the default i64 and need nothing here.
+            value = g.convert_integer_width(value, value_type, k.ty);
+            if (g.failed || value == null) {
+ return false; }
+            value_type = k.ty;
+        }
         if ((!is_bool && !is_ptr && !m1_value_type_compatible(k.ty, value_type, 0)) ||
             (is_ptr && m1_function_pointer_type(k.ty) && !m1_value_type_compatible(k.ty, value_type, 0))) {
  return false; }
@@ -3142,12 +3357,22 @@ fn bool M1Gen.consume_unit(M1Gen* g, AirCns* k, char* ret_name)
     {
         // The middot continuation is AIR's discard hole, not the function
         // return continuation. A unit value sent here is an ordinary no-op.
+        // Likewise unit delivered to an active statement-mu binder.
+        for (int i = 0; i < g.mu_depth; i++) { if (g.mu_covars[(usz)i] != null && same(k.name, g.mu_covars[(usz)i])) { return true; } }
+        if (g.in_label_replay && g.mu_drain_count > 0)
+        {
+            for (int i = g.mu_drain_count - 1; i >= 0; i--)
+            {
+                if (g.mu_drain_names[(usz)i] != null && g.mu_drain_cns[(usz)i] != null && same(k.name, g.mu_drain_names[(usz)i]))
+                { return g.consume_unit(g.mu_drain_cns[(usz)i], ret_name); }
+            }
+        }
+        // Unit delivered to the function's own return covar is terminal even
+        // nested inside a seq: the mu-stack check stays first, but the generic
+        // seq/discard skip must not swallow this cut.
+        if (g.return_unit && same(k.name, ret_name)) { fprintf(g.out, "  ret void\n"); g.terminated = true; return true; }
         if (same(k.name, (char*)"\xc2\xb7") || g.seq_depth > 0) { return true; }
-        if (!g.return_unit || !same(k.name, ret_name)) {
- return false; }
-        fprintf(g.out, "  ret void\n");
-        g.terminated = true;
-        return true;
+        return false;
     }
     if (k.tag == ACNS_COMU)
     {
@@ -4099,6 +4324,28 @@ fn bool M1Gen.syscall_cmd(M1Gen* g, AirCmd* c, char* ret_name)
     char* dst = g.tmp(); if (dst == null) { return false; }
     fprintf(g.out, "  %s = call i64 asm sideeffect \"syscall\", \"%s\"(%s)\n", dst, &cons[0], &ops[0]);
     if (c.cns == null) { return true; }
+    // A syscall consumed by an active statement-mu covar (the mu walker admits
+    // only the single-argument exit-family shape here) ends the process; the
+    // continuation is dead code. Emit a well-typed terminator and stop.
+    if (c.cns.tag == ACNS_COVAR)
+    {
+        for (int i = g.mu_depth - 1; i >= 0; i--)
+        {
+            if (g.mu_covars[(usz)i] != null && same(c.cns.name, g.mu_covars[(usz)i]))
+            {
+                if (g.return_unit)
+                { fprintf(g.out, "  ret void\n"); g.terminated = true; return true; }
+                AirTyp* rt = g.return_type;
+                if (m1_integer_type(rt) && m1_int_bits(rt) != 64)
+                { char* dv = g.convert_integer_width(dst, &i64t, rt); if (g.failed || dv == null) { return false; } dst = dv; }
+                else if (!m1_integer_type(rt))
+                { g.note_failure(c.source_line, c.source_col, (char*)"exit-syscall in a function returning a non-integer compound is unsupported"); return false; }
+                fprintf(g.out, "  ret %s %s\n", m1_llvm_scalar(rt), dst);
+                g.terminated = true;
+                return true;
+            }
+        }
+    }
     return g.consume(dst, false, false, &i64t, c.cns, ret_name);
 }
 fn char* M1Gen.asm_escaped(M1Gen* g, char* text)
@@ -4576,15 +4823,21 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         g.terminated = true;
         g.begin_block(then_label);
         g.terminated = false;
+        // Isolate arm environments: comu/let temps bound while compiling one
+        // arm (e.g. inside intercepted mu-drains) must not leak into the
+        // sibling arm's label captures and phi incoming values.
+        usz saved_env = g.env_count;
         g.branch_enter();
         bool then_ok = g.command(c.then_c, ret_name);
         g.branch_leave();
         if (!then_ok || !g.terminated) { return false; }
+        g.env_count = saved_env;
         g.begin_block(else_label);
         g.terminated = false;
         g.branch_enter();
         bool else_ok = g.command(c.else_c, ret_name);
         g.branch_leave();
+        g.env_count = saved_env;
         return else_ok && g.terminated;
     }
     if (c.tag == ACMD_LET)
@@ -4597,9 +4850,11 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         AirTyp* value_type = g.expr_type(c.prd);
         if (!is_bool && !is_ptr && m1_integer_type(value_type) && !m1_contextual_int_fits(c.prd, g.int_rep_type(value_type))) { return false; }
         if (!is_bool && !is_ptr) { value_type = g.int_rep_type(value_type); }
-        if (!g.bind_typed(c.binder, value, is_bool, is_ptr, value_type)) { return false; }
+        if (!g.bind_typed(c.binder, value, is_bool, is_ptr, value_type)) {
+ return false; }
         bool ok = g.command(c.body, ret_name);
         g.env_count = saved;
+
         return ok;
     }
     if (c.tag == ACMD_MATCH) { return g.match_cmd(c, ret_name); }
@@ -4661,6 +4916,23 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         }
         if (c.cns.tag == ACNS_CALL) { return g.call(c.prd, c.cns, ret_name); }
         if (c.prd.tag == APRD_UNIT) { return g.consume_unit(c.cns, ret_name); }
+        if (c.prd.tag == APRD_MU && c.prd.name != null && c.prd.body != null && c.cns.tag != ACNS_CASE &&
+            !(c.prd.body.tag == ACMD_CUT && c.prd.body.cns != null && c.prd.body.cns.tag == ACNS_COVAR && same(c.prd.body.cns.name, c.prd.name)))
+        {
+            // Statement-position value mu (compound body): evaluate the body for
+            // effect with the mu binder as its covar, then deliver unit onward;
+            // a body that terminates outright (exit-syscall arms) ends the cut.
+            if (g.mu_depth >= 8 || !g.mu_unit_terminals_ok(c.prd.body, c.prd.name, 0))
+            { g.note_failure(c.prd.source_line, c.prd.source_col, (char*)"value-position mu is limited to a direct mu %k. <v | %k> production or a unit-valued statement block"); return false; }
+            int saved_mu = g.mu_depth;
+            g.mu_covars[(usz)saved_mu] = c.prd.name; g.mu_depth = saved_mu + 1;
+            if (g.mu_drain_count < 8) { g.mu_drain_names[(usz)g.mu_drain_count] = c.prd.name; g.mu_drain_cns[(usz)g.mu_drain_count] = c.cns; g.mu_drain_count++; }
+            bool mu_ok = g.command(c.prd.body, c.prd.name);
+            g.mu_depth = saved_mu;
+            if (!mu_ok) { return false; }
+            if (g.terminated) { return true; }
+            return g.consume_unit(c.cns, ret_name);
+        }
         bool is_bool = g.is_condition(c.prd);
         bool is_ptr = !is_bool && g.is_pointer_value(c.prd);
         char* value = is_bool ? g.condition(c.prd) : (is_ptr ? g.pointer_value(c.prd) : g.prd(c.prd));
@@ -4697,7 +4969,7 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     g.default_bits = m1_integer_type(d.ret_ty) ? m1_int_bits(d.ret_ty) : 64;
     g.guard_active = false; g.guard_name = null; g.guard_true_label = null; g.guard_false_label = null;
     g.terminated = false;
-    g.has_for = false; g.for_depth = 0; g.seq_depth = 0; g.fx_depth = 0;
+    g.has_for = false; g.for_depth = 0; g.seq_depth = 0; g.fx_depth = 0; g.mu_depth = 0; g.mu_drain_count = 0; g.in_label_replay = false;
     g.watch_active = false; g.watch_count = 0; g.branch_depth = 0; g.watch_branch_depth = 0;
     AirCmd* body = d.def_body;
     char* ret_name = null;
@@ -5275,7 +5547,7 @@ fn int main(String[] args)
             rc = 3;
         }
     }
-    else { (void)remove(&ll_path[0]); }
+    else if (getenv((char*)"PEAR2_KEEPLL") == null) { (void)remove(&ll_path[0]); }
     if (rc == 0 && emit_exe && !emit_ll)
     {
         if (!make_executable(&bc_tmp[0], &exe_tmp[0]))

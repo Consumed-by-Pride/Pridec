@@ -11,3 +11,4 @@ tests/exec/pear/p09_stdout_extern.pie
 tests/exec/pear/p99_forward_call.pie
 tests/exec/pear/p116_closure_capture.pie
 tests/exec/pear/p117_closure_two_defs.pie
+tests/exec/pear/p118_closure_print_alloc.pie
