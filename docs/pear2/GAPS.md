@@ -52,10 +52,10 @@ is simply absent.
 | any CFG or dominance analysis | no constant propagation across branches, no loop-invariant motion, no dead-branch elimination on non-literal conditions, no SSA construction at the AIR level | L |
 | common-subexpression elimination / GVN | repeated pure expressions are re-emitted; LLVM recovers this, so the cost is IR size before LLVM runs | M |
 | inlining | AIR has no cost model and no call graph; LLVM inlines after lowering, which is cheaper and better informed | M |
-| tail-call marking | calls in return position are emitted as plain `call`, so a self-recursive function cannot be guaranteed to reuse its frame unless LLVM's tail-call analysis fires on its own | S |
+| tail-call marking | calls in return position are emitted as plain `call`, with no `tail`/`musttail` marker. Self-recursion is handled anyway, because `default<O2>`/`default<O3>` include `tailcallelim`; what is left on the table is *mutual* recursion, which no LLVM pass can turn into a loop and which the backend has to hope x86-64's frame reuse notices | S |
 | copy propagation | deliberately excluded: mutable locals are allocas, so `let x = y` snapshots a load, and renaming uses would observe later writes. Also worthless here, because the emitter binds names to SSA values, so an alias costs no instructions | — |
 | alias / memory-dependence analysis | ordering of loads and stores is left entirely to LLVM | L |
-| tier differentiation at the AIR level | `-O2` and `-O3` run the same AIR passes; only the LLVM pipeline differs (`default<O2>` vs `default<O3>`) | S |
+| tier differentiation at the AIR level | `-O2` and `-O3` run the same AIR passes; only the iteration cap (4 vs 8) and the LLVM pipeline differ (`default<O2>` vs `default<O3>`) | S |
 | optimizer statistics from the LLVM layer | `--stats` reports AIR counters only, so the effect of `default<On>` is invisible | S |
 
 `Arithmetic is emitted without nsw/nuw` (see `IMPLEMENTATION_PLAN.md`): the
@@ -98,8 +98,9 @@ range reasoning, and loop idioms.
 
 ## 5. Suggested order
 
-1. **Tail-call marking** — small, and the difference shows up on exactly the
-   recursive programs this backend is most likely to compile.
+1. **Tail-call marking** — small, and it is the only way to make mutual
+   recursion (never self-recursion, which `tailcallelim` already covers) reuse
+   frames, because marking requires knowing a call is in return position.
 2. **`nsw`/`nuw` after the integer contract is written down** — unlocks more
    downstream reasoning than any single pass here.
 3. **`letrec` for non-capturing recursive bindings** — the largest *language*
