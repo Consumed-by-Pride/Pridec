@@ -761,6 +761,15 @@ grep -Eq '(^| )folds=2( |$)' "$W/integer_let_chain.stats" || { echo "FAIL: expec
 grep -Eq '(^| )let-specializations=2( |$)' "$W/integer_let_chain.stats" || { echo "FAIL: expected two chained integer-let specializations"; cat "$W/integer_let_chain.stats"; exit 1; }
 [ -f "$W/integer_let_chain.bc" ] || { echo "FAIL: chained-let AIR did not emit bitcode"; exit 1; }
 
+# The -O2 tier adds the dead-binding pass; -O1 must not. A binding nothing reads
+# is the smallest case where the two tiers differ in what runs, not how often.
+cp tests/pear2/dead_binding_main.air "$W/dead_binding.air"
+"$PEAR2" "$W/dead_binding.air" --stats --quiet >"$W/dead_binding.stats"
+grep -Eq '(^| )dead=1( |$)' "$W/dead_binding.stats" || { echo "FAIL: expected one dead binding removed at -O2"; cat "$W/dead_binding.stats"; exit 1; }
+"$PEAR2" "$W/dead_binding.air" -O1 --stats --quiet >"$W/dead_binding_O1.stats"
+grep -Eq '(^| )dead=0( |$)' "$W/dead_binding_O1.stats" || { echo "FAIL: -O1 must not run the dead-binding pass"; cat "$W/dead_binding_O1.stats"; exit 1; }
+echo "PASS: dead-binding elimination is a -O2 pass and a no-op at -O1"
+
 # Exercise PEAR2's AIR optimizer on a real bool-let/if fixture. The comparison,
 # negation, let-condition specialization, and literal branch should all reduce.
 cp tests/pear2/if_compare_main.air "$W/if_optimizer.air"

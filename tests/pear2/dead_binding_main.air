@@ -1,0 +1,8 @@
+// A binding nothing reads. Pass 2 (enabled from -O2) deletes it; pass 1 alone
+// must leave it in place, so the two tiers are observably different.
+air 2.2 Main "dead_binding_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let unused = 7 in
+      <40 : i64 | %ret>;
