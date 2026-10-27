@@ -271,4 +271,23 @@ fi
 if [ ${#xpass_list[@]} -gt 0 ]; then
     echo "fixes landed — promote these out of XFAIL.tsv:"; for c in "${xpass_list[@]}"; do echo "  + $c"; done
 fi
-[ "$fail" -eq 0 ] && [ "$xpass" -eq 0 ]
+rc=0
+[ "$fail" -eq 0 ] && [ "$xpass" -eq 0 ] || rc=1
+
+# ── 3. differential matrix (opt-in: EXEC_DIFF=1) ──────────────────────────────
+# The case runs above use ONE backend at ONE tier. This runs every
+# tests/exec/pear/p*.pie through BOTH backends at -O0..-O3, compares exit status
+# and stdout, and gates the result against the checked-in ledger
+# (tests/exec/DIFF_BASELINE.csv). It needs both backends built, so it stays
+# opt-in rather than becoming a new hard dependency of `make test-exec`:
+#
+#   EXEC_DIFF=1 bash tests/exec/run.sh
+#
+# Fail-closed like the rest of this file: a missing backend or an empty matrix
+# makes scripts/pie-diff.sh exit 2, never a silent pass.
+if [ "${EXEC_DIFF:-0}" = "1" ]; then
+    echo "=== differential matrix (pear1c vs pear2c, -O0..-O3) ==="
+    DIFF_BASELINE=${DIFF_BASELINE:-tests/exec/DIFF_BASELINE.csv} \
+        bash scripts/pie-diff.sh --check || rc=1
+fi
+exit "$rc"

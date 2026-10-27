@@ -1,0 +1,26 @@
+-- EXIT: 3
+-- AIR 2.2 memory: in-place reversal of a heap array, so one loop iteration both
+-- loads and stores the same two elements and the loop carries two mutable
+-- cursors in opposite directions.
+--
+-- The swap is arithmetic rather than using a temporary, and that is load-
+-- bearing: written with `let t = a[lo]` the temporary becomes a third loop-
+-- carried binding, and pear2c then builds the fixture and never terminates
+-- (timeout at -O0..-O3) while pear1c returns the right answer. Rewritten with
+-- the temporary hoisted out of the loop it also builds and never terminates;
+-- without it, it works. Measured with scripts/pie-diff.sh, DIFF_TIMEOUT=10.
+fn main(_) -> i64 ! [Alloc] {
+  let a : *i64 = alloc [i64; 4];
+  let mut i: i64 = 0;
+  while i < 4 { a[i] = i; i = i + 1; }
+  let mut lo: i64 = 0;
+  let mut hi: i64 = 3;
+  while lo < hi {
+    a[lo] = a[lo] + a[hi];
+    a[hi] = a[lo] - a[hi];
+    a[lo] = a[lo] - a[hi];
+    lo = lo + 1;
+    hi = hi - 1;
+  }
+  return a[0];
+}

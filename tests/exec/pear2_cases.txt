@@ -1,5 +1,34 @@
 # Current PEAR2 native execution subset. Cases cover returns, arithmetic,
-# recursion, direct calls, conditionals, scalar externs, and loop-carried mutable locals.
+# recursion, direct calls, conditionals, scalar externs, loop-carried mutable
+# locals, nested functions, first-class closures, tuple/unit clause calls, heap
+# allocation with indexed stores and loads, block scoping, and a free on a
+# loop-exit join.
+#
+# Every line here is a claim that pear2/pear2c builds AND runs the fixture with
+# the fixture's own declared `-- EXIT:` value. scripts/pie-diff.sh reads this
+# file: a fixture listed here that pear2c rejects is ledgered as a defect, not
+# as `expected-reject`. Add a line only when the differential ledger shows
+# `verdict=match` and `spec=exit-ok` at all four tiers; remove one the moment it
+# does not.
+#
+# The 2026-10-26 additions were taken from that ledger, not from a reading of
+# the backend: 14 fixtures outside this list were already compiling, running and
+# returning their declared exit code on pear2c at -O0..-O3, plus 3 new
+# memory/mu fixtures (p124, p125, p130).
+#
+# Deliberate exceptions, each measured rather than assumed:
+#   * p09_stdout_extern is ledgered `diverge-stdout`, not `match`, because
+#     pear1c is the broken side there: it builds and exits 0 but putchar writes
+#     nothing, while pear2c prints the declared `A`.
+#   * p116/p117/p118 (first-class closures) are ledgered `diverge-exit`, not
+#     `match`, for the same reason from the other direction: pear1c SIGSEGVs on
+#     all three at every tier while pear2c returns their declared 42.
+#     In all four cases the reference backend is the wrong side, so keeping the
+#     entry asserts pear2c's behaviour is the correct one. The ledger's
+#     per-backend `spec` column is what makes that legible.
+#   * p129_ptr_offset_store is NOT here. Pointer arithmetic feeding an indexed
+#     store (`let p = a + 2; p[1] = …`) is outside the PEAR 2 subset; it is
+#     ledgered `expected-reject` at all four tiers.
 tests/exec/pear/p01_return_42.pie
 tests/exec/pear/p02_arith.pie
 tests/exec/pear/p03_fib.pie
@@ -8,7 +37,24 @@ tests/exec/pear/p05_call_chain.pie
 tests/exec/pear/p07_mut_reassign.pie
 tests/exec/pear/p08_if_else.pie
 tests/exec/pear/p09_stdout_extern.pie
+tests/exec/pear/p90_indexed_store_load.pie
+tests/exec/pear/p91_indexed_loop_write.pie
+tests/exec/pear/p92_clause_style.pie
+tests/exec/pear/p93_block_scope_bindings.pie
+tests/exec/pear/p95_block_then_tail.pie
+tests/exec/pear/p98_many_bindings.pie
 tests/exec/pear/p99_forward_call.pie
+tests/exec/pear/p99_i64_index.pie
+tests/exec/pear/p99b_i32_index.pie
+tests/exec/pear/p100_nested_fn.pie
+tests/exec/pear/p101_nested_fn_shadow.pie
+tests/exec/pear/p102_nested_fn_same_name.pie
+tests/exec/pear/p112_tuple_clause_expr.pie
+tests/exec/pear/p113_tuple_clause_wildcard.pie
+tests/exec/pear/p114_unit_clause_call.pie
 tests/exec/pear/p116_closure_capture.pie
 tests/exec/pear/p117_closure_two_defs.pie
 tests/exec/pear/p118_closure_print_alloc.pie
+tests/exec/pear/p124_heap_reversal.pie
+tests/exec/pear/p125_heap_inplace_swap.pie
+tests/exec/pear/p130_free_at_label_exit.pie
