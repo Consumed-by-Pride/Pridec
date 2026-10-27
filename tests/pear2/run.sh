@@ -114,9 +114,16 @@ FAKE_CLANG
 chmod +x "$W/fail-linker"
 printf stale > "$W/default"
 set +e
-PEAR2_CLANG="$W/fail-linker" "$PEAR2_BIN" "$W/default.air" --quiet >"$W/link_failure.log" 2>&1; rc=$?
+PEAR2_LINK=clang PEAR2_CLANG="$W/fail-linker" "$PEAR2_BIN" "$W/default.air" --quiet >"$W/link_failure.log" 2>&1; rc=$?
 set -e
-[ "$rc" = 3 ] && [ ! -e "$W/default" ] || { echo "FAIL: linker failure returned $rc or retained stale executable"; cat "$W/link_failure.log"; exit 1; }
+[ "$rc" = 3 ] && [ ! -e "$W/default" ] || { echo "FAIL: clang-driver link failure returned $rc or retained stale executable"; cat "$W/link_failure.log"; exit 1; }
+# The default link is ld + the C runtime objects, so pointing PEAR2_CRT_DIR at an
+# empty directory has to fail closed in exactly the same way.
+printf stale > "$W/default"
+set +e
+PEAR2_CRT_DIR="$W/no-such-crt" "$PEAR2_BIN" "$W/default.air" --quiet >"$W/link_failure_ld.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] && [ ! -e "$W/default" ] || { echo "FAIL: ld link failure returned $rc or retained stale executable"; cat "$W/link_failure_ld.log"; exit 1; }
 printf stale > "$W/default"
 printf stale > "$W/default.bc"
 set +e
