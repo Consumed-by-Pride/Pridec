@@ -276,6 +276,21 @@ bitcode-determinism fix committed with this checklist revision).
       is the rewrite the emitter refuses (there `let x = y` snapshots a
       load); here it is a statement about AIR names. Fixture opt_copy
       reports `copies=0` at -O2, `copies=1` at -O3, exit 42 at both.
+- [x] 5.37 `letrec` lowering: a recursive group of non-capturing lambdas
+      lifts to internal functions with a null environment; members are
+      planned in rounds so mutually recursive groups resolve, a scoped
+      table types a self or sibling call while its body is still being
+      scanned, and a group name inside a lifted member denotes
+      `{ @symbol, null }`. `letrec () in body` is `body`. Fixtures
+      letrec_factorial and letrec_mutual exit 42 at -O0..-O3; the suite
+      also checks the lifted definition is `internal` and the closure
+      carries the null environment. Reject fixtures cover a capturing
+      member and a non-lambda initializer, both with source positions.
+- [x] 5.38 Tail-call marking: a call whose continuation is the function's
+      own return covariable is printed with LLVM's `tail` marker, so a
+      recursive binding reuses frames. `tail` and not `musttail`, because
+      `musttail` also requires signature identity and this backend also
+      emits indirect closure calls whose signature comes from a type.
 
 ## 6. Determinism and equivalence (8)
 
@@ -364,6 +379,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**129 items: 128 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**131 items: 130 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.
