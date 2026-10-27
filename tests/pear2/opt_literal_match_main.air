@@ -1,0 +1,24 @@
+// PEAR 2 pass 3: dispatch on a literal subject (-O3).
+//
+// The subject is a constant, so exactly one unguarded arm can be selected and
+// the dispatch instruction, the comparison chain, and the unreachable arms are
+// all dead. Pass 3 selects the arm and re-optimizes it in place; at -O2 the
+// match is emitted in full and the runtime picks arm 2.
+//
+// Guards and binding patterns stop the fold instead of guessing, because both
+// need the subject's value at run time. The `bind` catch-all below is never
+// reached: the fold stops at the arm that matches first.
+//
+// Both tiers must return 42.
+air 2.2 Main "opt_literal_match_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    match (2 : i64) {
+      1 ->
+        <0 : i64 | %ret>;
+      2 ->
+        <42 : i64 | %ret>;
+      bind other ->
+        <1 : i64 | %ret>;
+    };

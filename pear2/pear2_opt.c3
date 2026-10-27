@@ -10,10 +10,18 @@
 // reduce to literals. Unsupported or ambiguous expressions remain unchanged.
 //
 // Pass 2 removes dead bindings (see the comment above opt_droppable_value); it
-// runs only at -O2 and above. Both passes are driven by optimize_module_at,
-// which is where the -O tier selects *which* passes run. pear2c then iterates
-// that set to a fixed point and hands the result to LLVM for the machine-level
-// work the AIR is not the right level for (mem2reg/SROA, CSE, inlining, loops).
+// runs only at -O2 and above. Pass 3 is the first whole-body analysis in the
+// pipeline: a name census it spends on constant propagation and on removing
+// bindings whose initializer is pure but unused. It runs only at -O3, which is
+// what makes the top tier a different *set* of passes rather than the same set
+// repeated more often.
+//
+// The three passes are driven by optimize_module_at, which is where the -O tier
+// selects which passes run; pear2c then iterates that set to a fixed point and
+// hands the result to LLVM for the machine-level work the AIR is not the right
+// level for (mem2reg/SROA, CSE, inlining, loops). Every rewrite is checked by
+// the AIR verifier afterwards, so a pass that produces a structurally invalid
+// module fails the build instead of reaching the backend.
 module pear2_opt;
 
 import air_ir;
@@ -28,7 +36,19 @@ struct OptStats
     uint branch_reductions;
     uint let_specializations;
     uint dead_bindings;      // pass 2: unused literal/variable bindings removed
+    uint propagated_bindings; // pass 3: constants substituted at every use in the body
+    uint pure_dead_bindings; // pass 3: unused pure producers removed
+    uint cse_replacements;   // pass 3: repeated pure values bound to an existing name
+    uint loop_eliminations;  // pass 3: `while false` removed
+    uint literal_matches;    // pass 3: match on a literal subject folded to one arm
+    uint dead_commands;      // pass 3: commands after an unconditional transfer removed
     bool drop_dead;          // pass 2 is enabled at -O2 and above
+    bool propagate_bindings; // pass 3 is enabled at -O3 only
+    // Pass 3's let-chain value table. Scoped by save/restore around each
+    // descendant scope, so an entry is only ever visible where its binder is.
+    char*[16] cse_names;
+    AirPrd*[16] cse_values;
+    int cse_count;
     AirArena* arena;
 }
 
@@ -1155,9 +1175,371 @@ fn void OptStats.scan_cmd(OptStats* s, AirCmd* c, char* name, int* var_uses, boo
     }
 }
 
-// rename_* -- copy propagation. Only reached after scan_* proved that every
-// occurrence of `from` in this subtree is an APRD_VAR producer, so a name swap
-// is the whole rewrite; no other field can mention the old name.
+
+// ===== pass 3: whole-body binding propagation (-O3) =========================
+//
+// Passes 1 and 2 are expression-local. Pass 1 reaches a constant only through
+// an immediate initializer or an immediate result; pass 2 removes only a
+// binding whose value is inert. Both stop at one nesting level because neither
+// ever asks a question about the whole body.
+//
+// Pass 3 asks that question once, as a name census, and spends the answer
+// twice:
+//
+//   propagation  `let x = <literal>` where the census proves `x` is bound
+//                nowhere else and never appears as a jump argument: every use
+//                becomes the literal, and the enclosing expressions then fold.
+//   removal      the same census proves an unused binding dead even when its
+//                initializer computes something, which pass 2 cannot do
+//                because it only accepts inert values.
+//
+// Why substitution is sound here: AIR has no assignment command. A mutable
+// local is carried by label and jump parameters, so it always shows up as an
+// extra binder position or a jump argument, and the census refuses. A name
+// that no other position mentions therefore has exactly one value for the
+// whole body, and replacing its uses with that value cannot observe a later
+// write -- the failure mode that made copy propagation unsound in the emitter
+// instead of here.
+//
+// The substitution is also type-checked per use rather than per binding: an
+// integer literal only replaces a use whose resolved width and signedness
+// match (or an untyped use that the literal fits), so a narrow binding is
+// never widened by a rewrite.
+
+// opt_pure_value -- can this producer be evaluated and discarded with no
+// observable difference? Pure means no call, no memory operation, no
+// allocation, no closure, no effect -- and no trap. Division and remainder are
+// deliberately excluded: `div x 0` faults at run time, and deleting a trapping
+// expression would turn a crash into a silent result, which is a semantics
+// change rather than an optimization. Loads, gepe, allocas, ref/addr/deref and
+// every closure form are excluded for the same reason: they touch state.
+fn bool opt_pure_value(AirPrd* p, int depth)
+{
+    if (p == null || depth >= 64) { return false; }
+    if (p.body != null || p.binder_count != 0 || p.rec_init_count != 0) { return false; }
+    for (usz i = 0; i < p.sub_count; i++) { if (!opt_pure_value(p.subs[i], depth + 1)) { return false; } }
+    switch (p.tag)
+    {
+        case APRD_VAR: case APRD_INT: case APRD_FLOAT: case APRD_BOOL: case APRD_CHAR:
+        case APRD_STRING: case APRD_BYTES: case APRD_UNIT: case APRD_NULL:
+            return true;
+        case APRD_BINOP:
+            return p.bop == ABIN_ADD || p.bop == ABIN_SUB || p.bop == ABIN_MUL ||
+                   p.bop == ABIN_AND || p.bop == ABIN_OR || p.bop == ABIN_XOR ||
+                   p.bop == ABIN_SHL || p.bop == ABIN_SHR ||
+                   p.bop == ABIN_LAND || p.bop == ABIN_LOR ||
+                   p.bop == ABIN_EQ || p.bop == ABIN_NEQ || p.bop == ABIN_LT ||
+                   p.bop == ABIN_GT || p.bop == ABIN_LE || p.bop == ABIN_GE;
+        case APRD_UNOP:
+            return p.uop == AUN_NEG || p.uop == AUN_NOT || p.uop == AUN_BITNOT;
+        case APRD_COERCE: case APRD_TUPLE: case APRD_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// substitute_all_prd/_cns/_cmd -- replace every `APRD_VAR name` in a subtree
+// with `value`, one use at a time, and report how many were rewritten. Each
+// site is checked for type compatibility on its own; a site that does not fit
+// is left as it was and the binding stays available for it. The walk mirrors
+// scan_* field for field, so a position the census counts as a use is exactly a
+// position this rewrite can reach.
+fn int OptStats.substitute_all_prd(OptStats* s, AirPrd* p, char* name, AirPrd* value, bool boolean, int depth)
+{
+    if (p == null || depth >= 128) { return 0; }
+    if (p.tag == APRD_VAR && p.name != null && opt_same_name(p.name, name))
+    {
+        bool fits = false;
+        if (boolean) { fits = opt_bool_hint(p.ty) && opt_bool_hint(value.ty); }
+        else { fits = opt_integer_substitution_compatible(p, value); }
+        if (!fits) { return 0; }
+        s.replace_with_prd(p, value);
+        return 1;
+    }
+    int replaced = 0;
+    for (usz i = 0; i < p.sub_count; i++)
+    {
+        replaced = replaced + s.substitute_all_prd(p.subs[i], name, value, boolean, depth + 1);
+    }
+    for (usz i = 0; i < p.rec_init_count; i++)
+    {
+        if (p.rec_inits[i] != null)
+        {
+            replaced = replaced + s.substitute_all_prd(p.rec_inits[i].value, name, value, boolean, depth + 1);
+        }
+    }
+    if (p.body != null) { replaced = replaced + s.substitute_all_cmd(p.body, name, value, boolean, depth + 1); }
+    return replaced;
+}
+
+fn int OptStats.substitute_all_cns(OptStats* s, AirCns* k, char* name, AirPrd* value, bool boolean, int depth)
+{
+    if (k == null || depth >= 128) { return 0; }
+    int replaced = s.substitute_all_prd(k.prd, name, value, boolean, depth + 1);
+    for (usz i = 0; i < k.subst_count; i++)
+    {
+        replaced = replaced + s.substitute_all_prd(k.subst_prds[i], name, value, boolean, depth + 1);
+    }
+    replaced = replaced + s.substitute_all_cns(k.tail, name, value, boolean, depth + 1);
+    replaced = replaced + s.substitute_all_cns(k.cont_k, name, value, boolean, depth + 1);
+    replaced = replaced + s.substitute_all_cmd(k.body, name, value, boolean, depth + 1);
+    replaced = replaced + s.substitute_all_cmd(k.label_body, name, value, boolean, depth + 1);
+    for (usz i = 0; i < k.branch_count; i++)
+    {
+        if (k.branches[i] == null) { continue; }
+        replaced = replaced + s.substitute_all_cns(k.branches[i].guard, name, value, boolean, depth + 1);
+        replaced = replaced + s.substitute_all_cmd(k.branches[i].body, name, value, boolean, depth + 1);
+    }
+    for (usz i = 0; i < k.cobranch_count; i++)
+    {
+        if (k.cobranches[i] == null) { continue; }
+        replaced = replaced + s.substitute_all_cmd(k.cobranches[i].body, name, value, boolean, depth + 1);
+    }
+    return replaced;
+}
+
+fn int OptStats.substitute_all_cmd(OptStats* s, AirCmd* c, char* name, AirPrd* value, bool boolean, int depth)
+{
+    if (c == null || depth >= 128) { return 0; }
+    int replaced = s.substitute_all_prd(c.prd, name, value, boolean, depth + 1);
+    for (usz i = 0; i < c.prd_count; i++)
+    {
+        replaced = replaced + s.substitute_all_prd(c.prds[i], name, value, boolean, depth + 1);
+    }
+    replaced = replaced + s.substitute_all_cns(c.cns, name, value, boolean, depth + 1);
+    replaced = replaced + s.substitute_all_cmd(c.body, name, value, boolean, depth + 1);
+    replaced = replaced + s.substitute_all_cmd(c.next, name, value, boolean, depth + 1);
+    replaced = replaced + s.substitute_all_cmd(c.then_c, name, value, boolean, depth + 1);
+    replaced = replaced + s.substitute_all_cmd(c.else_c, name, value, boolean, depth + 1);
+    replaced = replaced + s.substitute_all_cmd(c.handled, name, value, boolean, depth + 1);
+    for (usz i = 0; i < c.branch_count; i++)
+    {
+        if (c.branches[i] == null) { continue; }
+        replaced = replaced + s.substitute_all_cmd(c.branches[i].guard, name, value, boolean, depth + 1);
+        replaced = replaced + s.substitute_all_cmd(c.branches[i].body, name, value, boolean, depth + 1);
+    }
+    return replaced;
+}
+
+// propagate_let -- the pass-3 rewrite for one `let`. It reports whether it
+// changed anything so the caller knows to re-fold the body it just rewrote.
+fn bool OptStats.propagate_let(OptStats* s, AirCmd* c, int depth)
+{
+    if (c == null || c.tag != ACMD_LET || c.binder == null || c.prd == null || c.body == null || c.next != null) { return false; }
+    // `_` is the discard binder: there is nothing to propagate, and the name is
+    // not unique by construction.
+    if (opt_same_name(c.binder, (char*)"_")) { return false; }
+    bool boolean = c.prd.tag == APRD_BOOL;
+    if (!boolean && c.prd.tag != APRD_INT) { return false; }
+    if (boolean ? !opt_bool_hint(c.prd.ty) : !opt_integer_hint(c.prd.ty)) { return false; }
+    int var_uses = 0;
+    bool blocked = false;
+    s.scan_cmd(c.body, c.binder, &var_uses, &blocked, 0);
+    if (blocked || var_uses == 0) { return false; }
+    int replaced = s.substitute_all_cmd(c.body, c.binder, c.prd, boolean, depth + 1);
+    if (replaced == 0) { return false; }
+    s.propagated_bindings = s.propagated_bindings + 1;
+    s.let_specializations = s.let_specializations + 1;
+    return true;
+}
+
+// opt_ty_hint_equals -- do two type hints describe the same value? An absent
+// hint is not equal to a present one: the emitter resolves an untyped producer
+// from context, so the two are not interchangeable.
+fn bool opt_ty_hint_equals(AirTyp* a, AirTyp* b)
+{
+    if (a == b) { return true; }
+    if (a == null || b == null) { return false; }
+    if (a.tag != b.tag || a.arg_count != b.arg_count) { return false; }
+    if (a.tag == ATYP_ARRAY && a.ival != b.ival) { return false; }
+    if (a.tag == ATYP_NOMINAL && !opt_same_name(a.name, b.name)) { return false; }
+    for (usz i = 0; i < a.arg_count; i++)
+    {
+        if (!opt_ty_hint_equals(a.args[i], b.args[i])) { return false; }
+    }
+    return true;
+}
+
+// opt_prd_equals -- structural equality for the pure producers opt_pure_value
+// accepts. There is no call, load, or allocation form to compare, so two pure
+// trees denote the same value exactly when their operators, leaves, names, and
+// type hints agree. Anything with a body or binders is refused rather than
+// compared.
+//
+// Three shapes are excluded even though they are pure, because equal *content*
+// is not equal *value* for them: a string or byte literal is a pointer to a
+// distinct global per occurrence, and a float can be `-0.0` where the other is
+// `0.0` (which compare equal but behave differently) or `NaN` (which never
+// compares equal). Reusing one for the other would be observable.
+fn bool opt_prd_equals(AirPrd* a, AirPrd* b, int depth)
+{
+    if (a == b) { return true; }
+    if (a == null || b == null || depth >= 32) { return false; }
+    if (a.tag != b.tag || a.bop != b.bop || a.uop != b.uop) { return false; }
+    if (a.body != null || b.body != null || a.binder_count != 0 || b.binder_count != 0) { return false; }
+    if (a.rec_init_count != 0 || b.rec_init_count != 0) { return false; }
+    if (!opt_ty_hint_equals(a.ty, b.ty) || !opt_ty_hint_equals(a.ty_arg, b.ty_arg)) { return false; }
+    if (!opt_same_name(a.name, b.name)) { return false; }
+    if (a.sub_count != b.sub_count) { return false; }
+    if (a.tag == APRD_STRING || a.tag == APRD_BYTES || a.tag == APRD_FLOAT) { return false; }
+    if (a.tag == APRD_INT && a.ival != b.ival) { return false; }
+    if (a.tag == APRD_BOOL && a.bval != b.bval) { return false; }
+    if (a.tag == APRD_CHAR && a.cval != b.cval) { return false; }
+    for (usz i = 0; i < a.sub_count; i++)
+    {
+        if (!opt_prd_equals(a.subs[i], b.subs[i], depth + 1)) { return false; }
+    }
+    return true;
+}
+
+// cse_lookup -- the most recent enclosing let binder whose pure value is
+// structurally identical to `value`, provided that binder cannot be shadowed
+// anywhere in `body`. The census check is what keeps the reuse honest: a name
+// that some binder position below mentions may denote a different value there,
+// so that entry is skipped rather than trusted.
+fn char* OptStats.cse_lookup(OptStats* s, AirPrd* value, AirCmd* body)
+{
+    if (s == null || value == null || body == null) { return null; }
+    for (int i = s.cse_count - 1; i >= 0; i--)
+    {
+        char* name = s.cse_names[(usz)i];
+        if (name == null) { continue; }
+        if (!opt_prd_equals(s.cse_values[(usz)i], value, 0)) { continue; }
+        int var_uses = 0;
+        bool blocked = false;
+        s.scan_cmd(body, name, &var_uses, &blocked, 0);
+        if (blocked) { continue; }
+        return name;
+    }
+    return null;
+}
+
+// rewrite_to_var -- turn one producer node into a reference to an existing
+// binder. The node keeps its own type hint, so the rewrite cannot silently
+// retype the use; every other field is cleared so the emitter cannot read a
+// stale literal out of the old shape.
+fn void OptStats.rewrite_to_var(OptStats* s, AirPrd* p, char* name)
+{
+    if (s == null || p == null || name == null) { return; }
+    AirTyp* hint = p.ty;
+    p.tag = APRD_VAR;
+    p.name = name;
+    p.ival = 0;
+    p.fval = 0.0;
+    p.bval = false;
+    p.cval = 0;
+    p.subs = null;
+    p.sub_count = 0;
+    p.sub_cap = 0;
+    p.bytes = null;
+    p.bytes_len = 0;
+    p.binder_count = 0;
+    p.body = null;
+    p.ty_arg = null;
+    p.rec_inits = null;
+    p.rec_init_count = 0;
+    p.rec_init_cap = 0;
+    p.ty = hint;
+    s.rewrites = s.rewrites + 1;
+    s.operand_rewrites = s.operand_rewrites + 1;
+}
+
+// ===== pass 3: control-flow folding =========================================
+//
+// AIR control flow is structured, but two shapes are still statically decided
+// once the condition or subject is a literal -- which pass 3's propagation is
+// what usually makes it one:
+//
+//   `while false`        the body cannot run, so the loop is a no-op.
+//   `match <literal>`    exactly one unguarded arm can be selected, so the
+//                        dispatch disappears.
+//
+// Both are restricted to the case where the answer does not depend on anything
+// but the literal: a guarded arm is a runtime condition, and a `bind` pattern
+// would introduce a name, so either one stops the fold instead of guessing.
+
+// opt_terminates -- does this command always transfer control away before the
+// continuation that follows it? Used to drop the unreachable remainder of a
+// sequence; anything that can fall through reports false.
+fn bool opt_terminates(AirCmd* c, int depth)
+{
+    if (c == null || depth >= 64) { return false; }
+    if (c.tag == ACMD_RET || c.tag == ACMD_JUMP || c.tag == ACMD_BREAK || c.tag == ACMD_CONTINUE || c.tag == ACMD_TRAP) { return true; }
+    if (c.tag == ACMD_SEQ) { return opt_terminates(c.body, depth + 1) || opt_terminates(c.next, depth + 1); }
+    if (c.tag == ACMD_BLOCK || c.tag == ACMD_UNCHECKED || c.tag == ACMD_UNSAFE || c.tag == ACMD_COMPTIME)
+    {
+        return opt_terminates(c.body, depth + 1);
+    }
+    if (c.tag == ACMD_IF)
+    {
+        return c.then_c != null && c.else_c != null && opt_terminates(c.then_c, depth + 1) && opt_terminates(c.else_c, depth + 1);
+    }
+    return false;
+}
+
+// match_literal_arm -- the single arm a literal subject must select, or null
+// when the dispatch needs a run-time decision.
+fn AirCmd* OptStats.match_literal_arm(OptStats* s, AirCmd* c)
+{
+    if (c == null || c.tag != ACMD_MATCH || c.prd == null || c.branch_count == 0) { return null; }
+    if (c.cobranch_count != 0) { return null; }
+    AirPrd* subject = c.prd;
+    bool is_int = subject.tag == APRD_INT;
+    bool is_bool = subject.tag == APRD_BOOL;
+    bool is_char = subject.tag == APRD_CHAR;
+    if (!is_int && !is_bool && !is_char) { return null; }
+    for (usz i = 0; i < c.branch_count; i++)
+    {
+        AirBranch* b = c.branches[i];
+        if (b == null || b.pat == null) { return null; }
+        // A guard is a run-time condition, so nothing after it is decidable.
+        if (b.guard != null) { return null; }
+        AirPat* pat = b.pat;
+        if (pat.tag == APAT_WILD) { return b.body; }
+        if (pat.tag == APAT_INT && is_int && pat.ival == subject.ival) { return b.body; }
+        if (pat.tag == APAT_BOOL && is_bool && (pat.ival != 0) == subject.bval) { return b.body; }
+        if (pat.tag == APAT_CHAR && is_char && pat.ival == (long)subject.cval) { return b.body; }
+        // Another literal arm simply does not match and the search continues; any
+        // other pattern (bind, tuple, record, variant, or-pattern, range) either
+        // introduces a name or needs the value, so it stops the fold.
+        if (pat.tag == APAT_INT && is_int) { continue; }
+        if (pat.tag == APAT_BOOL && is_bool) { continue; }
+        if (pat.tag == APAT_CHAR && is_char) { continue; }
+        return null;
+    }
+    return null;
+}
+
+// cse_let -- bind `c`'s pure value to an earlier identical one when the chain
+// already computed it, then publish `c`'s own binder for the subtree below.
+fn void OptStats.cse_let(OptStats* s, AirCmd* c)
+{
+    if (s == null || c == null || c.tag != ACMD_LET || c.binder == null || c.prd == null || c.body == null) { return; }
+    if (opt_same_name(c.binder, (char*)"_") || !opt_pure_value(c.prd, 0)) { return; }
+    char* earlier = s.cse_lookup(c.prd, c.body);
+    if (earlier != null)
+    {
+        s.rewrite_to_var(c.prd, earlier);
+        s.cse_replacements = s.cse_replacements + 1;
+        return;
+    }
+    // Shadowing: an inner binder that reuses this name ends the visibility of
+    // everything below its entry, so truncate there.
+    for (int i = 0; i < s.cse_count; i++)
+    {
+        if (opt_same_name(s.cse_names[(usz)i], c.binder)) { s.cse_count = i; break; }
+    }
+    if (s.cse_count < 16)
+    {
+        s.cse_names[(usz)s.cse_count] = c.binder;
+        s.cse_values[(usz)s.cse_count] = c.prd;
+        s.cse_count = s.cse_count + 1;
+    }
+}
+
+// optimize_prd -- bottom-up rewrite of one producer. Substitution sites are
+// rewritten in place by substitute_all_*; this walk is the folding half.
 fn AirPrd* OptStats.optimize_prd(OptStats* s, AirPrd* p, int depth)
 {
     if (p == null || depth >= 128) { return p; }
@@ -1246,6 +1628,10 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
             return s.optimize_cmd(selected, depth + 1);
         }
     }
+    // Pass 3's value table is scoped to the descendants of this command: the
+    // binder published here is visible in them and nowhere else.
+    int saved_cse = s.cse_count;
+    if (s.propagate_bindings) { s.cse_let(c); }
     c.body = s.optimize_cmd(c.body, depth + 1);
     c.next = s.optimize_cmd(c.next, depth + 1);
     c.then_c = s.optimize_cmd(c.then_c, depth + 1);
@@ -1259,21 +1645,91 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
             c.branches[i].body = s.optimize_cmd(c.branches[i].body, depth + 1);
         }
     }
+    s.cse_count = saved_cse;
+    // Pass 3 control-flow folding: a loop whose condition is a literal false, a
+    // dispatch on a literal subject, and the unreachable tail of a sequence.
+    // All three are decided by the literal alone, so none of them needs the CFG
+    // an AIR-level dataflow pass would otherwise require.
+    if (s.propagate_bindings)
+    {
+        // Sequence cleanup. `seq { nop; rest }` and `seq { x; nop }` carry no
+        // meaning beyond `rest` and `x`: `nop` is the unit value, not an
+        // instruction, so dropping it cannot reorder or discard work. This is
+        // worth doing here rather than leaving to LLVM because the fold above
+        // *creates* the shape -- an eliminated loop leaves `seq { nop; rest }`
+        // behind, and a later pass that looks for a trailing cut would see it.
+        if (c.tag == ACMD_SEQ && c.body != null && c.body.tag == ACMD_NOP && c.next != null)
+        {
+            s.rewrites = s.rewrites + 1;
+            return s.optimize_cmd(c.next, depth + 1);
+        }
+        if (c.tag == ACMD_SEQ && c.next != null && c.next.tag == ACMD_NOP)
+        {
+            s.rewrites = s.rewrites + 1;
+            return c.body;
+        }
+        // A block with one command is the command: AIR blocks exist to give a
+        // binder a scope, and a single child subtree cannot observe the scope it
+        // was given.
+        if (c.tag == ACMD_BLOCK && c.body != null && c.next == null)
+        {
+            s.rewrites = s.rewrites + 1;
+            return s.optimize_cmd(c.body, depth + 1);
+        }
+        if (c.tag == ACMD_WHILE && c.prd != null && c.prd.tag == APRD_BOOL && !c.prd.bval && s.arena != null)
+        {
+            AirCmd* nop = air_ir::air_new_AirCmd(s.arena);
+            if (nop != null)
+            {
+                nop.tag = ACMD_NOP;
+                s.rewrites = s.rewrites + 1;
+                s.loop_eliminations = s.loop_eliminations + 1;
+                return nop;
+            }
+        }
+        AirCmd* arm = s.match_literal_arm(c);
+        if (arm != null)
+        {
+            s.rewrites = s.rewrites + 1;
+            s.literal_matches = s.literal_matches + 1;
+            return s.optimize_cmd(arm, depth + 1);
+        }
+        if (c.tag == ACMD_SEQ && c.next != null && opt_terminates(c.body, 0))
+        {
+            s.rewrites = s.rewrites + 1;
+            s.dead_commands = s.dead_commands + 1;
+            c.next = null;
+        }
+    }
+    // Pass 3 propagates a literal to every use in the body, then re-folds what
+    // the substitution exposed. The re-fold is a second descent on purpose: the
+    // census is already paid for, and folding is what turns a propagated
+    // constant into a shorter program rather than a renamed one.
+    if (s.propagate_bindings && s.propagate_let(c, depth))
+    {
+        c.body = s.optimize_cmd(c.body, depth + 1);
+    }
     // Pass 2 runs on the already-rewritten body, so a binding that folding made
     // dead is seen in its final shape.
     // c.next is only used by ACMD_SEQ, but requiring it to be null keeps the
     // rewrite honest if a reader ever attaches a trailing continuation to a let.
-    if (s.drop_dead && c.tag == ACMD_LET && c.binder != null && c.body != null &&
-        c.next == null && opt_droppable_value(c.prd))
+    // Pass 3 widens what counts as removable from "inert" to "pure": an
+    // initializer that computes a value but cannot trap, call, allocate, or
+    // touch memory is dead work once nothing reads the binding.
+    bool inert_value = opt_droppable_value(c.prd);
+    bool pure_value = !inert_value && s.propagate_bindings && opt_pure_value(c.prd, 0);
+    if ((s.drop_dead || s.propagate_bindings) && (inert_value || pure_value) &&
+        c.tag == ACMD_LET && c.binder != null && c.body != null && c.next == null)
     {
         int var_uses = 0;
         bool blocked = false;
         s.scan_cmd(c.body, c.binder, &var_uses, &blocked, 0);
         if (!blocked && var_uses == 0)
         {
-            // The body cannot see the binding and the value is a literal or a
-            // variable, so removing it cannot discard an effect.
-            s.dead_bindings = s.dead_bindings + 1;
+            // The body cannot see the binding, and the value is either inert or
+            // pure, so removing it can discard neither an effect nor a trap.
+            if (inert_value) { s.dead_bindings = s.dead_bindings + 1; }
+            else { s.pure_dead_bindings = s.pure_dead_bindings + 1; }
             s.rewrites = s.rewrites + 1;
             return c.body;
         }
@@ -1286,9 +1742,13 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
 //
 //   -O1        pass 1 only: folding, identities, strength reduction, shift
 //              combination, literal branches, constant-let specialization.
-//   -O2, -O3   pass 1 + pass 2 (dead bindings). pear2c repeats the set to a
-//              fixed point and LLVM then runs default<O2>/default<O3> over the
-//              module it is given.
+//   -O2        pass 1 + pass 2: the dead-binding sweep, still expression-local.
+//   -O3        pass 1 + pass 2 + pass 3: whole-body name census, so a constant
+//              reaches every use in the body and a pure-but-unused initializer
+//              is removable.
+//
+// pear2c repeats the selected set to a fixed point, then LLVM runs
+// default<O2>/default<O3> over the module it is given.
 //
 // Level 0 is handled by the caller, which never calls this function.
 fn OptStats optimize_module_at(AirModule* m, int level)
@@ -1302,7 +1762,15 @@ fn OptStats optimize_module_at(AirModule* m, int level)
     stats.branch_reductions = 0;
     stats.let_specializations = 0;
     stats.dead_bindings = 0;
+    stats.propagated_bindings = 0;
+    stats.pure_dead_bindings = 0;
+    stats.cse_replacements = 0;
+    stats.loop_eliminations = 0;
+    stats.literal_matches = 0;
+    stats.dead_commands = 0;
+    stats.cse_count = 0;
     stats.drop_dead = level >= 2;
+    stats.propagate_bindings = level >= 3;
     stats.arena = null;
     if (m == null) { return stats; }
     stats.arena = m.arena;

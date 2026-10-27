@@ -50,12 +50,11 @@ is simply absent.
 | absent | consequence | size |
 |---|---|---|
 | any CFG or dominance analysis | no constant propagation across branches, no loop-invariant motion, no dead-branch elimination on non-literal conditions, no SSA construction at the AIR level | L |
-| common-subexpression elimination / GVN | repeated pure expressions are re-emitted; LLVM recovers this, so the cost is IR size before LLVM runs | M |
+| common-subexpression elimination / GVN | pass 3 removes repeats only where both values are pure *and* the first is bound by an enclosing `let` in the same chain; anything across control flow, or involving memory, is still re-emitted and left to LLVM's GVN | M |
 | inlining | AIR has no cost model and no call graph; LLVM inlines after lowering, which is cheaper and better informed | M |
 | tail-call marking | calls in return position are emitted as plain `call`, with no `tail`/`musttail` marker. Self-recursion is handled anyway, because `default<O2>`/`default<O3>` include `tailcallelim`; what is left on the table is *mutual* recursion, which no LLVM pass can turn into a loop and which the backend has to hope x86-64's frame reuse notices | S |
 | copy propagation | deliberately excluded: mutable locals are allocas, so `let x = y` snapshots a load, and renaming uses would observe later writes. Also worthless here, because the emitter binds names to SSA values, so an alias costs no instructions | — |
 | alias / memory-dependence analysis | ordering of loads and stores is left entirely to LLVM | L |
-| tier differentiation at the AIR level | `-O2` and `-O3` run the same AIR passes; only the iteration cap (4 vs 8) and the LLVM pipeline differ (`default<O2>` vs `default<O3>`) | S |
 | optimizer statistics from the LLVM layer | `--stats` reports AIR counters only, so the effect of `default<On>` is invisible | S |
 
 `Arithmetic is emitted without nsw/nuw` (see `IMPLEMENTATION_PLAN.md`): the
@@ -85,6 +84,12 @@ range reasoning, and loop idioms.
   Fixture: `tests/pear2/atomic_cmpxchg_main.air`, executed at `-O0..-O3`.
 - **`syscall` bool arguments** now lower as a `zext i1 -> i64`, the same way C
   passes a `_Bool` in a register.
+- **Whole-body propagation (pass 3, `-O3` only)**: a name census over the
+  entire function body replaces a literal at every use — not just the immediate
+  initializer pass 1 reaches — and removes a binding whose initializer is pure
+  rather than inert. That is also what makes `-O3` a different *set* of passes
+  instead of the `-O2` set repeated more often, which was the last row this
+  table had under "tier differentiation".
 - **Linkage**: a non-`pub`, non-`extern` definition or global that is not an
   entry point and carries no `export`/`section` attribute is emitted
   `internal`, so LLVM can inline it and delete it when unused. On by default
@@ -105,8 +110,14 @@ range reasoning, and loop idioms.
    downstream reasoning than any single pass here.
 3. **`letrec` for non-capturing recursive bindings** — the largest *language*
    gap that does not require a new design.
-4. **CSE / constant propagation across branches** — only worth doing after a
-   CFG exists, and only with a differential test to prove it.
+4. **CSE / constant propagation across branches** — the let-chain case is
+   done in pass 3; what remains needs a CFG: merging equal values along
+   two arms of a join, and hoisting a value out of a loop. Only worth doing
+   with a differential test to prove it.
+5. **Loop unrolling / rotation** — a `for` iterates an array value, so the
+   literal-bounded shape an unroller wants is not what AIR carries today;
+   this needs either a range producer in AIR or a bounds proof through the
+   `for` lowering.
 
 Anything in §1 marked **L** needs a design note before code; they are not
 backlog items, they are open questions.

@@ -60,6 +60,7 @@ extern fn char* ll_get_err_msg(void* e) @cname("LLVMGetErrorMessage");
 // changed between LLVM releases, so only the version-stable Default is used --
 // x86-64 already defaults to the small model.
 // LLVMCodeGenFileType: AssemblyFile=0, ObjectFile=1.
+const int LLVM_CG_ASM_FILE = 0;
 const int LLVM_CG_OBJ_FILE = 1;
 const int LLVM_CODEGEN_DEFAULT = 2;
 const int LLVM_RELOC_STATIC = 1;
@@ -5435,12 +5436,22 @@ fn bool append_shell_word(char* out, usz cap, usz* length, char* word)
 // external compiler, and the object is produced by the same LLVM the bitcode
 // comes from. Only the x86-64 backend is registered, so any other triple fails
 // closed with LLVM's message instead of emitting a wrong-architecture file.
+// `--emit-asm` is the same call with LLVMAssemblyFile: the printed assembly is
+// what the object was assembled from, not a second compilation.
 //
 // Instruction selection always runs at LLVM's default codegen level. The -O
 // tier was already applied to the IR by m1_optimize_llvm (and to the AIR by
 // pear2_opt); letting codegen vary as well would make one flag mean two
 // different things.
 fn bool m1_emit_object(void* m, char* path, char** failure)
+{
+    return m1_emit_native(m, path, LLVM_CG_OBJ_FILE, failure);
+}
+// m1_emit_native -- the one code-generation entry point. `file_type` is
+// LLVMCodeGenFileType: the object the linker consumes, or the assembly text a
+// human reads. Both come out of the same target machine, so `--emit-asm` and
+// `--emit-obj` can never disagree about what the program compiled to.
+fn bool m1_emit_native(void* m, char* path, int file_type, char** failure)
 {
     if (failure != null) { *failure = null; }
     if (m == null) { return false; }
@@ -5469,7 +5480,7 @@ fn bool m1_emit_object(void* m, char* path, char** failure)
         if (failure != null) { *failure = (char*)"could not create a target machine"; }
         return false;
     }
-    int rc = ll_tm_emit_to_file(tm, m, path, LLVM_CG_OBJ_FILE, &err);
+    int rc = ll_tm_emit_to_file(tm, m, path, file_type, &err);
     ll_dispose_tm(tm);
     if (rc != 0)
     {
@@ -5537,7 +5548,8 @@ fn bool m1_link_object(char* object, char* output)
 }
 // m1_optimize_llvm -- run LLVM's own optimisation pipeline over the parsed
 // module. PEAR 2 hands LLVM the same `default<On>` pipelines it would use for a
-// .ll input, so an -On build combines two orthogonal layers:
+// .ll input (`default<Os>` for the size tier), so a build combines two
+// orthogonal layers:
 //
 //   pear2_opt   AIR rewrites the AIR-level pass can justify (folding,
 //               algebraic identities, strength reduction, let specialization)
@@ -5549,12 +5561,39 @@ fn bool m1_link_object(char* object, char* output)
 // At -O0 no pipeline runs and the published bitcode is exactly what PEAR 2
 // emitted. `*failure` receives LLVM's message on failure; the caller owns it
 // and must dispose it with ll_message_dispose().
-fn bool m1_optimize_llvm(void* m, int opt_level, char** failure)
+// m1_target_machine -- the target machine for the module's own triple, used so
+// LLVM's IR pipeline can run its target-aware analyses (loop and SLP
+// vectorisation, interleaving, cost models) instead of the generic defaults.
+// Returning null is not an error: the pipeline then runs target independently,
+// which is what it did before, so a host without the backend still produces
+// bitcode.
+fn void* m1_target_machine(void* m)
+{
+    if (m == null) { return null; }
+    char* triple = ll_get_triple(m);
+    if (triple == null || triple[0] == 0) { return null; }
+    ll_init_x86_ti();
+    ll_init_x86_t();
+    ll_init_x86_tmc();
+    ll_init_x86_asmp();
+    ll_init_x86_asmpa();
+    void* target = null;
+    char* err = null;
+    if (ll_get_target_from_triple(triple, &target, &err) != 0 || target == null)
+    {
+        if (err != null) { ll_message_dispose(err); }
+        return null;
+    }
+    if (err != null) { ll_message_dispose(err); }
+    return ll_create_tm(target, triple, (char*)"", (char*)"", LLVM_CODEGEN_DEFAULT, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_DEFAULT);
+}
+fn bool m1_optimize_llvm(void* m, int opt_level, bool opt_size, char** failure)
 {
     if (failure != null) { *failure = null; }
     if (m == null || opt_level <= 0) { return true; }
     char* pipeline = (char*)"default<O1>";
-    if (opt_level >= 3) { pipeline = (char*)"default<O3>"; }
+    if (opt_size) { pipeline = (char*)"default<Os>"; }
+    else if (opt_level >= 3) { pipeline = (char*)"default<O3>"; }
     else if (opt_level == 2) { pipeline = (char*)"default<O2>"; }
     void* opts = ll_create_pb_opts();
     if (opts == null)
@@ -5565,7 +5604,12 @@ fn bool m1_optimize_llvm(void* m, int opt_level, char** failure)
     // PEAR 1 uses the same threshold, so a given -O tier means the same thing
     // in both backends.
     ll_pb_set_inliner_threshold(opts, 250);
-    void* error = ll_run_passes(m, pipeline, null, opts);
+    // A target machine makes the pipeline target-aware: without one, vectorisers
+    // fall back to generic widths and skip target-specific cost decisions, which
+    // is a real difference on x86-64.
+    void* tm = m1_target_machine(m);
+    void* error = ll_run_passes(m, pipeline, tm, opts);
+    if (tm != null) { ll_dispose_tm(tm); }
     bool ok = error == null;
     if (!ok)
     {
@@ -5596,6 +5640,7 @@ fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, cha
     for (usz i = 0; i < stem; i++) { out[i] = input[i]; }
     if (mode == 0) { out[stem] = 0; }
     else if (mode == 3) { out[stem] = '.'; out[stem + 1] = 'o'; out[stem + 2] = 0; }
+    else if (mode == 4) { out[stem] = '.'; out[stem + 1] = 's'; out[stem + 2] = 0; }
     else
     {
         out[stem] = '.'; out[stem + 1] = mode == 1 ? 'b' : 'l'; out[stem + 2] = mode == 1 ? 'c' : 'l'; out[stem + 3] = 0;
@@ -5610,7 +5655,7 @@ fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, cha
 }
 fn void clear_stale_outputs(char* input)
 {
-    for (int mode = 0; mode <= 3; mode++)
+    for (int mode = 0; mode <= 4; mode++)
     {
         char[4096] out_path;
         char[4096] ll_path;
@@ -5634,8 +5679,10 @@ fn int main(String[] args)
     bool emit_exe = true;
     bool emit_ll = false;
     bool emit_obj = false;
+    bool emit_asm = false;
     bool mode_seen = false;
     int opt_level = 2;
+    bool opt_size = false;
     bool show_opt_stats = false;
     bool linkage_pinned = false;
     bool usage_error = false;
@@ -5646,20 +5693,20 @@ fn int main(String[] args)
         if (same(a, "--quiet")) { quiet = true; }
         else if (same(a, "--emit-exe"))
         {
-            if (mode_seen && (emit_ll || emit_obj || !emit_exe)) { usage_error = true; }
-            else { emit_exe = true; emit_ll = false; emit_obj = false; mode_seen = true; }
+            if (mode_seen && (emit_ll || emit_obj || emit_asm || !emit_exe)) { usage_error = true; }
+            else { emit_exe = true; emit_ll = false; emit_obj = false; emit_asm = false; mode_seen = true; }
         }
         else if (same(a, "--emit-bc"))
         {
-            if (mode_seen && (emit_ll || emit_obj || emit_exe)) { usage_error = true; }
-            else { emit_exe = false; emit_ll = false; emit_obj = false; mode_seen = true; }
+            if (mode_seen && (emit_ll || emit_obj || emit_asm || emit_exe)) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = false; mode_seen = true; }
         }
         // --emit-ll publishes the verified textual IR after the optimization
         // pipeline, so -O0 passes and lowered shapes can be inspected directly.
         else if (same(a, "--emit-ll"))
         {
             if (mode_seen) { usage_error = true; }
-            else { emit_exe = false; emit_ll = true; emit_obj = false; mode_seen = true; }
+            else { emit_exe = false; emit_ll = true; emit_obj = false; emit_asm = false; mode_seen = true; }
         }
         // --emit-obj publishes the machine-code object LLVM's backend produced
         // in process: the same code the executable is linked from, with no
@@ -5667,12 +5714,25 @@ fn int main(String[] args)
         else if (same(a, "--emit-obj"))
         {
             if (mode_seen) { usage_error = true; }
-            else { emit_exe = false; emit_ll = false; emit_obj = true; mode_seen = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = true; emit_asm = false; mode_seen = true; }
+        }
+        // --emit-asm publishes the assembly listing the object was assembled
+        // from. It is the same target-machine call as --emit-obj with the
+        // assembly file type, not a second compilation, so a listing can never
+        // show something other than what the object contains.
+        else if (same(a, "--emit-asm"))
+        {
+            if (mode_seen) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = true; mode_seen = true; }
         }
         else if (same(a, "-O0")) { opt_level = 0; }
         else if (same(a, "-O1")) { opt_level = 1; }
         else if (same(a, "-O2")) { opt_level = 2; }
         else if (same(a, "-O3")) { opt_level = 3; }
+        // -Os is -O2's AIR pipeline with LLVM's size-oriented pipeline, which is
+        // exactly what a user of -Os gets from clang: the same IR-level
+        // guarantees, a different cost model.
+        else if (same(a, "-Os")) { opt_level = 2; opt_size = true; }
         else if (same(a, "--internalize")) { g_m1_internalize = true; linkage_pinned = true; }
         // --no-internalize keeps every definition externally visible, which is
         // what a program that is linked against by name from outside needs.
@@ -5713,7 +5773,7 @@ fn int main(String[] args)
     }
     if (input == null)
     {
-        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-ll] [-O0|-O1|-O2|-O3] [--target=x86_64|wasm32-freestanding] [--internalize|--no-internalize] [--stats] [--quiet]\n");
+        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-asm|--emit-ll] [-O0|-O1|-O2|-O3|-Os] [--target=x86_64|wasm32-freestanding] [--internalize|--no-internalize] [--stats] [--quiet]\n");
         return 2;
     }
     // Default linkage policy per output mode; an explicit flag above wins.
@@ -5731,7 +5791,7 @@ fn int main(String[] args)
     char[4096] bc_tmp;
     char[4096] exe_tmp;
     char[4096] obj_tmp;
-    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : (emit_obj ? 3 : 1)), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
+    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : (emit_obj ? 3 : (emit_asm ? 4 : 1))), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
     {
         printf("pear2c: output path too long\n"); return 2;
     }
@@ -5759,7 +5819,14 @@ fn int main(String[] args)
     opt_stats.branch_reductions = 0;
     opt_stats.let_specializations = 0;
     opt_stats.dead_bindings = 0;
+    opt_stats.propagated_bindings = 0;
+    opt_stats.pure_dead_bindings = 0;
+    opt_stats.cse_replacements = 0;
+    opt_stats.loop_eliminations = 0;
+    opt_stats.literal_matches = 0;
+    opt_stats.dead_commands = 0;
     opt_stats.drop_dead = false;
+    opt_stats.propagate_bindings = false;
     opt_stats.arena = null;
     if (opt_level > 0)
     {
@@ -5779,6 +5846,12 @@ fn int main(String[] args)
             opt_stats.branch_reductions += pass_stats.branch_reductions;
             opt_stats.let_specializations += pass_stats.let_specializations;
             opt_stats.dead_bindings += pass_stats.dead_bindings;
+            opt_stats.propagated_bindings += pass_stats.propagated_bindings;
+            opt_stats.pure_dead_bindings += pass_stats.pure_dead_bindings;
+            opt_stats.cse_replacements += pass_stats.cse_replacements;
+            opt_stats.loop_eliminations += pass_stats.loop_eliminations;
+            opt_stats.literal_matches += pass_stats.literal_matches;
+            opt_stats.dead_commands += pass_stats.dead_commands;
             if (pass_stats.rewrites == 0) { break; }
         }
         int[8] post_counts;
@@ -5792,11 +5865,18 @@ fn int main(String[] args)
     }
     if (show_opt_stats)
     {
-        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u level=%d passes=%d linkage=%s\n",
+        char* pipe_name = (char*)"none";
+        if (opt_size) { pipe_name = (char*)"Os"; }
+        else if (opt_level == 1) { pipe_name = (char*)"O1"; }
+        else if (opt_level == 2) { pipe_name = (char*)"O2"; }
+        else if (opt_level >= 3) { pipe_name = (char*)"O3"; }
+        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u propagated=%u pure-dead=%u cse=%u loops=%u matches=%u dead-cmds=%u level=%d pipe=%s passes=%d linkage=%s\n",
                opt_level > 0 ? "enabled" : "disabled", opt_stats.rewrites, opt_stats.constant_folds,
                opt_stats.operand_rewrites, opt_stats.strength_reductions, opt_stats.shift_combinations,
                opt_stats.branch_reductions, opt_stats.let_specializations, opt_stats.dead_bindings,
-               opt_level, opt_passes, g_m1_internalize ? "internal" : "external");
+               opt_stats.propagated_bindings, opt_stats.pure_dead_bindings, opt_stats.cse_replacements,
+               opt_stats.loop_eliminations, opt_stats.literal_matches, opt_stats.dead_commands,
+               opt_level, pipe_name, opt_passes, g_m1_internalize ? "internal" : "external");
     }
     // AIR carries candidate claims, never trusted backend facts; recompute facts
     // on the exact post-optimization graph consumed by the lowering pass.
@@ -6037,7 +6117,7 @@ fn int main(String[] args)
             printf("pear2c: LLVM verifier rejected generated module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
             rc = 3;
         }
-        else if (!m1_optimize_llvm(m, opt_level, &msg))
+        else if (!m1_optimize_llvm(m, opt_level, opt_size, &msg))
         {
             printf("pear2c: LLVM optimisation pipeline failed%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
             rc = 3;
@@ -6047,14 +6127,17 @@ fn int main(String[] args)
             printf("pear2c: LLVM verifier rejected the optimised module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
             rc = 3;
         }
-        else if (emit_exe || emit_obj)
+        else if (emit_exe || emit_obj || emit_asm)
         {
             // Machine code from LLVM's backend in this process. No clang, no
             // temporary .bc, no textual IR handed to another compiler.
-            if (!m1_emit_object(m, &obj_tmp[0], &obj_msg))
+            // --emit-asm asks the same target machine for the assembly file
+            // type, so the listing is what the object was assembled from.
+            int file_type = emit_asm ? LLVM_CG_ASM_FILE : LLVM_CG_OBJ_FILE;
+            if (!m1_emit_native(m, &obj_tmp[0], file_type, &obj_msg))
             {
-                printf("pear2c: LLVM could not emit native object code%s%s\n",
-                       obj_msg == null ? "" : ": ", obj_msg == null ? "" : obj_msg);
+                if (emit_asm) { printf("pear2c: LLVM could not emit assembly text%s%s\n", obj_msg == null ? "" : ": ", obj_msg == null ? "" : obj_msg); }
+                else { printf("pear2c: LLVM could not emit native object code%s%s\n", obj_msg == null ? "" : ": ", obj_msg == null ? "" : obj_msg); }
                 rc = 3;
             }
         }
@@ -6100,10 +6183,13 @@ fn int main(String[] args)
     }
     else if (rc == 0 && !emit_ll)
     {
-        char* produced = emit_obj ? &obj_tmp[0] : &bc_tmp[0];
+        char* produced = (emit_obj || emit_asm) ? &obj_tmp[0] : &bc_tmp[0];
+        char* kind = (char*)"bitcode";
+        if (emit_obj) { kind = (char*)"object file"; }
+        else if (emit_asm) { kind = (char*)"assembly listing"; }
         if (rename(produced, &out_path[0]) != 0)
         {
-            printf("pear2c: could not publish %s atomically\n", emit_obj ? (char*)"object file" : (char*)"bitcode");
+            printf("pear2c: could not publish %s atomically\n", kind);
             rc = 3;
         }
     }

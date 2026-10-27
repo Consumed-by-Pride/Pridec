@@ -212,6 +212,43 @@ bitcode-determinism fix committed with this checklist revision).
       reports `linkage=internal|external`; fixture
       linkage_internal_main verifies `main` and `#export` stay visible and
       the internalized bitcode still links and exits 42.
+- [x] 5.29 Pass 3 (whole-body propagation, -O3 only): a name census over
+      the whole function body, spent on substituting a literal at every
+      use (not just the immediate initializer/result pass 1 reaches) and
+      on removing an unused binding whose initializer is *pure* rather
+      than inert — no call, allocation, memory access, or trap, so
+      division/remainder are excluded and a deleted expression can never
+      hide a fault; substitution is type-checked per use; census is
+      name-absence-elsewhere so shadowing cannot fool it; `--stats`
+      reports `propagated=`/`pure-dead=`/`cse=`; a scoped value table
+      reuses a structurally identical pure value from the enclosing let
+      chain (save/restored per descendant scope, so shadowing cannot be
+      confused with the outer binding); fixtures opt_propagate,
+      opt_pure_dead, and opt_cse differ between -O2 and -O3 and return
+      42 at both.
+- [x] 5.30 `--emit-asm`: publishes the x86-64 assembly listing through the
+      same target-machine call as `--emit-obj` with the assembly file
+      type, so a listing cannot describe different code than the object;
+      mutually exclusive with the other four emit modes (exit 2); the
+      suite checks a `main:` label and a `ret`, and that no object or
+      executable is published alongside it.
+- [x] 5.31 Literal-decided control flow (-O3 only): a `while` whose
+      condition is `false` becomes `nop`, and a `match` whose subject is
+      an integer, boolean, or character literal is replaced by the first
+      unguarded matching arm; a guard, a binding pattern, a non-literal
+      pattern, or a cobranch stops the fold instead of guessing, and the
+      remainder of a sequence after an unconditional transfer is dropped,
+      `seq { nop; x }` and `seq { x; nop }` reduce to the live half (the
+      loop fold above is what creates the first shape), and a block with a
+      single command reduces to that command;
+      `--stats` reports `loops=`/`matches=`/`dead-cmds=`; fixtures
+      opt_while_false and opt_literal_match differ between -O2 and -O3
+      and return 42 at both.
+- [x] 5.32 `-Os`: selects the `-O2` AIR tier and the `default<Os>` LLVM
+      pipeline, so the AIR-level result is identical to `-O2` and only
+      the size-oriented cost model changes; `--stats` reports the chosen
+      pipeline as `pipe=`; the suite compares the AIR counters of `-Os`
+      and `-O2` on the same fixture and executes the `-Os` binary.
 
 ## 6. Determinism and equivalence (8)
 
@@ -296,6 +333,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**122 items: 121 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**125 items: 124 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.

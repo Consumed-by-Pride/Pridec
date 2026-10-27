@@ -1,0 +1,17 @@
+// PEAR 2 pass 3: common-subexpression elimination across the let chain (-O3).
+//
+// `left` and `right` build the same pure tuple. Pass 1 cannot fold a tuple and
+// pass 2 only looks at one binding at a time, so both constructions are emitted
+// at -O2. Pass 3 keeps a scoped table of the pure values the enclosing let chain
+// already bound; the second one is structurally identical, so `right` is bound
+// to `left` instead of being rebuilt, and the two bindings then disappear
+// because nothing reads them.
+//
+// Both tiers must return 42.
+air 2.2 Main "opt_cse_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let left = (20 : i64, 22 : i64) in
+      let right = (20 : i64, 22 : i64) in
+        <42 : i64 | %ret>;

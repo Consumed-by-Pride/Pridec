@@ -13,22 +13,25 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 | `--emit-exe` (default) | write the executable `FILE` (the path with its last extension removed, next to the input) |
 | `--emit-bc` | write verified LLVM bitcode `FILE.bc`; a backend without bitcode support exits 2 |
 | `--emit-obj` | (PEAR 2) write the native object `FILE.o` produced by LLVM's backend in process |
-| `-On` | optimisation tier; default `-O2` |
+| `--emit-asm` | (PEAR 2) write the x86-64 assembly listing `FILE.s` the object was assembled from |
+| `-On` | optimisation tier; default `-O2` (PEAR 2: `-O1` = AIR folding only, `-O2` adds the dead-binding pass, `-O3` adds whole-body propagation and literal-decided control-flow folding; `-Os` keeps the `-O2` AIR tier and selects `default<Os>`, and every other tier selects the matching `default<On>` LLVM pipeline) |
 | exit 0 | the artifact was written |
 | exit 1 | the `.air` was rejected (syntax, version, limits) — message `file:line:col: …`, **no artifact** |
 | exit 2 | usage error, or a requested mode this backend does not provide |
 | exit 3 | the file was valid but the backend produced nothing (unsupported form, internal failure) — message names the form and the definition, **no artifact** |
 
-PEAR 2 additionally accepts `--emit-obj` (write the native object `FILE.o`), `--emit-ll` (write the verified
-textual LLVM IR as `FILE.ll`, the same module the bitcode would be serialised from) and `--stats` (report the
-AIR optimizer counters and the effective linkage policy on stdout). `--internalize` and `--no-internalize`
+PEAR 2 additionally accepts `--emit-obj` (write the native object `FILE.o`), `--emit-asm` (write the assembly
+listing `FILE.s` — the same target-machine call with the assembly file type, so the listing is what the object
+was assembled from rather than a second compilation), `--emit-ll` (write the verified textual LLVM IR as
+`FILE.ll`, the same module the bitcode would be serialised from) and `--stats` (report the AIR optimizer
+counters and the effective linkage policy on stdout). `--internalize` and `--no-internalize`
 control symbol visibility: with it, a definition or global that is not `pub`, is not `main`/`pride_main`/`_start`,
 and carries no `export`/`section` attribute is emitted with `internal` linkage so LLVM may inline it and drop it
 when unused; without it every definition keeps external linkage. `--emit-exe` defaults to internalizing (there
 PEAR 2 performs the final link and `main` is the only symbol the CRT resolves by name), while `--emit-bc`,
-`--emit-obj`, and `--emit-ll` default to external linkage because the published object may be linked against any
-symbol. A symbol named only by inline-asm text must be `pub` or `#export`ed. The four emit modes are mutually exclusive; naming two of them is a usage
-error (exit 2). `--emit-ll` is the diagnostic counterpart of `--emit-bc`: it shows exactly what the producer
+`--emit-obj`, `--emit-asm`, and `--emit-ll` default to external linkage because the published object may be
+linked against any symbol. A symbol named only by inline-asm text must be `pub` or `#export`ed. The five
+emit modes are mutually exclusive; naming two of them is a usage error (exit 2). `--emit-ll` is the diagnostic counterpart of `--emit-bc`: it shows exactly what the producer
 lowered, including the effect of the `-On` IR passes. `PEAR2_KEEPLL` in the environment publishes the same file
 during an `--emit-exe` run.
 

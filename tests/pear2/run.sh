@@ -147,6 +147,23 @@ if len(data) < 64:
 print(f"PASS: --emit-obj published a {len(data)}-byte ELF object from LLVM's backend")
 PY
 
+# --emit-asm is the same target-machine call with the assembly file type, so the
+# listing and the object cannot be produced from different code. The listing has
+# to be real x86-64 assembly for the entry point, and publishing it must not
+# leave an object or an executable behind.
+"$PEAR2_BIN" "$W/default.air" --emit-asm -O2 --quiet || { echo "FAIL: --emit-asm rejected"; exit 1; }
+[ -s "$W/default.s" ] || { echo "FAIL: --emit-asm published no assembly"; exit 1; }
+[ ! -e "$W/default.o" ] || { echo "FAIL: --emit-asm also published an object"; exit 1; }
+[ ! -e "$W/default" ] || { echo "FAIL: --emit-asm also published an executable"; exit 1; }
+grep -q '^main:' "$W/default.s" || { echo "FAIL: --emit-asm listing has no main label"; head -20 "$W/default.s"; exit 1; }
+grep -q 'ret' "$W/default.s" || { echo "FAIL: --emit-asm listing contains no ret"; head -20 "$W/default.s"; exit 1; }
+echo "PASS: --emit-asm published an x86-64 assembly listing and nothing else"
+set +e
+"$PEAR2_BIN" "$W/default.air" --emit-asm --emit-obj --quiet >"$W/conflict_asm.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] && [ ! -e "$W/default.s" ] && [ ! -e "$W/default.o" ] || { echo "FAIL: --emit-asm/--emit-obj conflict returned $rc or retained an artifact"; cat "$W/conflict_asm.log"; exit 1; }
+echo "PASS: --emit-asm and --emit-obj are mutually exclusive"
+
 # All remaining cases explicitly exercise the bitcode mode and independently
 # Parse and verify every successful artifact with LLVM 23 opt, or clang if opt is absent.
 cat > "$W/pear2-bc-wrapper" <<'WRAPPER'
@@ -769,6 +786,96 @@ grep -Eq '(^| )dead=1( |$)' "$W/dead_binding.stats" || { echo "FAIL: expected on
 "$PEAR2" "$W/dead_binding.air" -O1 --stats --quiet >"$W/dead_binding_O1.stats"
 grep -Eq '(^| )dead=0( |$)' "$W/dead_binding_O1.stats" || { echo "FAIL: -O1 must not run the dead-binding pass"; cat "$W/dead_binding_O1.stats"; exit 1; }
 echo "PASS: dead-binding elimination is a -O2 pass and a no-op at -O1"
+
+# Pass 3 is the whole-body census: -O3 propagates a literal to every use in
+# the body and removes an unused binding whose initializer is pure even when
+# it is not inert. -O2 must not run either half, so the tiers differ in
+# which passes run rather than how often the same set runs.
+cp tests/pear2/opt_propagate_main.air "$W/opt_propagate.air"
+"$PEAR2" "$W/opt_propagate.air" -O2 --stats --quiet >"$W/opt_propagate_O2.stats"
+"$PEAR2" "$W/opt_propagate.air" -O3 --stats --quiet >"$W/opt_propagate_O3.stats"
+grep -Eq '(^| )propagated=0( |$)' "$W/opt_propagate_O2.stats" || { echo "FAIL: -O2 must not run whole-body propagation"; cat "$W/opt_propagate_O2.stats"; exit 1; }
+grep -Eq '(^| )propagated=[2-9][0-9]*( |$)' "$W/opt_propagate_O3.stats" || { echo "FAIL: -O3 did not propagate both constants"; cat "$W/opt_propagate_O3.stats"; exit 1; }
+grep -Eq '(^| )folds=[3-9][0-9]*( |$)' "$W/opt_propagate_O3.stats" || { echo "FAIL: propagated constants did not fold the comparison and the sum"; cat "$W/opt_propagate_O3.stats"; exit 1; }
+cp tests/pear2/opt_pure_dead_main.air "$W/opt_pure_dead.air"
+"$PEAR2" "$W/opt_pure_dead.air" -O2 --stats --quiet >"$W/opt_pure_dead_O2.stats"
+"$PEAR2" "$W/opt_pure_dead.air" -O3 --stats --quiet >"$W/opt_pure_dead_O3.stats"
+grep -Eq '(^| )pure-dead=0( |$)' "$W/opt_pure_dead_O2.stats" || { echo "FAIL: -O2 removed a non-inert binding"; cat "$W/opt_pure_dead_O2.stats"; exit 1; }
+grep -Eq '(^| )pure-dead=1( |$)' "$W/opt_pure_dead_O3.stats" || { echo "FAIL: -O3 did not remove the unused pure initializer"; cat "$W/opt_pure_dead_O3.stats"; exit 1; }
+grep -Eq '(^| )dead=0( |$)' "$W/opt_pure_dead_O3.stats" || { echo "FAIL: the pure removal was miscounted as an inert dead binding"; cat "$W/opt_pure_dead_O3.stats"; exit 1; }
+# Folding more must not change the answer: run both fixtures at both tiers.
+for fixture in opt_propagate opt_pure_dead; do
+    for level in 2 3; do
+        "$PEAR2" "$W/$fixture.air" -O$level --quiet || { echo "FAIL: $fixture -O$level rejected"; exit 1; }
+        verify_bitcode "$W/$fixture.bc" || { echo "FAIL: $fixture -O$level bitcode did not verify"; exit 1; }
+        "$PEAR2_CLANG" -Wno-override-module "$W/$fixture.bc" -o "$W/$fixture.O$level" >"$W/$fixture.O$level.link.log" 2>&1 || { echo "FAIL: clang link $fixture -O$level"; cat "$W/$fixture.O$level.link.log"; exit 1; }
+        set +e
+        timeout 5 "$W/$fixture.O$level" >/dev/null 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = 42 ] || { echo "FAIL: $fixture -O$level returned $rc, expected 42"; exit 1; }
+    done
+done
+cp tests/pear2/opt_cse_main.air "$W/opt_cse.air"
+"$PEAR2" "$W/opt_cse.air" -O2 --stats --quiet >"$W/opt_cse_O2.stats"
+"$PEAR2" "$W/opt_cse.air" -O3 --stats --quiet >"$W/opt_cse_O3.stats"
+grep -Eq '(^| )cse=0( |$)' "$W/opt_cse_O2.stats" || { echo "FAIL: -O2 must not run the value table"; cat "$W/opt_cse_O2.stats"; exit 1; }
+grep -Eq '(^| )cse=1( |$)' "$W/opt_cse_O3.stats" || { echo "FAIL: -O3 did not reuse the identical pure value"; cat "$W/opt_cse_O3.stats"; exit 1; }
+grep -Eq '(^| )pure-dead=[2-9][0-9]*( |$)' "$W/opt_cse_O3.stats" || { echo "FAIL: the reused binding was not then removed as dead"; cat "$W/opt_cse_O3.stats"; exit 1; }
+"$PEAR2" "$W/opt_cse.air" -O3 --quiet || { echo "FAIL: opt_cse -O3 rejected"; exit 1; }
+verify_bitcode "$W/opt_cse.bc" || { echo "FAIL: opt_cse bitcode did not verify"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/opt_cse.bc" -o "$W/opt_cse" >"$W/opt_cse.link.log" 2>&1 || { echo "FAIL: clang link opt_cse"; cat "$W/opt_cse.link.log"; exit 1; }
+set +e
+timeout 5 "$W/opt_cse" >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: opt_cse returned $rc, expected 42"; exit 1; }
+echo "PASS: -O3 reuses an identical pure value from the enclosing let chain (cse=1, exit 42)"
+
+# Pass 3 also folds control flow that a literal decides: a loop whose condition
+# is `false`, and a dispatch whose subject is a literal. Neither pass 1 nor
+# pass 2 looks at control flow, so both shapes survive to the emitter at -O2.
+for fx in opt_while_false opt_literal_match; do
+    cp "tests/pear2/${fx}_main.air" "$W/$fx.air"
+    "$PEAR2" "$W/$fx.air" -O2 --stats --quiet >"$W/$fx.O2.stats" 2>&1
+    "$PEAR2" "$W/$fx.air" -O3 --stats --quiet >"$W/$fx.O3.stats" 2>&1
+    case $fx in
+        opt_while_false) field=loops ;;
+        *) field=matches ;;
+    esac
+    grep -Eq "(^| )${field}=0( |$)" "$W/$fx.O2.stats" || { echo "FAIL: $fx folded $field at -O2"; cat "$W/$fx.O2.stats"; exit 1; }
+    grep -Eq "(^| )${field}=1( |$)" "$W/$fx.O3.stats" || { echo "FAIL: $fx did not fold $field at -O3"; cat "$W/$fx.O3.stats"; exit 1; }
+    for tier in O2 O3; do
+        rm -f "$W/$fx"
+        "$PEAR2" "$W/$fx.air" "-$tier" --quiet || { echo "FAIL: $fx -$tier rejected"; exit 1; }
+        set +e
+        timeout 5 "$W/$fx" >/dev/null 2>&1
+        fx_rc=$?
+        set -e
+        [ "$fx_rc" = 42 ] || { echo "FAIL: $fx -$tier returned $fx_rc, expected 42"; exit 1; }
+    done
+done
+echo "PASS: -O3 folds literal-decided control flow (loop=false, match=literal; exit 42 at -O2 and -O3)"
+
+# -Os is -O2's AIR pipeline with LLVM's size-oriented pipeline: the AIR-level
+# result must be identical and the tier must be visible in the stats line.
+cp tests/pear2/arithmetic_main.air "$W/os_tier.air"
+"$PEAR2" "$W/os_tier.air" -Os --stats --quiet >"$W/os_tier.stats" 2>&1
+grep -Eq '(^| )pipe=Os( |$)' "$W/os_tier.stats" || { echo "FAIL: -Os did not select the size pipeline"; cat "$W/os_tier.stats"; exit 1; }
+grep -Eq '(^| )level=2( |$)' "$W/os_tier.stats" || { echo "FAIL: -Os did not run the -O2 AIR tier"; cat "$W/os_tier.stats"; exit 1; }
+rm -f "$W/os_tier"
+"$PEAR2" "$W/os_tier.air" -Os --quiet || { echo "FAIL: -Os rejected"; exit 1; }
+"$PEAR2" "$W/os_tier.air" -O2 --stats --quiet >"$W/os_tier.O2.stats" 2>&1
+# The AIR-level counters must match -O2 exactly; only the LLVM pipeline differs.
+o2_line=$(sed -e 's/.*rewrites=//' -e 's/ level=.*//' "$W/os_tier.O2.stats")
+os_line=$(sed -e 's/.*rewrites=//' -e 's/ level=.*//' "$W/os_tier.stats")
+[ "$o2_line" = "$os_line" ] || { echo "FAIL: -Os changed AIR-level counters"; echo "  O2: $o2_line"; echo "  Os: $os_line"; exit 1; }
+set +e
+timeout 5 "$W/os_tier" >/dev/null 2>&1
+os_rc=$?
+set -e
+[ "$os_rc" = 42 ] || { echo "FAIL: -Os executable returned $os_rc, expected 42"; exit 1; }
+echo "PASS: -Os keeps the -O2 AIR tier and switches LLVM to default<Os> (exit 42)"
 
 # Exercise PEAR2's AIR optimizer on a real bool-let/if fixture. The comparison,
 # negation, let-condition specialization, and literal branch should all reduce.
