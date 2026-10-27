@@ -1260,7 +1260,7 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
         }
     }
     // Pass 2 runs on the already-rewritten body, so a binding that folding made
-    // dead (or turned into an alias) is seen in its final shape.
+    // dead is seen in its final shape.
     // c.next is only used by ACMD_SEQ, but requiring it to be null keeps the
     // rewrite honest if a reader ever attaches a trailing continuation to a let.
     if (s.drop_dead && c.tag == ACMD_LET && c.binder != null && c.body != null &&
@@ -1281,18 +1281,6 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
     return c;
 }
 
-// optimize_module_at -- one pass of the pipeline at a given -O tier. This is
-// where the tiers finally differ in *what* runs, not just in how many times:
-//
-//   -O1  pass 1 only  constant folding, algebraic identities, strength
-//                     reduction, shift combination, literal-branch selection,
-//                     and the restricted constant-let specializations.
-//   -O2  pass 1 + 2   adds dead-binding elimination and copy propagation.
-//   -O3  pass 1 + 2   pear2c iterates the set to a fixpoint, and LLVM runs
-//                     default<O3> over the emitted module.
-//
-// The caller drives the fixpoint (pear2c_main.c3); level 0 means "no passes"
-// and is handled there, so it never reaches this function.
 // optimize_module_at -- one pass of the pipeline at a given -O tier. The tier
 // decides *which* passes run, not just how many times:
 //
