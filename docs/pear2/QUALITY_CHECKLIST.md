@@ -249,6 +249,33 @@ bitcode-determinism fix committed with this checklist revision).
       the size-oriented cost model changes; `--stats` reports the chosen
       pipeline as `pipe=`; the suite compares the AIR counters of `-Os`
       and `-O2` on the same fixture and executes the `-Os` binary.
+- [x] 5.33 Constant reassociation (pass 1): `(x op c1) op c2` becomes
+      `x op (c1 op c2)` for `+`/`-`/`*`/`&`/`|`/`^` when the folded constant
+      still fits the operand's width and signedness; a cancelling pair
+      becomes the operand itself. Integer arithmetic is wrapping here, so
+      regrouping cannot change trap behaviour. Fixture opt_reassoc reports
+      `reassoc=1` at -O1..-O3 and exits 42.
+- [x] 5.34 Self-operand folding (pass 1): `x - x`/`x ^ x` become zero,
+      `x & x`/`x | x` become the operand, and `eq`/`le`/`ge`/`ne`/`lt`/`gt`
+      of a value with itself become constants -- but only with an integer
+      or boolean ascription, because an untyped `(sub a b)` is float
+      subtraction too and `a - a` is NaN there. Requires a pure operand, so
+      `(div y 0) - (div y 0)` is never folded away. Fixture opt_self
+      reports `self=2` at -O1..-O3 and exits 42; both fixtures report zero
+      at -O0.
+- [x] 5.35 One-armed match elimination (pass 3, -O3): `match s { _ -> b }`
+      becomes `b` when `s` is pure, and `match s { bind x -> b }` becomes
+      `let x = s in b`, keeping the subject's evaluation position; the
+      resulting binding then feeds the propagation and dead-binding
+      passes. Fixture opt_match_bind reports `match-folds=0` at -O2 and
+      `match-folds=1` at -O3, its `-O3 --emit-ll` contains no `switch`, and
+      both tiers exit 42.
+- [x] 5.36 Copy propagation of a binding (pass 3, -O3): `let x = y` becomes
+      uses of `y` when the census proves `y` appears in no binder position
+      in the body, so `y` cannot denote a different value at any use. This
+      is the rewrite the emitter refuses (there `let x = y` snapshots a
+      load); here it is a statement about AIR names. Fixture opt_copy
+      reports `copies=0` at -O2, `copies=1` at -O3, exit 42 at both.
 
 ## 6. Determinism and equivalence (8)
 
@@ -278,10 +305,14 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 7.5 QUALITY_CHECKLIST.md (this file) is the release gate (AYO-11).
 - [x] 7.6 Claim audit: no doc claims sum-type/pattern support for records or
       cross-platform C ABI — all say "x86-64 + LLVM 23 only".
-- [x] 7.7 LoC accounting current: **7,822 backend lines**
-      (pear2c_main.c3 6,729 + pear2_opt.c3 1,093) vs the 18K–25K full M0–M6
-      planning range; shared AIR reader/verifier 17,863 lines excluded per
-      plan convention; frontend 36,112; tests: 87 fixtures + 964-line runner.
+- [x] 7.7 LoC accounting current: **10,863 backend lines** across
+      `pear2/*.c3` (pear2c_main 6,371 + pear2_opt 2,083 + pear2_match 1,085
+      + pear2_calls 350 + pear2_control 329 + pear2_types 303 +
+      pear2_letrec 222 + pear2_memory 120) vs the 18K–25K full M0–M6
+      planning range; shared AIR reader/verifier excluded per plan
+      convention. The range is a *planning* estimate for M0–M6, not a
+      promise that the remaining coverage is worth 7K further lines; what is
+      left is listed in GAPS.md §1 rather than inferred from a count.
 - [x] 7.8 Every run.sh helper's assertion text named in docs where a user
       could trip it (M8/M9/M10 greps match README sections).
 - [x] 7.9 COVERAGE.md regenerated via scripts/air-coverage.py over a fresh
@@ -333,6 +364,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**125 items: 124 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**129 items: 128 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.

@@ -3,6 +3,24 @@
 module pear2c;
 import air_ir;
 
+// m1_cns_delivers_to_return -- does this continuation hand the call's result
+// straight back to the caller, with nothing in between? That is the shape a tail
+// call takes in CPS: the call's own continuation *is* the function's return
+// covariable, possibly reached through ascriptions and the argument stack that
+// the caller already consumed.
+//
+// The marker this enables is LLVM's `tail`, not `musttail`: `tail` is a promise
+// about the callee's stack frame only, so it stays correct for every call this
+// backend emits, including indirect closure calls whose signature the emitter
+// derived from a type instead of from the callee's declaration.
+fn bool m1_cns_delivers_to_return(AirCns* k, char* ret_name, int depth)
+{
+    if (k == null || ret_name == null || depth >= 24) { return false; }
+    if (k.tag == ACNS_COVAR) { return same(k.name, ret_name); }
+    if (k.tag == ACNS_ASCRIBE) { return m1_cns_delivers_to_return(k.tail, ret_name, depth + 1); }
+    return false;
+}
+
 fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
 {
     if (callee == null || k == null || k.tag != ACNS_CALL)
@@ -240,13 +258,20 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
     if (call_result_type == null) {
  return false; }
     char* call_cc_text = direct && target != null && m1_decl_callconv(target) == 1 ? "fastcc " : "";
-    if (result_unit || sret_result) { fprintf(g.out, "  call %svoid ", call_cc_text); }
+    // A call whose continuation is the function's own return covariable is in
+    // tail position: its frame can be replaced rather than stacked. Marking it
+    // is what makes a recursive binding a loop in machine code instead of a
+    // stack overflow, and PEAR 2's closure ABI (a hidden leading `ptr %env`)
+    // keeps the signature identical on both sides of a self call, which is
+    // exactly the case the marker is for.
+    char* tail_text = m1_cns_delivers_to_return(k.tail, ret_name, 0) ? (char*)"tail " : (char*)"";
+    if (result_unit || sret_result) { fprintf(g.out, "  call %s%svoid ", tail_text, call_cc_text); }
     else
     {
         dst = g.tmp();
         if (dst == null) {
  return false; }
-        fprintf(g.out, "  %s = call %s%s ", dst, call_cc_text, call_result_type);
+        fprintf(g.out, "  %s = call %s%s%s ", dst, tail_text, call_cc_text, call_result_type);
     }
     if (direct) { fprintf(g.out, "@%s(", m1_link_name(target)); }
     else { fprintf(g.out, "%s(", indirect_value); }

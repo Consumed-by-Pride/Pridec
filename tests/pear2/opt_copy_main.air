@@ -1,0 +1,20 @@
+// PEAR 2 pass 3: copy propagation of an immutable binding.
+//
+// `let a = x` is a snapshot in the emitter's world (mutable locals are allocas),
+// which is why copy propagation is not done there. In AIR a name that appears in
+// no binder position below the binding has exactly one value in the body, so the
+// census can prove the rewrite sound. Here `a` is used twice and `x` is a
+// parameter that nothing rebinds.
+//
+// Expected: -O2 keeps the binding (`copies=0`), -O3 propagates it
+// (`copies=1`), and both exit 42 (6 * 7).
+air 2.2 Main "opt_copy_main.pie";
+
+def square_times(x : i64) : i64 =
+  mu~ %ret.
+    let a = x in
+      <(mul a 7 : i64) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <square_times | call · 6 : i64 · %ret>;

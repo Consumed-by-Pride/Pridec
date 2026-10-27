@@ -1,0 +1,17 @@
+// PEAR 2 pass 1: constant reassociation.
+//
+// `(x + 1) + 2` folds to `x + 3`, so the call site still computes the same
+// value with one addition instead of two. The operand is a parameter, not a
+// binding, precisely so that pass 3 cannot reduce the whole expression to a
+// literal first: this fixture has to exercise reassociation and nothing else.
+//
+// Expected: 39 + 3 = 42, with `reassoc=1` reported at -O1 and above.
+air 2.2 Main "opt_reassoc_main.pie";
+
+def bump(x : i64) : i64 =
+  mu~ %ret.
+    <(add (add x 1 : i64) 2 : i64) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <bump | call · 39 : i64 · %ret>;

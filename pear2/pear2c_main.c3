@@ -5984,6 +5984,10 @@ fn int main(String[] args)
     opt_stats.loop_eliminations = 0;
     opt_stats.literal_matches = 0;
     opt_stats.dead_commands = 0;
+    opt_stats.reassociations = 0;
+    opt_stats.self_folds = 0;
+    opt_stats.match_folds = 0;
+    opt_stats.copy_bindings = 0;
     opt_stats.drop_dead = false;
     opt_stats.propagate_bindings = false;
     opt_stats.arena = null;
@@ -6011,6 +6015,10 @@ fn int main(String[] args)
             opt_stats.loop_eliminations += pass_stats.loop_eliminations;
             opt_stats.literal_matches += pass_stats.literal_matches;
             opt_stats.dead_commands += pass_stats.dead_commands;
+            opt_stats.reassociations += pass_stats.reassociations;
+            opt_stats.self_folds += pass_stats.self_folds;
+            opt_stats.match_folds += pass_stats.match_folds;
+            opt_stats.copy_bindings += pass_stats.copy_bindings;
             if (pass_stats.rewrites == 0) { break; }
         }
         int[8] post_counts;
@@ -6029,12 +6037,13 @@ fn int main(String[] args)
         else if (opt_level == 1) { pipe_name = (char*)"O1"; }
         else if (opt_level == 2) { pipe_name = (char*)"O2"; }
         else if (opt_level >= 3) { pipe_name = (char*)"O3"; }
-        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u propagated=%u pure-dead=%u cse=%u loops=%u matches=%u dead-cmds=%u level=%d pipe=%s passes=%d linkage=%s\n",
+        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u propagated=%u pure-dead=%u cse=%u loops=%u matches=%u dead-cmds=%u reassoc=%u self=%u match-folds=%u copies=%u level=%d pipe=%s passes=%d linkage=%s\n",
                opt_level > 0 ? "enabled" : "disabled", opt_stats.rewrites, opt_stats.constant_folds,
                opt_stats.operand_rewrites, opt_stats.strength_reductions, opt_stats.shift_combinations,
                opt_stats.branch_reductions, opt_stats.let_specializations, opt_stats.dead_bindings,
                opt_stats.propagated_bindings, opt_stats.pure_dead_bindings, opt_stats.cse_replacements,
                opt_stats.loop_eliminations, opt_stats.literal_matches, opt_stats.dead_commands,
+               opt_stats.reassociations, opt_stats.self_folds, opt_stats.match_folds, opt_stats.copy_bindings,
                opt_level, pipe_name, opt_passes, g_m1_internalize ? "internal" : "external");
     }
     // AIR carries candidate claims, never trusted backend facts; recompute facts

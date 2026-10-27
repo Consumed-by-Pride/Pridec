@@ -857,6 +857,67 @@ for fx in opt_while_false opt_literal_match; do
 done
 echo "PASS: -O3 folds literal-decided control flow (loop=false, match=literal; exit 42 at -O2 and -O3)"
 
+# Pass 1 grows two expression families, and pass 3 two binding families. Each
+# fixture uses a parameter so a whole expression cannot be constant-folded away
+# before the pass under test sees it, and each one runs at 42 on both tiers.
+check_opt_counter() {
+    local fx=$1 tier=$2 field=$3 want=$4
+    grep -Eq "(^| )${field}=${want}( |$)" "$W/$fx.$tier.stats" || {
+        echo "FAIL: $fx at -$tier expected ${field}=${want}"; cat "$W/$fx.$tier.stats"; exit 1; }
+}
+for fx in opt_reassoc opt_self; do
+    cp "tests/pear2/${fx}_main.air" "$W/$fx.air"
+    for tier in 1 2 3; do
+        rm -f "$W/$fx"
+        "$PEAR2" "$W/$fx.air" "-O$tier" --stats --quiet >"$W/$fx.O$tier.stats" 2>&1 \
+            || { echo "FAIL: $fx rejected at -O$tier"; cat "$W/$fx.O$tier.stats"; exit 1; }
+        set +e
+        timeout 5 "$W/$fx" >/dev/null 2>&1
+        fx_rc=$?
+        set -e
+        [ "$fx_rc" = 42 ] || { echo "FAIL: $fx at -O$tier returned $fx_rc, expected 42"; exit 1; }
+    done
+done
+check_opt_counter opt_reassoc O1 reassoc 1
+check_opt_counter opt_self O1 self 2
+# -O0 must not rewrite anything: the same fixtures still return 42 unoptimized.
+for fx in opt_reassoc opt_self; do
+    rm -f "$W/$fx"
+    "$PEAR2" "$W/$fx.air" -O0 --stats --quiet >"$W/$fx.O0.stats" 2>&1 || { echo "FAIL: $fx -O0 rejected"; exit 1; }
+    check_opt_counter "$fx" O0 reassoc 0
+    check_opt_counter "$fx" O0 self 0
+    set +e
+    timeout 5 "$W/$fx" >/dev/null 2>&1
+    fx_rc=$?
+    set -e
+    [ "$fx_rc" = 42 ] || { echo "FAIL: $fx -O0 returned $fx_rc, expected 42"; exit 1; }
+done
+echo "PASS: pass 1 reassociates constants and decides self-operations (reassoc=1, self=2, exit 42)"
+
+for fx in opt_match_bind opt_copy; do
+    cp "tests/pear2/${fx}_main.air" "$W/$fx.air"
+    "$PEAR2" "$W/$fx.air" -O2 --stats --quiet >"$W/$fx.O2.stats" 2>&1 || { echo "FAIL: $fx -O2 rejected"; exit 1; }
+    "$PEAR2" "$W/$fx.air" -O3 --stats --quiet >"$W/$fx.O3.stats" 2>&1 || { echo "FAIL: $fx -O3 rejected"; exit 1; }
+    for tier in O2 O3; do
+        rm -f "$W/$fx"
+        "$PEAR2" "$W/$fx.air" "-$tier" --quiet || { echo "FAIL: $fx -$tier rejected"; exit 1; }
+        set +e
+        timeout 5 "$W/$fx" >/dev/null 2>&1
+        fx_rc=$?
+        set -e
+        [ "$fx_rc" = 42 ] || { echo "FAIL: $fx at -$tier returned $fx_rc, expected 42"; exit 1; }
+    done
+done
+check_opt_counter opt_match_bind O2 match-folds 0
+check_opt_counter opt_match_bind O3 match-folds 1
+check_opt_counter opt_copy O2 copies 0
+check_opt_counter opt_copy O3 copies 1
+# The one-armed match is gone from the emitted IR, not merely optimized by LLVM:
+# --emit-ll prints the AIR-lowered text before the LLVM pipeline runs.
+"$PEAR2" "$W/opt_match_bind.air" --emit-ll -O3 --quiet || { echo "FAIL: opt_match_bind --emit-ll rejected"; exit 1; }
+! grep -q 'switch' "$W/opt_match_bind.ll" || { echo "FAIL: the one-armed match survived as a switch"; exit 1; }
+echo "PASS: -O3 folds a one-armed match and propagates copies (match-folds=1, copies=1, exit 42)"
+
 # -Os is -O2's AIR pipeline with LLVM's size-oriented pipeline: the AIR-level
 # result must be identical and the tier must be visible in the stats line.
 cp tests/pear2/arithmetic_main.air "$W/os_tier.air"
