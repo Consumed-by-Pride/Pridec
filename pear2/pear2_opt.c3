@@ -18,6 +18,10 @@ struct OptStats
     uint shift_combinations;
     uint branch_reductions;
     uint let_specializations;
+    uint dead_bindings;      // pass 2: unused literal/variable bindings removed
+    uint copy_propagations;  // pass 2: `let x = y` aliases resolved to y
+    bool drop_dead;          // pass 2 is enabled at -O2 and above
+    bool propagate_copies;   // pass 2 is enabled at -O2 and above
     AirArena* arena;
 }
 
@@ -965,6 +969,235 @@ fn void OptStats.fold_unary(OptStats* s, AirPrd* p)
     if (opt_integer_fits(result, bits, uns)) { s.set_int(p, result); }
 }
 
+// ── Pass 2: bindings LLVM cannot drop for us ─────────────────────────────
+//
+// Two AIR-level transforms run after folding, before emission:
+//
+//   dead binding      `let x = <literal|variable>` where x never appears in the
+//                     body. Dropping it stops PEAR 2 from materialising a slot
+//                     for a value nothing reads.
+//   copy propagation  `let x = y` where every occurrence of x is a plain
+//                     variable producer. The binding is an alias the emitter
+//                     must resolve one hop at a time; renaming the uses to y
+//                     removes it.
+//
+// Both are restricted to values with no effect (literals and variables), so
+// deleting them cannot discard work. Both also refuse when the name shows up
+// anywhere else in the body -- as a binder, match-pattern binder, covariable,
+// jump argument, label, subst entry, or an operand of a non-variable producer.
+// That "absent everywhere, or present *only* as a variable use" test is
+// deliberately stronger than a use count: it cannot be fooled by shadowing, and
+// it cannot miss a name that reaches the emitter through an unusual field.
+// Copy propagation additionally runs the same test against the *source* name,
+// because renaming x to y would be captured by any inner binding of y.
+
+fn bool opt_droppable_value(AirPrd* p)
+{
+    if (p == null) { return false; }
+    if (p.tag == APRD_VAR || p.tag == APRD_INT || p.tag == APRD_FLOAT || p.tag == APRD_BOOL ||
+        p.tag == APRD_CHAR || p.tag == APRD_STRING || p.tag == APRD_BYTES || p.tag == APRD_UNIT ||
+        p.tag == APRD_NULL) { return true; }
+    return false;
+}
+
+// Pattern binders live in AirPat, which neither the scans below nor the rename
+// helpers rewrite. A match arm that binds a name must therefore block any
+// rewrite of that name for the whole command, or the rewrite would capture the
+// arm's own binding.
+fn bool opt_pat_binds(AirPat* p, char* name, int depth)
+{
+    if (p == null || depth >= 128) { return false; }
+    if (p.tag == APAT_BIND || p.tag == APAT_AS)
+    {
+        if (p.name != null && opt_same_name(p.name, name)) { return true; }
+    }
+    for (usz i = 0; i < p.sub_count; i++) { if (opt_pat_binds(p.sub[i], name, depth + 1)) { return true; } }
+    // A record pattern binds its field names (`Name { x, y }`); those are
+    // binders, not uses.
+    if (p.tag == APAT_RECORD)
+    {
+        for (usz i = 0; i < p.field_count; i++)
+        {
+            if (p.fields[i] != null && p.fields[i].name != null && opt_same_name(p.fields[i].name, name)) { return true; }
+        }
+    }
+    return opt_pat_binds(p.or_alt, name, depth + 1);
+}
+
+// scan_prd / scan_cns / scan_cmd accumulate, for one name:
+//   var_uses — how many APRD_VAR producers reference it
+//   blocked  — whether it appears in any other position (binder, covariable,
+//              label, jump argument, subst entry, non-variable producer name)
+fn void OptStats.scan_prd(OptStats* s, AirPrd* p, char* name, int* var_uses, bool* blocked, int depth)
+{
+    if (p == null || depth >= 128 || *blocked) { return; }
+    if (p.tag == APRD_VAR && p.name != null && opt_same_name(p.name, name)) { *var_uses = *var_uses + 1; }
+    else if (p.name != null && opt_same_name(p.name, name)) { *blocked = true; return; }
+    for (usz i = 0; i < p.sub_count; i++) { s.scan_prd(p.subs[i], name, var_uses, blocked, depth + 1); }
+    for (usz i = 0; i < p.rec_init_count; i++)
+    {
+        if (p.rec_inits[i] != null) { s.scan_prd(p.rec_inits[i].value, name, var_uses, blocked, depth + 1); }
+        if (*blocked) { return; }
+    }
+    for (usz i = 0; i < p.binder_count; i++)
+    {
+        if (p.binders[i] != null && p.binders[i].name != null && opt_same_name(p.binders[i].name, name)) { *blocked = true; return; }
+    }
+    if (p.body != null) { s.scan_cmd(p.body, name, var_uses, blocked, depth + 1); }
+}
+
+fn void OptStats.scan_cns(OptStats* s, AirCns* k, char* name, int* var_uses, bool* blocked, int depth)
+{
+    if (k == null || depth >= 128 || *blocked) { return; }
+    if (k.name != null && opt_same_name(k.name, name)) { *blocked = true; return; }
+    if (k.bind != null && opt_same_name(k.bind, name)) { *blocked = true; return; }
+    if (k.label_name != null && opt_same_name(k.label_name, name)) { *blocked = true; return; }
+    for (usz i = 0; i < k.label_arg_count; i++)
+    {
+        if (k.label_args[i] != null && k.label_args[i].name != null && opt_same_name(k.label_args[i].name, name)) { *blocked = true; return; }
+    }
+    for (usz i = 0; i < k.subst_count; i++)
+    {
+        if (k.subst_vars[i] != null && opt_same_name(k.subst_vars[i], name)) { *blocked = true; return; }
+        if (s.opt_cns_blocked(k.subst_prds[i], name, var_uses, depth)) { *blocked = true; return; }
+    }
+    s.scan_prd(k.prd, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cns(k.tail, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cns(k.cont_k, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cmd(k.body, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cmd(k.label_body, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    for (usz i = 0; i < k.branch_count; i++)
+    {
+        if (k.branches[i] == null) { continue; }
+        if (opt_pat_binds(k.branches[i].pat, name, 0)) { *blocked = true; return; }
+        s.scan_cmd(k.branches[i].body, name, var_uses, blocked, depth + 1);
+        if (*blocked) { return; }
+        s.scan_cmd(k.branches[i].guard, name, var_uses, blocked, depth + 1);
+        if (*blocked) { return; }
+    }
+    for (usz i = 0; i < k.cobranch_count; i++)
+    {
+        if (k.cobranches[i] == null) { continue; }
+        for (usz j = 0; j < k.cobranches[i].binder_count; j++)
+        {
+            if (k.cobranches[i].binders[j] != null && opt_same_name(k.cobranches[i].binders[j], name)) { *blocked = true; return; }
+        }
+        s.scan_cmd(k.cobranches[i].body, name, var_uses, blocked, depth + 1);
+        if (*blocked) { return; }
+    }
+}
+
+// Small helper so the subst_prds loop above cannot quietly swallow a hit.
+fn bool OptStats.opt_cns_blocked(OptStats* s, AirPrd* p, char* name, int* var_uses, int depth)
+{
+    bool blocked = false;
+    s.scan_prd(p, name, var_uses, &blocked, depth + 1);
+    return blocked;
+}
+
+fn void OptStats.scan_cmd(OptStats* s, AirCmd* c, char* name, int* var_uses, bool* blocked, int depth)
+{
+    if (c == null || depth >= 128 || *blocked) { return; }
+    if (c.binder != null && opt_same_name(c.binder, name)) { *blocked = true; return; }
+    if (c.target_label != null && opt_same_name(c.target_label, name)) { *blocked = true; return; }
+    for (usz i = 0; i < c.mbinder_count; i++)
+    {
+        if (c.mbinders[i] != null && c.mbinders[i].name != null && opt_same_name(c.mbinders[i].name, name)) { *blocked = true; return; }
+    }
+    for (usz i = 0; i < c.jump_arg_count; i++)
+    {
+        if (c.jump_args[i] != null && opt_same_name(c.jump_args[i], name)) { *blocked = true; return; }
+    }
+    s.scan_prd(c.prd, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    for (usz i = 0; i < c.prd_count; i++)
+    {
+        s.scan_prd(c.prds[i], name, var_uses, blocked, depth + 1);
+        if (*blocked) { return; }
+    }
+    s.scan_cns(c.cns, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cmd(c.body, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cmd(c.next, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cmd(c.then_c, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cmd(c.else_c, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    s.scan_cmd(c.handled, name, var_uses, blocked, depth + 1);
+    if (*blocked) { return; }
+    for (usz i = 0; i < c.branch_count; i++)
+    {
+        if (c.branches[i] == null) { continue; }
+        if (opt_pat_binds(c.branches[i].pat, name, 0)) { *blocked = true; return; }
+        s.scan_cmd(c.branches[i].guard, name, var_uses, blocked, depth + 1);
+        if (*blocked) { return; }
+        s.scan_cmd(c.branches[i].body, name, var_uses, blocked, depth + 1);
+        if (*blocked) { return; }
+    }
+}
+
+// rename_* -- copy propagation. Only reached after scan_* proved that every
+// occurrence of `from` in this subtree is an APRD_VAR producer, so a name swap
+// is the whole rewrite; no other field can mention the old name.
+fn void OptStats.rename_prd(OptStats* s, AirPrd* p, char* from, char* to, int depth)
+{
+    if (p == null || depth >= 128) { return; }
+    if (p.tag == APRD_VAR && p.name != null && opt_same_name(p.name, from)) { p.name = to; }
+    for (usz i = 0; i < p.sub_count; i++) { s.rename_prd(p.subs[i], from, to, depth + 1); }
+    for (usz i = 0; i < p.rec_init_count; i++)
+    {
+        if (p.rec_inits[i] != null) { s.rename_prd(p.rec_inits[i].value, from, to, depth + 1); }
+    }
+    if (p.body != null) { s.rename_cmd(p.body, from, to, depth + 1); }
+}
+
+fn void OptStats.rename_cns(OptStats* s, AirCns* k, char* from, char* to, int depth)
+{
+    if (k == null || depth >= 128) { return; }
+    s.rename_prd(k.prd, from, to, depth + 1);
+    s.rename_cns(k.tail, from, to, depth + 1);
+    s.rename_cns(k.cont_k, from, to, depth + 1);
+    s.rename_cmd(k.body, from, to, depth + 1);
+    s.rename_cmd(k.label_body, from, to, depth + 1);
+    for (usz i = 0; i < k.subst_count; i++) { s.rename_prd(k.subst_prds[i], from, to, depth + 1); }
+    for (usz i = 0; i < k.branch_count; i++)
+    {
+        if (k.branches[i] == null) { continue; }
+        s.rename_cmd(k.branches[i].body, from, to, depth + 1);
+        s.rename_cmd(k.branches[i].guard, from, to, depth + 1);
+    }
+    for (usz i = 0; i < k.cobranch_count; i++)
+    {
+        if (k.cobranches[i] != null) { s.rename_cmd(k.cobranches[i].body, from, to, depth + 1); }
+    }
+}
+
+fn void OptStats.rename_cmd(OptStats* s, AirCmd* c, char* from, char* to, int depth)
+{
+    if (c == null || depth >= 128) { return; }
+    s.rename_prd(c.prd, from, to, depth + 1);
+    for (usz i = 0; i < c.prd_count; i++) { s.rename_prd(c.prds[i], from, to, depth + 1); }
+    s.rename_cns(c.cns, from, to, depth + 1);
+    s.rename_cmd(c.body, from, to, depth + 1);
+    s.rename_cmd(c.next, from, to, depth + 1);
+    s.rename_cmd(c.then_c, from, to, depth + 1);
+    s.rename_cmd(c.else_c, from, to, depth + 1);
+    s.rename_cmd(c.handled, from, to, depth + 1);
+    for (usz i = 0; i < c.branch_count; i++)
+    {
+        if (c.branches[i] == null) { continue; }
+        s.rename_cmd(c.branches[i].guard, from, to, depth + 1);
+        s.rename_cmd(c.branches[i].body, from, to, depth + 1);
+    }
+}
+
 fn AirPrd* OptStats.optimize_prd(OptStats* s, AirPrd* p, int depth)
 {
     if (p == null || depth >= 128) { return p; }
@@ -1066,10 +1299,61 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
             c.branches[i].body = s.optimize_cmd(c.branches[i].body, depth + 1);
         }
     }
+    // Pass 2 runs on the already-rewritten body, so a binding that folding made
+    // dead (or turned into an alias) is seen in its final shape.
+    // c.next is only used by ACMD_SEQ, but requiring it to be null keeps the
+    // rewrite honest if a reader ever attaches a trailing continuation to a let.
+    if ((s.drop_dead || s.propagate_copies) && c.tag == ACMD_LET && c.binder != null && c.body != null &&
+        c.next == null && opt_droppable_value(c.prd))
+    {
+        int var_uses = 0;
+        bool blocked = false;
+        s.scan_cmd(c.body, c.binder, &var_uses, &blocked, 0);
+        if (!blocked && var_uses == 0 && s.drop_dead)
+        {
+            // The body cannot see the binding and the value is a literal or a
+            // variable, so removing it cannot discard an effect.
+            s.dead_bindings = s.dead_bindings + 1;
+            s.rewrites = s.rewrites + 1;
+            return c.body;
+        }
+        if (!blocked && var_uses > 0 && s.propagate_copies && c.prd.tag == APRD_VAR && c.prd.name != null &&
+            !opt_same_name(c.prd.name, c.binder))
+        {
+            // Renaming x to y is only sound when nothing inside the body
+            // re-binds y: a nested let, match arm, or lambda parameter named y
+            // would capture the rewritten uses. Reuse the same scan against the
+            // target name and require it to be unbound everywhere.
+            int target_uses = 0;
+            bool target_blocked = false;
+            s.scan_cmd(c.body, c.prd.name, &target_uses, &target_blocked, 0);
+            if (!target_blocked)
+            {
+                // Every occurrence is a plain variable producer, so the binding
+                // is pure aliasing: point the uses at the source and drop the let.
+                s.rename_cmd(c.body, c.binder, c.prd.name, 0);
+                s.copy_propagations = s.copy_propagations + 1;
+                s.rewrites = s.rewrites + 1;
+                return c.body;
+            }
+        }
+    }
     return c;
 }
 
-fn OptStats optimize_module(AirModule* m)
+// optimize_module_at -- one pass of the pipeline at a given -O tier. This is
+// where the tiers finally differ in *what* runs, not just in how many times:
+//
+//   -O1  pass 1 only  constant folding, algebraic identities, strength
+//                     reduction, shift combination, literal-branch selection,
+//                     and the restricted constant-let specializations.
+//   -O2  pass 1 + 2   adds dead-binding elimination and copy propagation.
+//   -O3  pass 1 + 2   pear2c iterates the set to a fixpoint, and LLVM runs
+//                     default<O3> over the emitted module.
+//
+// The caller drives the fixpoint (pear2c_main.c3); level 0 means "no passes"
+// and is handled there, so it never reaches this function.
+fn OptStats optimize_module_at(AirModule* m, int level)
 {
     OptStats stats;
     stats.rewrites = 0;
@@ -1079,6 +1363,10 @@ fn OptStats optimize_module(AirModule* m)
     stats.shift_combinations = 0;
     stats.branch_reductions = 0;
     stats.let_specializations = 0;
+    stats.dead_bindings = 0;
+    stats.copy_propagations = 0;
+    stats.drop_dead = level >= 2;
+    stats.propagate_copies = level >= 2;
     stats.arena = null;
     if (m == null) { return stats; }
     stats.arena = m.arena;
@@ -1090,4 +1378,12 @@ fn OptStats optimize_module(AirModule* m)
         d.g_init = stats.optimize_prd(d.g_init, 0);
     }
     return stats;
+}
+
+// optimize_module -- full strength (every pass enabled). The structural harness
+// (tests/pear2/opt_test.c3) and any caller that wants the final IR regardless of
+// tier use this.
+fn OptStats optimize_module(AirModule* m)
+{
+    return optimize_module_at(m, 3);
 }

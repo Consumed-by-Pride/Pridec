@@ -18,6 +18,12 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 | exit 2 | usage error, or a requested mode this backend does not provide |
 | exit 3 | the file was valid but the backend produced nothing (unsupported form, internal failure) — message names the form and the definition, **no artifact** |
 
+PEAR 2 additionally accepts `--emit-ll` (write the verified textual LLVM IR as `FILE.ll`, the same module the
+bitcode would be serialised from) and `--stats` (report the AIR optimizer counters on stdout). The three emit
+modes are mutually exclusive; naming two of them is a usage error (exit 2). `--emit-ll` is the diagnostic
+counterpart of `--emit-bc`: it shows exactly what the producer lowered, including the effect of the `-On`
+IR passes. `PEAR2_KEEPLL` in the environment publishes the same file during an `--emit-exe` run.
+
 A stale artifact from a previous run must not survive a failure: delete the output first or write atomically.
 PEAR2 emits and verifies temporary bitcode through the LLVM C API; default executable mode links it with LLVM 23
 `clang` (override its path with `PEAR2_CLANG`). A link failure is exit 3 and must leave no executable or temporary

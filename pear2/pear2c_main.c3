@@ -24,18 +24,31 @@ extern fn int snprintf(char* buf, usz cap, char* fmt, ...);
 extern fn int getpid();
 extern fn int system(char* command) @cname("system");
 extern fn char* getenv(char* name) @cname("getenv");
-// LLVM C API: parse the generated textual module, verify it, then serialize
-// the verified module as LLVM bitcode. PEAR 2 owns this path; it does not call
-// PEAR 1 or air_ll.
+// LLVM C API: parse the generated textual module, verify it, run LLVM's own
+// optimisation pipeline over it, then serialize the verified module as LLVM
+// bitcode. PEAR 2 owns this path; it does not call PEAR 1 or air_ll.
+//
+// The module text is rendered into memory and parsed from that buffer, so the
+// success path writes no temporary .ll file. The buffer is named with the input
+// path, which fixes the module's source identifier (and therefore keeps the
+// published bitcode byte-identical across runs) without a source-name rewrite.
 extern fn void* ll_context_create() @cname("LLVMContextCreate");
 extern fn void ll_context_dispose(void* c) @cname("LLVMContextDispose");
-extern fn int ll_buffer_from_file(char* path, void** out, char** msg) @cname("LLVMCreateMemoryBufferWithContentsOfFile");
+extern fn void* ll_buffer_from_mem(char* data, usz length, char* name) @cname("LLVMCreateMemoryBufferWithMemoryRangeCopy");
 extern fn int ll_parse_ir(void* c, void* buf, void** out_mod, char** msg) @cname("LLVMParseIRInContext");
 extern fn int ll_verify_module(void* m, int action, char** msg) @cname("LLVMVerifyModule");
 extern fn int ll_write_bitcode(void* m, char* path) @cname("LLVMWriteBitcodeToFile");
+extern fn int ll_print_module(void* m, char* path) @cname("LLVMPrintModuleToFile");
 extern fn void ll_module_dispose(void* m) @cname("LLVMDisposeModule");
 extern fn void ll_message_dispose(char* msg) @cname("LLVMDisposeMessage");
-extern fn void ll_set_source_file_name(void* m, char* name, usz len) @cname("LLVMSetSourceFileName");
+// Optimisation: LLVMRunPasses with a `default<On>` pipeline is the same set of
+// passes LLVM runs on a .ll input. No target machine is needed -- target
+// specific passes only run at codegen/link time, which is clang's job here.
+extern fn void* ll_create_pb_opts() @cname("LLVMCreatePassBuilderOptions");
+extern fn void ll_dispose_pb_opts(void* o) @cname("LLVMDisposePassBuilderOptions");
+extern fn void ll_pb_set_inliner_threshold(void* o, int t) @cname("LLVMPassBuilderOptionsSetInlinerThreshold");
+extern fn void* ll_run_passes(void* m, char* passes, void* tm, void* o) @cname("LLVMRunPasses");
+extern fn char* ll_get_err_msg(void* e) @cname("LLVMGetErrorMessage");
 fn bool same(char* a, char* b)
 {
     if (a == null || b == null) { return a == b; }
@@ -5333,12 +5346,59 @@ fn bool make_executable(char* bitcode, char* output)
     if (clang == null || clang[0] == 0) { clang = (char*)"clang"; }
     char[16384] command;
     usz length = 0;
+    // Codegen only: optimisation already happened in m1_optimize_llvm() (and in
+    // pear2_opt) before the bitcode was written, so clang must not run a second
+    // -O pipeline over it.
     if (!append_shell_word(&command[0], 16384, &length, clang) ||
         !append_text(&command[0], 16384, &length, (char*)" -Wno-override-module ") ||
         !append_shell_word(&command[0], 16384, &length, bitcode) ||
-        !append_text(&command[0], 16384, &length, (char*)" -o ") ||
+        !append_text(&command[0], 16384, &length, (char*)" -O0 -o ") ||
         !append_shell_word(&command[0], 16384, &length, output)) { return false; }
     return system(&command[0]) == 0;
+}
+// m1_optimize_llvm -- run LLVM's own optimisation pipeline over the parsed
+// module. PEAR 2 hands LLVM the same `default<On>` pipelines it would use for a
+// .ll input, so an -On build combines two orthogonal layers:
+//
+//   pear2_opt   AIR rewrites the AIR-level pass can justify (folding,
+//               algebraic identities, strength reduction, let specialization)
+//   this        downstream IR optimisation the AIR pass cannot express --
+//               mem2reg/SROA (PEAR 2 lowers label parameters to slots, so this
+//               is where most of the win is), instcombine, GVN/CSE, inlining,
+//               loop opts, DCE
+//
+// At -O0 no pipeline runs and the published bitcode is exactly what PEAR 2
+// emitted. `*failure` receives LLVM's message on failure; the caller owns it
+// and must dispose it with ll_message_dispose().
+fn bool m1_optimize_llvm(void* m, int opt_level, char** failure)
+{
+    if (failure != null) { *failure = null; }
+    if (m == null || opt_level <= 0) { return true; }
+    char* pipeline = (char*)"default<O1>";
+    if (opt_level >= 3) { pipeline = (char*)"default<O3>"; }
+    else if (opt_level == 2) { pipeline = (char*)"default<O2>"; }
+    void* opts = ll_create_pb_opts();
+    if (opts == null)
+    {
+        if (failure != null) { *failure = (char*)"could not create pass-builder options"; }
+        return false;
+    }
+    // PEAR 1 uses the same threshold, so a given -O tier means the same thing
+    // in both backends.
+    ll_pb_set_inliner_threshold(opts, 250);
+    void* error = ll_run_passes(m, pipeline, null, opts);
+    bool ok = error == null;
+    if (!ok)
+    {
+        // LLVM 23: LLVMGetErrorMessage takes the Error BY VALUE and consumes it.
+        // Do not also call LLVMConsumeError -- that double-frees (PEAR 1 hit it
+        // as an out-of-bounds access inside LLVMConsumeError).
+        char* text = ll_get_err_msg(error);
+        if (failure != null) { *failure = text; }
+        else if (text != null) { ll_message_dispose(text); }
+    }
+    ll_dispose_pb_opts(opts);
+    return ok;
 }
 // Output modes: 0 = native executable, 1 = LLVM bitcode, 2 = textual LLVM IR.
 fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, char* temp_bc, char* temp_exe)
@@ -5497,16 +5557,20 @@ fn int main(String[] args)
     opt_stats.shift_combinations = 0;
     opt_stats.branch_reductions = 0;
     opt_stats.let_specializations = 0;
+    opt_stats.dead_bindings = 0;
+    opt_stats.copy_propagations = 0;
+    opt_stats.drop_dead = false;
+    opt_stats.propagate_copies = false;
     opt_stats.arena = null;
     if (opt_level > 0)
     {
-        // Higher levels repeat the same conservative AIR pass to a bounded
-        // fixed point; later passes can expose opportunities created by a
-        // prior rewrite without changing the fail-closed rewrite rules.
+        // The tier selects WHICH passes run (see pear2_opt::optimize_module_at);
+        // higher tiers then repeat that set to a bounded fixed point, because a
+        // later pass can expose opportunities the next iteration can use.
         int max_opt_iterations = opt_level == 1 ? 1 : (opt_level == 2 ? 4 : 8);
         for (int iteration = 0; iteration < max_opt_iterations; iteration++)
         {
-            pear2_opt::OptStats pass_stats = pear2_opt::optimize_module(&mod);
+            pear2_opt::OptStats pass_stats = pear2_opt::optimize_module_at(&mod, opt_level);
             opt_passes++;
             opt_stats.rewrites += pass_stats.rewrites;
             opt_stats.constant_folds += pass_stats.constant_folds;
@@ -5515,6 +5579,8 @@ fn int main(String[] args)
             opt_stats.shift_combinations += pass_stats.shift_combinations;
             opt_stats.branch_reductions += pass_stats.branch_reductions;
             opt_stats.let_specializations += pass_stats.let_specializations;
+            opt_stats.dead_bindings += pass_stats.dead_bindings;
+            opt_stats.copy_propagations += pass_stats.copy_propagations;
             if (pass_stats.rewrites == 0) { break; }
         }
         int[8] post_counts;
@@ -5528,10 +5594,11 @@ fn int main(String[] args)
     }
     if (show_opt_stats)
     {
-        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u level=%d passes=%d\n",
+        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u copies=%u level=%d passes=%d\n",
                opt_level > 0 ? "enabled" : "disabled", opt_stats.rewrites, opt_stats.constant_folds,
                opt_stats.operand_rewrites, opt_stats.strength_reductions, opt_stats.shift_combinations,
-               opt_stats.branch_reductions, opt_stats.let_specializations, opt_level, opt_passes);
+               opt_stats.branch_reductions, opt_stats.let_specializations, opt_stats.dead_bindings,
+               opt_stats.copy_propagations, opt_level, opt_passes);
     }
     // AIR carries candidate claims, never trusted backend facts; recompute facts
     // on the exact post-optimization graph consumed by the lowering pass.
@@ -5689,8 +5756,12 @@ fn int main(String[] args)
         printf("pear2c: M1 requires exactly one zero-argument definition of `main`\n");
         arena.destroy(); return 3;
     }
-    void* f = fopen(&ll_path[0], "w");
-    if (f == null) { printf("pear2c: cannot create temporary LLVM IR\n"); arena.destroy(); return 3; }
+    // Render the module into memory. LLVM parses this buffer directly, so the
+    // success path creates no temporary .ll file and nothing to clean up.
+    char* mod_text = null;
+    usz mod_size = 0;
+    void* f = open_memstream(&mod_text, &mod_size);
+    if (f == null) { printf("pear2c: cannot allocate the LLVM IR buffer\n"); arena.destroy(); return 3; }
     fprintf(f, mod.low ? (char*)"; PEAR 2: AIR 3 globals, strings and typed-memory lowering\n" : (char*)"; PEAR 2: scalar and local aggregate lowering with direct calls\n");    fprintf(f, "target datalayout = \"%s\"\ntarget triple = \"%s\"\n", g_m1_target_datalayout, g_m1_target_triple);
     fprintf(f, "declare void @llvm.trap()\ndeclare void @llvm.assume(i1 noundef)\ndeclare ptr @llvm.stacksave()\ndeclare void @llvm.stackrestore(ptr)\n");
     M1Gen g;
@@ -5698,19 +5769,19 @@ fn int main(String[] args)
     g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0; g.default_unsigned = false; g.default_bits = 64; g.return_type = null; g.return_bool = false; g.return_ptr = false; g.return_unit = false; g.terminated = false; g.failed = false;    g.low_profile = mod.low; g.input_path = input; g.current_function = null; g.string_count = 0; g.provenance_count = 0; g.fx_depth = 0; g.fail_line = 0; g.fail_col = 0; g.last_line = 0; g.last_col = 0; g.fail_form = null; g.error = null;
     if (!g.emit_data_types())
     {
-        fclose(f); (void)remove(&ll_path[0]);
+        fclose(f); free(mod_text);
         printf("pear2c: could not emit supported record type declarations\n");
         arena.destroy(); return 3;
     }
     if (!g.emit_extern_declarations())
     {
-        fclose(f); (void)remove(&ll_path[0]);
+        fclose(f); free(mod_text);
         printf("pear2c: conflicting declarations for an external ABI symbol\n");
         arena.destroy(); return 3;
     }
     if (!g.emit_globals())
     {
-        fclose(f); (void)remove(&ll_path[0]);
+        fclose(f); free(mod_text);
         printf("%s:%d:%d: pear2c: %s\n", input, g.fail_line, g.fail_col, g.fail_form == null ? (char*)"unsupported global initializer" : g.fail_form);
         arena.destroy(); return 3;
     }
@@ -5732,25 +5803,26 @@ fn int main(String[] args)
     if (emitted && !g.emit_string_constants()) { emitted = false; }
     if (!emitted)
     {
-        fclose(f); (void)remove(&ll_path[0]);
+        fclose(f); free(mod_text);
         if (g.fail_form != null) { printf("%s:%d:%d: pear2c: %s\n", input, g.fail_line, g.fail_col, g.fail_form); }
         else { printf("pear2c: unsupported function body; PEAR2 subset includes scalar/aggregate values, direct calls, terminal if/match, and label/jump CFG\n"); }
         arena.destroy(); return 3;
     }
     fclose(f);
+    if (mod_text == null) { printf("pear2c: could not render the LLVM IR buffer\n"); arena.destroy(); return 3; }
     void* ctx = ll_context_create();
     void* mb = null;
     void* m = null;
     char* msg = null;
     int rc = 0;
-    // Determinism: LLVMParseIRInContext stamps the module's source identifier
-    // with the pid-suffixed temp path; normalize it to the input name so
-    // published bitcode is byte-identical across runs.
-    usz input_name_len = 0;
-    while (input[input_name_len] != 0) { input_name_len++; }
-    if (ctx == null || ll_buffer_from_file(&ll_path[0], &mb, &msg) != 0)
+    // Determinism: the buffer is named with the input path, so the module's
+    // source identifier comes out as that path (the old code had to rewrite a
+    // pid-suffixed temporary name here) and published bitcode is byte-identical
+    // across runs.
+    if (ctx == null) { printf("pear2c: LLVM context creation failed\n"); rc = 3; }
+    else if ((mb = ll_buffer_from_mem(mod_text, mod_size, input)) == null)
     {
-        printf("pear2c: LLVM could not read generated IR%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
+        printf("pear2c: LLVM could not copy the generated IR buffer\n");
         rc = 3;
     }
     else if (ll_parse_ir(ctx, mb, &m, &msg) != 0)
@@ -5760,11 +5832,20 @@ fn int main(String[] args)
     }
     else
     {
-        // Parsed OK: normalize the source identifier, then verify and write.
-        ll_set_source_file_name(m, input, input_name_len);
+        // Parsed OK: verify, optimise, re-verify, then serialize.
         if (ll_verify_module(m, 1, &msg) != 0)
         {
             printf("pear2c: LLVM verifier rejected generated module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
+            rc = 3;
+        }
+        else if (!m1_optimize_llvm(m, opt_level, &msg))
+        {
+            printf("pear2c: LLVM optimisation pipeline failed%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
+            rc = 3;
+        }
+        else if (ll_verify_module(m, 1, &msg) != 0)
+        {
+            printf("pear2c: LLVM verifier rejected the optimised module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
             rc = 3;
         }
         else if (!emit_ll && ll_write_bitcode(m, &bc_tmp[0]) != 0)
@@ -5773,21 +5854,26 @@ fn int main(String[] args)
             rc = 3;
         }
     }
-    if (msg != null) { ll_message_dispose(msg); }
-    if (m != null) { ll_module_dispose(m); }
-    if (ctx != null) { ll_context_dispose(ctx); }
-    // --emit-ll keeps the verified text IR for publication; other modes
-    // publish the bitcode/executable and drop the text form.
-    if (rc == 0 && emit_ll)
+    // Publish the textual IR from the MODULE, not from the pre-parse buffer, so
+    // an -On build shows the IR the bitcode was actually produced from.
+    if (rc == 0 && m != null && (emit_ll || getenv((char*)"PEAR2_KEEPLL") != null))
     {
-        if (rename(&ll_path[0], &out_path[0]) != 0)
+        if (ll_print_module(m, &ll_path[0]) != 0)
+        {
+            if (emit_ll) { printf("pear2c: could not publish LLVM IR atomically\n"); rc = 3; }
+            else { (void)remove(&ll_path[0]); }
+        }
+        else if (emit_ll && rename(&ll_path[0], &out_path[0]) != 0)
         {
             printf("pear2c: could not publish LLVM IR atomically\n");
             (void)remove(&ll_path[0]);
             rc = 3;
         }
     }
-    else if (getenv((char*)"PEAR2_KEEPLL") == null) { (void)remove(&ll_path[0]); }
+    if (msg != null) { ll_message_dispose(msg); }
+    if (m != null) { ll_module_dispose(m); }
+    if (ctx != null) { ll_context_dispose(ctx); }
+    free(mod_text);
     if (rc == 0 && emit_exe && !emit_ll)
     {
         if (!make_executable(&bc_tmp[0], &exe_tmp[0]))
