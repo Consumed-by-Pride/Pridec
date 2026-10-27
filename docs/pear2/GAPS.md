@@ -1,0 +1,110 @@
+# PEAR 2 — what is still missing
+
+An inventory of the AIR forms PEAR 2 refuses to lower and the optimizations it
+does not perform, with the evidence for each. It exists so that "PEAR 2 does not
+support X" is a fact with a location rather than a guess, and so the next piece
+of work can be picked by impact instead of by whatever is nearest.
+
+Scope note: this is about `pear2/pear2c_main.c3` and `pear2/pear2_opt.c3`. The
+front end, the AIR reader/verifier, and `airtool` are separate.
+
+Each item is tagged with a rough size: **S** (a focused change, one file),
+**M** (needs a new analysis or a new lowering table), **L** (needs a design
+decision or a new IR shape).
+
+---
+
+## 1. Lowering — AIR forms that fail closed
+
+Every one of these produces a positioned diagnostic and exit 3 rather than a
+guess, which is the correct default; the point of the list is that the set is
+larger than the language implies.
+
+| form | what happens today | why it is hard | size |
+|---|---|---|---|
+| `letrec` — local recursive bindings | rejected outright (`m1_contains_letrec`, `unsupported AIR construct 'letrec' in function ...`) | a non-capturing recursive lambda can be lifted to an `internal` function like any other lambda; a capturing one needs a self-referential environment slot, which the current closure conversion does not build | M |
+| AIR 3 dynamic pointer offsets | `dynamic pointer offsets are unsupported without a static provenance bound` | the typed-memory slice tracks provenance, and an unprovable index has no tracked base; the honest fix is a bounds model, not a lowering tweak | L |
+| constructor payload layouts outside the supported sum slice | `unsupported constructor payload layout`, `unsupported or ambiguous constructor value` | the payload packing rules are fixed by the supported slice; general layout needs the AIR-side layout contract finished first | M |
+| record GEP layouts with padding the backend does not model | `unsupported GEP field layout`, `unsupported GEP record layout` | needs the record layout to be authoritative rather than recomputed | M |
+| unusual `alloca` shapes (oversized or non-statically-sized) | `unsupported alloca type/size` | bounded allocation is a deliberate guard (1 MiB, static) | S |
+| globals with non-constant initialisers | `unsupported global initializer` | would need a static initialiser graph and an init function | M |
+| effect declarations whose operations are not `name + lowerable payload` | `unsupported effect declaration` | effects currently lower only in the supported handler shapes | L |
+| declaration attributes beyond the seven handled | `unsupported function attribute (supported: callconv, noinline, alwaysinline, cold, naked, section, export)` | each new attribute needs a meaning, not just a spelling | S each |
+| generic / packed / attributed records, signatures the emitter cannot type | `unsupported signature for function`, `unsupported data form in declaration` | representation inference for generics is unstarted | L |
+| external aggregates that are not C-compatible | `unsupported external aggregate form in definition` | by design: the C ABI subset is conservative | S |
+| `atomic` on pointer, float, bool, or 128-bit pointees | `atomic pointee must be an 8/16/32/64-bit integer` | AIR3.md restricts atomics to integer pointees ≤ 64 bits, so this is spec-aligned, not a backend shortcut | — |
+| `asm` with bool or aggregate operands | `asm operands must be typed integers, floats, or pointers` | the template/constraint form cannot express an aggregate register class | M |
+| `syscall` with float or aggregate arguments | `syscall arguments must be integers, bools, or pointers` | the register ABI carries words; floats would need a documented bit-pattern convention | S |
+| `--target=wasm32-freestanding` producing object/binary | rejected: IR or bitcode only | needs a wasm linker path and a runtime | L |
+
+Not a gap, worth stating because it looks like one: `relaxed` fences and
+`release`/`acq_rel` atomic loads are rejected by the *AIR verifier*, not by
+PEAR 2, because those orderings have no C11 meaning.
+
+## 2. Optimizer — what the AIR level does not do
+
+`pear2_opt` is two passes: a bottom-up, expression-local rewrite (pass 1) and a
+lexical dead-binding sweep (pass 2). Everything that needs a control-flow graph
+is simply absent.
+
+| absent | consequence | size |
+|---|---|---|
+| any CFG or dominance analysis | no constant propagation across branches, no loop-invariant motion, no dead-branch elimination on non-literal conditions, no SSA construction at the AIR level | L |
+| common-subexpression elimination / GVN | repeated pure expressions are re-emitted; LLVM recovers this, so the cost is IR size before LLVM runs | M |
+| inlining | AIR has no cost model and no call graph; LLVM inlines after lowering, which is cheaper and better informed | M |
+| tail-call marking | calls in return position are emitted as plain `call`, so a self-recursive function cannot be guaranteed to reuse its frame unless LLVM's tail-call analysis fires on its own | S |
+| copy propagation | deliberately excluded: mutable locals are allocas, so `let x = y` snapshots a load, and renaming uses would observe later writes. Also worthless here, because the emitter binds names to SSA values, so an alias costs no instructions | — |
+| alias / memory-dependence analysis | ordering of loads and stores is left entirely to LLVM | L |
+| linkage optimization | every `def` keeps external linkage and `AirDecl.is_pub` is never read, so LLVM cannot mark unreferenced definitions internal and drop them. `airtool`'s `--internalize` does exactly this, so the machinery is known — it is the PEAR 2 side that is missing | S |
+| tier differentiation at the AIR level | `-O2` and `-O3` run the same AIR passes; only the LLVM pipeline differs (`default<O2>` vs `default<O3>`) | S |
+| optimizer statistics from the LLVM layer | `--stats` reports AIR counters only, so the effect of `default<On>` is invisible | S |
+
+`Arithmetic is emitted without nsw/nuw` (see `IMPLEMENTATION_PLAN.md`): the
+integer contract does not yet say which AIR operations are unchecked, so the
+flags cannot be attached soundly. That blocks a set of downstream comparisons,
+range reasoning, and loop idioms.
+
+## 3. Verification
+
+- No execution, differential, or fuzzing gate can run in the sandbox this work
+  was written in (no `c3c`, no `libLLVM-23`, no `clang`), so every change in the
+  current branch is review-only until `make pear2c` runs somewhere real.
+- `tests/exec/DIFF_BASELINE.csv` was recorded against the backend *before*
+  in-process codegen and the LLVM IR passes. Semantics should not have moved,
+  but a verdict change fails the gate by design; re-bless deliberately with
+  `scripts/pie-diff.sh --bless`.
+- There is no translation-validation or randomized differential test between the
+  AIR optimizer's output and its input. The re-verification after optimization
+  catches structural damage, not semantic damage.
+
+## 4. Closed recently
+
+- **`atomic cmpxchg`** now lowers. AIR carries one ORDER; the backend uses it as
+  the success ordering and weakens it to the strongest legal failure ordering
+  (release/acq_rel degrade to monotonic/acquire), which is the same mapping the
+  AIR 3 reference consumer applies. The result is the old value, per AIR3.md.
+  Fixture: `tests/pear2/atomic_cmpxchg_main.air`, executed at `-O0..-O3`.
+- **`syscall` bool arguments** now lower as a `zext i1 -> i64`, the same way C
+  passes a `_Bool` in a register.
+- **Dead-binding elimination** (pass 2), **tiered AIR passes**, **in-process
+  LLVM IR optimization**, **in-process object emission**, and the **`ld` link**
+  are described in `IMPLEMENTATION_PLAN.md` M5.
+
+## 5. Suggested order
+
+1. **Linkage (`internal` for unreferenced non-`pub` definitions)** — small, and
+   it is what makes LLVM's inliner and global DCE effective on PEAR 2 output.
+   Blocked in one place: `tests/pear2/pointer_index_main.air` is linked into a
+   shared object and called from C, so the subset that is `pub`-gated needs
+   checking against figures like that one first.
+2. **Tail-call marking** — small, and the difference shows up on exactly the
+   recursive programs this backend is most likely to compile.
+3. **`nsw`/`nuw` after the integer contract is written down** — unlocks more
+   downstream reasoning than any single pass here.
+4. **`letrec` for non-capturing recursive bindings** — the largest *language*
+   gap that does not require a new design.
+5. **CSE / constant propagation across branches** — only worth doing after a
+   CFG exists, and only with a differential test to prove it.
+
+Anything in §1 marked **L** needs a design note before code; they are not
+backlog items, they are open questions.

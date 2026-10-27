@@ -1,8 +1,0 @@
-// Rejection: cmpxchg needs separate success/failure orderings, which the
-// AIR atomic grammar (a single ORDER) cannot express.
-air 3.0 Main "reject_atomic_cmpxchg_main.pie";
-def main() : i64 =
-  mu~ %ret.
-    <alloca(i64) : ptr(i64) | comu cell.
-      atomic cmpxchg seq_cst(cell, 0 : i64, 1 : i64) · comu _.
-        <42 : i64 | %ret>>;

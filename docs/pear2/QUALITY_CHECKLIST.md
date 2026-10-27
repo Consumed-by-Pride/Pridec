@@ -181,9 +181,9 @@ bitcode-determinism fix committed with this checklist revision).
 
 - [x] 5.26 Machine forms lower and execute: `fence` (acquire+; relaxed
       rejected by the AIR verifier per its ordering law), `atomic`
-      rmw/load/store over AIR 3 typed integer pointees 8/16/32/64 (cmpxchg
-      rejected — single ORDER cannot express paired orderings; load/store
-      ordering laws positioned), x86-64 Linux `syscall` via pinned-register
+      rmw/load/store/cmpxchg over AIR 3 typed integer pointees 8/16/32/64
+      (cmpxchg reuses the AIR ORDER as its success ordering and weakens it
+      for the failure path; load/store ordering laws positioned), x86-64 Linux `syscall` via pinned-register
       inline asm (rejected under wasm32-freestanding), and AIR 3.0 inline
       `asm` with template/constraints/result ascription over int/float/pointer
       operands and scalar-or-unit results (bool rejected); fixtures

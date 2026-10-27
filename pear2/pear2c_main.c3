@@ -4443,6 +4443,24 @@ fn char* m1_air_order_text(int order)
         default: return null;
     }
 }
+// cmpxchg carries TWO orderings in LLVM: the success path stores, so it may be
+// release/acq_rel/seq_cst, while the failure path performed no store and may
+// only be monotonic/acquire/seq_cst. AIR has a single ORDER, so the failure
+// ordering is the strongest one that ordering permits -- the same weakening the
+// AIR 3 reference consumer (air_ll.c3) applies.
+fn char* m1_air_failure_order_text(int order)
+{
+    switch (order)
+    {
+        case 0: return (char*)"monotonic";   // relaxed
+        case 1: return (char*)"acquire";     // acquire
+        case 2: return (char*)"monotonic";   // release: a failed compare released nothing
+        case 3: return (char*)"acquire";     // acq_rel: keep the acquire half
+        case 4: return (char*)"seq_cst";     // seq_cst
+        default: return null;
+    }
+}
+
 fn bool M1Gen.fence_cmd(M1Gen* g, AirCmd* c)
 {
     // LLVM admits acquire/release/acq_rel/seq_cst on a fence; a relaxed
@@ -4463,17 +4481,14 @@ fn bool M1Gen.atomic_cmd(M1Gen* g, AirCmd* c, char* ret_name)
         return false;
     }
     if (c.prd == null) { g.note_failure(c.source_line, c.source_col, (char*)"atomic operation is missing its pointer operand"); return false; }
-    if (c.atomic_op == 13)
-    {
-        g.note_failure(c.source_line, c.source_col, (char*)"atomic cmpxchg is not lowerable: the AIR grammar carries a single ORDER, but cmpxchg needs separate success/failure orderings");
-        return false;
-    }
-    if (c.atomic_op < 0 || c.atomic_op > 12) { g.note_failure(c.source_line, c.source_col, (char*)"unknown atomic operation"); return false; }
-    bool is_load = c.atomic_op == 0; bool is_store = c.atomic_op == 1;
-    int want = is_load ? 0 : 1;
+    if (c.atomic_op < 0 || c.atomic_op > 13) { g.note_failure(c.source_line, c.source_col, (char*)"unknown atomic operation"); return false; }
+    bool is_load = c.atomic_op == 0; bool is_store = c.atomic_op == 1; bool is_cmpxchg = c.atomic_op == 13;
+    int want = is_load ? 0 : (is_cmpxchg ? 2 : 1);
     if ((int)c.prd_count != want)
     {
-        g.note_failure(c.source_line, c.source_col, is_load ? (char*)"atomic load takes only its pointer operand" : (char*)"atomic operation takes exactly one value operand");
+        g.note_failure(c.source_line, c.source_col, is_load ? (char*)"atomic load takes only its pointer operand" :
+                       (is_cmpxchg ? (char*)"atomic cmpxchg takes an expected and a replacement operand" :
+                        (char*)"atomic operation takes exactly one value operand"));
         return false;
     }
     if (is_load && (c.atomic_order == 2 || c.atomic_order == 3))
@@ -4511,6 +4526,28 @@ fn bool M1Gen.atomic_cmd(M1Gen* g, AirCmd* c, char* ret_name)
         fprintf(g.out, "  store atomic %s %s, ptr %s %s, align %d\n", ety, value, address, order, align);
         if (c.cns == null) { return true; }
         return g.consume_unit(c.cns, ret_name);
+    }
+    if (is_cmpxchg)
+    {
+        // `atomic_cmpxchg(p, expected, new)` yields the OLD value (AIR3.md), so
+        // the lowered shape is the cmpxchg pair plus extractvalue 0.
+        AirPrd* rp = c.prds[1];
+        bool rok = rp != null && (m1_value_type_compatible(element, g.expr_type(rp), 0) || g.integer_value_compatible(rp, element));
+        if (!rok)
+        {
+            g.note_failure(c.source_line, c.source_col, (char*)"atomic cmpxchg replacement operand must be an integer compatible with the pointee type");
+            return false;
+        }
+        char* replacement = g.prd(rp);
+        if (g.failed || replacement == null) { return false; }
+        char* failure_order = m1_air_failure_order_text(c.atomic_order);
+        if (failure_order == null) { g.note_failure(c.source_line, c.source_col, (char*)"atomic cmpxchg has an out-of-range memory ordering"); return false; }
+        char* pair = g.tmp(); char* dst = g.tmp();
+        if (pair == null || dst == null) { return false; }
+        fprintf(g.out, "  %s = cmpxchg ptr %s, %s %s, %s %s %s %s\n", pair, address, ety, value, ety, replacement, order, failure_order);
+        fprintf(g.out, "  %s = extractvalue { %s, i1 } %s, 0\n", dst, ety, pair);
+        if (c.cns == null) { return true; }
+        return g.consume(dst, false, false, element, c.cns, ret_name);
     }
     char* opn = null;
     switch (c.atomic_op)
@@ -4554,8 +4591,19 @@ fn bool M1Gen.syscall_cmd(M1Gen* g, AirCmd* c, char* ret_name)
     {
         AirPrd* ap = c.prds[i];
         AirTyp* at = ap != null ? g.expr_type(ap) : null;
-        if (at != null && !m1_integer_type(at) && !m1_pointer_repr_type(at))
-        { g.note_failure(c.source_line, c.source_col, (char*)"syscall arguments must be integers or pointers (bool/float/aggregate arguments are unsupported)"); return false; }
+        if (at != null && !m1_integer_type(at) && !m1_pointer_repr_type(at) && at.tag != ATYP_BOOL)
+        { g.note_failure(c.source_line, c.source_col, (char*)"syscall arguments must be integers, bools, or pointers (float and aggregate arguments are unsupported)"); return false; }
+        if (at != null && at.tag == ATYP_BOOL)
+        {
+            // A bool travels as 0/1 in a register, the same way C passes a
+            // _Bool to a variadic or system call. g.prd yields an i1 here.
+            char* bv = g.prd(ap);
+            if (g.failed || bv == null) { return false; }
+            char* wi = g.tmp(); if (wi == null) { return false; }
+            fprintf(g.out, "  %s = zext i1 %s to i64\n", wi, bv);
+            args[i] = wi;
+            continue;
+        }
         if (at != null && m1_pointer_repr_type(at))
         {
             char* pv = g.pointer_value(ap);

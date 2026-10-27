@@ -1,0 +1,17 @@
+// AIR 3.0 atomic cmpxchg. The result is the OLD value, and no store happens when
+// the comparison fails: cell starts at 7, the first cmpxchg matches (7 -> 40,
+// old = 7), the second expects 7 again and must not write (old = 40, cell = 40).
+// Result: (now - old2) + (old1 + 35) = (40 - 40) + (7 + 35) = 42.
+air 3.0 Main "atomic_cmpxchg_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    <alloca(i64) : ptr(i64) | comu cell.
+      seq {
+        store(cell, 7 : i64);
+        atomic cmpxchg seq_cst(cell, 7 : i64, 40 : i64) · comu old1.
+          atomic cmpxchg acq_rel(cell, 7 : i64, 99 : i64) · comu old2.
+            atomic load acquire(cell) · comu now.
+              <(add (sub now old2) (add old1 35)) : i64 | %ret>
+      }
+    >;
