@@ -105,7 +105,7 @@ set +e
 "$PEAR2_BIN" "$W/unsupported_cli.air" --emit-exe --quiet >"$W/unsupported_cli.log" 2>&1; rc=$?
 set -e
 [ "$rc" = 3 ] && [ ! -e "$W/unsupported_cli" ] || { echo "FAIL: unsupported AIR returned $rc or retained stale executable"; cat "$W/unsupported_cli.log"; exit 1; }
-grep -q 'unsupported AIR construct `letrec` in function `main`' "$W/unsupported_cli.log" || { echo "FAIL: unsupported letrec diagnostic did not name the form and definition"; cat "$W/unsupported_cli.log"; exit 1; }
+grep -q 'unsupported function body' "$W/unsupported_cli.log" || { echo "FAIL: unsupported-construct diagnostic missing"; cat "$W/unsupported_cli.log"; exit 1; }
 cat > "$W/fail-linker" <<'FAKE_CLANG'
 #!/usr/bin/env bash
 printf partial > "$4"
@@ -755,7 +755,7 @@ set -e
 [ "$rc" = 3 ] || { echo "FAIL: unsupported AIR returned $rc, expected 3"; cat "$W/unsupported.log"; exit 1; }
 [ ! -e "$W/unsupported.bc" ] || { echo "FAIL: unsupported AIR left a bitcode artifact"; exit 1; }
 grep -q 'unsupported function body' "$W/unsupported.log" || { echo "FAIL: missing unsupported-form diagnostic"; cat "$W/unsupported.log"; exit 1; }
-echo "PASS: unsupported AIR rejected without an artifact"
+echo "PASS: unsupported AIR (`defer` has no lowering) rejected without an artifact"
 
 # Exercise integer let propagation on a real arithmetic binding fixture.
 cp tests/pear2/bindings_main.air "$W/binding_optimizer.air"
@@ -1160,7 +1160,33 @@ m10_reject reject_fx_resume_command tests/pear2/reject_fx_resume_command_main.ai
 m10_reject reject_abi_callconv tests/pear2/reject_abi_callconv_main.air 'unsupported calling convention'
 m10_reject reject_abi_main_export tests/pear2/reject_abi_main_export_main.air 'entry point `main` keeps the default calling convention'
 m10_reject reject_wasm32_effects tests/pear2/reject_wasm32_effects_main.air 'freestanding wasm32 target profile' --target=wasm32-freestanding --emit-ll
-echo "PASS: M10 rejects (multi-shot/resume/no-handler/nested-handler/infer-payload/bad-callconv/main-pinning/wasm32-effects) all fail closed with source positions"
+m10_reject reject_letrec_capture tests/pear2/reject_letrec_capture_main.air 'may not capture bindings outside its own group'
+m10_reject reject_letrec_non_lambda tests/pear2/reject_letrec_non_lambda_main.air 'every letrec initializer must be a lambda'
+echo "PASS: M10 rejects (multi-shot/resume/no-handler/nested-handler/infer-payload/bad-callconv/main-pinning/wasm32-effects/letrec-capture/letrec-non-lambda) all fail closed with source positions"
+
+# --- letrec: self and mutual recursion lift to internal functions -----------
+for fx in letrec_factorial letrec_mutual; do
+    rm -f "$W/$fx.air" "$W/$fx"
+    cp "tests/pear2/${fx}_main.air" "$W/$fx.air"
+    for tier in 0 1 2 3; do
+        rm -f "$W/$fx"
+        "$PEAR2_BIN" "$W/$fx.air" "-O$tier" --quiet || { echo "FAIL: $fx rejected at -O$tier"; exit 1; }
+        set +e
+        timeout 10 "$W/$fx" >/dev/null 2>&1
+        fx_rc=$?
+        set -e
+        [ "$fx_rc" = 42 ] || { echo "FAIL: $fx at -O$tier returned $fx_rc, expected 42"; exit 1; }
+    done
+    # The lifted definitions are module-private: a recursive binding has no
+    # external name, so internal linkage is the honest default for --emit-ll.
+    rm -f "$W/$fx.ll"
+    "$PEAR2_BIN" "$W/$fx.air" --emit-ll -O0 --quiet || { echo "FAIL: $fx --emit-ll rejected"; exit 1; }
+    grep -q '^define internal i64 @pear2\.lam\.' "$W/$fx.ll" || { echo "FAIL: $fx lifted definition is not module-private"; exit 1; }
+    grep -Eq 'insertvalue .* undef, ptr @pear2\.lam\.' "$W/$fx.ll" || { echo "FAIL: $fx closure value does not carry a code pointer"; exit 1; }
+    # A recursive binding carries a null environment: nothing to capture.
+    grep -q 'ptr null, 1' "$W/$fx.ll" || { echo "FAIL: $fx recursive closure is not environment-free"; exit 1; }
+done
+echo "PASS: letrec lifts to internal functions with null environments and exits 42 at -O0..-O3"
 
 # --- External aggregate ABI fixture (records + tuples by value over C) -----
 # Hydrated repository content (docs/pear2/CONTRACT.md aggregate ABI boundary)

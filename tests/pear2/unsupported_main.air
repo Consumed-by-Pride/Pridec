@@ -1,7 +1,10 @@
-// PEAR2 rejects unsupported recursive local bindings rather than emitting invalid IR.
+// PEAR2 rejects a construct outside the lowering subset rather than emitting
+// invalid IR. `defer` has no lowering in the PEAR 2 backend: a deferred command
+// would have to run on every exit edge, including traps, and the AIR subset here
+// models no unwind path. `letrec` used to be rejected here too; it is now
+// lowered (see letrec_*_main.air and reject_letrec_*).
 air 2.2 Main "unsupported_main.pie";
 
 def main() : i64 =
   mu~ %ret.
-    letrec () in
-      <42 : i64 | %ret>;
+    defer { nop };

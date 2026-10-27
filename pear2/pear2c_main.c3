@@ -191,6 +191,21 @@ struct M1Gen
     usz[24] lam_sizes;
     int lam_count;
     int lam_serial;
+    // Recursive binding groups (`letrec`) register the lifted symbol of every
+    // member here while its own body is being emitted, so a member can name
+    // itself or a sibling before any closure value exists at run time. The table
+    // is scoped: `lower_letrec` restores the saved count once the group's bodies
+    // are rendered, so it can never leak into a later function.
+    char*[8] rec_names;
+    char*[8] rec_symbols;
+    AirTyp*[8] rec_types;
+    int rec_count;
+    // While a recursive group's members are being planned, one arm of a
+    // branch may be a call whose type is the very type being inferred. In that
+    // mode a single unresolvable arm is tolerated and the other arm decides the
+    // result type; every emission-time check still runs afterwards, so a wrong
+    // guess is a hard failure rather than mis-typed code.
+    bool relax_recursive_inference;
     // M9 loop-carried watch: while/for bodies record the latest mainline
     // redefinition of each tracked loop-carried name so the backedge phi
     // incoming value survives the body's scope restorations. A redefinition
@@ -1150,7 +1165,16 @@ fn AirTyp* M1Gen.expr_type(M1Gen* g, AirPrd* p)
     if (p.tag == APRD_ALLOCA) { return p.ty != null ? p.ty : air_ir::air_mk_typ_ptr(g.arena, p.ty_arg); }
     if (p.tag == APRD_SIZEOF || p.tag == APRD_ALIGNOF) { return g.int_repr(g.default_bits, g.default_unsigned); }
     if (p.ty != null && p.ty.tag != ATYP_INFER) { return p.ty; }
-    if (p.tag == APRD_VAR) { return g.lookup_type(p.name); }
+    if (p.tag == APRD_VAR)
+    {
+        AirTyp* bound = g.lookup_type(p.name);
+        // A member of the recursive group currently being lifted is not in the
+        // environment (its closure does not exist yet), so its type comes from
+        // the group table. This is what lets `infer_cmd_return_type` type a
+        // self-recursive call while the body is still being scanned.
+        if (bound == null) { return g.rec_type(p.name); }
+        return bound;
+    }
     if (p.tag == APRD_LAMBDA) { return g.lambda_closure_type(p); }
     if (p.tag == APRD_MU)
     {
@@ -1780,6 +1804,11 @@ fn AirTyp* M1Gen.infer_cmd_return_type(M1Gen* g, AirDecl* d, AirCmd* c, char* re
                     {
                         AirDecl* callee = g.find_function(c.prd.name);
                         if (callee != null && !same(callee.name, d.name)) { return g.decl_return_type(callee); }
+                        // A member of the recursive group under construction has
+                        // no declaration to consult; its planned closure type is
+                        // the declaration.
+                        AirTyp* rec_result = g.rec_return_type(c.prd.name);
+                        if (rec_result != null) { return rec_result; }
                     }
                     return null;
                 }
@@ -1823,6 +1852,13 @@ fn AirTyp* M1Gen.infer_cmd_return_type(M1Gen* g, AirDecl* d, AirCmd* c, char* re
     {
         AirTyp* then_type = g.infer_cmd_return_type(d, c.then_c, ret_name, depth + 1);
         AirTyp* else_type = g.infer_cmd_return_type(d, c.else_c, ret_name, depth + 1);
+        // While planning a recursive group one arm may be the recursive call
+        // itself; the other arm then decides the type, and emission re-checks.
+        if (g.relax_recursive_inference)
+        {
+            if (then_type == null && else_type != null) { return else_type; }
+            if (else_type == null && then_type != null) { return then_type; }
+        }
         return m1_same_inferred_type(then_type, else_type) ? then_type : null;
     }
     if (c.tag == ACMD_MATCH)
@@ -2215,6 +2251,27 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
 // ===== M8: first-class closures & environment capture =======================
 // A `lam` producer lambda-lifts to a module-level function that takes a hidden
 // leading environment pointer (`ptr %env`) followed by the declared binders.
+// Everything one `lam` needs in order to become a lifted function: the resolved
+// capture set, the parameter and result types, the reserved symbol, and the AIR
+// closure type. `plan_lambda` fills it; `emit_lifted_function` renders the
+// definition; `materialize_env`/`materialize_closure` build the run-time value.
+// Splitting the three apart is what lets a `letrec` group lift its members with
+// an empty environment (they are necessarily non-capturing) while an ordinary
+// `lam` still carries its captured bindings.
+struct LamInfo {
+    AirPrd* prd;
+    char* symbol;
+    AirTyp* closure_type;
+    char*[16] cap_names;
+    char*[16] cap_values;
+    AirTyp*[16] cap_types;
+    bool[16] cap_bools;
+    bool[16] cap_ptrs;
+    int cap_count;
+    AirTyp*[16] params;
+    usz param_count;
+    AirTyp* ret;
+}
 // The closure value itself is a fat pointer rendered as the LLVM aggregate
 // `{ ptr, ptr }` = { lifted code pointer, environment pointer } and typed in
 // AIR as `tuple(arrow(tuple(ptr u8, params...) -> ret), ptr u8)`.
@@ -2277,6 +2334,14 @@ fn bool m1_lambda_cmd_ok(AirCmd* c, int depth)
             return m1_lambda_cmd_ok(c.body, depth + 1);
         case ACMD_LET:
             return m1_lambda_prd_ok(c.prd, depth + 1) && m1_lambda_cmd_ok(c.body, depth + 1);
+        case ACMD_LETREC:
+            // A recursive group inside a lifted body is allowed as long as every
+            // member is itself a lambda in the subset; the group's own capture
+            // rule (nothing outside its parameters and its siblings) is enforced
+            // when the group is lowered.
+            if (c.mbinder_count != c.prd_count) { return false; }
+            for (usz i = 0; i < c.prd_count; i++) { if (c.prds[i] == null || c.prds[i].tag != APRD_LAMBDA || !m1_lambda_prd_ok(c.prds[i], depth + 1)) { return false; } }
+            return m1_lambda_cmd_ok(c.body, depth + 1);
         case ACMD_IF:
             // Value-position if inside a lifted body is supported when every arm
             // is a direct value production (the shape pfront emits for
@@ -2381,6 +2446,18 @@ fn void m1_lam_scan_cmd(AirCmd* c, char*[] bound, int* bound_count, char*[] read
                 *bound_count = saved;
             }
             return;
+        case ACMD_LETREC:
+            for (usz i = 0; i < c.prd_count; i++) { m1_lam_scan_prd(c.prds[i], bound, bound_count, reads, read_count, depth + 1); }
+            {
+                // The group's own names are bound for its body (and for each
+                // member's initializer, which is handled where the group is
+                // lowered), so a self or sibling reference is not a capture.
+                int saved = *bound_count;
+                for (usz i = 0; i < c.mbinder_count; i++) { if (c.mbinders[i] != null) { m1_lam_bind(bound, bound_count, c.mbinders[i].name); } }
+                m1_lam_scan_cmd(c.body, bound, bound_count, reads, read_count, depth + 1);
+                *bound_count = saved;
+            }
+            return;
         case ACMD_IF:
             m1_lam_scan_prd(c.prd, bound, bound_count, reads, read_count, depth + 1);
             m1_lam_scan_cmd(c.then_c, bound, bound_count, reads, read_count, depth + 1);
@@ -2404,7 +2481,10 @@ fn bool M1Gen.lambda_scan(M1Gen* g, AirPrd* p, bool diagnose,
     char*[] cap_names, char*[] cap_values, AirTyp*[] cap_types, bool[] cap_bools, bool[] cap_ptrs, int* cap_count_out,
     AirTyp*[] param_types, usz* param_count_out, AirTyp** ret_out)
 {
-    if (p == null || p.tag != APRD_LAMBDA || p.body == null || p.binder_count == 0 || p.binder_count > 15) { if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"malformed lambda producer"); } return false; }
+    // A nullary lambda is well formed: a recursive `letrec` member that takes no
+    // arguments is exactly `lam() -> ...`, and nothing in the lifting path needs
+    // at least one binder (the hidden `%env` parameter is separate).
+    if (p == null || p.tag != APRD_LAMBDA || p.body == null || p.binder_count > 15) { if (diagnose) { g.note_failure(p == null ? 0 : p.source_line, p == null ? 0 : p.source_col, (char*)"malformed lambda producer"); } return false; }
     if (!m1_lambda_cmd_ok(p.body, 0))
     { if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"lambda body uses a form outside the first-class closure subset (loops, labels, matches, effects)"); } return false; }
     char*[64] bound; int bound_count = 0;
@@ -2491,44 +2571,87 @@ fn AirTyp* M1Gen.lambda_closure_type(M1Gen* g, AirPrd* p)
     closure.args[0] = arrow; closure.args[1] = u8p; closure.arg_count = 2;
     return closure;
 }
-// Lift the lambda: render the body as a module-level function taking
-// `ptr %env` plus its binders, buffer the definition for end-of-function
-// flush, then materialize the { code, env } fat pointer in the current stream.
-fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
+// plan_lambda -- validate one `lam` against the live environment, resolve its
+// capture set and parameter/result types, and reserve its lifted symbol name.
+// Nothing is emitted and no state outside the LamInfo is changed apart from the
+// serial counter, so a recursive group can plan every member before rendering
+// any of them (which is what makes mutual recursion possible).
+fn bool M1Gen.plan_lambda(M1Gen* g, AirPrd* p, LamInfo* info, bool diagnose)
 {
-    if (g.current_function == null)
-    { g.note_failure(p.source_line, p.source_col, (char*)"lambda producers may only appear inside function bodies"); return null; }
-    char*[16] cap_names; char*[16] cap_values; AirTyp*[16] cap_types; bool[16] cap_bools; bool[16] cap_ptrs; int cap_count = 0;
-    AirTyp*[16] params; usz param_count = 0; AirTyp* ret = null;
+    if (info == null) { return false; }
+    // Fill the record explicitly rather than assigning an empty literal through
+    // the pointer: the arrays are only ever read up to the counts set here.
+    info.prd = p;
+    info.symbol = null;
+    info.closure_type = null;
+    info.cap_count = 0;
+    info.param_count = 0;
+    info.ret = null;
+    if (p == null || g.current_function == null)
+    {
+        if (diagnose) { g.note_failure(p != null ? p.source_line : 0, p != null ? p.source_col : 0, (char*)"lambda producers may only appear inside function bodies"); }
+        return false;
+    }
     if (g.for_depth > 0 || g.watch_active)
-    { g.note_failure(p.source_line, p.source_col, (char*)"closures cannot be created inside loop bodies yet"); return null; }
-    if (!g.lambda_scan(p, true, cap_names[..], cap_values[..], cap_types[..], cap_bools[..], cap_ptrs[..], &cap_count, params[..], &param_count, &ret)) { return null; }
-    AirTyp* closure_type = g.lambda_closure_type(p);
-    if (closure_type == null) { g.failed = true; return null; }
-    char* ret_ir = g.llvm_abi_return_text(ret);
-    char* closure_ir = g.llvm_value_type_text(closure_type);
-    if (ret_ir == null || closure_ir == null) { g.failed = true; return null; }
+    {
+        if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"closures cannot be created inside loop bodies yet"); }
+        return false;
+    }
+    char*[16] cn; char*[16] cv; AirTyp*[16] ct; bool[16] cb; bool[16] cp; AirTyp*[16] pd; usz pc = 0; AirTyp* ret = null;
+    int cc = 0;
+    if (!g.lambda_scan(p, diagnose, cn[..], cv[..], ct[..], cb[..], cp[..], &cc, pd[..], &pc, &ret)) { return false; }
+    if (cc > 16 || pc > 16) { if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"lambda exceeds the capture or parameter budget"); } return false; }
+    for (int k = 0; k < cc; k++)
+    {
+        info.cap_names[(usz)k] = cn[(usz)k];
+        info.cap_values[(usz)k] = cv[(usz)k];
+        info.cap_types[(usz)k] = ct[(usz)k];
+        info.cap_bools[(usz)k] = cb[(usz)k];
+        info.cap_ptrs[(usz)k] = cp[(usz)k];
+    }
+    for (usz k = 0; k < pc; k++) { info.params[k] = pd[k]; }
+    info.cap_count = cc;
+    info.param_count = pc;
+    info.ret = ret;
+    info.closure_type = g.lambda_closure_type(p);
+    if (info.closure_type == null) { g.failed = true; return false; }
     if (g.lam_serial >= 1000000 || g.lam_count >= 24)
-    { g.note_failure(p.source_line, p.source_col, (char*)"too many lifted closures in one function"); return null; }
+    {
+        if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"too many lifted closures in one function"); }
+        return false;
+    }
     char[160] name_buf;
     int nn = snprintf(&name_buf[0], 160, (char*)"pear2.lam.%s.%d", g.current_function, g.lam_serial);
     g.lam_serial++;
-    if (nn < 0 || nn >= 160) { g.failed = true; return null; }
-    char* lam_name = g.arena.dup(&name_buf[0], (usz)nn);
-    // Environment struct type from captured field types.
+    if (nn < 0 || nn >= 160) { g.failed = true; return false; }
+    info.symbol = g.arena.dup(&name_buf[0], (usz)nn);
+    return true;
+}
+
+// emit_lifted_function -- render one planned lambda as a module-level
+// definition taking `ptr %env` plus its binders, and buffer it for the
+// end-of-function flush. The body is emitted into a side stream with a saved
+// emission state so the enclosing function's block, env, and termination flags
+// survive; captures are re-read out of `%env` inside the body, never taken from
+// the enclosing function's SSA names.
+fn bool M1Gen.emit_lifted_function(M1Gen* g, LamInfo* info)
+{
+    if (info == null || info.prd == null || info.symbol == null) { return false; }
+    AirPrd* p = info.prd;
+    char* ret_ir = g.llvm_abi_return_text(info.ret);
+    if (ret_ir == null) { g.failed = true; return false; }
     char* env_ir = null;
-    if (cap_count > 0)
+    if (info.cap_count > 0)
     {
         AirTyp* env_struct = air_ir::air_mk_typ_simple(g.arena, ATYP_TUPLE);
-        if (env_struct == null) { g.failed = true; return null; }
-        for (int i = 0; i < cap_count; i++) { env_struct.args[(usz)i] = cap_types[(usz)i]; env_struct.arg_count++; }
+        if (env_struct == null) { g.failed = true; return false; }
+        for (int i = 0; i < info.cap_count; i++) { env_struct.args[(usz)i] = info.cap_types[(usz)i]; env_struct.arg_count++; }
         env_ir = g.llvm_value_type_text(env_struct);
-        if (env_ir == null) { g.failed = true; return null; }
+        if (env_ir == null) { g.failed = true; return false; }
     }
-    // Render the lifted body into a side buffer.
     char* body_buffer = null; usz body_size = 0;
     void* side = open_memstream(&body_buffer, &body_size);
-    if (side == null) { g.failed = true; return null; }
+    if (side == null) { g.failed = true; return false; }
     void* saved_out = g.out;
     char* saved_block = g.cur_block; bool saved_terminated = g.terminated;
     char* saved_current = g.current_function;
@@ -2540,47 +2663,47 @@ fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
     bool saved_guard = g.guard_active; char* saved_gn = g.guard_name; char* saved_gt = g.guard_true_label; char* saved_gf = g.guard_false_label;
     usz saved_env = g.env_count;
     g.out = side;
-    g.current_function = lam_name;
-    g.return_type = ret;
-    g.return_bool = m1_bool_type(ret); g.return_ptr = m1_pointer_repr_type(ret); g.return_unit = m1_unit_type(ret);
-    g.default_bits = m1_integer_type(ret) ? m1_int_bits(ret) : 64;
-    g.default_unsigned = m1_unsigned(ret);
+    g.current_function = info.symbol;
+    g.return_type = info.ret;
+    g.return_bool = m1_bool_type(info.ret); g.return_ptr = m1_pointer_repr_type(info.ret); g.return_unit = m1_unit_type(info.ret);
+    g.default_bits = m1_integer_type(info.ret) ? m1_int_bits(info.ret) : 64;
+    g.default_unsigned = m1_unsigned(info.ret);
     g.watch_active = false; g.watch_count = 0; g.branch_depth = 0; g.seq_depth = 0;
     g.guard_active = false; g.guard_name = null; g.guard_true_label = null; g.guard_false_label = null;
     g.terminated = false;
-    fprintf(side, "define internal %s @%s(ptr %%env", ret_ir, lam_name);
-    for (usz i = 0; i < param_count; i++)
+    fprintf(side, "define internal %s @%s(ptr %%env", ret_ir, info.symbol);
+    for (usz i = 0; i < info.param_count; i++)
     {
-        char* pt = g.llvm_value_type_text(params[i]);
-        if (pt == null) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return null; }
+        char* pt = g.llvm_value_type_text(info.params[i]);
+        if (pt == null) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return false; }
         fprintf(side, ", %s %%a%d", pt, (int)i);
     }
     fprintf(side, ") {\n");
     g.begin_block((char*)"entry");
-    for (int i = 0; i < cap_count; i++)
+    for (int i = 0; i < info.cap_count; i++)
     {
-        char* ft = g.llvm_value_type_text(cap_types[(usz)i]);
+        char* ft = g.llvm_value_type_text(info.cap_types[(usz)i]);
         char* gep = g.tmp(); char* ld = g.tmp();
-        if (ft == null || gep == null || ld == null) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return null; }
+        if (ft == null || gep == null || ld == null) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return false; }
         fprintf(side, "  %s = getelementptr %s, ptr %%env, i32 0, i32 %d\n", gep, env_ir, i);
         fprintf(side, "  %s = load %s, ptr %s, align 1\n", ld, ft, gep);
-        if (!g.bind_rep(cap_names[(usz)i], ld, cap_bools[(usz)i], cap_ptrs[(usz)i], cap_types[(usz)i])) { fclose(side); free(body_buffer); g.out = saved_out; return null; }
+        if (!g.bind_rep(info.cap_names[(usz)i], ld, info.cap_bools[(usz)i], info.cap_ptrs[(usz)i], info.cap_types[(usz)i])) { fclose(side); free(body_buffer); g.out = saved_out; return false; }
     }
-    for (usz i = 0; i < param_count; i++)
+    for (usz i = 0; i < info.param_count; i++)
     {
         AirBinder* b = p.binders[i];
         if (b == null || b.name == null || same(b.name, "_")) { continue; }
         char[16] an;
         int na = snprintf(&an[0], 16, (char*)"%%a%d", (int)i);
-        if (na < 0 || na >= 16) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return null; }
-        if (!g.bind_rep(b.name, g.arena.dup(&an[0], (usz)na), m1_bool_type(params[i]), m1_pointer_repr_type(params[i]), params[i])) { fclose(side); free(body_buffer); g.out = saved_out; return null; }
+        if (na < 0 || na >= 16) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return false; }
+        if (!g.bind_rep(b.name, g.arena.dup(&an[0], (usz)na), m1_bool_type(info.params[i]), m1_pointer_repr_type(info.params[i]), info.params[i])) { fclose(side); free(body_buffer); g.out = saved_out; return false; }
     }
     char* lam_body_ret = m1_cmd_return_covar(p.body, 0);
     if (lam_body_ret == null) { lam_body_ret = (char*)"%ret"; }
     bool cmd_ok = g.command(p.body, lam_body_ret);
     bool body_ok = cmd_ok && g.terminated;
     if (body_ok) { fprintf(side, "}\n"); }
-    if (fclose(side) != 0) { g.out = saved_out; g.failed = true; return null; }
+    if (fclose(side) != 0) { g.out = saved_out; g.failed = true; return false; }
     // Restore the enclosing emission state before touching its stream again.
     g.out = saved_out; g.cur_block = saved_block; g.terminated = saved_terminated;
     g.current_function = saved_current;
@@ -2595,31 +2718,62 @@ fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
         // The lifted body failed to emit under the closure subset; the generic
         // "could not lower" message alone violates fail-closed diagnostics.
         g.note_failure(p.source_line, p.source_col, (char*)"closure body could not be emitted (captured raw-pointer element type is indeterminate; ascribe element usage or prefer typed load/store)");
-        free(body_buffer); return null;
+        free(body_buffer); return false;
     }
     g.lam_buffers[(usz)g.lam_count] = body_buffer; g.lam_sizes[(usz)g.lam_count] = body_size; g.lam_count++;
-    // Materialize the environment and the fat closure value in the host stream.
-    char* env_operand = (char*)"null";
-    if (cap_count > 0)
+    return true;
+}
+
+// materialize_env -- build the capture struct in the enclosing function and
+// return the pointer the closure carries. No captures means the canonical null
+// environment, which is exactly what a lifted function ignores.
+fn char* M1Gen.materialize_env(M1Gen* g, LamInfo* info)
+{
+    if (info == null) { return null; }
+    if (info.cap_count <= 0) { return (char*)"null"; }
+    AirTyp* env_struct = air_ir::air_mk_typ_simple(g.arena, ATYP_TUPLE);
+    if (env_struct == null) { g.failed = true; return null; }
+    for (int i = 0; i < info.cap_count; i++) { env_struct.args[(usz)i] = info.cap_types[(usz)i]; env_struct.arg_count++; }
+    char* env_ir = g.llvm_value_type_text(env_struct);
+    char* slot = g.tmp();
+    if (env_ir == null || slot == null) { g.failed = true; return null; }
+    fprintf(g.out, "  %s = alloca %s, align 8\n", slot, env_ir);
+    for (int i = 0; i < info.cap_count; i++)
     {
-        char* slot = g.tmp();
-        if (slot == null) { g.failed = true; return null; }
-        fprintf(g.out, "  %s = alloca %s, align 8\n", slot, env_ir);
-        for (int i = 0; i < cap_count; i++)
-        {
-            char* ft = g.llvm_value_type_text(cap_types[(usz)i]);
-            char* gep = g.tmp();
-            if (ft == null || gep == null) { g.failed = true; return null; }
-            fprintf(g.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n", gep, env_ir, slot, i);
-            fprintf(g.out, "  store %s %s, ptr %s, align 1\n", ft, cap_values[(usz)i], gep);
-        }
-        env_operand = slot;
+        char* ft = g.llvm_value_type_text(info.cap_types[(usz)i]);
+        char* gep = g.tmp();
+        if (ft == null || gep == null) { g.failed = true; return null; }
+        fprintf(g.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n", gep, env_ir, slot, i);
+        fprintf(g.out, "  store %s %s, ptr %s, align 1\n", ft, info.cap_values[(usz)i], gep);
     }
+    return slot;
+}
+
+// materialize_closure -- the fat `{ code, env }` value itself. A null
+// environment operand is the canonical "captures nothing" pointer.
+fn char* M1Gen.materialize_closure(M1Gen* g, LamInfo* info, char* env_operand)
+{
+    if (info == null || info.symbol == null || info.closure_type == null) { g.failed = true; return null; }
+    char* closure_ir = g.llvm_value_type_text(info.closure_type);
+    if (closure_ir == null) { g.failed = true; return null; }
+    char* env_text = env_operand != null ? env_operand : (char*)"null";
     char* c0 = g.tmp(); char* c1 = g.tmp();
     if (c0 == null || c1 == null) { g.failed = true; return null; }
-    fprintf(g.out, "  %s = insertvalue %s undef, ptr @%s, 0\n", c0, closure_ir, lam_name);
-    fprintf(g.out, "  %s = insertvalue %s %s, ptr %s, 1\n", c1, closure_ir, c0, env_operand);
+    fprintf(g.out, "  %s = insertvalue %s undef, ptr @%s, 0\n", c0, closure_ir, info.symbol);
+    fprintf(g.out, "  %s = insertvalue %s %s, ptr %s, 1\n", c1, closure_ir, c0, env_text);
     return c1;
+}
+
+// Lift the lambda: plan it, render its definition, then materialize the
+// { code, env } fat pointer in the current stream.
+fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
+{
+    LamInfo info = {};
+    if (!g.plan_lambda(p, &info, true)) { return null; }
+    if (!g.emit_lifted_function(&info)) { return null; }
+    char* env_operand = g.materialize_env(&info);
+    if (env_operand == null) { return null; }
+    return g.materialize_closure(&info, env_operand);
 }
 // Append buffered lifted-closure definitions after the enclosing function.
 fn bool M1Gen.flush_lambdas(M1Gen* g)
@@ -2854,6 +3008,21 @@ fn char* M1Gen.prd(M1Gen* g, AirPrd* p)
     }
     if (p.tag == APRD_VAR)
     {
+        // Inside a lifted member, naming the group is the only way to reach the
+        // closure value: the environment holds nothing for a non-capturing
+        // group, so the constant { code, null } is rebuilt here. LLVM folds the
+        // extractvalue pair back into a direct call.
+        if (g.env_index(p.name) < 0)
+        {
+            int ri = g.rec_index(p.name);
+            if (ri >= 0)
+            {
+                LamInfo rec = {};
+                rec.symbol = g.rec_symbols[(usz)ri];
+                rec.closure_type = g.rec_types[(usz)ri];
+                return g.materialize_closure(&rec, null);
+            }
+        }
         AirTyp* value_type = g.expr_type(p);
         if (m1_function_pointer_type(value_type)) { return g.pointer_value(p); }
         char* value = g.lookup(p.name);
@@ -5195,6 +5364,7 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
 
         return ok;
     }
+    if (c.tag == ACMD_LETREC) { return g.lower_letrec(c, ret_name); }
     if (c.tag == ACMD_MATCH) { return g.match_cmd(c, ret_name); }
     if (c.tag == ACMD_CUT)
     {
@@ -5314,6 +5484,10 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     g.terminated = false;
     g.has_for = false; g.for_depth = 0; g.seq_depth = 0; g.fx_depth = 0; g.mu_depth = 0; g.mu_drain_count = 0; g.in_label_replay = false;
     g.watch_active = false; g.watch_count = 0; g.branch_depth = 0; g.watch_branch_depth = 0;
+    // Closure lifting state is per function: a recursive group left registered by
+    // an earlier function would make an unrelated name resolve to a stale symbol.
+    g.rec_count = 0; g.relax_recursive_inference = false;
+    g.lam_count = 0; g.lam_serial = 0;
     AirCmd* body = d.def_body;
     char* ret_name = null;
     if (body != null && body.tag == ACMD_MUTILDE) { ret_name = body.binder; body = body.body; }
@@ -5378,21 +5552,6 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     fprintf(g.out, "}\n");
     return g.flush_lambdas();
 }
-fn bool m1_contains_letrec(AirCmd* c, int depth)
-{
-    if (c == null || depth >= 128) { return false; }
-    if (c.tag == ACMD_LETREC) { return true; }
-    if (m1_contains_letrec(c.body, depth + 1) || m1_contains_letrec(c.next, depth + 1) ||
-        m1_contains_letrec(c.then_c, depth + 1) || m1_contains_letrec(c.else_c, depth + 1) ||
-        m1_contains_letrec(c.handled, depth + 1)) { return true; }
-    for (usz i = 0; i < c.branch_count; i++)
-    {
-        AirBranch* branch = c.branches[i];
-        if (branch != null && (m1_contains_letrec(branch.body, depth + 1) || m1_contains_letrec(branch.guard, depth + 1))) { return true; }
-    }
-    return false;
-}
-
 fn bool append_text(char* out, usz cap, usz* length, char* text)
 {
     for (usz i = 0; text[i] != 0; i++)
@@ -6044,7 +6203,8 @@ fn int main(String[] args)
     fprintf(f, "declare void @llvm.trap()\ndeclare void @llvm.assume(i1 noundef)\ndeclare ptr @llvm.stacksave()\ndeclare void @llvm.stackrestore(ptr)\n");
     M1Gen g;
     g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = root_decl_count;
-    g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0; g.default_unsigned = false; g.default_bits = 64; g.return_type = null; g.return_bool = false; g.return_ptr = false; g.return_unit = false; g.terminated = false; g.failed = false;    g.low_profile = mod.low; g.input_path = input; g.current_function = null; g.string_count = 0; g.provenance_count = 0; g.fx_depth = 0; g.fail_line = 0; g.fail_col = 0; g.last_line = 0; g.last_col = 0; g.fail_form = null; g.error = null;
+    g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0; g.default_unsigned = false; g.default_bits = 64; g.return_type = null; g.return_bool = false; g.return_ptr = false; g.return_unit = false; g.terminated = false; g.failed = false;    g.low_profile = mod.low; g.input_path = input; g.current_function = null; g.string_count = 0;
+    g.rec_count = 0; g.relax_recursive_inference = false; g.lam_count = 0; g.lam_serial = 0; g.provenance_count = 0; g.fx_depth = 0; g.fail_line = 0; g.fail_col = 0; g.last_line = 0; g.last_col = 0; g.fail_form = null; g.error = null;
     if (!g.emit_data_types())
     {
         fclose(f); free(mod_text);
@@ -6071,8 +6231,7 @@ fn int main(String[] args)
         {
             if (g.fail_form == null)
             {
-                if (m1_contains_letrec(d.def_body, 0)) { printf("pear2c: unsupported AIR construct `letrec` in function `%s`\n", d.name == null ? (char*)"?" : d.name); }
-                else { printf("pear2c: could not lower function `%s` in the supported PEAR2 subset\n", d.name == null ? (char*)"?" : d.name); }
+                printf("pear2c: could not lower function `%s` in the supported PEAR2 subset\n", d.name == null ? (char*)"?" : d.name);
             }
             emitted = false;
             break;

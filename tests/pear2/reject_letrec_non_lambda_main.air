@@ -1,0 +1,12 @@
+// PEAR 2 rejects a `letrec` group whose initializer is not a lambda.
+//
+// Recursion is lowered by lifting each member to a module-level function; an
+// arbitrary initializer has no lifted definition to call, so the group is not
+// expressible without a fixpoint over stored values, which the backend does not
+// model. The group is refused with a positioned diagnostic naming the rule.
+air 2.2 Main "reject_letrec_non_lambda_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    letrec (answer = 42 : i64) in
+      <answer | %ret>;
