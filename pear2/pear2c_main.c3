@@ -25,8 +25,9 @@ extern fn int getpid();
 extern fn int system(char* command) @cname("system");
 extern fn char* getenv(char* name) @cname("getenv");
 // LLVM C API: parse the generated textual module, verify it, run LLVM's own
-// optimisation pipeline over it, then serialize the verified module as LLVM
-// bitcode. PEAR 2 owns this path; it does not call PEAR 1 or air_ll.
+// optimisation pipeline over it, then publish it as bitcode, as text, or as
+// native object code from LLVM's backend. PEAR 2 owns this path; it does not
+// call PEAR 1 or air_ll.
 //
 // The module text is rendered into memory and parsed from that buffer, so the
 // success path writes no temporary .ll file. The buffer is named with the input
@@ -42,13 +43,37 @@ extern fn int ll_print_module(void* m, char* path) @cname("LLVMPrintModuleToFile
 extern fn void ll_module_dispose(void* m) @cname("LLVMDisposeModule");
 extern fn void ll_message_dispose(char* msg) @cname("LLVMDisposeMessage");
 // Optimisation: LLVMRunPasses with a `default<On>` pipeline is the same set of
-// passes LLVM runs on a .ll input. No target machine is needed -- target
-// specific passes only run at codegen/link time, which is clang's job here.
+// passes LLVM runs on a .ll input. It is called with a null target machine: the
+// pipeline is target independent, and target-specific passes belong to codegen,
+// which m1_emit_object drives below.
 extern fn void* ll_create_pb_opts() @cname("LLVMCreatePassBuilderOptions");
 extern fn void ll_dispose_pb_opts(void* o) @cname("LLVMDisposePassBuilderOptions");
 extern fn void ll_pb_set_inliner_threshold(void* o, int t) @cname("LLVMPassBuilderOptionsSetInlinerThreshold");
 extern fn void* ll_run_passes(void* m, char* passes, void* tm, void* o) @cname("LLVMRunPasses");
 extern fn char* ll_get_err_msg(void* e) @cname("LLVMGetErrorMessage");
+// Code generation: the target machine turns the verified in-process module into
+// a real object file, so PEAR 2's machine code comes from LLVM's own backend
+// inside this process instead of from an external clang invocation.
+// LLVMCodeGenOptLevel: None=0, Less=1, Default=2, Aggressive=3.
+// LLVMRelocMode: Default=0, Static=1, PIC=2, DynamicNoPic=3.
+// LLVMCodeModel: Default=0, then JITDefault/Tiny/Small/... in an order that has
+// changed between LLVM releases, so only the version-stable Default is used --
+// x86-64 already defaults to the small model.
+// LLVMCodeGenFileType: AssemblyFile=0, ObjectFile=1.
+const int LLVM_CG_OBJ_FILE = 1;
+const int LLVM_CODEGEN_DEFAULT = 2;
+const int LLVM_RELOC_STATIC = 1;
+const int LLVM_CODE_MODEL_DEFAULT = 0;
+extern fn void ll_init_x86_ti() @cname("LLVMInitializeX86TargetInfo");
+extern fn void ll_init_x86_t() @cname("LLVMInitializeX86Target");
+extern fn void ll_init_x86_tmc() @cname("LLVMInitializeX86TargetMC");
+extern fn void ll_init_x86_asmp() @cname("LLVMInitializeX86AsmPrinter");
+extern fn void ll_init_x86_asmpa() @cname("LLVMInitializeX86AsmParser");
+extern fn char* ll_get_triple(void* m) @cname("LLVMGetTargetTriple");
+extern fn int ll_get_target_from_triple(char* triple, void** target, char** msg) @cname("LLVMGetTargetFromTriple");
+extern fn void* ll_create_tm(void* target, char* triple, char* cpu, char* features, int level, int reloc, int model) @cname("LLVMCreateTargetMachine");
+extern fn void ll_dispose_tm(void* tm) @cname("LLVMDisposeTargetMachine");
+extern fn int ll_tm_emit_to_file(void* tm, void* m, char* path, int file_type, char** msg) @cname("LLVMTargetMachineEmitToFile");
 fn bool same(char* a, char* b)
 {
     if (a == null || b == null) { return a == b; }
@@ -5340,20 +5365,110 @@ fn bool append_shell_word(char* out, usz cap, usz* length, char* word)
     out[*length] = 0;
     return true;
 }
-fn bool make_executable(char* bitcode, char* output)
+// m1_emit_object -- run LLVM's own instruction selection over the verified
+// in-process module and write a native object. This is the step clang used to
+// perform: the module never leaves the process, no textual IR is handed to an
+// external compiler, and the object is produced by the same LLVM the bitcode
+// comes from. Only the x86-64 backend is registered, so any other triple fails
+// closed with LLVM's message instead of emitting a wrong-architecture file.
+//
+// Instruction selection always runs at LLVM's default codegen level. The -O
+// tier was already applied to the IR by m1_optimize_llvm (and to the AIR by
+// pear2_opt); letting codegen vary as well would make one flag mean two
+// different things.
+fn bool m1_emit_object(void* m, char* path, char** failure)
 {
-    char* clang = getenv((char*)"PEAR2_CLANG");
-    if (clang == null || clang[0] == 0) { clang = (char*)"clang"; }
+    if (failure != null) { *failure = null; }
+    if (m == null) { return false; }
+    char* triple = ll_get_triple(m);
+    if (triple == null || triple[0] == 0)
+    {
+        if (failure != null) { *failure = (char*)"the module does not name a target triple"; }
+        return false;
+    }
+    ll_init_x86_ti();
+    ll_init_x86_t();
+    ll_init_x86_tmc();
+    ll_init_x86_asmp();
+    ll_init_x86_asmpa();
+    void* target = null;
+    char* err = null;
+    if (ll_get_target_from_triple(triple, &target, &err) != 0 || target == null)
+    {
+        if (failure != null) { *failure = err == null ? (char*)"unknown target triple for object emission" : err; }
+        else if (err != null) { ll_message_dispose(err); }
+        return false;
+    }
+    void* tm = ll_create_tm(target, triple, (char*)"", (char*)"", LLVM_CODEGEN_DEFAULT, LLVM_RELOC_STATIC, LLVM_CODE_MODEL_DEFAULT);
+    if (tm == null)
+    {
+        if (failure != null) { *failure = (char*)"could not create a target machine"; }
+        return false;
+    }
+    int rc = ll_tm_emit_to_file(tm, m, path, LLVM_CG_OBJ_FILE, &err);
+    ll_dispose_tm(tm);
+    if (rc != 0)
+    {
+        if (failure != null) { *failure = err == null ? (char*)"target machine could not emit an object" : err; }
+        else if (err != null) { ll_message_dispose(err); }
+        return false;
+    }
+    if (err != null) { ll_message_dispose(err); }
+    return true;
+}
+
+// m1_link_object -- link the object PEAR 2 just produced. The object is ours, so
+// the driver is only a linker: glibc's crt1.o supplies `_start` (which calls
+// `main`), crti.o/crtn.o bracket the init/fini arrays, and -lc resolves the C
+// symbols the runtime declares. PEAR 1 links with the same flag set.
+//
+// LD_LIBRARY_PATH is cleared for the command: the compiler runs with a directory
+// on that path that holds LLVM's libc shim, and ld would try to parse it as
+// libc. PEAR2_CRT_DIR overrides where crt1.o/crti.o/crtn.o are found;
+// PEAR2_LINK=clang swaps in a clang driver over the same object.
+fn bool m1_link_object(char* object, char* output)
+{
     char[16384] command;
     usz length = 0;
-    // Codegen only: optimisation already happened in m1_optimize_llvm() (and in
-    // pear2_opt) before the bitcode was written, so clang must not run a second
-    // -O pipeline over it.
-    if (!append_shell_word(&command[0], 16384, &length, clang) ||
-        !append_text(&command[0], 16384, &length, (char*)" -Wno-override-module ") ||
-        !append_shell_word(&command[0], 16384, &length, bitcode) ||
-        !append_text(&command[0], 16384, &length, (char*)" -O0 -o ") ||
-        !append_shell_word(&command[0], 16384, &length, output)) { return false; }
+    char* driver = getenv((char*)"PEAR2_LINK");
+    if (driver != null && same(driver, (char*)"clang"))
+    {
+        char* clang = getenv((char*)"PEAR2_CLANG");
+        if (clang == null || clang[0] == 0) { clang = (char*)"clang"; }
+        // clang only drives the linker here; the object is already machine code.
+        if (!append_shell_word(&command[0], 16384, &length, clang) ||
+            !append_text(&command[0], 16384, &length, (char*)" -o ") ||
+            !append_shell_word(&command[0], 16384, &length, output) ||
+            !append_text(&command[0], 16384, &length, (char*)" ") ||
+            !append_shell_word(&command[0], 16384, &length, object)) { return false; }
+        return system(&command[0]) == 0;
+    }
+    char* crt = getenv((char*)"PEAR2_CRT_DIR");
+    if (crt == null || crt[0] == 0) { crt = (char*)"/usr/lib/x86_64-linux-gnu"; }
+    char[4096] lib_flag;
+    char[4096] crt1;
+    char[4096] crti;
+    char[4096] crtn;
+    int lf = snprintf(&lib_flag[0], 4096, (char*)"-L%s", crt);
+    int c1 = snprintf(&crt1[0], 4096, (char*)"%s/crt1.o", crt);
+    int ci = snprintf(&crti[0], 4096, (char*)"%s/crti.o", crt);
+    int cn = snprintf(&crtn[0], 4096, (char*)"%s/crtn.o", crt);
+    if (lf < 0 || (usz)lf >= 4096 || c1 < 0 || (usz)c1 >= 4096 || ci < 0 || (usz)ci >= 4096 ||
+        cn < 0 || (usz)cn >= 4096) { return false; }
+    if (!append_text(&command[0], 16384, &length, (char*)"LD_LIBRARY_PATH= ld ") ||
+        !append_shell_word(&command[0], 16384, &length, &lib_flag[0]) ||
+        !append_text(&command[0], 16384, &length, (char*)" -L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu ") ||
+        !append_shell_word(&command[0], 16384, &length, &crt1[0]) ||
+        !append_text(&command[0], 16384, &length, (char*)" ") ||
+        !append_shell_word(&command[0], 16384, &length, &crti[0]) ||
+        !append_text(&command[0], 16384, &length, (char*)" ") ||
+        !append_shell_word(&command[0], 16384, &length, object) ||
+        !append_text(&command[0], 16384, &length, (char*)" ") ||
+        !append_shell_word(&command[0], 16384, &length, &crtn[0]) ||
+        !append_text(&command[0], 16384, &length, (char*)" -o ") ||
+        !append_shell_word(&command[0], 16384, &length, output) ||
+        !append_text(&command[0], 16384, &length,
+                     (char*)" --entry=_start -no-pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 -lc")) { return false; }
     return system(&command[0]) == 0;
 }
 // m1_optimize_llvm -- run LLVM's own optimisation pipeline over the parsed
@@ -5401,7 +5516,7 @@ fn bool m1_optimize_llvm(void* m, int opt_level, char** failure)
     return ok;
 }
 // Output modes: 0 = native executable, 1 = LLVM bitcode, 2 = textual LLVM IR.
-fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, char* temp_bc, char* temp_exe)
+fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, char* temp_bc, char* temp_exe, char* temp_obj)
 {
     int slash = -1;
     int dot = -1;
@@ -5416,6 +5531,7 @@ fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, cha
     if (stem + 4 >= cap) { return false; }
     for (usz i = 0; i < stem; i++) { out[i] = input[i]; }
     if (mode == 0) { out[stem] = 0; }
+    else if (mode == 3) { out[stem] = '.'; out[stem + 1] = 'o'; out[stem + 2] = 0; }
     else
     {
         out[stem] = '.'; out[stem + 1] = mode == 1 ? 'b' : 'l'; out[stem + 2] = mode == 1 ? 'c' : 'l'; out[stem + 3] = 0;
@@ -5424,22 +5540,26 @@ fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, cha
     int ll_n = snprintf(temp_ll, cap, (char*)"%s.pear2-%ld.ll", out, pid);
     int bc_n = snprintf(temp_bc, cap, (char*)"%s.pear2-%ld.tmp.bc", out, pid);
     int exe_n = snprintf(temp_exe, cap, (char*)"%s.pear2-%ld.tmp.exe", out, pid);
-    return ll_n >= 0 && (usz)ll_n < cap && bc_n >= 0 && (usz)bc_n < cap && exe_n >= 0 && (usz)exe_n < cap;
+    int obj_n = snprintf(temp_obj, cap, (char*)"%s.pear2-%ld.tmp.o", out, pid);
+    return ll_n >= 0 && (usz)ll_n < cap && bc_n >= 0 && (usz)bc_n < cap && exe_n >= 0 && (usz)exe_n < cap &&
+           obj_n >= 0 && (usz)obj_n < cap;
 }
 fn void clear_stale_outputs(char* input)
 {
-    for (int mode = 0; mode <= 2; mode++)
+    for (int mode = 0; mode <= 3; mode++)
     {
         char[4096] out_path;
         char[4096] ll_path;
         char[4096] bc_tmp;
         char[4096] exe_tmp;
-        if (make_paths(input, mode, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0]))
+        char[4096] obj_tmp;
+        if (make_paths(input, mode, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
         {
             (void)remove(&out_path[0]);
             (void)remove(&ll_path[0]);
             (void)remove(&bc_tmp[0]);
             (void)remove(&exe_tmp[0]);
+            (void)remove(&obj_tmp[0]);
         }
     }
 }
@@ -5449,6 +5569,7 @@ fn int main(String[] args)
     bool quiet = false;
     bool emit_exe = true;
     bool emit_ll = false;
+    bool emit_obj = false;
     bool mode_seen = false;
     int opt_level = 2;
     bool show_opt_stats = false;
@@ -5460,20 +5581,28 @@ fn int main(String[] args)
         if (same(a, "--quiet")) { quiet = true; }
         else if (same(a, "--emit-exe"))
         {
-            if (mode_seen && (emit_ll || !emit_exe)) { usage_error = true; }
-            else { emit_exe = true; emit_ll = false; mode_seen = true; }
+            if (mode_seen && (emit_ll || emit_obj || !emit_exe)) { usage_error = true; }
+            else { emit_exe = true; emit_ll = false; emit_obj = false; mode_seen = true; }
         }
         else if (same(a, "--emit-bc"))
         {
-            if (mode_seen && (emit_ll || emit_exe)) { usage_error = true; }
-            else { emit_exe = false; emit_ll = false; mode_seen = true; }
+            if (mode_seen && (emit_ll || emit_obj || emit_exe)) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; mode_seen = true; }
         }
         // --emit-ll publishes the verified textual IR after the optimization
         // pipeline, so -O0 passes and lowered shapes can be inspected directly.
         else if (same(a, "--emit-ll"))
         {
             if (mode_seen) { usage_error = true; }
-            else { emit_exe = false; emit_ll = true; mode_seen = true; }
+            else { emit_exe = false; emit_ll = true; emit_obj = false; mode_seen = true; }
+        }
+        // --emit-obj publishes the machine-code object LLVM's backend produced
+        // in process: the same code the executable is linked from, with no
+        // linker involved.
+        else if (same(a, "--emit-obj"))
+        {
+            if (mode_seen) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = true; mode_seen = true; }
         }
         else if (same(a, "-O0")) { opt_level = 0; }
         else if (same(a, "-O1")) { opt_level = 1; }
@@ -5515,10 +5644,10 @@ fn int main(String[] args)
     }
     if (input == null)
     {
-        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-ll] [-O0|-O1|-O2|-O3] [--target=x86_64|wasm32-freestanding] [--stats] [--quiet]\n");
+        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-ll] [-O0|-O1|-O2|-O3] [--target=x86_64|wasm32-freestanding] [--stats] [--quiet]\n");
         return 2;
     }
-    if (g_m1_target_freestanding && emit_exe)
+    if (g_m1_target_freestanding && (emit_exe || emit_obj))
     {
         clear_stale_outputs(input);
         printf("pear2c: --target=wasm32-freestanding emits LLVM IR or bitcode only; use --emit-ll/--emit-bc and link with a wasm toolchain\n");
@@ -5530,7 +5659,8 @@ fn int main(String[] args)
     char[4096] ll_path;
     char[4096] bc_tmp;
     char[4096] exe_tmp;
-    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : 1), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0]))
+    char[4096] obj_tmp;
+    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : (emit_obj ? 3 : 1)), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
     {
         printf("pear2c: output path too long\n"); return 2;
     }
@@ -5558,9 +5688,7 @@ fn int main(String[] args)
     opt_stats.branch_reductions = 0;
     opt_stats.let_specializations = 0;
     opt_stats.dead_bindings = 0;
-    opt_stats.copy_propagations = 0;
     opt_stats.drop_dead = false;
-    opt_stats.propagate_copies = false;
     opt_stats.arena = null;
     if (opt_level > 0)
     {
@@ -5580,7 +5708,6 @@ fn int main(String[] args)
             opt_stats.branch_reductions += pass_stats.branch_reductions;
             opt_stats.let_specializations += pass_stats.let_specializations;
             opt_stats.dead_bindings += pass_stats.dead_bindings;
-            opt_stats.copy_propagations += pass_stats.copy_propagations;
             if (pass_stats.rewrites == 0) { break; }
         }
         int[8] post_counts;
@@ -5594,11 +5721,11 @@ fn int main(String[] args)
     }
     if (show_opt_stats)
     {
-        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u copies=%u level=%d passes=%d\n",
+        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u level=%d passes=%d\n",
                opt_level > 0 ? "enabled" : "disabled", opt_stats.rewrites, opt_stats.constant_folds,
                opt_stats.operand_rewrites, opt_stats.strength_reductions, opt_stats.shift_combinations,
                opt_stats.branch_reductions, opt_stats.let_specializations, opt_stats.dead_bindings,
-               opt_stats.copy_propagations, opt_level, opt_passes);
+               opt_level, opt_passes);
     }
     // AIR carries candidate claims, never trusted backend facts; recompute facts
     // on the exact post-optimization graph consumed by the lowering pass.
@@ -5814,6 +5941,7 @@ fn int main(String[] args)
     void* mb = null;
     void* m = null;
     char* msg = null;
+    char* obj_msg = null;
     int rc = 0;
     // Determinism: the buffer is named with the input path, so the module's
     // source identifier comes out as that path (the old code had to rewrite a
@@ -5848,6 +5976,17 @@ fn int main(String[] args)
             printf("pear2c: LLVM verifier rejected the optimised module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
             rc = 3;
         }
+        else if (emit_exe || emit_obj)
+        {
+            // Machine code from LLVM's backend in this process. No clang, no
+            // temporary .bc, no textual IR handed to another compiler.
+            if (!m1_emit_object(m, &obj_tmp[0], &obj_msg))
+            {
+                printf("pear2c: LLVM could not emit native object code%s%s\n",
+                       obj_msg == null ? "" : ": ", obj_msg == null ? "" : obj_msg);
+                rc = 3;
+            }
+        }
         else if (!emit_ll && ll_write_bitcode(m, &bc_tmp[0]) != 0)
         {
             printf("pear2c: LLVM failed to write bitcode\n");
@@ -5871,14 +6010,15 @@ fn int main(String[] args)
         }
     }
     if (msg != null) { ll_message_dispose(msg); }
+    if (obj_msg != null) { ll_message_dispose(obj_msg); }
     if (m != null) { ll_module_dispose(m); }
     if (ctx != null) { ll_context_dispose(ctx); }
     free(mod_text);
     if (rc == 0 && emit_exe && !emit_ll)
     {
-        if (!make_executable(&bc_tmp[0], &exe_tmp[0]))
+        if (!m1_link_object(&obj_tmp[0], &exe_tmp[0]))
         {
-            printf("pear2c: native linker failed (set PEAR2_CLANG to an LLVM-compatible clang)\n");
+            printf("pear2c: native link failed (set PEAR2_LINK=clang to link the object with a clang driver, PEAR2_CRT_DIR to relocate crt1.o/crti.o/crtn.o)\n");
             rc = 3;
         }
         else if (rename(&exe_tmp[0], &out_path[0]) != 0)
@@ -5887,13 +6027,18 @@ fn int main(String[] args)
             rc = 3;
         }
     }
-    else if (rc == 0 && !emit_ll && rename(&bc_tmp[0], &out_path[0]) != 0)
+    else if (rc == 0 && !emit_ll)
     {
-        printf("pear2c: could not publish bitcode atomically\n");
-        rc = 3;
+        char* produced = emit_obj ? &obj_tmp[0] : &bc_tmp[0];
+        if (rename(produced, &out_path[0]) != 0)
+        {
+            printf("pear2c: could not publish %s atomically\n", emit_obj ? (char*)"object file" : (char*)"bitcode");
+            rc = 3;
+        }
     }
     (void)remove(&bc_tmp[0]);
     (void)remove(&exe_tmp[0]);
+    (void)remove(&obj_tmp[0]);
     if (rc != 0) { (void)remove(&out_path[0]); }
     else if (!quiet) { printf("pear2c: wrote %s\n", &out_path[0]); }
     arena.destroy();

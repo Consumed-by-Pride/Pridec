@@ -1,10 +1,19 @@
 // PEAR 2's conservative AIR optimization pipeline.
 //
-// This pass avoids target-dependent type guesses and rewrites integer constant
+// Pass 1 is an expression-local, bottom-up rewrite: constant folding, algebraic
+// and boolean identities, power-of-two strength reduction, shift combination,
+// literal-branch selection, and the restricted constant-let specializations.
+// It avoids target-dependent type guesses and rewrites integer constant
 // expressions only when host arithmetic is defined and the result fits the
 // resolved integer width (or the default i64 literal representation). Integer
 // identities require matching resolved representations; boolean branches must
 // reduce to literals. Unsupported or ambiguous expressions remain unchanged.
+//
+// Pass 2 removes dead bindings (see the comment above opt_droppable_value); it
+// runs only at -O2 and above. Both passes are driven by optimize_module_at,
+// which is where the -O tier selects *which* passes run. pear2c then iterates
+// that set to a fixed point and hands the result to LLVM for the machine-level
+// work the AIR is not the right level for (mem2reg/SROA, CSE, inlining, loops).
 module pear2_opt;
 
 import air_ir;
@@ -19,9 +28,7 @@ struct OptStats
     uint branch_reductions;
     uint let_specializations;
     uint dead_bindings;      // pass 2: unused literal/variable bindings removed
-    uint copy_propagations;  // pass 2: `let x = y` aliases resolved to y
     bool drop_dead;          // pass 2 is enabled at -O2 and above
-    bool propagate_copies;   // pass 2 is enabled at -O2 and above
     AirArena* arena;
 }
 
@@ -969,27 +976,32 @@ fn void OptStats.fold_unary(OptStats* s, AirPrd* p)
     if (opt_integer_fits(result, bits, uns)) { s.set_int(p, result); }
 }
 
-// ── Pass 2: bindings LLVM cannot drop for us ─────────────────────────────
+// ── Pass 2: dead binding elimination ─────────────────────────────────────
 //
-// Two AIR-level transforms run after folding, before emission:
+// `let x = <literal|variable>` where x never appears in the body. Dropping it
+// stops PEAR 2 from materialising a slot for a value nothing reads, and it
+// removes the binding before the emitter has to lower its initialiser, so a
+// dead binding can no longer make an otherwise-supported function fail closed.
 //
-//   dead binding      `let x = <literal|variable>` where x never appears in the
-//                     body. Dropping it stops PEAR 2 from materialising a slot
-//                     for a value nothing reads.
-//   copy propagation  `let x = y` where every occurrence of x is a plain
-//                     variable producer. The binding is an alias the emitter
-//                     must resolve one hop at a time; renaming the uses to y
-//                     removes it.
+// Two restrictions keep it sound:
 //
-// Both are restricted to values with no effect (literals and variables), so
-// deleting them cannot discard work. Both also refuse when the name shows up
-// anywhere else in the body -- as a binder, match-pattern binder, covariable,
-// jump argument, label, subst entry, or an operand of a non-variable producer.
-// That "absent everywhere, or present *only* as a variable use" test is
-// deliberately stronger than a use count: it cannot be fooled by shadowing, and
-// it cannot miss a name that reaches the emitter through an unusual field.
-// Copy propagation additionally runs the same test against the *source* name,
-// because renaming x to y would be captured by any inner binding of y.
+//   inert value   the initialiser is a literal or a variable, so deleting the
+//                 binding cannot discard an effect or a trap.
+//   absent name   the name must not appear anywhere in the body -- not as a
+//                 use, not as a binder, match-pattern binder, covariable, jump
+//                 argument, label, subst entry, or the name carried by a
+//                 non-variable producer. That test is deliberately stronger
+//                 than a use count: it cannot be fooled by shadowing, and it
+//                 cannot miss a name that reaches the emitter through an
+//                 unusual field.
+//
+// Copy propagation (`let x = y` rewritten to use y directly) is deliberately
+// NOT done here. PEAR 2 lowers mutable locals to allocas, so `let x = y` is a
+// snapshot of a load; renaming the uses would re-load the slot and observe
+// later writes. Deciding that a name is an immutable binding needs the
+// emitter's scope and mutability information, which this pass does not have --
+// and the transform would buy nothing anyway, because the emitter already
+// binds AIR names to SSA values, so an alias costs no instructions.
 
 fn bool opt_droppable_value(AirPrd* p)
 {
@@ -1000,10 +1012,10 @@ fn bool opt_droppable_value(AirPrd* p)
     return false;
 }
 
-// Pattern binders live in AirPat, which neither the scans below nor the rename
-// helpers rewrite. A match arm that binds a name must therefore block any
-// rewrite of that name for the whole command, or the rewrite would capture the
-// arm's own binding.
+// Pattern binders live in AirPat, which the scans below do not walk as uses. A
+// match arm that binds a name must therefore block removal of a binding with
+// that name for the whole command: the arm's binder shadows nothing here, but
+// treating it as an occurrence is the conservative reading.
 fn bool opt_pat_binds(AirPat* p, char* name, int depth)
 {
     if (p == null || depth >= 128) { return false; }
@@ -1146,58 +1158,6 @@ fn void OptStats.scan_cmd(OptStats* s, AirCmd* c, char* name, int* var_uses, boo
 // rename_* -- copy propagation. Only reached after scan_* proved that every
 // occurrence of `from` in this subtree is an APRD_VAR producer, so a name swap
 // is the whole rewrite; no other field can mention the old name.
-fn void OptStats.rename_prd(OptStats* s, AirPrd* p, char* from, char* to, int depth)
-{
-    if (p == null || depth >= 128) { return; }
-    if (p.tag == APRD_VAR && p.name != null && opt_same_name(p.name, from)) { p.name = to; }
-    for (usz i = 0; i < p.sub_count; i++) { s.rename_prd(p.subs[i], from, to, depth + 1); }
-    for (usz i = 0; i < p.rec_init_count; i++)
-    {
-        if (p.rec_inits[i] != null) { s.rename_prd(p.rec_inits[i].value, from, to, depth + 1); }
-    }
-    if (p.body != null) { s.rename_cmd(p.body, from, to, depth + 1); }
-}
-
-fn void OptStats.rename_cns(OptStats* s, AirCns* k, char* from, char* to, int depth)
-{
-    if (k == null || depth >= 128) { return; }
-    s.rename_prd(k.prd, from, to, depth + 1);
-    s.rename_cns(k.tail, from, to, depth + 1);
-    s.rename_cns(k.cont_k, from, to, depth + 1);
-    s.rename_cmd(k.body, from, to, depth + 1);
-    s.rename_cmd(k.label_body, from, to, depth + 1);
-    for (usz i = 0; i < k.subst_count; i++) { s.rename_prd(k.subst_prds[i], from, to, depth + 1); }
-    for (usz i = 0; i < k.branch_count; i++)
-    {
-        if (k.branches[i] == null) { continue; }
-        s.rename_cmd(k.branches[i].body, from, to, depth + 1);
-        s.rename_cmd(k.branches[i].guard, from, to, depth + 1);
-    }
-    for (usz i = 0; i < k.cobranch_count; i++)
-    {
-        if (k.cobranches[i] != null) { s.rename_cmd(k.cobranches[i].body, from, to, depth + 1); }
-    }
-}
-
-fn void OptStats.rename_cmd(OptStats* s, AirCmd* c, char* from, char* to, int depth)
-{
-    if (c == null || depth >= 128) { return; }
-    s.rename_prd(c.prd, from, to, depth + 1);
-    for (usz i = 0; i < c.prd_count; i++) { s.rename_prd(c.prds[i], from, to, depth + 1); }
-    s.rename_cns(c.cns, from, to, depth + 1);
-    s.rename_cmd(c.body, from, to, depth + 1);
-    s.rename_cmd(c.next, from, to, depth + 1);
-    s.rename_cmd(c.then_c, from, to, depth + 1);
-    s.rename_cmd(c.else_c, from, to, depth + 1);
-    s.rename_cmd(c.handled, from, to, depth + 1);
-    for (usz i = 0; i < c.branch_count; i++)
-    {
-        if (c.branches[i] == null) { continue; }
-        s.rename_cmd(c.branches[i].guard, from, to, depth + 1);
-        s.rename_cmd(c.branches[i].body, from, to, depth + 1);
-    }
-}
-
 fn AirPrd* OptStats.optimize_prd(OptStats* s, AirPrd* p, int depth)
 {
     if (p == null || depth >= 128) { return p; }
@@ -1303,39 +1263,19 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
     // dead (or turned into an alias) is seen in its final shape.
     // c.next is only used by ACMD_SEQ, but requiring it to be null keeps the
     // rewrite honest if a reader ever attaches a trailing continuation to a let.
-    if ((s.drop_dead || s.propagate_copies) && c.tag == ACMD_LET && c.binder != null && c.body != null &&
+    if (s.drop_dead && c.tag == ACMD_LET && c.binder != null && c.body != null &&
         c.next == null && opt_droppable_value(c.prd))
     {
         int var_uses = 0;
         bool blocked = false;
         s.scan_cmd(c.body, c.binder, &var_uses, &blocked, 0);
-        if (!blocked && var_uses == 0 && s.drop_dead)
+        if (!blocked && var_uses == 0)
         {
             // The body cannot see the binding and the value is a literal or a
             // variable, so removing it cannot discard an effect.
             s.dead_bindings = s.dead_bindings + 1;
             s.rewrites = s.rewrites + 1;
             return c.body;
-        }
-        if (!blocked && var_uses > 0 && s.propagate_copies && c.prd.tag == APRD_VAR && c.prd.name != null &&
-            !opt_same_name(c.prd.name, c.binder))
-        {
-            // Renaming x to y is only sound when nothing inside the body
-            // re-binds y: a nested let, match arm, or lambda parameter named y
-            // would capture the rewritten uses. Reuse the same scan against the
-            // target name and require it to be unbound everywhere.
-            int target_uses = 0;
-            bool target_blocked = false;
-            s.scan_cmd(c.body, c.prd.name, &target_uses, &target_blocked, 0);
-            if (!target_blocked)
-            {
-                // Every occurrence is a plain variable producer, so the binding
-                // is pure aliasing: point the uses at the source and drop the let.
-                s.rename_cmd(c.body, c.binder, c.prd.name, 0);
-                s.copy_propagations = s.copy_propagations + 1;
-                s.rewrites = s.rewrites + 1;
-                return c.body;
-            }
         }
     }
     return c;
@@ -1353,6 +1293,16 @@ fn AirCmd* OptStats.optimize_cmd(OptStats* s, AirCmd* c, int depth)
 //
 // The caller drives the fixpoint (pear2c_main.c3); level 0 means "no passes"
 // and is handled there, so it never reaches this function.
+// optimize_module_at -- one pass of the pipeline at a given -O tier. The tier
+// decides *which* passes run, not just how many times:
+//
+//   -O1        pass 1 only: folding, identities, strength reduction, shift
+//              combination, literal branches, constant-let specialization.
+//   -O2, -O3   pass 1 + pass 2 (dead bindings). pear2c repeats the set to a
+//              fixed point and LLVM then runs default<O2>/default<O3> over the
+//              module it is given.
+//
+// Level 0 is handled by the caller, which never calls this function.
 fn OptStats optimize_module_at(AirModule* m, int level)
 {
     OptStats stats;
@@ -1364,9 +1314,7 @@ fn OptStats optimize_module_at(AirModule* m, int level)
     stats.branch_reductions = 0;
     stats.let_specializations = 0;
     stats.dead_bindings = 0;
-    stats.copy_propagations = 0;
     stats.drop_dead = level >= 2;
-    stats.propagate_copies = level >= 2;
     stats.arena = null;
     if (m == null) { return stats; }
     stats.arena = m.arena;

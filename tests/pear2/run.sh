@@ -126,6 +126,20 @@ set -e
 find "$W" -maxdepth 1 -name '*.pear2-*' -print -quit | grep -q . && { echo "FAIL: temporary artifact leaked after CLI failures"; exit 1; } || true
 echo "PASS: CLI exit codes 0/1/2/3 and failure cleanup"
 
+# Machine code comes from LLVM's backend inside pear2c. --emit-obj publishes the
+# object the executable is linked from, with neither clang nor a linker involved.
+"$PEAR2_BIN" "$W/default.air" --emit-obj -O2 --quiet || { echo "FAIL: --emit-obj rejected"; exit 1; }
+[ -s "$W/default.o" ] || { echo "FAIL: --emit-obj published no object"; exit 1; }
+python3 - "$W/default.o" <<'PY'
+import pathlib, sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+if data[:4] != b"\x7fELF":
+    raise SystemExit("FAIL: --emit-obj output is not an ELF object")
+if len(data) < 64:
+    raise SystemExit(f"FAIL: --emit-obj object is implausibly small ({len(data)} bytes)")
+print(f"PASS: --emit-obj published a {len(data)}-byte ELF object from LLVM's backend")
+PY
+
 # All remaining cases explicitly exercise the bitcode mode and independently
 # Parse and verify every successful artifact with LLVM 23 opt, or clang if opt is absent.
 cat > "$W/pear2-bc-wrapper" <<'WRAPPER'

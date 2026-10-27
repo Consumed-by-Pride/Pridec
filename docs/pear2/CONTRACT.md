@@ -12,22 +12,27 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 |---|---|
 | `--emit-exe` (default) | write the executable `FILE` (the path with its last extension removed, next to the input) |
 | `--emit-bc` | write verified LLVM bitcode `FILE.bc`; a backend without bitcode support exits 2 |
+| `--emit-obj` | (PEAR 2) write the native object `FILE.o` produced by LLVM's backend in process |
 | `-On` | optimisation tier; default `-O2` |
 | exit 0 | the artifact was written |
 | exit 1 | the `.air` was rejected (syntax, version, limits) — message `file:line:col: …`, **no artifact** |
 | exit 2 | usage error, or a requested mode this backend does not provide |
 | exit 3 | the file was valid but the backend produced nothing (unsupported form, internal failure) — message names the form and the definition, **no artifact** |
 
-PEAR 2 additionally accepts `--emit-ll` (write the verified textual LLVM IR as `FILE.ll`, the same module the
-bitcode would be serialised from) and `--stats` (report the AIR optimizer counters on stdout). The three emit
-modes are mutually exclusive; naming two of them is a usage error (exit 2). `--emit-ll` is the diagnostic
-counterpart of `--emit-bc`: it shows exactly what the producer lowered, including the effect of the `-On`
-IR passes. `PEAR2_KEEPLL` in the environment publishes the same file during an `--emit-exe` run.
+PEAR 2 additionally accepts `--emit-obj` (write the native object `FILE.o`), `--emit-ll` (write the verified
+textual LLVM IR as `FILE.ll`, the same module the bitcode would be serialised from) and `--stats` (report the
+AIR optimizer counters on stdout). The four emit modes are mutually exclusive; naming two of them is a usage
+error (exit 2). `--emit-ll` is the diagnostic counterpart of `--emit-bc`: it shows exactly what the producer
+lowered, including the effect of the `-On` IR passes. `PEAR2_KEEPLL` in the environment publishes the same file
+during an `--emit-exe` run.
 
 A stale artifact from a previous run must not survive a failure: delete the output first or write atomically.
-PEAR2 emits and verifies temporary bitcode through the LLVM C API; default executable mode links it with LLVM 23
-`clang` (override its path with `PEAR2_CLANG`). A link failure is exit 3 and must leave no executable or temporary
-artifact. Explicit `--emit-bc` does not invoke clang.
+PEAR2 builds an LLVM module through the LLVM C API, verifies it, and then generates machine code with LLVM's own
+backend **in process** — no textual IR is handed to an external compiler and no `clang` is needed to compile.
+Default executable mode links the object it just produced with `ld`, using glibc's `crt1.o`/`crti.o`/`crtn.o` for
+startup and `-lc` for the C runtime; `PEAR2_CRT_DIR` relocates those objects and `PEAR2_LINK=clang` swaps in a
+clang driver over the same object if the system linker cannot be used. A link failure is exit 3 and must leave no
+executable or temporary artifact. `--emit-bc`, `--emit-obj`, and `--emit-ll` never link and never invoke clang.
 Warnings go to stdout/stderr and never change the exit status of a successful emit. The wrapper
 `scripts/pie-exe.sh` forwards both stages' output; `BACKEND=… scripts/pie-exe.sh FILE.pie --emit-exe -O2` is the
 whole chain.
