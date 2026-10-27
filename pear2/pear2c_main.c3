@@ -133,6 +133,22 @@ usz g_m1_target_ptr_bits = 64;
 bool g_m1_target_freestanding = false;
 char* g_m1_target_triple = (char*)"x86_64-unknown-linux-gnu";
 char* g_m1_target_datalayout = (char*)"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
+// M11: link-time visibility. A definition that is not `pub`, not `extern`,
+// is not the entry point, and carries no attribute that hands its symbol to
+// the linker (`export` renames it, `section` puts it in a named section) can
+// only be called from inside this module, so `internal` linkage is exact and
+// lets LLVM's inliner and GlobalDCE work on it. Off by default because
+// --emit-bc/--emit-obj hand a linkable object to someone else, who may call
+// any symbol; on by default for --emit-exe, where PEAR 2 links the whole
+// program itself and the only symbol the CRT needs is `main`.
+bool g_m1_internalize = false;
+fn bool m1_decl_linkage_internal(AirDecl* d)
+{
+    if (!g_m1_internalize || d == null || d.is_pub || d.is_extern || d.name == null) { return false; }
+    if (same(d.name, "main") || same(d.name, "pride_main") || same(d.name, "_start")) { return false; }
+    if (m1_decl_attr_string(d, "export") != null || m1_decl_attr_string(d, "section") != null) { return false; }
+    return true;
+}
 fn int m1_target_ptr_bytes() { return (int)(g_m1_target_ptr_bits / 8); }
 fn bool m1_has_prefix(char* s, char* prefix)
 {
@@ -3845,7 +3861,7 @@ fn bool M1Gen.emit_globals(M1Gen* g)
             fprintf(g.out, "external %s %s, align %d\n", d.g_mut ? (char*)"global" : (char*)"constant", ty, align);
             continue;
         }
-        fprintf(g.out, "%s %s ", d.g_mut ? (char*)"global" : (char*)"constant", ty);
+        fprintf(g.out, "%s%s %s ", m1_decl_linkage_internal(d) ? (char*)"internal " : "", d.g_mut ? (char*)"global" : (char*)"constant", ty);
         if (d.g_init == null) { fprintf(g.out, "zeroinitializer"); }
         else if (!g.emit_constant(d.g_init, d.ret_ty, 0))
         {
@@ -5326,7 +5342,7 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
         if (!m1_value_type(parameter_types[i], 0)) { return false; }
     }
     int fn_cc = m1_decl_callconv(d);
-    fprintf(g.out, "define %s%s @%s(", fn_cc == 1 ? "fastcc " : "", return_type_ir, m1_link_name(d));
+    fprintf(g.out, "define %s%s%s @%s(", m1_decl_linkage_internal(d) ? "internal " : "", fn_cc == 1 ? "fastcc " : "", return_type_ir, m1_link_name(d));
     for (usz i = 0; i < emitted_param_count; i++)
     {
         AirBinder* p = d.params[i];
@@ -5621,6 +5637,7 @@ fn int main(String[] args)
     bool mode_seen = false;
     int opt_level = 2;
     bool show_opt_stats = false;
+    bool linkage_pinned = false;
     bool usage_error = false;
     char* bad_option = null;
     for (usz i = 1; i < args.len; i++)
@@ -5656,6 +5673,10 @@ fn int main(String[] args)
         else if (same(a, "-O1")) { opt_level = 1; }
         else if (same(a, "-O2")) { opt_level = 2; }
         else if (same(a, "-O3")) { opt_level = 3; }
+        else if (same(a, "--internalize")) { g_m1_internalize = true; linkage_pinned = true; }
+        // --no-internalize keeps every definition externally visible, which is
+        // what a program that is linked against by name from outside needs.
+        else if (same(a, "--no-internalize")) { g_m1_internalize = false; linkage_pinned = true; }
         else if (same(a, "--stats")) { show_opt_stats = true; }
         else if (m1_has_prefix(a, "--target="))
         {
@@ -5692,9 +5713,11 @@ fn int main(String[] args)
     }
     if (input == null)
     {
-        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-ll] [-O0|-O1|-O2|-O3] [--target=x86_64|wasm32-freestanding] [--stats] [--quiet]\n");
+        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-ll] [-O0|-O1|-O2|-O3] [--target=x86_64|wasm32-freestanding] [--internalize|--no-internalize] [--stats] [--quiet]\n");
         return 2;
     }
+    // Default linkage policy per output mode; an explicit flag above wins.
+    if (!linkage_pinned) { g_m1_internalize = emit_exe; }
     if (g_m1_target_freestanding && (emit_exe || emit_obj))
     {
         clear_stale_outputs(input);
@@ -5769,11 +5792,11 @@ fn int main(String[] args)
     }
     if (show_opt_stats)
     {
-        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u level=%d passes=%d\n",
+        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u level=%d passes=%d linkage=%s\n",
                opt_level > 0 ? "enabled" : "disabled", opt_stats.rewrites, opt_stats.constant_folds,
                opt_stats.operand_rewrites, opt_stats.strength_reductions, opt_stats.shift_combinations,
                opt_stats.branch_reductions, opt_stats.let_specializations, opt_stats.dead_bindings,
-               opt_level, opt_passes);
+               opt_level, opt_passes, g_m1_internalize ? "internal" : "external");
     }
     // AIR carries candidate claims, never trusted backend facts; recompute facts
     // on the exact post-optimization graph consumed by the lowering pass.

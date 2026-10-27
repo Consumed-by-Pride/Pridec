@@ -75,6 +75,17 @@ loop-body creation and capturing label-carried bindings.
   optimization hint attributes (`noinline`, `alwaysinline`, `cold`, `naked`)
   are preserved on definitions and their call sites; unsupported combinations
   are positioned errors, never silent drops.
+- Linkage follows the same visibility rule: a definition or global that is
+  not `pub`, is not `main`/`pride_main`/`_start`, and carries no `export` or
+  `section` attribute can only be named from inside this module, so it gets
+  `internal` linkage and LLVM may inline it everywhere and drop it when
+  unused. `--emit-exe` (where PEAR 2 links the whole program itself) does
+  this by default, `--internalize`/`--no-internalize` override it either way,
+  and `--emit-bc`/`--emit-obj`/`--emit-ll` stay external by default because
+  the object is handed to a linker that may resolve any symbol. A symbol
+  that only inline-asm text names must be `pub` or `#export`ed. `--stats`
+  reports the effective policy as `linkage=internal|external`.
+  Fixture: `linkage_internal_main.air`.
 - One-shot (escape-only) effect handlers lower to payload slots plus
   branch-to-arm control flow; anything resuming or multi-shot, handler-less
   performs, and all effect forms under wasm32-freestanding reject with; object/link end-to-end is gate-checked in run.sh (`PASS: wasm32-freestanding bitcode compiled and linked by pinned toolchain`)

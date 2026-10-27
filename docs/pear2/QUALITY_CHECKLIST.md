@@ -21,8 +21,11 @@ bitcode-determinism fix committed with this checklist revision).
       historical "no binary" exec failures).
 - [x] 0.8 `LD_LIBRARY_PATH`/`PATH` requirements documented in
       `docs/pear2/LLVM23_SETUP.md`.
-- [x] 0.9 `PEAR2_CLANG` override honored in `make_executable`
-      (defaults to `clang`, used by run.sh for every link).
+- [x] 0.9 Link driver contract: `m1_link_object` links the emitted
+      object with `ld` by default; `PEAR2_LINK=clang` swaps in a clang
+      driver over the same object, `PEAR2_CLANG` names that driver
+      (default `clang`), and `PEAR2_CRT_DIR` relocates
+      `crt1.o`/`crti.o`/`crtn.o`. No mode needs `clang` to compile.
 - [x] 0.10 Recovery backups in `/home/user/recovery/` (41 files) cover the
       driver, pfront pear_ir, legacy pear1, run.sh, docs, and all fixtures;
       `recovery/pear2c_main.c3` sha256 == HEAD blob (verified).
@@ -199,6 +202,16 @@ bitcode-determinism fix committed with this checklist revision).
       codata_struct verified -O0..-O3 exit 42; reject fixtures
       reject_codata_method (parameterized destructor) and
       reject_codata_ambiguous positioned (suite 124 PASS).
+- [x] 5.28 Linkage: a non-`pub`, non-`extern` definition or global that is
+      not `main`/`pride_main`/`_start` and carries no `export`/`section`
+      attribute is emitted `internal`, so LLVM may inline it everywhere
+      and GlobalDCE may drop it when unused; `--emit-exe` enables it by
+      default (PEAR 2 owns that link), `--internalize`/`--no-internalize`
+      override, and `--emit-bc`/`--emit-obj`/`--emit-ll` stay external
+      because a published object may be resolved by any name; `--stats`
+      reports `linkage=internal|external`; fixture
+      linkage_internal_main verifies `main` and `#export` stay visible and
+      the internalized bitcode still links and exits 42.
 
 ## 6. Determinism and equivalence (8)
 
@@ -283,6 +296,6 @@ bitcode-determinism fix committed with this checklist revision).
 
 ## Score
 
-**121 items: 120 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
+**122 items: 121 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
 noted). No open item lowers the safety floor: they are triage, publication,
 and follow-up validation, not correctness debt.

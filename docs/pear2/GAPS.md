@@ -55,7 +55,6 @@ is simply absent.
 | tail-call marking | calls in return position are emitted as plain `call`, so a self-recursive function cannot be guaranteed to reuse its frame unless LLVM's tail-call analysis fires on its own | S |
 | copy propagation | deliberately excluded: mutable locals are allocas, so `let x = y` snapshots a load, and renaming uses would observe later writes. Also worthless here, because the emitter binds names to SSA values, so an alias costs no instructions | — |
 | alias / memory-dependence analysis | ordering of loads and stores is left entirely to LLVM | L |
-| linkage optimization | every `def` keeps external linkage and `AirDecl.is_pub` is never read, so LLVM cannot mark unreferenced definitions internal and drop them. `airtool`'s `--internalize` does exactly this, so the machinery is known — it is the PEAR 2 side that is missing | S |
 | tier differentiation at the AIR level | `-O2` and `-O3` run the same AIR passes; only the LLVM pipeline differs (`default<O2>` vs `default<O3>`) | S |
 | optimizer statistics from the LLVM layer | `--stats` reports AIR counters only, so the effect of `default<On>` is invisible | S |
 
@@ -86,24 +85,26 @@ range reasoning, and loop idioms.
   Fixture: `tests/pear2/atomic_cmpxchg_main.air`, executed at `-O0..-O3`.
 - **`syscall` bool arguments** now lower as a `zext i1 -> i64`, the same way C
   passes a `_Bool` in a register.
+- **Linkage**: a non-`pub`, non-`extern` definition or global that is not an
+  entry point and carries no `export`/`section` attribute is emitted
+  `internal`, so LLVM can inline it and delete it when unused. On by default
+  for `--emit-exe` (PEAR 2 owns that link), selectable elsewhere with
+  `--internalize`/`--no-internalize`. Fixture:
+  `tests/pear2/linkage_internal_main.air`, which also pins that `main` and
+  `#export`ed symbols stay external.
 - **Dead-binding elimination** (pass 2), **tiered AIR passes**, **in-process
   LLVM IR optimization**, **in-process object emission**, and the **`ld` link**
   are described in `IMPLEMENTATION_PLAN.md` M5.
 
 ## 5. Suggested order
 
-1. **Linkage (`internal` for unreferenced non-`pub` definitions)** — small, and
-   it is what makes LLVM's inliner and global DCE effective on PEAR 2 output.
-   Blocked in one place: `tests/pear2/pointer_index_main.air` is linked into a
-   shared object and called from C, so the subset that is `pub`-gated needs
-   checking against figures like that one first.
-2. **Tail-call marking** — small, and the difference shows up on exactly the
+1. **Tail-call marking** — small, and the difference shows up on exactly the
    recursive programs this backend is most likely to compile.
-3. **`nsw`/`nuw` after the integer contract is written down** — unlocks more
+2. **`nsw`/`nuw` after the integer contract is written down** — unlocks more
    downstream reasoning than any single pass here.
-4. **`letrec` for non-capturing recursive bindings** — the largest *language*
+3. **`letrec` for non-capturing recursive bindings** — the largest *language*
    gap that does not require a new design.
-5. **CSE / constant propagation across branches** — only worth doing after a
+4. **CSE / constant propagation across branches** — only worth doing after a
    CFG exists, and only with a differential test to prove it.
 
 Anything in §1 marked **L** needs a design note before code; they are not

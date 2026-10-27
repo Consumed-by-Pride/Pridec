@@ -984,6 +984,32 @@ grep -q 'define fastcc i64 @pear2_fast_add(i64 %a0, i64 %a1) noinline' "$W/$name
 grep -q 'call fastcc i64 @pear2_fast_add(' "$W/$name.ll" || { echo "FAIL: $name call site lost the fastcc marker"; exit 1; }
 echo "PASS: fastcc/export/noinline markers survive define and call lines"
 
+# Linkage. A definition nothing outside the module can name gets `internal`
+# linkage, so LLVM is free to inline it everywhere and drop it if unused.
+# `main` must stay external (the CRT references it) and `#export` renames a
+# symbol for the linker, so it stays external too.
+cp tests/pear2/linkage_internal_main.air "$W/linkage.air"
+"$PEAR2_BIN" "$W/linkage.air" --emit-ll --internalize --quiet || { echo "FAIL: --internalize rejected"; exit 1; }
+grep -q '^define internal i64 @local_add(' "$W/linkage.ll" || { echo "FAIL: --internalize left local_add externally visible"; grep '^define' "$W/linkage.ll"; exit 1; }
+grep -q '^define i64 @main(' "$W/linkage.ll" || { echo "FAIL: --internalize made the entry point internal"; grep '^define' "$W/linkage.ll"; exit 1; }
+grep -q '^define i64 @pear2_exported_add(' "$W/linkage.ll" || { echo "FAIL: --internalize internalized an #export symbol"; grep '^define' "$W/linkage.ll"; exit 1; }
+"$PEAR2_BIN" "$W/linkage.air" --emit-ll --no-internalize --quiet || { echo "FAIL: --no-internalize rejected"; exit 1; }
+! grep -q '^define internal' "$W/linkage.ll" || { echo "FAIL: --no-internalize still produced internal linkage"; grep '^define' "$W/linkage.ll"; exit 1; }
+# --emit-ll publishes inspected IR, so the default there is external linkage.
+"$PEAR2_BIN" "$W/linkage.air" --emit-ll --quiet || { echo "FAIL: --emit-ll rejected"; exit 1; }
+! grep -q '^define internal' "$W/linkage.ll" || { echo "FAIL: --emit-ll must not internalize by default"; exit 1; }
+# Internal linkage must not change what the program does on the clang path.
+"$PEAR2_BIN" "$W/linkage.air" --emit-bc --internalize --quiet || { echo "FAIL: --emit-bc --internalize rejected"; exit 1; }
+verify_bitcode "$W/linkage.bc" || { echo "FAIL: internalized bitcode did not verify"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/linkage.bc" -o "$W/linkage" >"$W/linkage.link.log" 2>&1 || { echo "FAIL: clang link of internalized bitcode"; cat "$W/linkage.link.log"; exit 1; }
+set +e
+timeout 5 "$W/linkage" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: internalized program returned $rc, expected 42"; exit 1; }
+"$PEAR2_BIN" "$W/linkage.air" --emit-ll --internalize --stats --quiet >"$W/linkage.stats" || { echo "FAIL: --stats with --internalize rejected"; exit 1; }
+grep -Eq '(^| )linkage=internal( |$)' "$W/linkage.stats" || { echo "FAIL: --stats did not report the effective linkage"; cat "$W/linkage.stats"; exit 1; }
+echo "PASS: non-pub definitions internalize while main and #export stay visible"
+
 # Target profiles: the one fixture asserts i64 under x86_64 and i32 under
 # wasm32-freestanding; wasm emits IR/bitcode only.
 name=target_profile_main

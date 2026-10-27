@@ -21,7 +21,13 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 
 PEAR 2 additionally accepts `--emit-obj` (write the native object `FILE.o`), `--emit-ll` (write the verified
 textual LLVM IR as `FILE.ll`, the same module the bitcode would be serialised from) and `--stats` (report the
-AIR optimizer counters on stdout). The four emit modes are mutually exclusive; naming two of them is a usage
+AIR optimizer counters and the effective linkage policy on stdout). `--internalize` and `--no-internalize`
+control symbol visibility: with it, a definition or global that is not `pub`, is not `main`/`pride_main`/`_start`,
+and carries no `export`/`section` attribute is emitted with `internal` linkage so LLVM may inline it and drop it
+when unused; without it every definition keeps external linkage. `--emit-exe` defaults to internalizing (there
+PEAR 2 performs the final link and `main` is the only symbol the CRT resolves by name), while `--emit-bc`,
+`--emit-obj`, and `--emit-ll` default to external linkage because the published object may be linked against any
+symbol. A symbol named only by inline-asm text must be `pub` or `#export`ed. The four emit modes are mutually exclusive; naming two of them is a usage
 error (exit 2). `--emit-ll` is the diagnostic counterpart of `--emit-bc`: it shows exactly what the producer
 lowered, including the effect of the `-On` IR passes. `PEAR2_KEEPLL` in the environment publishes the same file
 during an `--emit-exe` run.

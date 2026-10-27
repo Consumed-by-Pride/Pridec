@@ -1,0 +1,22 @@
+// PEAR 2: link-time visibility. A definition that is not `pub`, is not the
+// entry point and carries no `export`/`section` attribute can only be called
+// from inside this module, so --internalize (and --emit-exe, which links the
+// whole program itself) gives it `internal` linkage. `main` and `#export`ed
+// definitions keep external linkage, because the CRT and the linker look them
+// up by name. Returns 42 either way: local_add(20, 0) + exported_add(20, 2).
+air 2.2 Main "linkage_internal_main.pie";
+
+def local_add(a : i64, b : i64) : i64 =
+  mu~ %ret.
+    <(add a b : i64) | %ret>;
+
+attr export "pear2_exported_add"
+def exported_add(a : i64, b : i64) : i64 =
+  mu~ %ret.
+    <(add a b : i64) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <local_add | call · 20 : i64 · 0 : i64 · comu _a.
+      <exported_add | call · 20 : i64 · 2 : i64 · comu _b.
+        <(add _a _b) : i64 | %ret>>;
