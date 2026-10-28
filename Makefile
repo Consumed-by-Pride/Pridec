@@ -194,6 +194,8 @@ $(PEAR2_OPT_TEST): $(PEAR2_OPT_TEST_SRC) | c3c
 test-pear2: $(PEAR2_BIN) $(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) C3C="$(C3C)" LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" bash tests/pear2/run.sh ./$(PEAR2_BIN)
+	# The native backend needs no LLVM at all: object, ld, exit status.
+	bash tests/pear2/native.sh ./$(PEAR2_BIN)
 
 test-pear2-exec: $(BINARY) $(PEAR2_BIN) $(PEAR2_OPT_TEST) pear2c
 	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
@@ -207,6 +209,7 @@ check-pear2: | c3c
 	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
 	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
 	bash -n tests/pear2/run.sh
+	bash -n tests/pear2/native.sh
 	python3 tests/pear2/signed_division_model_test.py
 
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
