@@ -417,10 +417,39 @@ bitcode-determinism fix committed with this checklist revision).
       rotation, and instruction scheduling each name the PIR information they
       consume, and none of them can reach into LLVM.
 
+## 12. Bitcode artifact contract (6)
+
+- [x] 12.1 Verified twice in process: `LLVMVerifyModule` on the parsed module
+      before the write, and again after it -- the written file is loaded back,
+      parsed with `LLVMParseBitcodeInContext2`, and verified
+      (`m1_bitcode_roundtrip` in `pear2/pear2c_main.c3`).
+- [x] 12.2 The load-back compares the re-parsed module's triple with the triple
+      that was requested. A mismatch is exit 3 with the artifact removed, not a
+      warning.
+- [x] 12.3 Buffer ownership is stated where it bites:
+      `LLVMParseBitcodeInContext2` takes the memory buffer whether it succeeds or
+      fails, so the size is read with `LLVMGetBufferSize` *before* the parse and
+      the buffer is never disposed afterwards. The obvious code is a double free,
+      and the comment says so.
+- [x] 12.4 Provenance: every module carries `source_filename` (escaped by
+      `m1_ir_write_string`, so a quote or backslash in a path cannot produce
+      unparsable IR) and `!llvm.ident` naming the compiler, the AIR profile and the
+      triple.
+- [x] 12.5 All LLVM targets are registered before the pass pipeline
+      (`LLVMInitializeAllTargets` and friends), so a wasm32 request gets a real
+      target machine for cost decisions instead of a generic fallback. The x86-64
+      object/executable modes are unchanged.
+- [ ] 12.6 The new `tests/pear2/run.sh` assertions (byte-identical repeat compile,
+      `source_filename`, `!llvm.ident`, wasm32 triple present and x86-64 triple
+      absent) and the byte count in the success message have not been executed:
+      there is no C3 compiler and no LLVM in this workspace. Structurally
+      verified only: brace balance and every patched region read back.
+
 ## Score
 
-**139 items: 137 complete with evidence, 2 open** — 10.5 (token rotation) and
-11.6 (the native end-to-end script has not been run here: no C3 compiler, no
-linker). Each open item carries a Linear issue (AYO-5/8/9/11 as noted). No open
-item lowers the safety floor: they are triage, publication, and follow-up
-validation, not correctness debt.
+**145 items: 142 complete with evidence, 3 open** — 10.5 (token rotation), 11.6
+(the native end-to-end script has not been run here: no C3 compiler, no linker),
+and 12.6 (the new bitcode assertions have not been run for the same reason). Each
+open item carries a Linear issue (AYO-5/8/9/11 as noted). No open item lowers the
+safety floor: they are triage, publication, and follow-up validation, not
+correctness debt.

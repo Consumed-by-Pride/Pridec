@@ -76,6 +76,57 @@ printf stale > "$W/default"
 verify_bitcode "$W/default.bc" || { echo "FAIL: LLVM 23 did not parse and verify emitted bitcode"; exit 1; }
 echo "PASS: explicit --emit-bc emits verifiable bitcode"
 
+# Bitcode is a published artifact, so the bytes carry claims that are checked
+# here rather than trusted: the same input compiles to the same bytes, the module
+# says what produced it, and a wasm32 request really is a wasm32 module.
+cp "$W/default.bc" "$W/bc_first.bc"
+"$PEAR2_BIN" "$W/default.air" --emit-bc -O3 --quiet || { echo "FAIL: second --emit-bc run rejected"; exit 1; }
+cmp -s "$W/bc_first.bc" "$W/default.bc" || { echo "FAIL: two --emit-bc runs of one input produced different bytes"; exit 1; }
+echo "PASS: bitcode is byte-identical across runs"
+rm -f "$W/bc_first.bc"
+
+"$PEAR2_BIN" "$W/default.air" --emit-ll --quiet || { echo "FAIL: --emit-ll rejected"; exit 1; }
+grep -q '^source_filename = ' "$W/default.ll" || { echo "FAIL: emitted IR has no source_filename"; exit 1; }
+grep -q '!llvm.ident' "$W/default.ll" || { echo "FAIL: emitted IR records no producer in !llvm.ident"; exit 1; }
+grep -q 'pear2c (AIR' "$W/default.ll" || { echo "FAIL: !llvm.ident does not name the compiler"; exit 1; }
+echo "PASS: emitted IR carries source_filename and a producer ident"
+
+"$PEAR2_BIN" "$W/default.air" --emit-bc --target=wasm32-freestanding --quiet \
+    || { echo "FAIL: --emit-bc --target=wasm32-freestanding rejected"; exit 1; }
+# The triple is a plain string inside the bitcode, so it can be found without a
+# disassembler; the independent parser below is what proves the file is valid.
+grep -qa 'wasm32-unknown-unknown' "$W/default.bc" || { echo "FAIL: wasm32 bitcode does not carry the wasm32 triple"; exit 1; }
+grep -qa 'x86_64-unknown-linux-gnu' "$W/default.bc" && { echo "FAIL: wasm32 bitcode still names the x86-64 triple"; exit 1; }
+verify_bitcode "$W/default.bc" || { echo "FAIL: LLVM 23 did not parse the wasm32 bitcode"; exit 1; }
+echo "PASS: --emit-bc honours --target=wasm32-freestanding"
+# Back to the default target so later fixtures are unaffected.
+"$PEAR2_BIN" "$W/default.air" --emit-bc -O3 --quiet || { echo "FAIL: could not restore the x86-64 bitcode"; exit 1; }
+
+# A library has no `main`. Publishing one as bitcode is the ordinary use of the
+# mode, so it must work; producing a *program* still requires an entry point and
+# must say so.
+cat > "$W/library.air" <<'AIR'
+air 2.2 Main "library.pie";
+
+def twice(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 2 : i64) | %ret>;
+AIR
+"$PEAR2_BIN" "$W/library.air" --emit-bc --quiet || { echo "FAIL: --emit-bc rejected a library without main"; exit 1; }
+[ -f "$W/library.bc" ] || { echo "FAIL: --emit-bc wrote no bitcode for the library"; exit 1; }
+verify_bitcode "$W/library.bc" || { echo "FAIL: library bitcode did not verify"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/library.air" --emit-exe >"$W/library_exe.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: --emit-exe without main returned $rc, expected 3"; exit 1; }
+[ ! -e "$W/library" ] || { echo "FAIL: --emit-exe without main left an artifact"; exit 1; }
+grep -q 'needs a definition of `main`' "$W/library_exe.log" || { echo "FAIL: --emit-exe without main did not explain itself"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/library.air" --emit-bc --native-entry >"$W/library_entry.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: --native-entry with --emit-bc returned $rc, expected 2"; exit 1; }
+echo "PASS: --emit-bc publishes a library, and program modes still demand main"
+
 # Exit 2: usage/option errors. Exit 1: invalid AIR. Exit 3: valid AIR outside
 # the supported backend subset. Every failure must remove a stale artifact.
 set +e

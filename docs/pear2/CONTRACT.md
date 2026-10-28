@@ -14,6 +14,7 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 | `--emit-bc` | write verified LLVM bitcode `FILE.bc`; a backend without bitcode support exits 2 |
 | `--emit-obj` | (PEAR 2) write the native object `FILE.o` produced by LLVM's backend in process |
 | `--emit-asm` | (PEAR 2) write the x86-64 assembly listing `FILE.s` the object was assembled from |
+| `--emit-native` | (PEAR 2) write the x86-64 ELF object `FILE.o` from PEAR 2's own backend — no LLVM, no textual IR; `--native-entry` adds a `_start` so `ld -static` yields a runnable program |
 | `-On` | optimisation tier; default `-O2` (PEAR 2: `-O1` = AIR folding, reassociation, and self-operand folding, `-O2` adds the dead-binding pass, `-O3` adds whole-body propagation and literal-decided control-flow folding; `-Os` keeps the `-O2` AIR tier and selects `default<Os>`, and every other tier selects the matching `default<On>` LLVM pipeline) |
 | exit 0 | the artifact was written |
 | exit 1 | the `.air` was rejected (syntax, version, limits) — message `file:line:col: …`, **no artifact** |
@@ -30,8 +31,9 @@ and carries no `export`/`section` attribute is emitted with `internal` linkage s
 when unused; without it every definition keeps external linkage. `--emit-exe` defaults to internalizing (there
 PEAR 2 performs the final link and `main` is the only symbol the CRT resolves by name), while `--emit-bc`,
 `--emit-obj`, `--emit-asm`, and `--emit-ll` default to external linkage because the published object may be
-linked against any symbol. A symbol named only by inline-asm text must be `pub` or `#export`ed. The five
-emit modes are mutually exclusive; naming two of them is a usage error (exit 2). `--emit-ll` is the diagnostic counterpart of `--emit-bc`: it shows exactly what the producer
+linked against any symbol. A symbol named only by inline-asm text must be `pub` or `#export`ed. The six
+emit modes (`--emit-exe`, `--emit-bc`, `--emit-obj`, `--emit-asm`, `--emit-ll`, `--emit-native`) are mutually
+exclusive; naming two of them is a usage error (exit 2). `--emit-ll` is the diagnostic counterpart of `--emit-bc`: it shows exactly what the producer
 lowered, including the effect of the `-On` IR passes. `PEAR2_KEEPLL` in the environment publishes the same file
 during an `--emit-exe` run.
 
@@ -41,7 +43,14 @@ backend **in process** — no textual IR is handed to an external compiler and n
 Default executable mode links the object it just produced with `ld`, using glibc's `crt1.o`/`crti.o`/`crtn.o` for
 startup and `-lc` for the C runtime; `PEAR2_CRT_DIR` relocates those objects and `PEAR2_LINK=clang` swaps in a
 clang driver over the same object if the system linker cannot be used. A link failure is exit 3 and must leave no
-executable or temporary artifact. `--emit-bc`, `--emit-obj`, and `--emit-ll` never link and never invoke clang.
+executable or temporary artifact. `--emit-bc`, `--emit-obj`, `--emit-native`, and `--emit-ll` never link and never invoke clang.
+
+`--emit-bc` is the only mode whose artifact is checked after it is written: the file is loaded back with
+`LLVMCreateMemoryBufferWithContentsOfFile`, parsed with `LLVMParseBitcodeInContext2`, verified, and its triple
+compared with the requested one. A file that fails any of those steps is removed and the run exits 3, so a
+published `.bc` is by construction one this LLVM can read. Emitted modules carry `source_filename` and
+`!llvm.ident` (compiler, AIR profile, target). `--emit-native` is a second, independent backend described in
+[`BACKENDS.md`](BACKENDS.md); it covers a documented subset of AIR and refuses the rest with a source position.
 Warnings go to stdout/stderr and never change the exit status of a successful emit. The wrapper
 `scripts/pie-exe.sh` forwards both stages' output; `BACKEND=… scripts/pie-exe.sh FILE.pie --emit-exe -O2` is the
 whole chain.

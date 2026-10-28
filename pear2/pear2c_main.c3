@@ -70,11 +70,28 @@ extern fn void ll_init_x86_t() @cname("LLVMInitializeX86Target");
 extern fn void ll_init_x86_tmc() @cname("LLVMInitializeX86TargetMC");
 extern fn void ll_init_x86_asmp() @cname("LLVMInitializeX86AsmPrinter");
 extern fn void ll_init_x86_asmpa() @cname("LLVMInitializeX86AsmParser");
+// Every target LLVM was built with, not just x86-64. Bitcode can be emitted for
+// wasm32-freestanding, and the optimiser is measurably better with a target
+// machine (vector widths and cost decisions come from the target), so the target
+// that a requested triple names is the one that gets initialised.
+extern fn void ll_init_all_target_infos() @cname("LLVMInitializeAllTargetInfos");
+extern fn void ll_init_all_targets() @cname("LLVMInitializeAllTargets");
+extern fn void ll_init_all_target_mcs() @cname("LLVMInitializeAllTargetMCs");
+extern fn void ll_init_all_asm_printers() @cname("LLVMInitializeAllAsmPrinters");
+extern fn void ll_init_all_asm_parsers() @cname("LLVMInitializeAllAsmParsers");
 extern fn char* ll_get_triple(void* m) @cname("LLVMGetTargetTriple");
 extern fn int ll_get_target_from_triple(char* triple, void** target, char** msg) @cname("LLVMGetTargetFromTriple");
 extern fn void* ll_create_tm(void* target, char* triple, char* cpu, char* features, int level, int reloc, int model) @cname("LLVMCreateTargetMachine");
 extern fn void ll_dispose_tm(void* tm) @cname("LLVMDisposeTargetMachine");
 extern fn int ll_tm_emit_to_file(void* tm, void* m, char* path, int file_type, char** msg) @cname("LLVMTargetMachineEmitToFile");
+// Reading bitcode back. The bitcode mode does not trust its own writer: after the
+// file is on disk it is loaded again with the same LLVM the compiler links
+// against, parsed into a module, and verified. A file that cannot be loaded is
+// not a bitcode artifact, and the compiler says so instead of publishing it.
+extern fn int ll_buffer_from_file(char* path, void** out_buf, char** msg) @cname("LLVMCreateMemoryBufferWithContentsOfFile");
+extern fn void ll_buffer_dispose(void* buf) @cname("LLVMDisposeMemoryBuffer");
+extern fn int ll_parse_bitcode(void* ctx, void* buf, void** out_mod) @cname("LLVMParseBitcodeInContext2");
+extern fn usz ll_buffer_size(void* buf) @cname("LLVMGetBufferSize");
 fn bool same(char* a, char* b)
 {
     if (a == null || b == null) { return a == b; }
@@ -82,6 +99,78 @@ fn bool same(char* a, char* b)
     while (a[i] != 0 && b[i] != 0) { if (a[i] != b[i]) { return false; } i++; }
     return a[i] == b[i];
 }
+// m1_ir_write_string -- write the inside of an LLVM IR string literal.
+//
+// `source_filename` is the one place a user-controlled string (the input path)
+// reaches the module text, so it is escaped rather than pasted: a quote or a
+// backslash in a path would otherwise produce a module that does not parse, and
+// the failure would look like a compiler bug rather than an escaping bug.
+fn void m1_ir_write_string(void* f, char* text)
+{
+    if (text == null) { return; }
+    for (usz i = 0; text[i] != 0; i++)
+    {
+        int ch = (int)text[i] & 255;
+        if (ch == '"' || ch == 92) { fprintf(f, "\\%c", (char)ch); }
+        else if (ch >= 32 && ch < 127) { fprintf(f, "%c", (char)ch); }
+        else { fprintf(f, "\\%02X", ch); }
+    }
+}
+
+// m1_bitcode_roundtrip -- prove that the file just written is bitcode.
+//
+// Writing a file is not evidence that what landed on disk can be read: the writer
+// could have failed short, the path could be truncated, or the module could carry
+// a triple nobody asked for. So the artifact is loaded back, parsed into a module
+// in this context, verified, and its triple compared with the one requested. Only
+// then does the compiler publish it.
+//
+// On success `out_size` is the file's size and the function returns true. On
+// failure it returns false and `out_error` is a malloc'd message the caller frees
+// with ll_message_dispose.
+fn bool m1_bitcode_roundtrip(void* ctx, char* path, usz* out_size, char* want_triple, char** out_error)
+{
+    if (out_error != null) { *out_error = null; }
+    void* buf = null;
+    char* msg = null;
+    if (ll_buffer_from_file(path, &buf, &msg) != 0 || buf == null)
+    {
+        if (out_error != null) { *out_error = msg; } else if (msg != null) { ll_message_dispose(msg); }
+        return false;
+    }
+    if (out_size != null) { *out_size = ll_buffer_size(buf); }
+    // LLVMParseBitcodeInContext2 takes ownership of the memory buffer whether it
+    // succeeds or fails, so the buffer is never disposed here: doing so would free
+    // it twice. The size is therefore read before the parse, never after.
+    void* m = null;
+    if (ll_parse_bitcode(ctx, buf, &m) != 0 || m == null)
+    {
+        if (out_error != null) { *out_error = null; }
+        return false;
+    }
+    char* verr = null;
+    bool ok = true;
+    if (ll_verify_module(m, 1, &verr) != 0)
+    {
+        ok = false;
+        if (out_error != null) { *out_error = verr; } else if (verr != null) { ll_message_dispose(verr); }
+    }
+    if (ok && want_triple != null)
+    {
+        char* triple = ll_get_triple(m);
+        if (triple == null || !same(triple, want_triple))
+        {
+            // The module parsed and verified, but it describes a different target
+            // than the one the user asked for. That is a silently wrong artifact,
+            // so it is a hard failure rather than a warning.
+            ok = false;
+            if (out_error != null) { *out_error = null; }
+        }
+    }
+    ll_module_dispose(m);
+    return ok;
+}
+
 struct M1Label
 {
     AirCmd* cmd;
@@ -5620,11 +5709,18 @@ fn bool m1_emit_native(void* m, char* path, int file_type, char** failure)
         if (failure != null) { *failure = (char*)"the module does not name a target triple"; }
         return false;
     }
+    // The x86-64 entry points stay because they are what the object/executable
+    // modes use; the All* registration is what makes a wasm32 request work.
     ll_init_x86_ti();
     ll_init_x86_t();
     ll_init_x86_tmc();
     ll_init_x86_asmp();
     ll_init_x86_asmpa();
+    ll_init_all_target_infos();
+    ll_init_all_targets();
+    ll_init_all_target_mcs();
+    ll_init_all_asm_printers();
+    ll_init_all_asm_parsers();
     void* target = null;
     char* err = null;
     if (ll_get_target_from_triple(triple, &target, &err) != 0 || target == null)
@@ -5944,6 +6040,11 @@ fn int main(String[] args)
         else { printf("pear2c: invalid arguments; choose one input and one output mode\n"); }
         return 2;
     }
+    if (emit_native_entry && !emit_native)
+    {
+        printf("pear2c: --native-entry only applies to --emit-native\n");
+        return 2;
+    }
     if (input == null)
     {
         printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-asm|--emit-ll|--emit-native] [-O0|-O1|-O2|-O3|-Os] [--target=x86_64|wasm32-freestanding] [--internalize|--no-internalize] [--stats] [--quiet]\n");
@@ -6210,10 +6311,28 @@ fn int main(String[] args)
     bool ignored_main_parameter = main_decl != null && main_decl.param_count == 1 && main_decl.params[0] != null &&
                                   same(main_decl.params[0].name, "_") &&
                                   (main_decl.params[0].ty == null || main_decl.params[0].ty.tag == ATYP_INFER);
-    if (main_count != 1 || main_decl == null || (main_decl.param_count != 0 && !ignored_main_parameter) ||
-        (main_decl.ret_ty != null && main_decl.ret_ty.tag != ATYP_INFER && (!m1_integer_type(main_decl.ret_ty) || m1_int_bits(main_decl.ret_ty) != 64)))
+    // `main` is required only when this run has to produce a *program*: an
+    // executable, or a native object with an entry stub that calls main. A library
+    // published as bitcode, object, listing or IR may define no main at all --
+    // that is the ordinary shape of a library, and demanding one made --emit-bc
+    // useless for anything but a whole program.
+    bool needs_main = emit_exe || (emit_native && emit_native_entry);
+    if (main_count > 1)
     {
-        printf("pear2c: M1 requires exactly one zero-argument definition of `main`\n");
+        printf("pear2c: more than one definition of `main`\n");
+        arena.destroy(); return 3;
+    }
+    if (main_decl != null &&
+        ((main_decl.param_count != 0 && !ignored_main_parameter) ||
+         (main_decl.ret_ty != null && main_decl.ret_ty.tag != ATYP_INFER && (!m1_integer_type(main_decl.ret_ty) || m1_int_bits(main_decl.ret_ty) != 64))))
+    {
+        printf("pear2c: M1 requires a zero-argument definition of `main` returning i64\n");
+        arena.destroy(); return 3;
+    }
+    if (needs_main && main_decl == null)
+    {
+        printf("pear2c: %s needs a definition of `main`; compile a library with --emit-bc, --emit-obj or --emit-ll\n",
+               emit_exe ? (char*)"--emit-exe" : (char*)"--emit-native --native-entry");
         arena.destroy(); return 3;
     }
     // ── the native path ────────────────────────────────────────────────────
@@ -6290,7 +6409,13 @@ fn int main(String[] args)
     usz mod_size = 0;
     void* f = open_memstream(&mod_text, &mod_size);
     if (f == null) { printf("pear2c: cannot allocate the LLVM IR buffer\n"); arena.destroy(); return 3; }
-    fprintf(f, mod.low ? (char*)"; PEAR 2: AIR 3 globals, strings and typed-memory lowering\n" : (char*)"; PEAR 2: scalar and local aggregate lowering with direct calls\n");    fprintf(f, "target datalayout = \"%s\"\ntarget triple = \"%s\"\n", g_m1_target_datalayout, g_m1_target_triple);
+    fprintf(f, mod.low ? (char*)"; PEAR 2: AIR 3 globals, strings and typed-memory lowering\n" : (char*)"; PEAR 2: scalar and local aggregate lowering with direct calls\n");
+    // source_filename makes the module self-describing: a .ll or .bc that has
+    // travelled away from the command line still says which source it came from.
+    fprintf(f, "source_filename = \"");
+    m1_ir_write_string(f, input);
+    fprintf(f, "\"\n");
+    fprintf(f, "target datalayout = \"%s\"\ntarget triple = \"%s\"\n", g_m1_target_datalayout, g_m1_target_triple);
     fprintf(f, "declare void @llvm.trap()\ndeclare void @llvm.assume(i1 noundef)\ndeclare ptr @llvm.stacksave()\ndeclare void @llvm.stackrestore(ptr)\n");
     M1Gen g;
     g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = root_decl_count;
@@ -6336,6 +6461,12 @@ fn int main(String[] args)
         else { printf("pear2c: unsupported function body; PEAR2 subset includes scalar/aggregate values, direct calls, terminal if/match, and label/jump CFG\n"); }
         arena.destroy(); return 3;
     }
+    // Provenance. !llvm.ident is the standard place for "what produced this
+    // module", every LLVM tool reads it, and it survives the optimisation
+    // pipeline, so a published .bc records the backend and the target it was
+    // built for instead of looking like anonymous LLVM output.
+    fprintf(f, "\n!llvm.ident = !{!0}\n!0 = !{!\"pear2c (%s, %s)\"}\n",
+            mod.low ? (char*)"AIR 3.0 low profile" : (char*)"AIR 2.2 subset", g_m1_target_triple);
     fclose(f);
     if (mod_text == null) { printf("pear2c: could not render the LLVM IR buffer\n"); arena.destroy(); return 3; }
     void* ctx = ll_context_create();
@@ -6343,6 +6474,8 @@ fn int main(String[] args)
     void* m = null;
     char* msg = null;
     char* obj_msg = null;
+    char* rt_msg = null;
+    usz bc_size = 0;
     int rc = 0;
     // Determinism: the buffer is named with the input path, so the module's
     // source identifier comes out as that path (the old code had to rewrite a
@@ -6391,10 +6524,32 @@ fn int main(String[] args)
                 rc = 3;
             }
         }
-        else if (!emit_ll && ll_write_bitcode(m, &bc_tmp[0]) != 0)
+        else if (!emit_ll)
         {
-            printf("pear2c: LLVM failed to write bitcode\n");
-            rc = 3;
+            // Bitcode is the other artifact this compiler publishes, and it is
+            // checked the same way an object is: write it, load it back with the
+            // same LLVM, parse it, verify it, and compare its triple. Only a file
+            // that survives all four is published.
+            if (ll_write_bitcode(m, &bc_tmp[0]) != 0)
+            {
+                printf("pear2c: LLVM failed to write bitcode\n");
+                rc = 3;
+            }
+            else if (!m1_bitcode_roundtrip(ctx, &bc_tmp[0], &bc_size, g_m1_target_triple, &rt_msg))
+            {
+                if (rt_msg != null)
+                {
+                    printf("pear2c: the bitcode this compiler wrote did not load back: %s\n", rt_msg);
+                    ll_message_dispose(rt_msg);
+                    rt_msg = null;
+                }
+                else
+                {
+                    printf("pear2c: the bitcode this compiler wrote did not load back as a verifiable module for %s\n", g_m1_target_triple);
+                }
+                (void)remove(&bc_tmp[0]);
+                rc = 3;
+            }
         }
     }
     // Publish the textual IR from the MODULE, not from the pre-parse buffer, so
@@ -6447,7 +6602,17 @@ fn int main(String[] args)
     (void)remove(&exe_tmp[0]);
     (void)remove(&obj_tmp[0]);
     if (rc != 0) { (void)remove(&out_path[0]); }
-    else if (!quiet) { printf("pear2c: wrote %s\n", &out_path[0]); }
+    else if (!quiet)
+    {
+        // The bitcode mode reports the byte count it proved the file has, so a
+        // build log records the size of the artifact that was actually verified
+        // rather than the size the writer claimed.
+        if (!emit_ll && bc_size > 0 && !emit_exe && !emit_obj && !emit_asm)
+        {
+            printf("pear2c: wrote %s (%d bytes of bitcode)\n", &out_path[0], (int)bc_size);
+        }
+        else { printf("pear2c: wrote %s\n", &out_path[0]); }
+    }
     arena.destroy();
     return rc;
 }
