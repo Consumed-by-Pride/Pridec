@@ -5839,6 +5839,8 @@ fn int main(String[] args)
     bool emit_ll = false;
     bool emit_obj = false;
     bool emit_asm = false;
+    bool emit_native = false;
+    bool emit_native_entry = false;
     bool mode_seen = false;
     int opt_level = 2;
     bool opt_size = false;
@@ -5852,20 +5854,20 @@ fn int main(String[] args)
         if (same(a, "--quiet")) { quiet = true; }
         else if (same(a, "--emit-exe"))
         {
-            if (mode_seen && (emit_ll || emit_obj || emit_asm || !emit_exe)) { usage_error = true; }
-            else { emit_exe = true; emit_ll = false; emit_obj = false; emit_asm = false; mode_seen = true; }
+            if (mode_seen && (emit_ll || emit_obj || emit_asm || emit_native || !emit_exe)) { usage_error = true; }
+            else { emit_exe = true; emit_ll = false; emit_obj = false; emit_asm = false; emit_native = false; mode_seen = true; }
         }
         else if (same(a, "--emit-bc"))
         {
-            if (mode_seen && (emit_ll || emit_obj || emit_asm || emit_exe)) { usage_error = true; }
-            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = false; mode_seen = true; }
+            if (mode_seen && (emit_ll || emit_obj || emit_asm || emit_native || emit_exe)) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = false; emit_native = false; mode_seen = true; }
         }
         // --emit-ll publishes the verified textual IR after the optimization
         // pipeline, so -O0 passes and lowered shapes can be inspected directly.
         else if (same(a, "--emit-ll"))
         {
             if (mode_seen) { usage_error = true; }
-            else { emit_exe = false; emit_ll = true; emit_obj = false; emit_asm = false; mode_seen = true; }
+            else { emit_exe = false; emit_ll = true; emit_obj = false; emit_asm = false; emit_native = false; mode_seen = true; }
         }
         // --emit-obj publishes the machine-code object LLVM's backend produced
         // in process: the same code the executable is linked from, with no
@@ -5873,7 +5875,7 @@ fn int main(String[] args)
         else if (same(a, "--emit-obj"))
         {
             if (mode_seen) { usage_error = true; }
-            else { emit_exe = false; emit_ll = false; emit_obj = true; emit_asm = false; mode_seen = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = true; emit_asm = false; emit_native = false; mode_seen = true; }
         }
         // --emit-asm publishes the assembly listing the object was assembled
         // from. It is the same target-machine call as --emit-obj with the
@@ -5882,8 +5884,20 @@ fn int main(String[] args)
         else if (same(a, "--emit-asm"))
         {
             if (mode_seen) { usage_error = true; }
-            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = true; mode_seen = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = true; emit_native = false; mode_seen = true; }
         }
+        // --emit-native compiles to an x86-64 ELF object with this compiler's
+        // own pipeline: AIR -> PIR -> machine code -> ELF. LLVM is not entered at
+        // all -- no context, no IR text, no target machine.
+        else if (same(a, "--emit-native"))
+        {
+            if (mode_seen) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = false; emit_native = true; mode_seen = true; }
+        }
+        // --native-entry adds a `_start` that calls `main` and exits with its
+        // result, so `ld prog.o -o prog` produces a runnable program with no C
+        // runtime and no linker script.
+        else if (same(a, "--native-entry")) { emit_native_entry = true; }
         else if (same(a, "-O0")) { opt_level = 0; }
         else if (same(a, "-O1")) { opt_level = 1; }
         else if (same(a, "-O2")) { opt_level = 2; }
@@ -5932,7 +5946,7 @@ fn int main(String[] args)
     }
     if (input == null)
     {
-        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-asm|--emit-ll] [-O0|-O1|-O2|-O3|-Os] [--target=x86_64|wasm32-freestanding] [--internalize|--no-internalize] [--stats] [--quiet]\n");
+        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-asm|--emit-ll|--emit-native] [-O0|-O1|-O2|-O3|-Os] [--target=x86_64|wasm32-freestanding] [--internalize|--no-internalize] [--stats] [--quiet]\n");
         return 2;
     }
     // Default linkage policy per output mode; an explicit flag above wins.
@@ -5950,7 +5964,7 @@ fn int main(String[] args)
     char[4096] bc_tmp;
     char[4096] exe_tmp;
     char[4096] obj_tmp;
-    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : (emit_obj ? 3 : (emit_asm ? 4 : 1))), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
+    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : ((emit_obj || emit_native) ? 3 : (emit_asm ? 4 : 1))), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
     {
         printf("pear2c: output path too long\n"); return 2;
     }
@@ -6201,6 +6215,74 @@ fn int main(String[] args)
     {
         printf("pear2c: M1 requires exactly one zero-argument definition of `main`\n");
         arena.destroy(); return 3;
+    }
+    // ── the native path ────────────────────────────────────────────────────
+    //
+    // Everything above this point is shared with the LLVM path: the same AIR, the
+    // same checks, the same diagnostics. From here the two part company. The
+    // native path builds PIR from the AIR declarations, selects x86-64 bytes for
+    // every instruction, attaches relocations, and serialises an ELF object --
+    // all in this process, with no textual IR anywhere in the pipeline.
+    //
+    // The speed claim is not a hope: the LLVM path prints a module, copies it
+    // into an LLVM buffer, parses it, verifies twice, runs a pass pipeline, and
+    // drives a target machine. This path appends bytes to a growing buffer and
+    // writes it once.
+    if (emit_native)
+    {
+        u8* native_data = null;
+        usz native_size = 0;
+        char* fail_name = null;
+        char* fail_message = null;
+        int fail_line = 0;
+        int fail_col = 0;
+        if (!nat_emit_module(&mod.decls[0], root_decl_count, emit_native_entry, &native_data, &native_size,
+                             &fail_name, &fail_line, &fail_col, &fail_message))
+        {
+            if (fail_name != null && fail_message != null)
+            {
+                printf("%s:%d:%d: pear2c: function `%s` is outside the native subset: %s\n",
+                       input, fail_line, fail_col, fail_name, fail_message);
+            }
+            else
+            {
+                printf("pear2c: the native backend could not emit this module\n");
+            }
+            arena.destroy();
+            return 3;
+        }
+        // Written through the same temporary-then-rename path every other output
+        // mode uses, so a failed write cannot leave a half-finished object where a
+        // build system expects a complete one.
+        void* nf = fopen(&obj_tmp[0], (char*)"wb");
+        if (nf == null)
+        {
+            printf("pear2c: cannot open the native object for writing\n");
+            arena.destroy();
+            return 3;
+        }
+        usz wrote = native_size == 0 ? 0 : fwrite(native_data, 1, native_size, nf);
+        int closed = fclose(nf);
+        if (wrote != native_size || closed != 0)
+        {
+            remove(&obj_tmp[0]);
+            printf("pear2c: could not write the native object\n");
+            arena.destroy();
+            return 3;
+        }
+        if (rename(&obj_tmp[0], &out_path[0]) != 0)
+        {
+            remove(&obj_tmp[0]);
+            printf("pear2c: could not publish the native object atomically\n");
+            arena.destroy();
+            return 3;
+        }
+        if (!quiet)
+        {
+            printf("%s -> %s (native x86-64 object, %d bytes)\n", input, &out_path[0], (int)native_size);
+        }
+        arena.destroy();
+        return 0;
     }
     // Render the module into memory. LLVM parses this buffer directly, so the
     // success path creates no temporary .ll file and nothing to clean up.

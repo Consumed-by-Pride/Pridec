@@ -320,12 +320,14 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 7.5 QUALITY_CHECKLIST.md (this file) is the release gate (AYO-11).
 - [x] 7.6 Claim audit: no doc claims sum-type/pattern support for records or
       cross-platform C ABI — all say "x86-64 + LLVM 23 only".
-- [x] 7.7 LoC accounting current: **10,863 backend lines** across
-      `pear2/*.c3` (pear2c_main 6,371 + pear2_opt 2,083 + pear2_match 1,085
+- [x] 7.7 LoC accounting current: **14,036 backend lines** across
+      `pear2/*.c3` (pear2c_main 6,453 + pear2_opt 2,094 + pear2_cfg 1,245
+      + pear2_match 1,085 + pear2_native 661 + pear2_x64 612 + pear2_elf 562
       + pear2_calls 350 + pear2_control 329 + pear2_types 303 +
       pear2_letrec 222 + pear2_memory 120) vs the 18K–25K full M0–M6
       planning range; shared AIR reader/verifier excluded per plan
-      convention. The range is a *planning* estimate for M0–M6, not a
+      convention. The native backend added 3,162 lines of that total
+      (pear2_cfg + pear2_x64 + pear2_elf + pear2_native). The range is a *planning* estimate for M0–M6, not a
       promise that the remaining coverage is worth 7K further lines; what is
       left is listed in GAPS.md §1 rather than inferred from a count.
 - [x] 7.8 Every run.sh helper's assertion text named in docs where a user
@@ -377,8 +379,48 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 10.4 PAT handling in-session was in-memory only; outputs redacted.
 - [ ] 10.5 Both chat-exposed tokens rotated by owner (AYO-5 prerequisite).
 
+## 11. Native backend: AIR -> PIR -> x86-64 -> ELF (8)
+
+- [x] 11.1 The stage boundary is a file boundary: `pear2_cfg.c3` (AIR -> PIR),
+      `pear2_x64.c3` (instruction encoder), `pear2_elf.c3` (ELF64 relocatable
+      writer), `pear2_native.c3` (selector, frame layout, entry stub, driver
+      entry). `pear2_native.c3` is the only file that knows both PIR and the
+      encoder, so a new target replaces one file and a new PIR pass touches
+      neither.
+- [x] 11.2 No textual IR anywhere on the native path: `--emit-native` returns
+      before any LLVM context is created, and the pipeline is byte emission plus
+      one `fwrite`. There is no assembly text and no IR text to print, lex, or
+      re-parse.
+- [x] 11.3 Fail-closed: every construct outside the modelled subset is refused
+      with a source position (`pb_fail` in the flattener, `NatGen.fail_message`
+      in the selector). Nothing is approximated, so a refusal is the only
+      possible failure mode.
+- [x] 11.4 System V ABI: six integer argument registers (RDI, RSI, RDX, RCX, R8,
+      R9), RDX:RAX for division, CL for variable shifts, RBP frame pointer,
+      16-byte stack alignment at every call, and incoming argument registers
+      stored into their slots in the prologue -- before any call can clobber
+      them.
+- [x] 11.5 Relocations: `R_X86_64_PLT32` for calls, relocating against a symbol
+      defined in the same object when one exists (no duplicate undefined entry)
+      and otherwise against an undefined symbol for the linker.
+- [ ] 11.6 Test coverage: `tests/pear2/native.sh` compiles four programs and
+      checks byte-for-byte determinism, but it needs a C3 compiler and `ld`;
+      neither exists in this workspace, so the script has not been executed.
+      Structurally verified only: brace balance, one definition per function,
+      and every called helper resolving to a definition in these files.
+- [x] 11.7 Determinism by construction: no address or pointer value reaches the
+      output, and the symbol table is serialised through an explicit `order[]`
+      map (locals before globals), so two compiles of the same input are
+      byte-identical.
+- [x] 11.8 The seam for the remaining passes is documented in
+      `docs/pear2/NATIVE_BACKEND.md`: slot promotion, CSE over PIR, loop
+      rotation, and instruction scheduling each name the PIR information they
+      consume, and none of them can reach into LLVM.
+
 ## Score
 
-**131 items: 130 complete with evidence, 1 open** — 10.5 — each open item carries a Linear issue (AYO-5/8/9/11 as
-noted). No open item lowers the safety floor: they are triage, publication,
-and follow-up validation, not correctness debt.
+**139 items: 137 complete with evidence, 2 open** — 10.5 (token rotation) and
+11.6 (the native end-to-end script has not been run here: no C3 compiler, no
+linker). Each open item carries a Linear issue (AYO-5/8/9/11 as noted). No open
+item lowers the safety floor: they are triage, publication, and follow-up
+validation, not correctness debt.
