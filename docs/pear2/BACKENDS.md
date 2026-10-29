@@ -8,7 +8,8 @@ claims.
 
 | option | pipeline | artifact | status |
 | --- | --- | --- | --- |
-| `--emit-bc` | AIR → LLVM IR text → LLVM parse → verify → `default<On>` → verify → bitcode → **load back and verify** | `.bc`, linkable by any LLVM 23 tool | **complete** (see §1) |
+| `--emit-bc` | AIR → LLVM IR text → LLVM parse → verify → `default<On>` → verify → bitcode → **load back, verify, compare triple, check exports** | `.bc`, linkable by any LLVM 23 tool | **complete** (see §1) |
+| `--verify-bc` | load → parse → verify → compare triple → report | nothing (checks an existing `.bc`) | complete |
 | `--emit-native` | AIR → PIR → x86-64 bytes → ELF64 | `.o` relocatable, or runnable with `--native-entry` | **partial** (see §2) |
 | `--emit-exe`, `--emit-obj`, `--emit-asm`, `--emit-ll` | the LLVM path | executable / object / listing / text | complete, unchanged |
 
@@ -31,16 +32,46 @@ the one that was requested. A file that fails any of those steps is deleted and
 the compile exits 3. This is the difference between "the writer returned 0" and
 "the artifact is bitcode".
 
+**The interface check.** Optimisation may delete anything nobody outside the
+module can observe. It may not delete something the module promised to export —
+that is a link error for whoever links the published bitcode, surfacing far from
+the compile that caused it. So `m1_abi_snapshot_begin` records every externally
+linked definition *before* the optimizer runs, and `m1_abi_check` looks each one
+up again in the module loaded back from the written file. A missing symbol is
+exit 3 with its name. Internal definitions are deliberately excluded: deleting
+those is exactly what internalising is for.
+
+**Checking an artifact that is already on disk.** `--verify-bc FILE.bc` runs the
+same load, parse, verify and triple comparison over a file this run did not
+produce, and reports its shape:
+
+```
+$ pear2c prog.bc --verify-bc
+pear2c: prog.bc is valid bitcode (1140 bytes, 3 functions defined, 2 declarations, 1 globals, triple x86_64-unknown-linux-gnu)
+```
+
+It writes nothing, and it runs before any output path is computed, because
+`clear_stale_outputs` would otherwise delete the very file being inspected. It is
+refused (exit 2) alongside an `--emit-*` mode rather than silently ignoring one of
+them, and exit 3 covers unreadable, unparsable, unverifiable, and wrong-triple.
+That makes the artifact checkable by a build system long after it was built.
+
 The memory buffer is never disposed by the caller: `LLVMParseBitcodeInContext2`
 takes ownership whether it succeeds or fails, so the size is read before the
 parse and the buffer is left alone afterwards.
 
-**Provenance.** Every module carries
+**Provenance and module flags.** Every module carries
 `source_filename = "<input path>"` (escaped by `m1_ir_write_string`, so a quote or
-a backslash in a path cannot produce unparsable IR) and
-`!llvm.ident = !{!0}` naming the compiler, the AIR profile it consumed, and the
-target. A `.bc` that has travelled away from the command line still says what
-produced it.
+a backslash in a path cannot produce unparsable IR), `!llvm.ident = !{!0}` naming
+the compiler, the AIR profile it consumed and the target, and
+`!llvm.module.flags` pinning `wchar_size` to 4 and declaring `uwtable` — the two
+flags every clang-produced Linux module carries and some consumers read instead of
+assuming. A `.bc` that has travelled away from the command line still says what
+produced it and what it expects of the platform.
+
+**The success line reports the artifact, not the writer's opinion.** A bitcode
+compile prints the byte count read back from the file and the module's shape
+(functions defined, declarations, globals), all measured after verification.
 
 **Determinism.** The module identifier is the input path, no PID, timestamp, or
 address reaches the module, and the symbol order is fixed. Two compiles of one

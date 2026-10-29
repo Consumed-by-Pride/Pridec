@@ -6,6 +6,7 @@ Normative for any program that consumes `.air`. Format: [`docs/specs/AIR.md`](..
 
 ```
 BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
+BACKEND FILE.bc --verify-bc [--target=x86_64 | --target=wasm32-freestanding] [--quiet]
 ```
 
 | | |
@@ -15,6 +16,7 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 | `--emit-obj` | (PEAR 2) write the native object `FILE.o` produced by LLVM's backend in process |
 | `--emit-asm` | (PEAR 2) write the x86-64 assembly listing `FILE.s` the object was assembled from |
 | `--emit-native` | (PEAR 2) write the x86-64 ELF object `FILE.o` from PEAR 2's own backend — no LLVM, no textual IR; `--native-entry` adds a `_start` so `ld -static` yields a runnable program |
+| `--verify-bc` | (PEAR 2) the first argument is a `.bc` instead of a `.air`: load, parse, verify, compare the triple, report the module's shape. Writes nothing and deletes nothing |
 | `-On` | optimisation tier; default `-O2` (PEAR 2: `-O1` = AIR folding, reassociation, and self-operand folding, `-O2` adds the dead-binding pass, `-O3` adds whole-body propagation and literal-decided control-flow folding; `-Os` keeps the `-O2` AIR tier and selects `default<Os>`, and every other tier selects the matching `default<On>` LLVM pipeline) |
 | exit 0 | the artifact was written |
 | exit 1 | the `.air` was rejected (syntax, version, limits) — message `file:line:col: …`, **no artifact** |
@@ -46,11 +48,18 @@ clang driver over the same object if the system linker cannot be used. A link fa
 executable or temporary artifact. `--emit-bc`, `--emit-obj`, `--emit-native`, and `--emit-ll` never link and never invoke clang.
 
 `--emit-bc` is the only mode whose artifact is checked after it is written: the file is loaded back with
-`LLVMCreateMemoryBufferWithContentsOfFile`, parsed with `LLVMParseBitcodeInContext2`, verified, and its triple
-compared with the requested one. A file that fails any of those steps is removed and the run exits 3, so a
-published `.bc` is by construction one this LLVM can read. Emitted modules carry `source_filename` and
-`!llvm.ident` (compiler, AIR profile, target). `--emit-native` is a second, independent backend described in
-[`BACKENDS.md`](BACKENDS.md); it covers a documented subset of AIR and refuses the rest with a source position.
+`LLVMCreateMemoryBufferWithContentsOfFile`, parsed with `LLVMParseBitcodeInContext2`, verified, its triple
+compared with the requested one, and every symbol that had external linkage before optimisation looked up
+again. A file that fails any of those steps is removed and the run exits 3, so a published `.bc` is by
+construction one this LLVM can read and one that still exports what the source declared. Emitted modules carry
+`source_filename`, `!llvm.ident` (compiler, AIR profile, target) and `!llvm.module.flags` (`wchar_size`,
+`uwtable`).
+
+`--verify-bc FILE.bc` applies the same load/parse/verify/triple checks to a file this run did not produce, and
+writes no artifact; exit 0 means valid, exit 3 means unreadable, unparsable, unverifiable, or the wrong triple,
+and combining it with an `--emit-*` mode is exit 2. `--emit-native` is a second, independent backend described
+in [`BACKENDS.md`](BACKENDS.md); it covers a documented subset of AIR and refuses the rest with a source
+position.
 Warnings go to stdout/stderr and never change the exit status of a successful emit. The wrapper
 `scripts/pie-exe.sh` forwards both stages' output; `BACKEND=… scripts/pie-exe.sh FILE.pie --emit-exe -O2` is the
 whole chain.

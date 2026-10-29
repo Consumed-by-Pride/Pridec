@@ -127,6 +127,66 @@ set -e
 [ "$rc" = 2 ] || { echo "FAIL: --native-entry with --emit-bc returned $rc, expected 2"; exit 1; }
 echo "PASS: --emit-bc publishes a library, and program modes still demand main"
 
+# --verify-bc checks an artifact this run did not necessarily produce: load,
+# parse, verify, triple-check, report. It writes nothing and must not delete the
+# file it was asked to inspect.
+"$PEAR2_BIN" --verify-bc "$W/library.bc" >"$W/verify_ok.log" 2>&1 || { echo "FAIL: --verify-bc rejected bitcode this compiler produced"; cat "$W/verify_ok.log"; exit 1; }
+[ -f "$W/library.bc" ] || { echo "FAIL: --verify-bc deleted the file it checked"; exit 1; }
+grep -q 'functions defined' "$W/verify_ok.log" || { echo "FAIL: --verify-bc reported no module shape"; exit 1; }
+"$PEAR2_BIN" --verify-bc "$W/library.bc" --quiet || { echo "FAIL: --verify-bc --quiet rejected valid bitcode"; exit 1; }
+echo "PASS: --verify-bc reports on a published artifact"
+
+set +e
+"$PEAR2_BIN" --verify-bc "$W/library.air" >"$W/verify_bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: --verify-bc on a .air file returned $rc, expected 3"; exit 1; }
+grep -q 'not readable LLVM bitcode' "$W/verify_bad.log" || { echo "FAIL: --verify-bc did not name the problem"; exit 1; }
+
+set +e
+"$PEAR2_BIN" --verify-bc "$W/library.bc" --target=wasm32-freestanding >"$W/verify_triple.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: --verify-bc with the wrong triple returned $rc, expected 3"; exit 1; }
+grep -q 'not the requested' "$W/verify_triple.log" || { echo "FAIL: --verify-bc did not report the triple mismatch"; exit 1; }
+
+set +e
+"$PEAR2_BIN" --verify-bc "$W/library.bc" --emit-bc >"$W/verify_conflict.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: --verify-bc with an emit mode returned $rc, expected 2"; exit 1; }
+echo "PASS: --verify-bc refuses non-bitcode, a wrong triple, and a mode conflict"
+
+# Module flags: what every clang-produced Linux module carries and what a consumer
+# reads instead of assuming (wchar_t width, unwind tables).
+grep -q '!llvm.module.flags' "$W/default.ll" || { echo "FAIL: emitted IR has no module flags"; exit 1; }
+grep -q 'wchar_size", i32 4' "$W/default.ll" || { echo "FAIL: module flags do not pin wchar_size"; exit 1; }
+grep -q 'uwtable", i32 2' "$W/default.ll" || { echo "FAIL: module flags do not declare unwinding tables"; exit 1; }
+echo "PASS: emitted IR carries llvm.module.flags"
+
+# The export list survives optimisation. `pub def` on a library is a promise to
+# whoever links the bitcode, so -O3 must not delete or internalise it.
+cat > "$W/exports.air" <<'AIR'
+air 2.2 Main "exports.pie";
+
+pub def twice(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 2 : i64) | %ret>;
+
+pub def unused_pub() : i64 =
+  mu~ %ret.
+    <7 | %ret>;
+
+def main() : i64 =
+  mu~ %ret_2.
+    <twice | call · 21 : i64 · comu _x1.
+      <_x1 : i64 | %ret_2>>;
+AIR
+"$PEAR2_BIN" "$W/exports.air" --emit-bc -O3 --quiet || { echo "FAIL: -O3 --emit-bc rejected the exports fixture"; exit 1; }
+"$PEAR2_BIN" "$W/exports.air" --emit-ll -O3 --quiet || { echo "FAIL: -O3 --emit-ll rejected the exports fixture"; exit 1; }
+grep -q 'define .*@twice(' "$W/exports.ll" || { echo "FAIL: -O3 dropped the exported `twice`"; exit 1; }
+grep -q 'define .*@unused_pub(' "$W/exports.ll" || { echo "FAIL: -O3 dropped the exported-but-unused `unused_pub`"; exit 1; }
+! grep -q 'internal .*@unused_pub(' "$W/exports.ll" || { echo "FAIL: -O3 internalised an exported symbol"; exit 1; }
+"$PEAR2_BIN" --verify-bc "$W/exports.bc" || { echo "FAIL: the exports bitcode did not verify"; exit 1; }
+echo "PASS: -O3 keeps every exported symbol"
+
 # Exit 2: usage/option errors. Exit 1: invalid AIR. Exit 3: valid AIR outside
 # the supported backend subset. Every failure must remove a stale artifact.
 set +e

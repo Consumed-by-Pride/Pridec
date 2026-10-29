@@ -320,14 +320,17 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 7.5 QUALITY_CHECKLIST.md (this file) is the release gate (AYO-11).
 - [x] 7.6 Claim audit: no doc claims sum-type/pattern support for records or
       cross-platform C ABI — all say "x86-64 + LLVM 23 only".
-- [x] 7.7 LoC accounting current: **14,036 backend lines** across
-      `pear2/*.c3` (pear2c_main 6,453 + pear2_opt 2,094 + pear2_cfg 1,245
-      + pear2_match 1,085 + pear2_native 661 + pear2_x64 612 + pear2_elf 562
-      + pear2_calls 350 + pear2_control 329 + pear2_types 303 +
-      pear2_letrec 222 + pear2_memory 120) vs the 18K–25K full M0–M6
-      planning range; shared AIR reader/verifier excluded per plan
-      convention. The native backend added 3,162 lines of that total
-      (pear2_cfg + pear2_x64 + pear2_elf + pear2_native). The range is a *planning* estimate for M0–M6, not a
+- [x] 7.7 LoC accounting current: **14,465 backend lines** across
+      `pear2/*.c3`, split by backend because the two no longer share an emitter:
+      **11,077** for the `.bc`/LLVM backend (pear2c_main 6,877 + pear2_opt 2,094
+      + pear2_match 1,085 + pear2_calls 350 + pear2_control 329 + pear2_letrec 222
+      + pear2_memory 120), **3,085** for the native backend (pear2_cfg 1,250
+      + pear2_native 661 + pear2_x64 612 + pear2_elf 562), and **303** shared
+      (pear2_types, used by both) — vs the 18K–25K full M0–M6 planning range;
+      shared AIR reader/verifier excluded per plan convention. Every helper module
+      was checked for who calls it: match, calls, control, letrec and memory are
+      referenced only from pear2c_main, and pear2_types is the only module both
+      backends call into. The range is a *planning* estimate for M0–M6, not a
       promise that the remaining coverage is worth 7K further lines; what is
       left is listed in GAPS.md §1 rather than inferred from a count.
 - [x] 7.8 Every run.sh helper's assertion text named in docs where a user
@@ -445,11 +448,36 @@ bitcode-determinism fix committed with this checklist revision).
       there is no C3 compiler and no LLVM in this workspace. Structurally
       verified only: brace balance and every patched region read back.
 
+## 13. Bitcode: artifact inspection and interface preservation (5)
+
+- [x] 13.1 `--verify-bc FILE.bc` checks an artifact this run did not produce:
+      load, parse, verify, optional triple comparison, and a report of the
+      module's shape (bytes, functions defined, declarations, globals, triple).
+      It writes nothing and, unlike every `--emit-*` mode, runs before
+      `clear_stale_outputs`, because the file it inspects is the one those paths
+      would delete.
+- [x] 13.2 `--verify-bc` is refused with an `--emit-*` mode (exit 2) rather than
+      silently ignoring one of them.
+- [x] 13.3 The export list survives optimisation *and* serialisation:
+      `m1_abi_snapshot_begin` records every externally linked definition before
+      the optimizer runs, and `m1_abi_check` looks each one up in the module that
+      was loaded back from the written file. Internal symbols are deliberately
+      excluded -- deleting those is what internalising is for.
+- [x] 13.4 Emitted modules carry `!llvm.module.flags` with `wchar_size` (4) and
+      `uwtable` (2), the two flags every clang-produced Linux module carries and
+      some consumers read instead of assuming. Behaviour 7 (Max) means a module
+      that disagrees is diagnosed rather than silently merged.
+- [ ] 13.5 The new `run.sh` assertions (verify-bc success, non-bitcode input,
+      wrong triple, mode conflict, module flags present, `pub def` survives -O3
+      and is not internalised) have not been executed: no C3 compiler and no LLVM
+      in this workspace. Structurally verified only.
+
 ## Score
 
-**145 items: 142 complete with evidence, 3 open** — 10.5 (token rotation), 11.6
+**151 items: 147 complete with evidence, 4 open** (the count is the file's own
+inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.5
+(token rotation), 11.6
 (the native end-to-end script has not been run here: no C3 compiler, no linker),
-and 12.6 (the new bitcode assertions have not been run for the same reason). Each
-open item carries a Linear issue (AYO-5/8/9/11 as noted). No open item lowers the
-safety floor: they are triage, publication, and follow-up validation, not
-correctness debt.
+12.6 and 13.5 (the new bitcode assertions have not been run for the same reason).
+Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All four are an
+unrun test or an owner action, not a known defect: none lowers the safety floor.

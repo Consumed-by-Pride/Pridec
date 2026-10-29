@@ -92,6 +92,18 @@ extern fn int ll_buffer_from_file(char* path, void** out_buf, char** msg) @cname
 extern fn void ll_buffer_dispose(void* buf) @cname("LLVMDisposeMemoryBuffer");
 extern fn int ll_parse_bitcode(void* ctx, void* buf, void** out_mod) @cname("LLVMParseBitcodeInContext2");
 extern fn usz ll_buffer_size(void* buf) @cname("LLVMGetBufferSize");
+// The module's own symbol tables. A published artifact makes a promise about
+// what it exports, and that promise is checked here by walking the module before
+// optimisation and again after the file is loaded back.
+extern fn void* ll_first_function(void* m) @cname("LLVMGetFirstFunction");
+extern fn void* ll_next_function(void* f) @cname("LLVMGetNextFunction");
+extern fn void* ll_first_global(void* m) @cname("LLVMGetFirstGlobal");
+extern fn void* ll_next_global(void* g) @cname("LLVMGetNextGlobal");
+extern fn int ll_is_declaration(void* v) @cname("LLVMIsDeclaration");
+extern fn int ll_get_linkage(void* v) @cname("LLVMGetLinkage");
+extern fn char* ll_value_name(void* v, usz* length) @cname("LLVMGetValueName2");
+extern fn void* ll_get_named_function(void* m, char* name) @cname("LLVMGetNamedFunction");
+const int LLVM_EXTERNAL_LINKAGE = 0;
 fn bool same(char* a, char* b)
 {
     if (a == null || b == null) { return a == b; }
@@ -128,7 +140,7 @@ fn void m1_ir_write_string(void* f, char* text)
 // On success `out_size` is the file's size and the function returns true. On
 // failure it returns false and `out_error` is a malloc'd message the caller frees
 // with ll_message_dispose.
-fn bool m1_bitcode_roundtrip(void* ctx, char* path, usz* out_size, char* want_triple, char** out_error)
+fn void* m1_bitcode_roundtrip(void* ctx, char* path, usz* out_size, char* want_triple, char** out_error)
 {
     if (out_error != null) { *out_error = null; }
     void* buf = null;
@@ -136,7 +148,7 @@ fn bool m1_bitcode_roundtrip(void* ctx, char* path, usz* out_size, char* want_tr
     if (ll_buffer_from_file(path, &buf, &msg) != 0 || buf == null)
     {
         if (out_error != null) { *out_error = msg; } else if (msg != null) { ll_message_dispose(msg); }
-        return false;
+        return null;
     }
     if (out_size != null) { *out_size = ll_buffer_size(buf); }
     // LLVMParseBitcodeInContext2 takes ownership of the memory buffer whether it
@@ -146,16 +158,16 @@ fn bool m1_bitcode_roundtrip(void* ctx, char* path, usz* out_size, char* want_tr
     if (ll_parse_bitcode(ctx, buf, &m) != 0 || m == null)
     {
         if (out_error != null) { *out_error = null; }
-        return false;
+        return null;
     }
     char* verr = null;
-    bool ok = true;
     if (ll_verify_module(m, 1, &verr) != 0)
     {
-        ok = false;
         if (out_error != null) { *out_error = verr; } else if (verr != null) { ll_message_dispose(verr); }
+        ll_module_dispose(m);
+        return null;
     }
-    if (ok && want_triple != null)
+    if (want_triple != null)
     {
         char* triple = ll_get_triple(m);
         if (triple == null || !same(triple, want_triple))
@@ -163,12 +175,198 @@ fn bool m1_bitcode_roundtrip(void* ctx, char* path, usz* out_size, char* want_tr
             // The module parsed and verified, but it describes a different target
             // than the one the user asked for. That is a silently wrong artifact,
             // so it is a hard failure rather than a warning.
-            ok = false;
             if (out_error != null) { *out_error = null; }
+            ll_module_dispose(m);
+            return null;
         }
     }
+    // The caller owns the module from here and must dispose it.
+    return m;
+}
+
+// ── the module's public interface ──────────────────────────────────────────
+//
+// Optimisation is allowed to delete anything that nobody outside the module can
+// observe. It is not allowed to delete something the module promised to export:
+// that would be a linker error for whoever links the published bitcode, and it
+// would show up far from the compile that caused it. So the external definitions
+// are recorded before the optimizer runs and every one of them is looked up again
+// in the module that was loaded back from the written file.
+//
+// Names are copied into one block rather than referenced, because the strings
+// LLVM hands out belong to the module that was disposed when the round trip
+// returned a new one.
+struct M1AbiSnapshot {
+    char* block;
+    usz cap;
+    usz used;
+    int[512] offs;
+    int count;
+    bool active;
+    bool overflow;
+}
+
+fn void m1_abi_snapshot_begin(M1AbiSnapshot* s, void* m)
+{
+    if (s == null) { return; }
+    s.count = 0;
+    s.active = false;
+    s.overflow = false;
+    s.used = 0;
+    s.cap = 65536;
+    s.block = (char*)malloc(s.cap);
+    if (s.block == null || m == null) { return; }
+    void* f = ll_first_function(m);
+    while (f != null)
+    {
+        // Only externally visible definitions are a promise. An internal function
+        // may legitimately vanish, which is the whole point of internalising.
+        if (ll_is_declaration(f) == 0 && ll_get_linkage(f) == LLVM_EXTERNAL_LINKAGE)
+        {
+            usz len = 0;
+            char* nm = ll_value_name(f, &len);
+            if (nm != null && len > 0 && s.count < 512 && s.used + len + 1 < s.cap)
+            {
+                s.offs[s.count] = (int)s.used;
+                s.count++;
+                for (usz i = 0; i < len; i++) { s.block[s.used] = nm[i]; s.used++; }
+                s.block[s.used] = 0;
+                s.used++;
+            }
+            // A name this table cannot hold is not a reason to fail the compile,
+            // but it is a reason to stop claiming the export list was checked:
+            // the flag says so rather than quietly checking a shorter list.
+            else { s.overflow = true; }
+        }
+        f = ll_next_function(f);
+    }
+    s.active = true;
+}
+
+fn void m1_abi_snapshot_end(M1AbiSnapshot* s)
+{
+    if (s == null) { return; }
+    if (s.block != null) { free(s.block); s.block = null; }
+    s.active = false;
+    s.count = 0;
+}
+
+// m1_abi_check -- every symbol that was exported before optimisation must still
+// be defined in the artifact. Returns false and names the first casualty.
+fn bool m1_abi_check(M1AbiSnapshot* s, void* m, char** missing)
+{
+    if (missing != null) { *missing = null; }
+    if (s == null || !s.active || m == null || s.overflow) { return true; }
+    for (int i = 0; i < s.count; i++)
+    {
+        if (s.offs[i] < 0) { continue; }
+        char* nm = &s.block[s.offs[i]];
+        void* f = ll_get_named_function(m, nm);
+        if (f == null || ll_is_declaration(f) != 0)
+        {
+            if (missing != null) { *missing = nm; }
+            return false;
+        }
+    }
+    return true;
+}
+
+// m1_verify_bitcode_file -- check a .bc that may not have come from this run,
+// or from this compiler at all.
+//
+// `--emit-bc` verifies what it just wrote, but that only helps the process that
+// wrote it. An artifact that has been copied, cached, or produced by another
+// PEAR 2 build needs to be checkable on its own, and a build system needs a
+// command that answers "is this file usable by this LLVM" with an exit status
+// rather than an opinion. That is what this mode is: load, parse, verify,
+// optionally compare the triple, and report the module's shape.
+fn int m1_verify_bitcode_file(char* path, char* want_triple, bool quiet)
+{
+    if (path == null) { return 2; }
+    void* ctx = ll_context_create();
+    if (ctx == null)
+    {
+        printf("pear2c: LLVM context creation failed\n");
+        return 3;
+    }
+    void* buf = null;
+    char* msg = null;
+    if (ll_buffer_from_file(path, &buf, &msg) != 0 || buf == null)
+    {
+        printf("pear2c: cannot read %s%s%s\n", path, msg == null ? (char*)"" : (char*)": ", msg == null ? (char*)"" : msg);
+        if (msg != null) { ll_message_dispose(msg); }
+        ll_context_dispose(ctx);
+        return 3;
+    }
+    usz size = ll_buffer_size(buf);
+    // The parse takes ownership of the buffer whatever it returns (see the note
+    // in m1_bitcode_roundtrip), so the size is read here and the buffer is never
+    // disposed by this function.
+    void* m = null;
+    if (ll_parse_bitcode(ctx, buf, &m) != 0 || m == null)
+    {
+        printf("pear2c: %s is not readable LLVM bitcode\n", path);
+        ll_context_dispose(ctx);
+        return 3;
+    }
+    char* verr = null;
+    if (ll_verify_module(m, 1, &verr) != 0)
+    {
+        printf("pear2c: %s parses but fails verification%s%s\n", path, verr == null ? (char*)"" : (char*)": ", verr == null ? (char*)"" : verr);
+        if (verr != null) { ll_message_dispose(verr); }
+        ll_module_dispose(m);
+        ll_context_dispose(ctx);
+        return 3;
+    }
+    char* triple = ll_get_triple(m);
+    if (want_triple != null && (triple == null || !same(triple, want_triple)))
+    {
+        printf("pear2c: %s targets %s, not the requested %s\n", path,
+               triple == null ? (char*)"<no triple>" : triple, want_triple);
+        ll_module_dispose(m);
+        ll_context_dispose(ctx);
+        return 3;
+    }
+    int defined = 0;
+    int declared = 0;
+    int globals = 0;
+    m1_count_symbols(m, &defined, &declared, &globals);
+    if (!quiet)
+    {
+        printf("pear2c: %s is valid bitcode (%d bytes, %d functions defined, %d declarations, %d globals, triple %s)\n",
+               path, (int)size, defined, declared, globals, triple == null ? (char*)"<none>" : triple);
+    }
     ll_module_dispose(m);
-    return ok;
+    ll_context_dispose(ctx);
+    return 0;
+}
+
+// m1_count_symbols -- the shape of a module, for the artifact report and for
+// `--verify-bc`. Declarations are counted separately: they are what the artifact
+// needs from whoever links it.
+fn void m1_count_symbols(void* m, int* defined, int* declared, int* globals)
+{
+    int d = 0;
+    int e = 0;
+    int g = 0;
+    if (m != null)
+    {
+        void* f = ll_first_function(m);
+        while (f != null)
+        {
+            if (ll_is_declaration(f) != 0) { e++; } else { d++; }
+            f = ll_next_function(f);
+        }
+        void* v = ll_first_global(m);
+        while (v != null)
+        {
+            if (ll_is_declaration(v) == 0) { g++; }
+            v = ll_next_global(v);
+        }
+    }
+    if (defined != null) { *defined = d; }
+    if (declared != null) { *declared = e; }
+    if (globals != null) { *globals = g; }
 }
 
 struct M1Label
@@ -5937,6 +6135,8 @@ fn int main(String[] args)
     bool emit_asm = false;
     bool emit_native = false;
     bool emit_native_entry = false;
+    bool verify_bc = false;
+    bool target_pinned = false;
     bool mode_seen = false;
     int opt_level = 2;
     bool opt_size = false;
@@ -5994,6 +6194,10 @@ fn int main(String[] args)
         // result, so `ld prog.o -o prog` produces a runnable program with no C
         // runtime and no linker script.
         else if (same(a, "--native-entry")) { emit_native_entry = true; }
+        // --verify-bc takes a .bc as its input instead of a .air: load, parse,
+        // verify, report. It writes no artifact and touches none, so it can check
+        // a file that has been copied or cached long after the compile.
+        else if (same(a, "--verify-bc")) { verify_bc = true; }
         else if (same(a, "-O0")) { opt_level = 0; }
         else if (same(a, "-O1")) { opt_level = 1; }
         else if (same(a, "-O2")) { opt_level = 2; }
@@ -6010,6 +6214,7 @@ fn int main(String[] args)
         else if (m1_has_prefix(a, "--target="))
         {
             char* tname = a + 9;
+            target_pinned = true;
             if (same(tname, "x86_64"))
             {
                 g_m1_target_ptr_bits = 64;
@@ -6048,7 +6253,20 @@ fn int main(String[] args)
     if (input == null)
     {
         printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-obj|--emit-asm|--emit-ll|--emit-native] [-O0|-O1|-O2|-O3|-Os] [--target=x86_64|wasm32-freestanding] [--internalize|--no-internalize] [--stats] [--quiet]\n");
+        printf("       pear2c FILE.bc --verify-bc [--target=...] [--quiet]\n");
         return 2;
+    }
+    // --verify-bc reads an artifact and writes none, so it runs before anything
+    // computes output paths: clear_stale_outputs would delete the very file the
+    // user asked to have checked.
+    if (verify_bc)
+    {
+        if (mode_seen)
+        {
+            printf("pear2c: --verify-bc checks an existing file and cannot be combined with an --emit-* mode\n");
+            return 2;
+        }
+        return m1_verify_bitcode_file(input, target_pinned ? g_m1_target_triple : null, quiet);
     }
     // Default linkage policy per output mode; an explicit flag above wins.
     if (!linkage_pinned) { g_m1_internalize = emit_exe; }
@@ -6467,6 +6685,14 @@ fn int main(String[] args)
     // built for instead of looking like anonymous LLVM output.
     fprintf(f, "\n!llvm.ident = !{!0}\n!0 = !{!\"pear2c (%s, %s)\"}\n",
             mod.low ? (char*)"AIR 3.0 low profile" : (char*)"AIR 2.2 subset", g_m1_target_triple);
+    // Module flags. Every clang-produced Linux module carries these and some
+    // consumers read them instead of assuming: wchar_t is 4 bytes here, and
+    // unwinding tables are emitted (behavior 7 = Max, so a module that disagrees
+    // is diagnosed by the linker rather than silently merged). Leaving them out
+    // is legal, which is exactly why it is easy to leave them out and wrong.
+    fprintf(f, "!llvm.module.flags = !{!1, !2}\n");
+    fprintf(f, "!1 = !{i32 1, !\"wchar_size\", i32 4}\n");
+    fprintf(f, "!2 = !{i32 7, !\"uwtable\", i32 2}\n");
     fclose(f);
     if (mod_text == null) { printf("pear2c: could not render the LLVM IR buffer\n"); arena.destroy(); return 3; }
     void* ctx = ll_context_create();
@@ -6476,6 +6702,16 @@ fn int main(String[] args)
     char* obj_msg = null;
     char* rt_msg = null;
     usz bc_size = 0;
+    int bc_functions = 0;
+    int bc_declarations = 0;
+    int bc_globals = 0;
+    M1AbiSnapshot abi;
+    abi.block = null;
+    abi.cap = 0;
+    abi.used = 0;
+    abi.count = 0;
+    abi.active = false;
+    abi.overflow = false;
     int rc = 0;
     // Determinism: the buffer is named with the input path, so the module's
     // source identifier comes out as that path (the old code had to rewrite a
@@ -6494,6 +6730,9 @@ fn int main(String[] args)
     }
     else
     {
+        // Record what the module promises to export before anything rewrites it.
+        // The check after the round trip is what makes the promise binding.
+        m1_abi_snapshot_begin(&abi, m);
         // Parsed OK: verify, optimise, re-verify, then serialize.
         if (ll_verify_module(m, 1, &msg) != 0)
         {
@@ -6535,20 +6774,41 @@ fn int main(String[] args)
                 printf("pear2c: LLVM failed to write bitcode\n");
                 rc = 3;
             }
-            else if (!m1_bitcode_roundtrip(ctx, &bc_tmp[0], &bc_size, g_m1_target_triple, &rt_msg))
+            else
             {
-                if (rt_msg != null)
+                void* loaded = m1_bitcode_roundtrip(ctx, &bc_tmp[0], &bc_size, g_m1_target_triple, &rt_msg);
+                if (loaded == null)
                 {
-                    printf("pear2c: the bitcode this compiler wrote did not load back: %s\n", rt_msg);
-                    ll_message_dispose(rt_msg);
-                    rt_msg = null;
+                    if (rt_msg != null)
+                    {
+                        printf("pear2c: the bitcode this compiler wrote did not load back: %s\n", rt_msg);
+                        ll_message_dispose(rt_msg);
+                        rt_msg = null;
+                    }
+                    else
+                    {
+                        printf("pear2c: the bitcode this compiler wrote did not load back as a verifiable module for %s\n", g_m1_target_triple);
+                    }
+                    rc = 3;
                 }
                 else
                 {
-                    printf("pear2c: the bitcode this compiler wrote did not load back as a verifiable module for %s\n", g_m1_target_triple);
+                    // The file loaded. The last question is whether it still
+                    // exports what the source declared: the optimizer may delete
+                    // internal symbols freely, but dropping an exported one
+                    // breaks every user of the published artifact, and the
+                    // failure would surface at link time somewhere else.
+                    char* missing = null;
+                    if (!m1_abi_check(&abi, loaded, &missing))
+                    {
+                        printf("pear2c: the published bitcode no longer defines exported symbol `%s`\n",
+                               missing == null ? (char*)"?" : missing);
+                        rc = 3;
+                    }
+                    m1_count_symbols(loaded, &bc_functions, &bc_declarations, &bc_globals);
+                    ll_module_dispose(loaded);
                 }
-                (void)remove(&bc_tmp[0]);
-                rc = 3;
+                if (rc != 0) { (void)remove(&bc_tmp[0]); }
             }
         }
     }
@@ -6609,10 +6869,12 @@ fn int main(String[] args)
         // rather than the size the writer claimed.
         if (!emit_ll && bc_size > 0 && !emit_exe && !emit_obj && !emit_asm)
         {
-            printf("pear2c: wrote %s (%d bytes of bitcode)\n", &out_path[0], (int)bc_size);
+            printf("pear2c: wrote %s (%d bytes of bitcode, %d functions defined, %d declarations, %d globals)\n",
+                   &out_path[0], (int)bc_size, bc_functions, bc_declarations, bc_globals);
         }
         else { printf("pear2c: wrote %s\n", &out_path[0]); }
     }
+    m1_abi_snapshot_end(&abi);
     arena.destroy();
     return rc;
 }

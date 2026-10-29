@@ -12,9 +12,11 @@ module exists.
 - **`--emit-bc`** — the LLVM backend, and the one that is complete. The module is
   rendered to IR in memory, parsed and verified in this process, optimized with
   `default<O1|O2|O3|Os>`, verified again, written as `.bc`, then loaded back,
-  re-parsed, re-verified, and triple-checked before it is published. Emitted
-  modules carry `source_filename` and `!llvm.ident`. Output is byte-identical
-  across runs. x86-64 and wasm32-freestanding both work.
+  re-parsed, re-verified, triple-checked, and checked for the exports the source
+  declared before it is published. Emitted modules carry `source_filename`,
+  `!llvm.ident` and `!llvm.module.flags`. Output is byte-identical across runs.
+  x86-64 and wasm32-freestanding both work, and `--verify-bc FILE.bc` applies the
+  same checks to an artifact that already exists.
 - **`--emit-native`** — a second backend with no LLVM in it: AIR to PIR to x86-64
   bytes to an ELF object, in this process, with no textual intermediate. It
   currently covers scalar integer/boolean code, direct calls, `if`, literal
