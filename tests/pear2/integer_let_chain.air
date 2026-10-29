@@ -1,0 +1,8 @@
+// Pure scalar constants propagate through adjacent integer-let initializers.
+air 2.2 Main "integer_let_chain.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let base = 39 in
+      let middle = (add base 2 : i64) in
+        <(add middle 3 : i64) : i64 | %ret>;

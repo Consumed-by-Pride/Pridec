@@ -19,12 +19,15 @@
 #   make legacy       build the legacy pride1 compiler under legacy/pride1/
 # ============================================================================
 
-C3C       ?= $(HOME)/c3bin/c3c
-C3C_LIB   ?= $(HOME)/c3lib
+C3C       ?= $(if $(wildcard $(HOME)/.cache/c3src/build-llvm23-clang/c3c),$(HOME)/.cache/c3src/build-llvm23-clang/c3c,$(HOME)/c3bin/c3c)
+C3C_LIB   ?= $(if $(wildcard $(HOME)/.cache/c3src/src/lib/std),$(HOME)/.cache/c3src/src/lib,$(HOME)/c3lib)
 C3C_VER   := v0.8.4
 C3C_URL   := https://github.com/c3lang/c3c/releases/download/$(C3C_VER)/c3-linux-static.tar.gz
 
 BINARY    := pfrontc
+
+# C3 0.8.4 and PEAR2 load LLVM/LLD dynamically in the reproducible setup.
+C3_RUNTIME_ENV = PATH="$(LLVM23_BIN):$(LLVM23_DIR)/../llvm-runtime-lld-linux-x64/bin:$$PATH" LD_LIBRARY_PATH="$(LLVM23_LIBDIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"
 
 # PEAR backend links against the LLVM-C API.
 #
@@ -37,12 +40,13 @@ BINARY    := pfrontc
 #
 # If only LLVM 19 is installed, overriding works, but expect -O1/-O2 to crash:
 #     make LLVM_LIB=LLVM-19
-LLVM23_DIR  := $(HOME)/.cache/llvm23
-ifeq ($(wildcard $(LLVM23_DIR)/libLLVM-23.so),)
+LLVM23_DIR  ?= $(if $(wildcard $(HOME)/.cache/llvm23/node_modules/llvm-runtime-clang-linux-x64/lib/libLLVM.so.23.1),$(HOME)/.cache/llvm23/node_modules/llvm-runtime-clang-linux-x64,$(HOME)/.cache/llvm23)
+LLVM23_LIBDIR ?= $(if $(wildcard $(LLVM23_DIR)/lib/libLLVM-23.so),$(LLVM23_DIR)/lib,$(LLVM23_DIR))
+ifeq ($(wildcard $(LLVM23_LIBDIR)/libLLVM-23.so),)
 LLVM_LIBDIR ?= /usr/lib/x86_64-linux-gnu
 LLVM_LIB    ?= LLVM-19
 else
-LLVM_LIBDIR ?= $(LLVM23_DIR)
+LLVM_LIBDIR ?= $(LLVM23_LIBDIR)
 LLVM_LIB    ?= LLVM-23
 endif
 LDFLAGS     := -L $(LLVM_LIBDIR) -l $(LLVM_LIB)
@@ -64,14 +68,14 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool legacy-pear test-legacy clean legacy \
+.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
 
 # pfrontc ends at .air: no LLVM, no backend. Native code is pear1c (legacy/pear1) or PEAR 2.
 $(BINARY): $(SOURCES) | c3c
-	$(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) --max-stack-object-size 262144 -o $(BINARY)
+	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) --max-stack-object-size 262144 -o $(BINARY)
 
 # ── Bootstrap c3c if missing ────────────────────────────────────────────
 c3c:
@@ -90,7 +94,7 @@ c3c:
 	@$(C3C) --version | head -1
 
 # ── Tests ───────────────────────────────────────────────────────────────
-test: test-pfront test-conform test-pear test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering
+test: test-pfront test-conform test-pear test-pear2 test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering
 
 # Test the test infrastructure too: missing/crashing compilers must never
 # produce a false EXPECT-CLEAN pass.
@@ -168,6 +172,43 @@ $(AIRTOOL): $(AIR_CORE) | c3c
 	mkdir -p tmp
 	$(C3C) compile --stdlib $(C3C_LIB) $(AIR_CORE) --max-stack-object-size 262144 -o $(AIRTOOL)
 
+# PEAR 2 bootstrap backend. It is a separate executable and links the shared
+# AIR reader/verifier plus LLVM 23; it does not link PEAR 1 or pfrontc.
+PEAR2_BIN := pear2/pear2c
+PEAR2_SRC := $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_opt.c3 pear2/pear2c_main.c3
+PEAR2_LDFLAGS ?= -L $(LLVM23_LIBDIR) -l LLVM-23
+LLVM23_BIN ?= $(LLVM23_DIR)/bin
+PEAR2_CLANG ?= $(LLVM23_BIN)/clang
+pear2c: $(PEAR2_BIN)
+	ln -sf $(PEAR2_BIN) pear2c
+$(PEAR2_BIN): $(PEAR2_SRC) | c3c
+	@test -f "$(LLVM23_LIBDIR)/libLLVM-23.so" || { echo "PEAR2 requires LLVM 23 C API at $(LLVM23_LIBDIR); set LLVM23_DIR"; exit 1; }
+	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(PEAR2_SRC) --max-stack-object-size 262144 $(PEAR2_LDFLAGS) -o $(PEAR2_BIN)
+
+PEAR2_OPT_TEST := tmp/pear2-opt-test
+PEAR2_OPT_TEST_SRC := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3
+$(PEAR2_OPT_TEST): $(PEAR2_OPT_TEST_SRC) | c3c
+	mkdir -p tmp
+	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(PEAR2_OPT_TEST_SRC) --max-stack-object-size 262144 -o $(PEAR2_OPT_TEST)
+
+test-pear2: $(PEAR2_BIN) $(PEAR2_OPT_TEST)
+	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
+	$(C3_RUNTIME_ENV) C3C="$(C3C)" LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" bash tests/pear2/run.sh ./$(PEAR2_BIN)
+
+test-pear2-exec: $(BINARY) $(PEAR2_BIN) $(PEAR2_OPT_TEST) pear2c
+	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
+	$(C3_RUNTIME_ENV) LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" BACKEND=./pear2c bash tests/exec/run.sh
+	$(C3_RUNTIME_ENV) LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" BACKEND=./pear2c bash tests/exec/pear/run.sh
+
+# Syntax/type-check PEAR2 and the structural optimizer harness without linking
+# LLVM, then run LLVM-independent arithmetic model tests. This does not replace
+# executing the optimizer or backend fixtures.
+check-pear2: | c3c
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_opt.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
+	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
+	bash -n tests/pear2/run.sh
+	python3 tests/pear2/signed_division_model_test.py
+
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
 # (canonical re-print, validity ledger) and the write->read round trip.
 test-air: $(BINARY) $(AIRTOOL)
@@ -197,6 +238,6 @@ legacy:
 
 # ── Clean ───────────────────────────────────────────────────────────────
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(PEAR2_BIN) pear2c
 	rm -f tmp/*.air
-	find . -name "*.air" -not -path "./docs/*" -not -path "./legacy/*" -delete
+	find . -name "*.air" -not -path "./docs/*" -not -path "./legacy/*" -not -path "./tests/pear2/*" -delete

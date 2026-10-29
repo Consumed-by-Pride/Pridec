@@ -1,0 +1,14 @@
+// PEAR 2 M3 subset: narrow signed integer params/returns use signext ABI.
+air 2.2 Main "int8_main.pie";
+
+def plus_one(x : i8) : i8 =
+  mu~ %ret.
+    <(add x 1 : i8) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <plus_one | call · 41 : i8 · comu result.
+      if (eq result 42 : i8) then
+        <42 | %ret>
+      else
+        <0 | %ret>>;

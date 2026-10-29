@@ -1,0 +1,11 @@
+// PEAR2: Unicode scalar values lower as i32 and support literal match dispatch.
+air 2.2 Main "char_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    match char(65) : char {
+      char(65) ->
+        <42 | %ret>;
+      bind other ->
+        <0 | %ret>;
+    };

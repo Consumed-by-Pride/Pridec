@@ -1,0 +1,13 @@
+// Immutable global storage rejects typed stores.
+air 3.0 Main "reject_const_global_store_main.pie";
+
+global fixed : i64 = 7;
+
+def bad_store() : i64 =
+  mu~ %ret.
+    seq {
+      store(fixed, 9 : i64);
+      <0 : i64 | %ret>
+    };
+
+def main() : i64 = mu~ %ret. <0 : i64 | %ret>;

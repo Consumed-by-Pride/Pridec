@@ -1,0 +1,26 @@
+// PEAR2: ordered scalar matches, guarded pattern binders, and guard-false fallthrough.
+air 2.2 Main "match_guard_main.pie";
+
+def guarded_binder(value : i32) : i32 =
+  mu~ %ret.
+    match value {
+      bind item guard {
+        if (gt item 3 : i32) then
+          <true | %guard>
+        else
+          <false | %guard>
+      } -> <item | %ret>;
+      _ -> <0 | %ret>;
+    };
+
+def guarded_literal_fallthrough() : i64 =
+  mu~ %ret.
+    match 5 {
+      5 guard { <false | %guard> } -> <1 | %ret>;
+      5 -> <2 | %ret>;
+      _ -> <0 | %ret>;
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <guarded_literal_fallthrough | call · %ret>;

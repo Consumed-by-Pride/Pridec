@@ -1,0 +1,25 @@
+// PEAR2: empty tuples and unit values cross internal aggregate call ABIs.
+air 2.2 Main "unit_aggregate_main.pie";
+
+def identity(p : tuple(unit, i32)) : tuple(unit, i32) =
+  mu~ %ret.
+    <p | %ret>;
+
+def identity_empty(p : tuple()) : tuple() =
+  mu~ %ret.
+    <p | %ret>;
+
+def unit_parameter(value : unit) : i64 =
+  mu~ %ret.
+    <42 | %ret>;
+
+def exercise_unit_call() : i64 =
+  mu~ %ret.
+    <unit_parameter | call · unit · %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <identity_empty | call · tuple() : tuple() · comu _.
+      <identity | call · tuple(unit, 42 : i32) : tuple(unit, i32) · comu pair.
+        <pair | proj 1 · comu number.
+          <number | %ret>>>>;

@@ -1,0 +1,14 @@
+// AIR 2.1 syscall: raw x86-64 Linux syscall ABI through pinned-register
+// inline asm. write(1, buf, 0) exercises a pointer argument; exit(nr 60)
+// carries the process out with status 42.
+air 3.0 Main "syscall_main.pie";
+
+extern declare malloc(size : i64) : ptr(u8);
+
+def main() : i64 =
+  mu~ %ret.
+    <malloc | call · 16 : i64 · comu buf.
+      syscall(1 : i64, 1 : i64, buf, 0 : i64) · comu wrote.
+        <(add wrote 42) : i64 | comu code.
+          syscall(60 : i64, code) · comu _.
+            <code : i64 | %ret>>>;

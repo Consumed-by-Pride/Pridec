@@ -1,0 +1,18 @@
+// PEAR2: fixed-array for loops, element bindings, and nested stack restoration.
+air 2.2 Main "for_main.pie";
+
+def visit_nested_arrays() : i64 =
+  mu~ %ret.
+    seq {
+      for row in array(
+        array(1 : i8, 2 : i8) : array#2(i8),
+        array(3 : i8, 4 : i8) : array#2(i8)
+      ) : array#2(array#2(i8)) do {
+        for byte in row do { nop }
+      };
+      <42 | %ret>
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <visit_nested_arrays | call · %ret>;

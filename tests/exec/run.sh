@@ -31,13 +31,15 @@ cd "$(dirname "$0")/../.." || exit 2
 BIN=scripts/pie-exe.sh      # the chain: pfrontc -> FILE.air -> legacy pear1c (same CLI as the old pfrontc --emit-exe)
 FRONT=./pfrontc
 BACK=${BACKEND:-legacy/pear1/pear1c}   # any backend with the CLI contract in docs/pear2/CONTRACT.md
+PEAR2_MODE=0
+[ "$(basename "$BACK")" = "pear2c" ] && PEAR2_MODE=1
 PEAR_OPT=${PEAR_OPT:--O2}
 TIMEOUT=${TIMEOUT:-5}
 VERBOSE=0
 [ "${1:-}" = "-v" ] && VERBOSE=1
 
 [ -x "$FRONT" ] || { echo "build ./pfrontc first (make)"; exit 2; }
-[ -x "$BACK" ]  || { echo "build the legacy backend first (make legacy-pear)"; exit 2; }
+[ -x "$BACK" ]  || { echo "build the selected backend first (legacy: make legacy-pear; PEAR2: make pear2c)"; exit 2; }
 
 # Preflight: pear1c links against a versioned libLLVM. If that library is not on
 # the loader path every single case reports "no binary", which looks exactly like
@@ -52,6 +54,7 @@ case "$lerr" in
 esac
 
 XFAIL=${XFAIL_FILE:-tests/exec/XFAIL.tsv}   # a different backend has a different set of known failures
+if [ "$PEAR2_MODE" -eq 1 ]; then XFAIL=${PEAR2_XFAIL_FILE:-/dev/null}; fi
 pass=0; fail=0; xfail=0; xpass=0
 declare -a fail_list=() xpass_list=()
 
@@ -68,7 +71,7 @@ xfail_reason() { # $1 = case id, e.g. "pear/p01_return_42" or "02_fibonacci"
 }
 
 # decode \n / \t escapes in an EXPECT line
-expect_of() { grep -m1 '^-- EXPECT:' "$1" | sed 's/^-- EXPECT: //'; }
+expect_of() { v=$(grep -m1 '^-- EXPECT:' "$1" | sed 's/^-- EXPECT: //' || true); printf '%b' "$v"; }
 exit_of()   { v=$(grep -m1 '^-- EXIT:' "$1" | sed 's/^-- EXIT: *//'); printf '%s' "${v:-0}"; }
 
 record() { # $1=status $2=id $3=detail
@@ -86,9 +89,17 @@ record() { # $1=status $2=id $3=detail
 # a "return 7"-only canary compiles on a toolchain linked against the wrong
 # libLLVM, which is a real configuration we hit (attribute enum IDs differ
 # between LLVM 19 and 23, so -O1/-O2 die in instcombine). Sum of fib(0..7) = 33.
-echo "=== emit configuration matrix (canary: fib-sum loop, expect exit 33) ==="
-canary=/tmp/pear_canary_$$.pie
-printf 'fn fib(n: i64) -> i64 { if (n < 2) { return n; } return fib(n-1) + fib(n-2); }\nfn main(_) -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while (i < 8) { s = s + fib(i); i = i + 1; } return s; }\n' > "$canary"
+if [ "$PEAR2_MODE" -eq 1 ]; then
+    echo "=== emit configuration matrix (PEAR2 scalar canary, expect exit 42) ==="
+    config_expected=42
+    canary=/tmp/pear_canary_$$.pie
+    printf 'fn main(_) -> i64 { return 42; }\n' > "$canary"
+else
+    echo "=== emit configuration matrix (canary: fib-sum loop, expect exit 33) ==="
+    config_expected=33
+    canary=/tmp/pear_canary_$$.pie
+    printf 'fn fib(n: i64) -> i64 { if (n < 2) { return n; } return fib(n-1) + fib(n-2); }\nfn main(_) -> i64 { let mut s: i64 = 0; let mut i: i64 = 0; while (i < 8) { s = s + fib(i); i = i + 1; } return s; }\n' > "$canary"
+fi
 config_tiers=(-O0 -O1 -O2 -O3)
 for O in "${config_tiers[@]}"; do
     id="cfg/$O"
@@ -100,15 +111,15 @@ for O in "${config_tiers[@]}"; do
         record "$status" "$id" "no binary emitted${why:+ — $why}"
     else
         timeout "$TIMEOUT" "$bin" >/dev/null 2>&1; rc=$?
-        if [ "$rc" = "33" ]; then
+        if [ "$rc" = "$config_expected" ]; then
             if reason=$(xfail_reason "$id"); then
-                record XPASS "$id" "emits and runs (exit 33) — remove XFAIL entry: $reason"
+                record XPASS "$id" "emits and runs (exit $config_expected) — remove XFAIL entry: $reason"
             else
-                record PASS "$id" "emits and runs (exit 33)"
+                record PASS "$id" "emits and runs (exit $config_expected)"
             fi
         else
             why=$(xfail_reason "$id") && status=XFAIL || status=FAIL
-            record "$status" "$id" "emitted but exit=$rc (want 33)${why:+ — $why}"
+            record "$status" "$id" "emitted but exit=$rc (want $config_expected)${why:+ — $why}"
         fi
     fi
     rm -f "$bin"
@@ -125,6 +136,7 @@ rm -f "$canary" "${canary%.pie}"
 # to a script. Both halves are checked here, because either one regressing is
 # silent: the first makes valid programs fail outside the repo, the second makes
 # invalid programs produce something runnable.
+if [ "$PEAR2_MODE" -eq 0 ]; then
 echo "=== driver contract (cwd independence, no artifact on errors) ==="
 dc_dir=$(mktemp -d /tmp/pear_dc_XXXXXX)
 printf 'fn main(_) -> i64 { return 42; }\n' > "$dc_dir/ok.pie"
@@ -192,11 +204,20 @@ else
     fi
 fi
 rm -rf "$dc_dir"
-
+else
+    echo "=== PEAR2 CLI contract covered by tests/pear2/run.sh ==="
+fi
 
 # ── 2. case runs ────────────────────────────────────────────────────────────
 echo "=== execution cases (pipeline tier: $PEAR_OPT) ==="
-cases=$(ls tests/exec/*.pie tests/exec/pear/*.pie 2>/dev/null | sort)
+driver_count=4
+if [ "$PEAR2_MODE" -eq 1 ]; then
+    cases=$(grep -v '^#' tests/exec/pear2_cases.txt)
+    driver_count=0
+    echo "PEAR2 supported-case set: tests/exec/pear2_cases.txt"
+else
+    cases=$(ls tests/exec/*.pie tests/exec/pear/*.pie 2>/dev/null | sort)
+fi
 count=0
 for f in $cases; do
     count=$((count+1))
@@ -243,7 +264,7 @@ done
 rm -f /tmp/pear_out_$$
 
 echo "---"
-echo "exec suite: pass=$pass fail=$fail xfail=$xfail xpass=$xpass  (cases=$((count + 4 + ${#config_tiers[@]})) [$count files + 4 driver checks + ${#config_tiers[@]} tier checks], tier=$PEAR_OPT)"
+echo "exec suite: pass=$pass fail=$fail xfail=$xfail xpass=$xpass  (cases=$((count + driver_count + ${#config_tiers[@]})) [$count files + $driver_count driver checks + ${#config_tiers[@]} tier checks], tier=$PEAR_OPT, backend=$BACK)"
 if [ ${#fail_list[@]} -gt 0 ]; then
     echo "unexpected failures:"; for c in "${fail_list[@]}"; do echo "  - $c"; done
 fi

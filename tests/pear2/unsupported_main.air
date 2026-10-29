@@ -1,0 +1,7 @@
+// PEAR2 rejects unsupported recursive local bindings rather than emitting invalid IR.
+air 2.2 Main "unsupported_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    letrec () in
+      <42 : i64 | %ret>;

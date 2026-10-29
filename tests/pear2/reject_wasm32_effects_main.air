@@ -1,0 +1,15 @@
+// M10 reject (--target=wasm32-freestanding): effect handlers need a host
+// stack/continuation runtime; the freestanding wasm32 profile has none.
+air 2.2 Main "reject_wasm32_effects.pie";
+
+effect E {
+  op `op` : i64;
+};
+
+def main() : i64 =
+  mu~ %ret_2.
+    handle {
+      perform `E.op`(1 : i64) · comu _k1. <_k1 : i64 | %ret_2>
+    } {
+      ctor `E.op`(bind x, _) -> <x : i64 | %ret_2>;
+    };

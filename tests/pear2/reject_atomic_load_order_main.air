@@ -1,0 +1,12 @@
+// Rejection: an atomic load cannot carry a release ordering (LLVM has no
+// release load; release implies a store-side ordering).
+air 3.0 Main "reject_atomic_load_order_main.pie";
+def main() : i64 =
+  mu~ %ret.
+    <alloca(i64) : ptr(i64) | comu cell.
+      seq {
+        store(cell, 0 : i64);
+        atomic load release(cell) · comu v.
+          <v : i64 | %ret>
+      }
+    >;

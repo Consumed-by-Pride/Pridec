@@ -1,0 +1,19 @@
+// PEAR2: internal tuple parameters flow through explicit label/jump edges.
+air 2.2 Main "tuple_label_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      label done(pair : tuple(i32, bool)).
+        <pair | proj 0 · comu number.
+          <pair | proj 1 · comu flag.
+            if (eq number 42 : i32) then
+              if flag then
+                <42 | %ret>
+              else
+                <0 | %ret>
+            else
+              <0 | %ret>>>;
+      let initial = tuple(42 : i32, true) : tuple(i32, bool) in
+        jump done(initial)
+    };

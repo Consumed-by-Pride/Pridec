@@ -1,0 +1,9 @@
+// PEAR2 M8: nested closure invocation — `compose` captures the closure value
+// `seven_off` itself and invokes it through the fat-pointer ABI.
+air 2.2 Main "closure_nested.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let seven_off = lam(y : i64). <(add y 7 : i64) : i64 | %ret> in
+      let compose = lam(z : i64). <seven_off | call · z · %ret> in
+        <compose | call · 35 : i64 · %ret>;

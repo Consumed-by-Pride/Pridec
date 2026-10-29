@@ -11,7 +11,7 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 | | |
 |---|---|
 | `--emit-exe` (default) | write the executable `FILE` (the path with its last extension removed, next to the input) |
-| `--emit-bc` | write LLVM bitcode `FILE.bc` — optional for a backend that does not use LLVM; then exit 2 with a message |
+| `--emit-bc` | write verified LLVM bitcode `FILE.bc`; a backend without bitcode support exits 2 |
 | `-On` | optimisation tier; default `-O2` |
 | exit 0 | the artifact was written |
 | exit 1 | the `.air` was rejected (syntax, version, limits) — message `file:line:col: …`, **no artifact** |
@@ -19,9 +19,20 @@ BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
 | exit 3 | the file was valid but the backend produced nothing (unsupported form, internal failure) — message names the form and the definition, **no artifact** |
 
 A stale artifact from a previous run must not survive a failure: delete the output first or write atomically.
+PEAR2 emits and verifies temporary bitcode through the LLVM C API; default executable mode links it with LLVM 23
+`clang` (override its path with `PEAR2_CLANG`). A link failure is exit 3 and must leave no executable or temporary
+artifact. Explicit `--emit-bc` does not invoke clang.
 Warnings go to stdout/stderr and never change the exit status of a successful emit. The wrapper
 `scripts/pie-exe.sh` forwards both stages' output; `BACKEND=… scripts/pie-exe.sh FILE.pie --emit-exe -O2` is the
 whole chain.
+
+### PEAR 2 aggregate ABI boundary (current implementation)
+
+PEAR 2 lowers plain, non-generic, non-packed, single-constructor product declarations as LLVM named structs. AIR `record` construction and `field` projection are supported for those declarations; sum types, constructor patterns, and record patterns are not implied by that support. External by-value aggregates are limited to non-empty tuples and these plain records whose fields have C-compatible LLVM representations. AIR `bool` and `unit` fields are rejected in external aggregates, as are unsupported declaration attributes and aggregate shapes. Native interoperability is verified with the checked-in C fixture on x86-64 Linux/LLVM 23 only; LLVM's `ccc` lowering is not a promise of cross-target C ABI compatibility. Unsupported AIR forms such as recursive `letrec` bindings must still fail with exit 3, name the construct and enclosing function where known, and publish no artifact.
+
+### PEAR 2 AIR 3 low-profile globals and memory
+
+The bounded AIR 3 low-profile slice lowers typed globals with constant initializers, mutability, alignment, `extern`, and explicit `link "symbol"` names. String and byte literals used as pointer constants are pooled as private unnamed-address LLVM constants with a trailing NUL for strings; pointer decay and constant GEP are emitted explicitly. Typed `alloca`, statically sized `malloc` (positive, at most 1 MiB), `free`, typed `load`/`store`, and constant typed GEP are supported for types with known size/alignment and tracked provenance. A free must receive the live base pointer of a known heap allocation; stores through immutable globals, out-of-bounds or misaligned accesses, stale/freed pointers, unknown provenance, dynamic GEP indices, and dynamic/unsupported allocation forms fail closed with exit 3 and a source-located diagnostic. Pointer-cell stores/loads retain the provenance of the stored pointer, and freeing an allocation invalidates its tracked aliases. The fixture-backed acceptance cases are `tests/pear2/global_string_main.air`, `tests/pear2/typed_memory_main.air`, and `tests/pear2/typed_pointer_cell_main.air`; negative provenance, lifetime, and dynamic-form checks live beside them under `tests/pear2/reject_*.air`.
 
 ## 2 Obligations
 

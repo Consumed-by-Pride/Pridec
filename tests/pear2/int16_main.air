@@ -1,0 +1,14 @@
+// PEAR 2 subset: i16 arithmetic and signext direct-call ABI.
+air 2.2 Main "int16_main.pie";
+
+def add16(a : i16, b : i16) : i16 =
+  mu~ %ret.
+    <(add a b) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <add16 | call · 40 : i16 · 2 : i16 · comu total.
+      if (eq total 42 : i16) then
+        <42 | %ret>
+      else
+        <0 | %ret>>;

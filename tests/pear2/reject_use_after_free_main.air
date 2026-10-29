@@ -1,0 +1,21 @@
+// Provenance preserved in a pointer cell must remain invalid after free.
+air 3.0 Main "reject_use_after_free_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare free(p : ptr(i64)) : unit;
+
+def bad_alias() : i64 =
+  mu~ %ret.
+    <alloca(ptr(i64)) : ptr(ptr(i64)) | comu cell.
+      <malloc | call · 8 : i64 · comu heap.
+        seq {
+          store(cell, heap);
+          <free | call · heap · comu _.
+            <load(cell) : ptr(i64) | comu alias.
+              <load(alias) : i64 | %ret>>
+          >
+        }
+      >
+    >;
+
+def main() : i64 = mu~ %ret. <0 : i64 | %ret>;

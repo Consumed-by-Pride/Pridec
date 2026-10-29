@@ -1,0 +1,14 @@
+// PEAR2: i128 values support arithmetic, comparison, and internal scalar ABI.
+air 2.2 Main "int128_main.pie";
+
+def add128(a : i128, b : i128) : i128 =
+  mu~ %ret.
+    <(add a b) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <add128 | call · 20 : i128 · 22 : i128 · comu total.
+      if (eq total 42 : i128) then
+        <42 | %ret>
+      else
+        <0 | %ret>>;

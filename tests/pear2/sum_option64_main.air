@@ -1,0 +1,18 @@
+// Tagged-sum round trip: multi-constructor record -> payload bind -> arithmetic.
+air 2.2 Main "sum_option64.pie";
+data Option64 {
+  ctor None() : nominal Option64;
+  ctor Some(x : i64) : nominal Option64;
+};
+def unwrap_or(o : nominal Option64) : i64 =
+  mu~ %ret.
+    match o {
+      ctor None -> <0 | %ret>;
+      ctor Some(bind x) -> <x | %ret>;
+      _ -> <1 | %ret>;
+    };
+def main() : i64 =
+  mu~ %ret.
+    <con Some(40 : i64) | comu r.
+      <unwrap_or | call · r · comu u.
+        <(add u 2 : i64) | %ret>>>;

@@ -1,0 +1,15 @@
+// PEAR 2 M2: scalar loop-carried state uses explicit label arguments.
+air 2.2 Main "label_loop_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      label loop(x : i64).
+        if (lt x 3 : i64) then
+          let next = (add x 1 : i64) in
+            jump loop(next)
+        else
+          <x | %ret>;
+      let zero = 0 : i64 in
+        jump loop(zero)
+    };

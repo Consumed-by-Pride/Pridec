@@ -1,0 +1,24 @@
+// PEAR 2 M1: bool is a distinct i1 ABI value through a direct call.
+air 2.2 Main "bool_function_main.pie";
+
+def below_three(x : i64) : bool =
+  mu~ %ret.
+    <(lt x 3 : i64) | %ret>;
+
+def both_true(a : bool, b : bool) : bool =
+  mu~ %ret.
+    <(and a b : bool) | %ret>;
+
+def identity(flag : bool) : bool =
+  mu~ %ret.
+    <(eq flag true : bool) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <below_three | call · 2 : i64 · comu condition.
+      <both_true | call · condition · true · comu combined.
+        <identity | call · combined · comu checked.
+          if checked then
+            <42 | %ret>
+          else
+            <0 | %ret>>>>;

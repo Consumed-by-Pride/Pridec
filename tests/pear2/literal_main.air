@@ -1,0 +1,6 @@
+// PEAR 2 M0: no static type annotation is required.
+air 2.2 Main "literal_main.pie";
+
+def main() =
+  mu~ %ret.
+    <42 | %ret>;

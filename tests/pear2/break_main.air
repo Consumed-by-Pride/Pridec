@@ -1,0 +1,22 @@
+// PEAR2: break/continue label transfers require a captured zero-parameter block.
+air 2.2 Main "break_main.pie";
+
+def transfer_to_exit() : i64 =
+  mu~ %ret.
+    seq {
+      label done().
+        <42 | %ret>;
+      break done
+    };
+
+def continue_to_loop() : i64 =
+  mu~ %ret.
+    seq {
+      label again().
+        continue again;
+      continue again
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <transfer_to_exit | call · %ret>;

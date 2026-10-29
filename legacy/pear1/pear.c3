@@ -1431,6 +1431,11 @@ fn bool PearCg.cns(PearCg* cg, Lvalue v, AirCns* k)
         }
         default:
         {
+            // Report the unhandled consumer tag instead of a bare trap so the
+            // failing AIR form is identifiable from the compiler output.
+            char[96] pmsg;
+            (void)snprintf(&pmsg[0], 96, "unhandled consumer tag %d", (int)k.tag);
+            pear_unsupported_form(&pmsg[0]);
             ll_build_unreachable(cg.b); cg.terminated = true;
             return true;
         }

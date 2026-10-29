@@ -1,0 +1,9 @@
+// M10 reject: unknown calling-convention attribute value.
+air 2.2 Main "reject_callconv.pie";
+
+attr callconv "vectorcall"
+def helper(a : i64) : i64 =
+  mu~ %ret_2. <a : i64 | %ret_2>;
+
+def main() : i64 =
+  mu~ %ret_2. <1 : i64 | %ret_2>;

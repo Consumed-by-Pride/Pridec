@@ -1,0 +1,18 @@
+// PEAR 2 M10: escape-only algebraic effects. A `perform` inside `handle`
+// stores the payload into the handler's slot and branches to the matching
+// arm block; the arm's result flows through the function continuation.
+// Returns 42 from the arm (40 + 2).
+air 2.2 Main "fx_escape.pie";
+
+effect Raise {
+  op `abort` : i64;
+};
+
+def main() : i64 =
+  mu~ %ret_2.
+    handle {
+      perform `Raise.abort`(40 : i64) · comu _k1. <_k1 : i64 | %ret_2>
+    } {
+      ctor `Raise.abort`(bind c, bind k) ->
+        <(add c 2 : i64) | %ret_2>;
+    };

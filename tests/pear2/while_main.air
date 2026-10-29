@@ -1,0 +1,20 @@
+// PEAR2: while loops with explicit header/body/exit blocks and backedges.
+air 2.2 Main "while_main.pie";
+
+def loop_exit(flag : bool) : i64 =
+  mu~ %ret.
+    seq {
+      while flag do { trap };
+      <9 | %ret>
+    };
+
+def empty_loop() : i64 =
+  mu~ %ret.
+    seq {
+      while false do { nop };
+      <42 | %ret>
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <loop_exit | call · false · %ret>;

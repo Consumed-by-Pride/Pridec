@@ -1,0 +1,24 @@
+// PEAR2 M9: conditional diamond join. Both arms rebind the label-captured
+// accumulator and converge on the same label; phi incoming edges carry the
+// divergent values with no alloca/load/store round trip.
+air 2.2 Main "phi_diamond_join.pie";
+
+def pick(flag : bool) : i64 =
+  mu~ %ret.
+    let acc = 6 : i64 in
+      seq {
+        label join(x : i64).
+          <x | %ret>;
+        if flag then
+          let acc = (add acc 13 : i64) in
+            jump join(acc)
+        else
+          let acc = (add acc 17 : i64) in
+            jump join(acc)
+      };
+
+def main() : i64 =
+  mu~ %ret.
+    <pick | call · false · comu a.
+      <pick | call · true · comu b.
+        <(add a b : i64) : i64 | %ret>>>;

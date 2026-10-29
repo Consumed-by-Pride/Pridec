@@ -1,0 +1,41 @@
+// PEAR2: unannotated integer parameters/results use the documented i64 default representation; bool branch results are inferred from boolean literals.
+air 2.2 Main "untyped_function_main.pie";
+
+def add_untyped(left, right) =
+  mu~ %ret.
+    <(add left right) | %ret>;
+
+def increment_untyped(value) =
+  mu~ %ret.
+    <(add value 1) | %ret>;
+
+def add_with_inferred_params(left, right) : i32 =
+  mu~ %ret.
+    <(add left right) | %ret>;
+
+def untyped_boolean_result() =
+  mu~ %ret.
+    <true | %ret>;
+
+
+def untyped_branch_result(flag : bool) =
+  mu~ %ret.
+    if flag then
+      <true | %ret>
+    else
+      <false | %ret>;
+
+def call_untyped_boolean(flag : bool) : bool =
+  mu~ %ret.
+    <untyped_branch_result | call · flag · %ret>;
+
+
+def exercise_contextual_i32() : i64 =
+  mu~ %ret.
+    <add_with_inferred_params | call · 20 : i32 · 22 : i32 · comu result.
+      <coerce(result, i64) | %ret>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <add_untyped | call · 40 · 1 · comu total.
+      <increment_untyped | call · total · %ret>>;

@@ -1,0 +1,16 @@
+// PEAR 2 M10: calling-convention markers and function attributes on
+// definitions are preserved in emission: `fastcc` marks define and call,
+// `export` renames the emitted symbol, `noinline` is kept as a function
+// attribute. Returns 42.
+air 2.2 Main "abi_callconv_export.pie";
+
+attr noinline
+attr export "pear2_fast_add"
+fastcc def helper(a : i64, b : i64) : i64 =
+  mu~ %ret_2.
+    <(add a b : i64) | %ret_2>;
+
+def main() : i64 =
+  mu~ %ret_2.
+    <helper | call · 40 : i64 · 2 : i64 · comu _x1.
+      <_x1 : i64 | %ret_2>>;

@@ -1,0 +1,10 @@
+// PEAR2 M8: closure capturing one scalar local. The lambda lifts to a
+// module-level function taking a hidden `ptr %env` parameter and the closure
+// value is a `{ code, env }` fat pointer pair.
+air 2.2 Main "closure_scalar_capture.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let base = 8 : i64 in
+      let add_base = lam(x : i64). <(add x base : i64) : i64 | %ret> in
+        <add_base | call · 34 : i64 · %ret>;

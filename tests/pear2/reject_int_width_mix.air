@@ -1,0 +1,10 @@
+// PEAR 2 must not silently coerce unlike integer widths.
+air 2.2 Main "reject_int_width_mix.pie";
+
+def bad_add(a : i8, b : i16) : i8 =
+  mu~ %ret.
+    <(add a b) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <0 | %ret>;

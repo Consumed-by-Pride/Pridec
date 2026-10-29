@@ -1,0 +1,20 @@
+// PEAR2 M9: a label join block fed by three incoming edges merges its
+// parameter through a single phi node with three incoming pairs.
+air 2.2 Main "phi_label_ladder.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      label join(x : i64).
+        <x | %ret>;
+      let high = 100 : i64 in
+        let mid = 20 : i64 in
+          let extra = 22 : i64 in
+            if (gt mid high : i64) then
+              jump join(high)
+            else
+              if (lt mid 100 : i64) then
+                jump join(mid)
+              else
+                jump join(extra)
+    };

@@ -1,0 +1,7 @@
+// Float-to-bool has no defined PEAR2 truthiness conversion and must stay fail-closed.
+air 2.2 Main "reject_coerce_float_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    <coerce(1.0 : f32, bool) | comu unsupported.
+      <0 | %ret>>;

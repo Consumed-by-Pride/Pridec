@@ -1,0 +1,10 @@
+// PEAR 2 M1/M2: a comparison and boolean negation feed a boolean let and if.
+air 2.2 Main "if_compare_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let condition = (not (lt 2 1)) in
+      if condition then
+        <42 | %ret>
+      else
+        <0 | %ret>;

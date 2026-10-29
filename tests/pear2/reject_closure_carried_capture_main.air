@@ -1,0 +1,14 @@
+// PEAR2 M8 fail-closed check: a closure cannot capture a binding that a label
+// already captured (phi-promoted carried state cannot escape by value).
+air 2.2 Main "reject_closure_carried_capture.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let total = 0 : i64 in
+      seq {
+        label done(x : i64).
+          <x | %ret>;
+        let f = lam(y : i64). <(add y total : i64) : i64 | %ret> in
+          let d = 41 : i64 in
+            jump done(d)
+      };

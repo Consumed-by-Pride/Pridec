@@ -1,0 +1,19 @@
+// AIR 2.1 machine forms: atomicrmw, atomic load/store, and fence over a
+// typed AIR 3 alloca. Result continuation carries the old value; exit 42.
+air 3.0 Main "atomic_fence_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    <alloca(i64) : ptr(i64) | comu cell.
+      seq {
+        store(cell, 0 : i64);
+        atomic add seq_cst(cell, 40 : i64) · comu first_old.
+          seq {
+            fence acq_rel;
+            atomic add acq_rel(cell, 2 : i64) · comu second_old.
+              atomic store release(cell, 42 : i64) · comu _.
+                atomic load acquire(cell) · comu now.
+                  <(sub now first_old) : i64 | %ret>
+          }
+      }
+    >;

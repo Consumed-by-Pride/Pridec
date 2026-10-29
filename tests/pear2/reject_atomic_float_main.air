@@ -1,0 +1,7 @@
+// Rejection: atomics in this slice are defined over integer pointees only.
+air 3.0 Main "reject_atomic_float_main.pie";
+def main() : i64 =
+  mu~ %ret.
+    <alloca(f64) : ptr(f64) | comu cell.
+      atomic add seq_cst(cell, 1.0 : f64) · comu _.
+        <42 : i64 | %ret>>;

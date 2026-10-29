@@ -127,6 +127,8 @@ fn void Verify.collect_pat(Verify* v, AirPat* p)
     if (p.tag == APAT_AS) { v.bind_var(p.name); }
     for (usz i = 0; i < p.sub_count; i++) { v.collect_pat(p.sub[i]); }
     v.collect_pat(p.or_alt);
+    // Record-pattern fields introduce binders by name (`Name { x, y }`).
+    if (p.tag == APAT_RECORD) { for (usz i = 0; i < p.field_count; i++) { if (p.fields[i] != null) { v.bind_var(p.fields[i].name); } } }
 }
 fn void Verify.collect_prd(Verify* v, AirPrd* p)
 {

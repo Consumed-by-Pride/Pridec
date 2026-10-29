@@ -1,0 +1,36 @@
+// PEAR2: fixed arrays are first-class local values, support constant projection/indexing,
+// and destructure recursively with an exact-size array pattern.
+air 2.2 Main "array_local_main.pie";
+
+def dynamic_pick_large(values : array#128(i8), ix : i64) : i8 =
+  mu~ %ret.
+    <values | index(ix; 1) · %ret>;
+
+def array_head(values : array#3(i32)) : i32 =
+  mu~ %ret.
+    match values {
+      array(bind head, rest) ->
+        <head | %ret>;
+    };
+
+def dynamic_pick(values : array#3(i32), ix : i64) : i32 =
+  mu~ %ret.
+    <values | index(ix; 4) · %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <array(7 : i32, 9 : i32, 11 : i32) : array#3(i32) | comu values.
+      <values | index(1 : infer; 4) · comu indexed.
+        match values {
+          array(bind first, bind second, bind third) ->
+            if (eq indexed second) then
+              if (eq first 7 : i32) then
+                if (eq third 11 : i32) then
+                  <42 | %ret>
+                else
+                  <0 | %ret>
+              else
+                <0 | %ret>
+            else
+              <0 | %ret>;
+        }>>;

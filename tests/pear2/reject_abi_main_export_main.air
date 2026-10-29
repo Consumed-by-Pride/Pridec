@@ -1,0 +1,7 @@
+// M10 reject: calling-convention/export attributes on `main` are pinned off
+// so the driver-facing entry symbol keeps the default ABI.
+air 2.2 Main "reject_main_export.pie";
+
+attr export "pear2_main"
+def main() : i64 =
+  mu~ %ret_2. <0 : i64 | %ret_2>;

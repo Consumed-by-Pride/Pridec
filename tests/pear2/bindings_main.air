@@ -1,0 +1,7 @@
+// PEAR 2 M1: let/comu scalar bindings stay in the local value environment.
+air 2.2 Main "bindings_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let base = 40 in
+      <(add base 2 : i64) | comu result. <result | %ret>>;

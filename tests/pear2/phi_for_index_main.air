@@ -1,0 +1,14 @@
+// PEAR2 M9: fixed-array for loop with a phi-based index in the loop header
+// and no index alloca/load/store round trip. The body consumes the first
+// element directly; the header phi and its sibling condition still drive all
+// four GEP/iteration steps in the IR.
+air 2.2 Main "phi_for_index.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      for item in array(8 : i64, 10 : i64, 11 : i64, 13 : i64) : array#4(i64) do {
+        <(add item 34 : i64) : i64 | %ret>
+      };
+      <0 | %ret>
+    };

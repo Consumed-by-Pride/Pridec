@@ -1,0 +1,7 @@
+// Rejection: syscalls bind the host x86-64 Linux ABI and are not lowerable
+// under the freestanding wasm32 target profile.
+air 3.0 Main "reject_syscall_wasm32_main.pie";
+def main() : i64 =
+  mu~ %ret.
+    syscall(60 : i64, 42 : i64) · comu _.
+      <42 : i64 | %ret>;

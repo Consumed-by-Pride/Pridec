@@ -1,0 +1,13 @@
+// PEAR2: assertions branch to an explicit trap block; unconditional trap is terminal.
+air 2.2 Main "assert_trap_main.pie";
+
+def explicit_trap() : unit =
+  mu~ %ret.
+    trap;
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      assert((eq 1 1 : i64));
+      <42 | %ret>
+    };

@@ -1,0 +1,11 @@
+// PEAR 2 M2: jump arguments update label parameters through entry allocas.
+air 2.2 Main "label_arg_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      label done(x : i64).
+        <x | %ret>;
+      let value = 42 : i64 in
+        jump done(value)
+    };

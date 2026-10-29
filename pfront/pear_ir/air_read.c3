@@ -501,7 +501,9 @@ fn AirPrd* Rd.new_prd(Rd* r, AirPrdTag tag)
 {
     AirPrd* p = air_ir::air_new_AirPrd(r.a);
     if (p == null) { r.fail("out of memory"); return null; }
+    p.source_line = r.tline; p.source_col = r.tcol;
     p.tag = tag;
+    p.source_line = r.tline; p.source_col = r.tcol;
     return p;
 }
 fn void Rd.sub_list(Rd* r, AirPrd* p)
@@ -729,6 +731,7 @@ fn AirCns* Rd.new_cns(Rd* r, AirCnsTag tag)
     AirCns* k = air_ir::air_new_AirCns(r.a);
     if (k == null) { r.fail("out of memory"); return null; }
     k.tag = tag;
+    k.source_line = r.tline; k.source_col = r.tcol;
     return k;
 }
 // pat [guard { cmd }] -> cmd ;   (repeated until the closing brace)
@@ -876,7 +879,9 @@ fn AirCmd* Rd.new_cmd(Rd* r, AirCmdTag tag)
 {
     AirCmd* c = air_ir::air_new_AirCmd(r.a);
     if (c == null) { r.fail("out of memory"); return null; }
+    c.source_line = r.tline; c.source_col = r.tcol;
     c.tag = tag;
+    c.source_line = r.tline; c.source_col = r.tcol;
     return c;
 }
 fn AirCmd* Rd.braced(Rd* r, AirCmdTag tag)
@@ -1177,6 +1182,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
 {
     if (r.failed) { return false; }
     AirArena* a = r.a;
+    int decl_line = r.tline; int decl_col = r.tcol;
     bool is_pub = false; bool is_extern = false; bool is_fastcc = false; bool is_varargs = false;
     bool ro = false; bool facts = false; char* link = null;
     char*[8] pend_attr_n; char*[8] pend_attr_s; long[8] pend_attr_i; bool[8] pend_attr_h; usz pend_attr_c = 0;
@@ -1219,6 +1225,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         r.next();
         char* nm = r.name(); r.expect_p(';');
         AirDecl* d = air_ir::air_mk_decl(a, ADECL_MODULE, nm); d.module_name = nm;
+        if (d != null) { d.source_line = r.tline; d.source_col = r.tcol; }
         d.is_pub = is_pub;
         return m.add_decl(d);
     }
@@ -1226,6 +1233,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
     {
         r.next();
         AirDecl* d = air_ir::air_mk_decl(a, ADECL_IMPORT, null);
+        if (d != null) { d.source_line = r.tline; d.source_col = r.tcol; }
         if (r.kind == T_STR) { d.name = r.dup_tok(); d.import_path = d.name; r.next(); }
         else if (r.is_kw("nil")) { r.next(); }
         else { r.fail("expected an import path string"); return false; }
@@ -1239,6 +1247,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         AirDeclTag tg = r.is_kw("def") ? ADECL_DEF : (r.is_kw("defco") ? ADECL_DEFCO : ADECL_DECLARE);
         r.next();
         AirDecl* d = air_ir::air_mk_decl(a, tg, r.name());
+        if (d != null) { d.source_line = r.tline; d.source_col = r.tcol; }
         d.is_pub = is_pub; d.is_extern = is_extern; d.is_fastcc = is_fastcc; d.is_varargs = is_varargs;
         d.extern_link = link; d.memory_readonly = ro;
         for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
@@ -1257,6 +1266,8 @@ fn bool Rd.decl(Rd* r, AirModule* m)
         if (r.ver_major < 3) { r.fail("global needs `air 3.0`"); return false; }
         r.next();
         AirDecl* d = air_ir::air_mk_decl(a, ADECL_GLOBAL, null);
+        if (d != null) { d.source_line = r.tline; d.source_col = r.tcol; }
+        if (d != null) { d.extern_link = link; }
         d.is_pub = is_pub; d.is_extern = is_extern;
         for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         if (r.eat_kw("mut")) { d.g_mut = true; }
@@ -1270,6 +1281,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
     {
         bool is_data = r.is_kw("data"); r.next();
         AirDecl* d = air_ir::air_mk_decl(a, is_data ? ADECL_DATA : ADECL_CODATA, r.name());
+        if (d != null) { d.source_line = r.tline; d.source_col = r.tcol; }
         d.is_pub = is_pub;
         for (usz ai = 0; ai < pend_attr_c; ai++) { air_ir::air_add_attr(d, pend_attr_n[ai], pend_attr_s[ai], pend_attr_i[ai], pend_attr_h[ai]); }
         if (r.eat_kw("lin")) { d.mult = AMULT_LIN; } else if (r.eat_kw("aff")) { d.mult = AMULT_AFF; }
@@ -1308,6 +1320,7 @@ fn bool Rd.decl(Rd* r, AirModule* m)
     {
         r.next();
         AirDecl* d = air_ir::air_mk_decl(a, ADECL_EFFECT, r.name());
+        if (d != null) { d.source_line = r.tline; d.source_col = r.tcol; }
         d.is_pub = is_pub;
         r.expect_p('{');
         while (!r.failed && !r.is_p('}'))

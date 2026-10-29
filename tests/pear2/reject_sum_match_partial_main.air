@@ -1,0 +1,13 @@
+// Tagged-sum matches must carry a wildcard/default arm.
+air 2.2 Main "reject_sum_match_partial.pie";
+data Option64 {
+  ctor None() : nominal Option64;
+  ctor Some(x : i64) : nominal Option64;
+};
+def main() : i64 =
+  mu~ %ret.
+    <con Some(1 : i64) | comu r.
+      match r {
+        ctor Some(bind x) -> <x | %ret>;
+        ctor None -> <0 | %ret>;
+      }>;

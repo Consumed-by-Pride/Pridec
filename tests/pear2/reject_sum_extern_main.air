@@ -1,0 +1,12 @@
+// External C signatures may not carry tagged sums; must fail closed, positioned.
+air 2.2 Main "reject_sum_extern.pie";
+data Option64 {
+  ctor None() : nominal Option64;
+  ctor Some(x : i64) : nominal Option64;
+};
+link "take_option" extern declare take(o : nominal Option64) : i64;
+def main() : i64 =
+  mu~ %ret.
+    <con Some(42 : i64) | comu r.
+      <take | call · r · comu t.
+        <t | %ret>>>;

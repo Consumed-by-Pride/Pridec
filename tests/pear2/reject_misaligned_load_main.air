@@ -1,0 +1,10 @@
+// An under-aligned global must not be dereferenced as an i32.
+air 3.0 Main "reject_misaligned_load_main.pie";
+
+attr align 1 global mut under_aligned : i32 = 7;
+
+def bad_load() : i32 =
+  mu~ %ret.
+    <load(under_aligned) : i32 | %ret>;
+
+def main() : i64 = mu~ %ret. <0 : i64 | %ret>;

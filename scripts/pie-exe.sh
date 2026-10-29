@@ -21,6 +21,18 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PFRONTC="${PFRONTC:-$ROOT/pfrontc}"
 PEAR1C="${BACKEND:-${PEAR1C:-$ROOT/legacy/pear1/pear1c}}"
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu}"
+if [ "$(basename "$PEAR1C")" = "pear2c" ]; then
+    LLVM23_BIN=${LLVM23_BIN:-$HOME/.cache/llvm23/bin}
+    if [ -z "${LLVM23_LIBDIR:-}" ]; then
+        _llvm_root=$(dirname "$LLVM23_BIN")
+        if [ -f "$_llvm_root/lib/libLLVM-23.so" ]; then LLVM23_LIBDIR="$_llvm_root/lib"; else LLVM23_LIBDIR="$_llvm_root"; fi
+    fi
+    export LD_LIBRARY_PATH="$LLVM23_LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    if [ -z "${PEAR2_CLANG:-}" ]; then
+        if [ -x "$LLVM23_BIN/clang" ]; then PEAR2_CLANG="$LLVM23_BIN/clang"; else PEAR2_CLANG=$(command -v clang || true); fi
+        export PEAR2_CLANG
+    fi
+fi
 
 src=""; mode="--emit-exe"; opt=""; front=()
 for a in "$@"; do

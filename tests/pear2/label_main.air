@@ -1,0 +1,10 @@
+// PEAR 2 M2: label blocks and jumps are compiled as explicit LLVM blocks.
+air 2.2 Main "label_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      label exit().
+        <42 | %ret>;
+      jump exit()
+    };

@@ -1,0 +1,21 @@
+-- EXIT: 42
+-- First-class closures end to end: a closure value is selected by a
+-- value-position if (both arms produce lambdas capturing the same runtime
+-- binding), returned across a def boundary as the {code, env} fat tuple, then
+-- applied indirectly. Exercises closure lifting (env-first internal defs),
+-- fat values ({ ptr, ptr } insertvalue/extractvalue), and env-first indirect
+-- calls; the exit code is the closure result, so a broken pipeline fails.
+fn forty : () -> i64
+  | () -> 40
+
+fn choose_adder : i64 -> fn(i64) -> i64
+  | base ->
+      if base > 0
+        fn (x: i64) -> i64 { x + base }
+      else
+        fn (x: i64) -> i64 { x - base }
+
+fn main : () -> () ! [IO]
+  | () ->
+      let f = choose_adder(forty())
+      syscall(231, f(2))

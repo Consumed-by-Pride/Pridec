@@ -1,0 +1,25 @@
+// AIR 3 pointer-cell provenance survives a typed store/load and is valid for free.
+air 3.0 Main "typed_pointer_cell_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare free(p : ptr(i64)) : unit;
+
+def main() : i64 =
+  mu~ %ret.
+    <alloca(ptr(i64)) : ptr(ptr(i64)) | comu cell.
+      <malloc | call · 8 : i64 · comu heap.
+        seq {
+          store(cell, heap);
+          <load(cell) : ptr(i64) | comu alias.
+            seq {
+              store(alias, 42 : i64);
+              <load(alias) : i64 | comu result.
+                <free | call · alias · comu _.
+                  <result | %ret>
+                >
+              >
+            }
+          >
+        }
+      >
+    >;
