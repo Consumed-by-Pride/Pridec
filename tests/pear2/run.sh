@@ -187,6 +187,147 @@ grep -q 'define .*@unused_pub(' "$W/exports.ll" || { echo "FAIL: -O3 dropped the
 "$PEAR2_BIN" --verify-bc "$W/exports.bc" || { echo "FAIL: the exports bitcode did not verify"; exit 1; }
 echo "PASS: -O3 keeps every exported symbol"
 
+# ── multi-unit compilation ────────────────────────────────────────────────
+#
+# Two .air files compile into ONE module, so a call from one unit into the other
+# is an ordinary direct call and the optimiser sees both bodies.
+cat > "$W/unit_a.air" <<'AIR'
+air 2.2 Main "unit_a.pie";
+
+pub def twice(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 2 : i64) | %ret>;
+AIR
+cat > "$W/unit_b.air" <<'AIR'
+air 2.2 Main "unit_b.pie";
+
+extern declare twice(x : i64) : i64;
+
+def main() : i64 =
+  mu~ %ret_2.
+    <twice | call · 21 : i64 · comu _x1.
+      <_x1 : i64 | %ret_2>>;
+AIR
+"$PEAR2_BIN" "$W/unit_b.air" "$W/unit_a.air" --emit-bc -O2 --quiet \
+    || { echo "FAIL: multi-unit --emit-bc rejected two .air inputs"; exit 1; }
+[ -f "$W/unit_b.bc" ] || { echo "FAIL: multi-unit compile wrote no bitcode"; exit 1; }
+verify_bitcode "$W/unit_b.bc" || { echo "FAIL: multi-unit bitcode did not verify"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/unit_b.bc" -o "$W/unit_b" || { echo "FAIL: multi-unit bitcode did not link"; exit 1; }
+set +e
+timeout 5 "$W/unit_b" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: multi-unit program returned $rc, expected 42"; exit 1; }
+echo "PASS: two .air inputs compile into one module and run"
+
+# Two inputs that define the same symbol cannot become one module. The refusal
+# names the symbol and the input that repeats it, rather than letting LLVM report
+# a redefinition with no file attached.
+cp "$W/unit_a.air" "$W/unit_a_copy.air"
+set +e
+"$PEAR2_BIN" "$W/unit_a.air" "$W/unit_a_copy.air" --emit-ll >"$W/dup.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: duplicate definitions across inputs returned $rc, expected 3"; cat "$W/dup.log"; exit 1; }
+grep -q '`twice` is defined in more than one input' "$W/dup.log" || { echo "FAIL: duplicate report did not name the symbol"; cat "$W/dup.log"; exit 1; }
+echo "PASS: a symbol defined by two inputs is refused by name"
+
+# ── bitcode inputs are linked, not parsed ─────────────────────────────────
+"$PEAR2_BIN" "$W/unit_a.air" --emit-bc --quiet || { echo "FAIL: could not build the library bitcode"; exit 1; }
+"$PEAR2_BIN" "$W/unit_b.air" "$W/unit_a.bc" --emit-bc -O2 --quiet \
+    || { echo "FAIL: AIR plus a .bc input was rejected"; exit 1; }
+verify_bitcode "$W/unit_b.bc" || { echo "FAIL: linked bitcode did not verify"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/unit_b.bc" -o "$W/unit_b_bc" || { echo "FAIL: linked bitcode did not link"; exit 1; }
+set +e
+timeout 5 "$W/unit_b_bc" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: AIR+bitcode program returned $rc, expected 42"; exit 1; }
+echo "PASS: a .bc input is linked into the compiled module"
+
+# ── verify-bc over several artifacts ──────────────────────────────────────
+cp "$W/unit_a.air" "$W/unit_a2.air"
+"$PEAR2_BIN" "$W/unit_a2.air" --emit-bc --quiet || { echo "FAIL: could not build the second library"; exit 1; }
+set +e
+"$PEAR2_BIN" --verify-bc "$W/unit_a.bc" "$W/unit_a2.bc" >"$W/clash.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: two artifacts defining one symbol returned $rc, expected 3"; cat "$W/clash.log"; exit 1; }
+grep -q 'both define' "$W/clash.log" || { echo "FAIL: --verify-bc did not report the shared definition"; exit 1; }
+# `unit_a` defines `twice`; this one defines `quadruple`, so the two share no
+# definition and linking them is legal even though both have a `main`.
+cat > "$W/unit_c.air" <<'AIR'
+air 2.2 Main "unit_c.pie";
+
+pub def quadruple(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 4 : i64) | %ret>;
+AIR
+"$PEAR2_BIN" "$W/unit_c.air" --emit-bc --quiet || { echo "FAIL: could not build the third library"; exit 1; }
+"$PEAR2_BIN" --verify-bc "$W/unit_a.bc" "$W/unit_c.bc" >"$W/pair.log" 2>&1 \
+    || { echo "FAIL: --verify-bc rejected two artifacts with no shared symbols"; cat "$W/pair.log"; exit 1; }
+grep -q 'can be linked' "$W/pair.log" || { echo "FAIL: --verify-bc did not confirm the pair is linkable"; exit 1; }
+echo "PASS: --verify-bc answers whether artifacts can be linked"
+
+# ── target tuning and pipeline control ────────────────────────────────────
+"$PEAR2_BIN" --print-pipeline -O2 >"$W/pipe_02.log" 2>&1 || { echo "FAIL: --print-pipeline rejected"; exit 1; }
+grep -q 'pipeline=default<O2>' "$W/pipe_02.log" || { echo "FAIL: -O2 did not select default<O2>"; cat "$W/pipe_02.log"; exit 1; }
+"$PEAR2_BIN" --print-pipeline -Oz >"$W/pipe_oz.log" 2>&1 || { echo "FAIL: -Oz rejected"; exit 1; }
+grep -q 'pipeline=default<Oz>' "$W/pipe_oz.log" || { echo "FAIL: -Oz did not select default<Oz>"; exit 1; }
+# A custom pipeline is used as written, but verification is never dropped.
+"$PEAR2_BIN" --print-pipeline --passes=mem2reg >"$W/pipe_custom.log" 2>&1 || { echo "FAIL: --passes rejected"; exit 1; }
+grep -q 'pipeline=mem2reg,verify' "$W/pipe_custom.log" || { echo "FAIL: a custom pipeline did not get verification appended"; cat "$W/pipe_custom.log"; exit 1; }
+"$PEAR2_BIN" --print-pipeline --passes=mem2reg,verify >"$W/pipe_custom2.log" 2>&1 || { echo "FAIL: --passes with verify rejected"; exit 1; }
+[ "$(grep -o 'verify' "$W/pipe_custom2.log" | wc -l | tr -d ' ')" = 1 ] \
+    || { echo "FAIL: an existing verify was duplicated"; cat "$W/pipe_custom2.log"; exit 1; }
+"$PEAR2_BIN" --print-pipeline --cpu=native >"$W/pipe_cpu.log" 2>&1 || { echo "FAIL: --cpu=native rejected"; exit 1; }
+grep -q 'cpu=native' "$W/pipe_cpu.log" && { echo "FAIL: --cpu=native was not resolved to a real CPU"; exit 1; }
+"$PEAR2_BIN" --print-pipeline -fPIC >"$W/pipe_pic.log" 2>&1 || { echo "FAIL: -fPIC rejected"; exit 1; }
+grep -q 'reloc=pic' "$W/pipe_pic.log" || { echo "FAIL: -fPIC did not select the PIC relocation model"; exit 1; }
+"$PEAR2_BIN" --print-pipeline --inline-threshold=1000 >"$W/pipe_inl.log" 2>&1 || { echo "FAIL: --inline-threshold rejected"; exit 1; }
+grep -q 'inline-threshold=1000' "$W/pipe_inl.log" || { echo "FAIL: --inline-threshold was not honoured"; exit 1; }
+set +e
+"$PEAR2_BIN" --print-pipeline --inline-threshold=-5 >"$W/pipe_bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: a negative inline threshold returned $rc, expected 2"; exit 1; }
+echo "PASS: --print-pipeline reports the pipeline and tuning that would run"
+
+# --check is the CI gate: parse, merge and verify, then stop. It must not write,
+# and it must not delete the artifact a previous real build published.
+"$PEAR2_BIN" "$W/default.air" --emit-bc -O2 --quiet || { echo "FAIL: could not build the artifact --check must leave alone"; exit 1; }
+"$PEAR2_BIN" "$W/default.air" --check >"$W/check.log" 2>&1 || { echo "FAIL: --check rejected valid AIR"; cat "$W/check.log"; exit 1; }
+grep -q 'checks clean' "$W/check.log" || { echo "FAIL: --check did not report a verdict"; cat "$W/check.log"; exit 1; }
+[ -f "$W/default.bc" ] || { echo "FAIL: --check deleted a published artifact"; exit 1; }
+"$PEAR2_BIN" "$W/unit_a.air" "$W/unit_b.air" --check >"$W/check_multi.log" 2>&1 \
+    || { echo "FAIL: --check rejected two valid units"; cat "$W/check_multi.log"; exit 1; }
+grep -q '2 .air unit' "$W/check_multi.log" || { echo "FAIL: --check did not report both units"; cat "$W/check_multi.log"; exit 1; }
+printf 'not AIR\n' > "$W/check_invalid.air"
+set +e
+"$PEAR2_BIN" "$W/check_invalid.air" --check >"$W/check_bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 1 ] || { echo "FAIL: --check on invalid AIR returned $rc, expected 1"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/default.air" --check --emit-bc >"$W/check_mode.log" 2>&1; rc=$?
+"$PEAR2_BIN" "$W/default.bc" --check >"$W/check_bc.log" 2>&1; rc2=$?
+set -e
+[ "$rc" = 2 ] && [ "$rc2" = 2 ] || { echo "FAIL: --check conflicts returned $rc/$rc2, expected 2/2"; exit 1; }
+echo "PASS: --check validates AIR and writes nothing"
+
+# Tuning travels with the module, not with the command line: a published .bc that
+# is linked somewhere else must still say which CPU it was built for.
+"$PEAR2_BIN" "$W/default.air" --emit-ll --cpu=x86-64-v3 --features=+sse4.2 --quiet \
+    || { echo "FAIL: --cpu/--features rejected"; exit 1; }
+grep -q '^attributes #0 = {' "$W/default.ll" || { echo "FAIL: tuned module has no attribute group"; exit 1; }
+grep -q '"target-cpu"="x86-64-v3"' "$W/default.ll" || { echo "FAIL: target-cpu attribute missing"; exit 1; }
+grep -q '"target-features"="+sse4.2"' "$W/default.ll" || { echo "FAIL: target-features attribute missing"; exit 1; }
+grep -q '^define .*#0 {' "$W/default.ll" || { echo "FAIL: definitions do not reference the tuning group"; exit 1; }
+"$PEAR2_BIN" "$W/default.air" --emit-bc --cpu=x86-64-v3 --quiet || { echo "FAIL: tuned --emit-bc rejected"; exit 1; }
+verify_bitcode "$W/default.bc" || { echo "FAIL: tuned bitcode did not verify"; exit 1; }
+# -fPIC is a property of the code in the module, not of the command line that
+# made it, so it is recorded where a linker will read it.
+"$PEAR2_BIN" "$W/default.air" --emit-ll -fPIC --quiet || { echo "FAIL: -fPIC --emit-ll rejected"; exit 1; }
+grep -q '"PIC Level", i32 2' "$W/default.ll" || { echo "FAIL: -fPIC did not record a PIC level"; cat "$W/default.ll"; exit 1; }
+"$PEAR2_BIN" "$W/default.air" --emit-ll -O2 --quiet || { echo "FAIL: untuned rebuild rejected"; exit 1; }
+grep -q '^attributes #0' "$W/default.ll" && { echo "FAIL: an untuned module still emits an attribute group"; exit 1; }
+grep -q 'PIC Level' "$W/default.ll" && { echo "FAIL: a static module still claims a PIC level"; exit 1; }
+echo "PASS: --cpu/--features are recorded in the module and absent when unset"
+
 # Exit 2: usage/option errors. Exit 1: invalid AIR. Exit 3: valid AIR outside
 # the supported backend subset. Every failure must remove a stale artifact.
 set +e

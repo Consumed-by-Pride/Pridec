@@ -320,9 +320,9 @@ bitcode-determinism fix committed with this checklist revision).
 - [x] 7.5 QUALITY_CHECKLIST.md (this file) is the release gate (AYO-11).
 - [x] 7.6 Claim audit: no doc claims sum-type/pattern support for records or
       cross-platform C ABI — all say "x86-64 + LLVM 23 only".
-- [x] 7.7 LoC accounting current: **14,465 backend lines** across
+- [x] 7.7 LoC accounting current: **15,097 backend lines** across
       `pear2/*.c3`, split by backend because the two no longer share an emitter:
-      **11,077** for the `.bc`/LLVM backend (pear2c_main 6,877 + pear2_opt 2,094
+      **11,709** for the `.bc`/LLVM backend (pear2c_main 7,509 + pear2_opt 2,094
       + pear2_match 1,085 + pear2_calls 350 + pear2_control 329 + pear2_letrec 222
       + pear2_memory 120), **3,085** for the native backend (pear2_cfg 1,250
       + pear2_native 661 + pear2_x64 612 + pear2_elf 562), and **303** shared
@@ -472,12 +472,68 @@ bitcode-determinism fix committed with this checklist revision).
       and is not internalised) have not been executed: no C3 compiler and no LLVM
       in this workspace. Structurally verified only.
 
+## 14. Bitcode: multi-input, target tuning, pipeline control (11)
+
+- [x] 14.1 Several `.air` inputs compile into one module: declarations are merged
+      before the AIR optimizer runs, so the optimizer and LLVM both see the whole
+      program and a cross-unit call can be inlined. The merged module owns only
+      the declaration list -- each declaration stays in the arena it was parsed
+      into, and those arenas outlive emission.
+- [x] 14.2 A symbol defined by two inputs is exit 3 naming the symbol and the
+      input that repeats it (`m1_defined_named`), rather than LLVM rejecting the
+      merged text with a redefinition that names neither file.
+- [x] 14.3 External declarations merge once by name (`m1_decl_named`): every unit
+      carries the same three prelude declarations for libc, and a second copy of a
+      symbol is not a second symbol.
+- [x] 14.3a Duplicate detection covers every tag that occupies a symbol: `def`,
+      `defco` and `global` are all definitions (`m1_defined_named`), so two units
+      cannot define one global — which LLVM would reject as a redefinition with
+      no file attached. `import` merges like `declare`.
+- [x] 14.3b A type (data/codata/effect) declared by two inputs is refused by name
+      (`m1_type_decl_named`). Types are the one thing a merged module cannot
+      merge: the emitter writes one identified struct per record and LLVM does
+      not unique two same-named structs, so the module would fail to parse with
+      an error that names `%point` and neither file.
+- [x] 14.4 `.bc` inputs are linked, not parsed as AIR: load, compare triple, then
+      `LLVMLinkModules2`. The triple is compared *before* the link because a wasm
+      module linked into an x86 one verifies and then fails in the backend.
+      `LLVMLinkModules2` consumes the source module, so there is no dispose after
+      the call. `--emit-native` with a `.bc` input is exit 2, not a silent drop.
+- [x] 14.5 Target tuning is threaded through and also recorded in the module:
+      `--cpu`/`--features` reach the target machine (previously empty strings) and
+      become a `#0` attribute group on every definition, so a published `.bc`
+      keeps its tuning after it leaves the process. `native` resolves through
+      LLVM's own host queries.
+- [x] 14.6 The pipeline cannot lose verification: `--passes=` replaces the default
+      but `verify` is appended when absent (`m1_pipeline_for`, checked with
+      `m1_contains`). `-Oz` is a real tier; `--inline-threshold=` overrides the
+      shared default of 250; `--print-pipeline` reports pipeline, target, CPU,
+      features, relocation model, threshold and input count, and writes nothing.
+- [x] 14.8 `--check` is the CI gate: the merged module is verified and the verdict
+      reported, then the driver returns before optimisation, IR emission, or
+      `clear_stale_outputs` -- a check must not delete the artifact it did not
+      replace. Refused with an `--emit-*` mode and with a `.bc` input (exit 2),
+      because either way it would report on work it did not do.
+- [x] 14.9 A PIC build records `!{i32 8, !"PIC Level", i32 2}` in
+      `!llvm.module.flags`. Min behavior is not a style choice: it is what
+      `Module::setPICLevel` uses (verified in LLVM's `llvm/lib/IR/Module.cpp`),
+      because a non-PIC object and a PIC object can only be used together as
+      non-PIC, so the merge must keep the lesser claim.
+- [ ] 14.7 The new `run.sh` assertions (multi-unit compile-and-run, duplicate
+      definition refusal, `.bc` linking, `--verify-bc` over a pair with and without
+      a shared definition, every `--print-pipeline` case, `#0` present with tuning
+      and absent without, `PIC Level` present under `-fPIC` and absent otherwise,
+      `--check` clean/invalid/conflict and that it leaves a published artifact
+      alone) have not been executed: no C3 compiler and no LLVM in this workspace.
+      Structurally verified only.
+
 ## Score
 
-**151 items: 147 complete with evidence, 4 open** (the count is the file's own
+**162 items: 157 complete with evidence, 5 open** (the count is the file's own
 inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.5
 (token rotation), 11.6
 (the native end-to-end script has not been run here: no C3 compiler, no linker),
-12.6 and 13.5 (the new bitcode assertions have not been run for the same reason).
-Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All four are an
+12.6, 13.5 and 14.7 (the new bitcode assertions have not been run for the same
+reason).
+Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All five are an
 unrun test or an owner action, not a known defect: none lowers the safety floor.

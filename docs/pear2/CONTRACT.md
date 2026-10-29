@@ -5,8 +5,8 @@ Normative for any program that consumes `.air`. Format: [`docs/specs/AIR.md`](..
 ## 1 Process interface
 
 ```
-BACKEND FILE.air [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3] [--quiet]
-BACKEND FILE.bc --verify-bc [--target=x86_64 | --target=wasm32-freestanding] [--quiet]
+BACKEND FILE.air [FILE.air | FILE.bc ...] [--emit-exe | --emit-bc] [-O0 | -O1 | -O2 | -O3 | -Os | -Oz] [--quiet]
+BACKEND FILE.bc [FILE.bc ...] --verify-bc [--target=x86_64 | --target=wasm32-freestanding] [--quiet]
 ```
 
 | | |
@@ -17,6 +17,12 @@ BACKEND FILE.bc --verify-bc [--target=x86_64 | --target=wasm32-freestanding] [--
 | `--emit-asm` | (PEAR 2) write the x86-64 assembly listing `FILE.s` the object was assembled from |
 | `--emit-native` | (PEAR 2) write the x86-64 ELF object `FILE.o` from PEAR 2's own backend — no LLVM, no textual IR; `--native-entry` adds a `_start` so `ld -static` yields a runnable program |
 | `--verify-bc` | (PEAR 2) the first argument is a `.bc` instead of a `.air`: load, parse, verify, compare the triple, report the module's shape. Writes nothing and deletes nothing |
+| multiple inputs | (PEAR 2) every `.air` input is parsed and merged into **one** module before optimisation, so cross-unit calls are ordinary direct calls; a symbol defined twice (function, coterm definition, or global) is exit 3 naming the symbol, and so is a type (data/codata/effect) declared by two inputs — the emitter writes one identified struct per record and LLVM does not unique two same-named structs, so that merge cannot be papered over; an external declaration or import is merged once by name, and each unit is verified against its own file first. A `.bc` input is not parsed as AIR: it is loaded, its triple compared with `--target=`, and linked with `LLVMLinkModules2`. `--emit-native` refuses `.bc` inputs (exit 2) rather than dropping them |
+| `--cpu=NAME\|native`, `--features=LIST\|native` | (PEAR 2) target tuning, resolved through `LLVMGetHostCPUName`/`LLVMGetHostCPUFeatures` when `native`, used for the optimiser *and* written into the module as `"target-cpu"`/`"target-features"` so a published `.bc` keeps its tuning after it leaves the process |
+| `--reloc=static\|pic\|dynamic-no-pic\|default`, `-fPIC` | (PEAR 2) `LLVMRelocMode` for code generation; static unless asked, and a PIC build records `!{i32 8, !"PIC Level", i32 2}` in `!llvm.module.flags` (Min behavior, as `Module::setPICLevel` does) so a later link cannot silently mix PIC and non-PIC code. Only the *default* code model is ever passed, because that enum's order has changed between LLVM releases |
+| `--passes=PIPELINE`, `--print-pipeline`, `--inline-threshold=N` | (PEAR 2) an explicit pipeline replaces the `-On` default, but `verify` is appended when absent: a custom pipeline may not skip verification. `--print-pipeline` prints what would run and writes nothing |
+| `--check` | (PEAR 2) parse, merge and verify the AIR, report the verdict, write nothing and delete nothing; exit 0 clean / 1 invalid. Refused with an `--emit-*` mode or a `.bc` input (exit 2), because it would then report on work it did not do |
+| `-Os`, `-Oz` | (PEAR 2) `default<Os>` / `default<Oz>` with the `-O2` AIR tier |
 | `-On` | optimisation tier; default `-O2` (PEAR 2: `-O1` = AIR folding, reassociation, and self-operand folding, `-O2` adds the dead-binding pass, `-O3` adds whole-body propagation and literal-decided control-flow folding; `-Os` keeps the `-O2` AIR tier and selects `default<Os>`, and every other tier selects the matching `default<On>` LLVM pipeline) |
 | exit 0 | the artifact was written |
 | exit 1 | the `.air` was rejected (syntax, version, limits) — message `file:line:col: …`, **no artifact** |

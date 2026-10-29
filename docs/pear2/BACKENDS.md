@@ -8,7 +8,7 @@ claims.
 
 | option | pipeline | artifact | status |
 | --- | --- | --- | --- |
-| `--emit-bc` | AIR → LLVM IR text → LLVM parse → verify → `default<On>` → verify → bitcode → **load back, verify, compare triple, check exports** | `.bc`, linkable by any LLVM 23 tool | **complete** (see §1) |
+| `--emit-bc` | N × AIR merged → LLVM IR text (+ linked `.bc` inputs) → parse → verify → pipeline → verify → bitcode → **load back, verify, compare triple, check exports** | `.bc`, linkable by any LLVM 23 tool | **complete** (see §1) |
 | `--verify-bc` | load → parse → verify → compare triple → report | nothing (checks an existing `.bc`) | complete |
 | `--emit-native` | AIR → PIR → x86-64 bytes → ELF64 | `.o` relocatable, or runnable with `--native-entry` | **partial** (see §2) |
 | `--emit-exe`, `--emit-obj`, `--emit-asm`, `--emit-ll` | the LLVM path | executable / object / listing / text | complete, unchanged |
@@ -73,6 +73,11 @@ produced it and what it expects of the platform.
 compile prints the byte count read back from the file and the module's shape
 (functions defined, declarations, globals), all measured after verification.
 
+**Verifying several artifacts at once.** `--verify-bc a.bc b.bc` checks each file
+and then answers the question that actually matters for a pair: whether they can be
+linked. Two artifacts that both *define* a symbol cannot be, and finding that out
+from the linker after a long build is the wrong time.
+
 **Determinism.** The module identifier is the input path, no PID, timestamp, or
 address reaches the module, and the symbol order is fixed. Two compiles of one
 input in one directory are byte-identical, and `tests/pear2/run.sh` asserts it.
@@ -86,6 +91,87 @@ carries the requested triple and no other.
 **Failure modes.** Exit 2 for a bad option or two conflicting modes, exit 1 for
 invalid AIR, exit 3 for valid AIR outside the supported subset or for an artifact
 that failed verification. Every failure removes a stale output.
+
+### 1.1 Several inputs become one module
+
+`pear2c a.air b.air --emit-bc` parses both files and merges their declarations
+into **one** module before anything else runs, so the AIR optimiser and LLVM both
+see the whole program: a call from `a` into `b` is an ordinary direct call and can
+be inlined across the unit boundary.
+
+The rules are stated rather than implied:
+
+* a symbol **defined** twice is refused (exit 3) with the symbol and the input
+  that repeats it — not by LLVM as a redefinition with no file attached. A
+  definition here means `def`, a coterm `defco`, or a `global`: all three occupy
+  a symbol;
+* a **type** declared by two inputs is refused too. The emitter writes one
+  identified struct per record, and LLVM does not unique two same-named structs,
+  so a merged module carrying both would simply fail to parse — with an error
+  naming `%point` and not the two files;
+* an external **declaration** or an `import` is merged once by name; the first input to declare
+  a symbol fixes its signature, and every unit carries the same three prelude
+  declarations for libc, so they collapse instead of colliding;
+* each unit is verified on its own first, so invalid AIR is reported against the
+  file it came from;
+* the first `.air` input names the output and the `source_filename`.
+
+`.bc` inputs are not parsed as AIR at all: each is loaded, its triple compared
+with the requested one, and linked into the module with `LLVMLinkModules2`. That
+is what makes "compile this and link that prebuilt library" one command. Mixing
+targets is refused *before* the link, because a wasm module linked into an x86 one
+produces a module LLVM will verify and no backend will emit. `--emit-native`
+refuses `.bc` inputs outright rather than silently ignoring them.
+
+### 1.2 Target tuning travels with the module
+
+`--cpu=NAME|native`, `--features=LIST|native`, `--reloc=static|pic|dynamic-no-pic|default`
+and `-fPIC` reach the target machine — before this, they were hardcoded to an empty
+CPU and a static relocation model, which means the optimiser assumed a generic
+baseline and never used an instruction the machine actually has.
+
+Relocation is recorded the same way: a `-fPIC` build emits
+`!{i32 8, !"PIC Level", i32 2}` in `!llvm.module.flags`, with **Min** behavior
+because that is what `Module::setPICLevel` uses — a non-PIC object and a PIC object
+can only be used together as non-PIC, so the merge rule has to keep the lesser
+claim rather than the louder one.
+
+Tuning is also written *into* the module as an attribute group:
+
+```llvm
+define i64 @f(i64 %a0) #0 {
+...
+attributes #0 = { "target-cpu"="x86-64-v3" "target-features"="+sse4.2" }
+```
+
+because a `.bc` that leaves this process is linked somewhere else, possibly by a
+tool that has never heard of `--cpu`, and the tuning is part of what the code
+means. `--cpu=native` and `--features=native` are resolved through LLVM's own
+`LLVMGetHostCPUName`/`LLVMGetHostCPUFeatures` rather than a second implementation
+of host detection.
+
+### 1.3 The pipeline is inspectable and cannot lose verification
+
+`--print-pipeline` prints exactly what would run — pipeline, target, CPU,
+features, relocation model, inliner threshold, input count — and writes no
+artifact:
+
+```
+$ pear2c --print-pipeline -Oz --cpu=native
+pear2c: pipeline=default<Oz> target=x86_64-unknown-linux-gnu cpu=znver4 features=... reloc=static inline-threshold=250 inputs=0
+```
+
+`--check` is the same gate without the work after it: parse, merge, verify the
+AIR, print a verdict, touch nothing. A CI gate that has to build a `.bc` to learn
+whether a file is valid cannot be run on a file that is being edited, and a gate
+that deletes the last good artifact to report a failure is worse than none — so
+`--check` skips `clear_stale_outputs` as well as emission.
+
+`--passes=PIPELINE` replaces the `-On` default. Whatever it says, `verify` is
+appended when it is not already present: "I asked for `mem2reg`" is not a reason
+to publish a module nobody checked. `-Oz` joins `-Os` as a real tier
+(`default<Oz>`), and `--inline-threshold=N` overrides the inliner threshold that
+shared PEAR 2's default of 250.
 
 ## 2. `--emit-native`: partial, and honest about it
 

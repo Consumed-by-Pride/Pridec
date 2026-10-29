@@ -77,6 +77,21 @@ range reasoning, and loop idioms.
 
 ## 4. Closed recently
 
+- **Multi-input builds.** Up to sixteen positional inputs compile into one
+  module: `.air` units are parsed separately, verified separately (so the
+  diagnostic names the file), and merged declaration-by-declaration; `.bc`
+  inputs are triple-checked and linked with `LLVMLinkModules2`. A symbol defined
+  by two inputs is refused by name, an external declaration merges once. This is
+  what makes cross-unit inlining possible at all — before it, "the optimiser sees
+  the whole program" was only true of one file.
+- **Target tuning (`--cpu`, `--features`, `-Oz`, `--reloc`/`-fPIC`)** reaches the
+  target machine instead of the empty strings that used to be passed, and is
+  written into the module (`attributes #0`, `PIC Level`) so a published `.bc`
+  keeps the tuning after it leaves the process.
+- **Pipeline control (`--passes`, `--inline-threshold`, `--print-pipeline`,
+  `--check`)** makes what runs inspectable, and appends `verify` to a custom
+  pipeline rather than trusting the caller to remember it.
+
 - **`atomic cmpxchg`** now lowers. AIR carries one ORDER; the backend uses it as
   the success ordering and weakens it to the strongest legal failure ordering
   (release/acq_rel degrade to monotonic/acquire), which is the same mapping the
