@@ -751,3 +751,8 @@ inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.
 assertions have not been run for the same reason).
 Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All twelve are an
 unrun test or an owner action, not a known defect: none lowers the safety floor.
+
+What the checkmarks mean together, and where the measure stops, is written down in
+`docs/pear2/COMPLETENESS.md`: coverage measured against the tags the AIR 3.0 low
+profile can actually emit, the claims the memory model makes, and the three
+things that are still missing (execution evidence, debug info, and the stdlib).

@@ -6253,9 +6253,20 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
         char* arg_name = g.arena.dup(&arg[0], (usz)n);
         if (p.name != null && !same(p.name, "_") && !g.bind_typed(p.name, arg_name, m1_bool_type(parameter_types[i]), m1_pointer_repr_type(parameter_types[i]), parameter_types[i])) { return false; }
     }
-    if (!g.command(body, ret_name) || !g.terminated)
+    bool body_lowered = g.command(body, ret_name);
+    if (!body_lowered || !g.terminated)
     {
-        if (g.low_profile && g.fail_form == null) { g.note_failure(g.last_line != 0 ? g.last_line : d.source_line, g.last_col != 0 ? g.last_col : d.source_col, (char*)"unsupported AIR 3 command/producer in function body"); }
+        // Two different failures were sharing one message. A body that lowers and
+        // then falls off the end is a *shape* problem -- a missing return or a
+        // continuation that never delivers -- and saying "unsupported command"
+        // about it sends the reader looking in the wrong place.
+        if (g.low_profile && g.fail_form == null)
+        {
+            int line = g.last_line != 0 ? g.last_line : d.source_line;
+            int col = g.last_col != 0 ? g.last_col : d.source_col;
+            if (!body_lowered) { g.note_failure(line, col, (char*)"unsupported AIR 3 command/producer in function body"); }
+            else { g.note_failure(line, col, (char*)"the function body does not end in a terminator (no return or delivered continuation)"); }
+        }
         return false;
     }    for (usz i = 0; i < g.label_count; i++) { if (!g.buffer_label_body(&g.labels[i], ret_name)) { return false; } }
     for (usz i = 0; i < g.label_count; i++) { if (!g.replay_label_block(&g.labels[i])) { return false; } }

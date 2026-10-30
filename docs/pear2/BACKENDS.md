@@ -250,6 +250,10 @@ against the tree, not estimated:
 | debug info | **absent** on every path (no DI/DWARF) | a 10k-line program is undebuggable |
 | execution evidence | **none**: no C3 compiler and no LLVM in the sandbox this was written in | every claim here is review-only until `make test-pear2` runs |
 
+For the auditable version of this section — coverage counted against the tags
+the AIR 3.0 low profile can actually emit, the claims the memory model makes, and
+what is still missing — see `docs/pear2/COMPLETENESS.md`.
+
 The ladder that would settle "is it complete", in order, each runnable:
 
 1. `make check-pear2` clean. **Now true** — see §3.1.
