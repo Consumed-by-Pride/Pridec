@@ -16,26 +16,105 @@ extern fn void* fopen(char* path, char* mode);
 extern fn int fclose(void* f);
 extern fn void* open_memstream(char** buf, usz* size) @cname("open_memstream");
 extern fn usz fwrite(void* ptr, usz size, usz count, void* f) @cname("fwrite");
-extern fn void* malloc(usz bytes) @cname("malloc");
-extern fn void free(void* p) @cname("free");
+// free is declared once, in pear2_types.c3, for the whole module.
 extern fn int remove(char* path);
 extern fn int rename(char* old_path, char* new_path);
 extern fn int snprintf(char* buf, usz cap, char* fmt, ...);
 extern fn int getpid();
 extern fn int system(char* command) @cname("system");
 extern fn char* getenv(char* name) @cname("getenv");
-// LLVM C API: parse the generated textual module, verify it, then serialize
-// the verified module as LLVM bitcode. PEAR 2 owns this path; it does not call
-// PEAR 1 or air_ll.
+// LLVM C API: parse the generated textual module, verify it, run LLVM's own
+// optimisation pipeline over it, then publish it as bitcode, as text, or as
+// native object code from LLVM's backend. PEAR 2 owns this path; it does not
+// call PEAR 1 or air_ll.
+//
+// The module text is rendered into memory and parsed from that buffer, so the
+// success path writes no temporary .ll file. The buffer is named with the input
+// path, which fixes the module's source identifier (and therefore keeps the
+// published bitcode byte-identical across runs) without a source-name rewrite.
 extern fn void* ll_context_create() @cname("LLVMContextCreate");
 extern fn void ll_context_dispose(void* c) @cname("LLVMContextDispose");
-extern fn int ll_buffer_from_file(char* path, void** out, char** msg) @cname("LLVMCreateMemoryBufferWithContentsOfFile");
+extern fn void* ll_buffer_from_mem(char* data, usz length, char* name) @cname("LLVMCreateMemoryBufferWithMemoryRangeCopy");
 extern fn int ll_parse_ir(void* c, void* buf, void** out_mod, char** msg) @cname("LLVMParseIRInContext");
 extern fn int ll_verify_module(void* m, int action, char** msg) @cname("LLVMVerifyModule");
 extern fn int ll_write_bitcode(void* m, char* path) @cname("LLVMWriteBitcodeToFile");
+extern fn int ll_print_module(void* m, char* path) @cname("LLVMPrintModuleToFile");
 extern fn void ll_module_dispose(void* m) @cname("LLVMDisposeModule");
 extern fn void ll_message_dispose(char* msg) @cname("LLVMDisposeMessage");
-extern fn void ll_set_source_file_name(void* m, char* name, usz len) @cname("LLVMSetSourceFileName");
+// Optimisation: LLVMRunPasses with a `default<On>` pipeline is the same set of
+// passes LLVM runs on a .ll input. It is called with a null target machine: the
+// pipeline is target independent, and target-specific passes belong to codegen,
+// which m1_emit_object drives below.
+extern fn void* ll_create_pb_opts() @cname("LLVMCreatePassBuilderOptions");
+extern fn void ll_dispose_pb_opts(void* o) @cname("LLVMDisposePassBuilderOptions");
+extern fn void ll_pb_set_inliner_threshold(void* o, int t) @cname("LLVMPassBuilderOptionsSetInlinerThreshold");
+extern fn void* ll_run_passes(void* m, char* passes, void* tm, void* o) @cname("LLVMRunPasses");
+extern fn char* ll_get_err_msg(void* e) @cname("LLVMGetErrorMessage");
+// Code generation: the target machine turns the verified in-process module into
+// a real object file, so PEAR 2's machine code comes from LLVM's own backend
+// inside this process instead of from an external clang invocation.
+// LLVMCodeGenOptLevel: None=0, Less=1, Default=2, Aggressive=3.
+// LLVMRelocMode: Default=0, Static=1, PIC=2, DynamicNoPic=3.
+// LLVMCodeModel: Default=0, then JITDefault/Tiny/Small/... in an order that has
+// changed between LLVM releases, so only the version-stable Default is used --
+// x86-64 already defaults to the small model.
+// LLVMCodeGenFileType: AssemblyFile=0, ObjectFile=1.
+const int LLVM_CG_ASM_FILE = 0;
+const int LLVM_CG_OBJ_FILE = 1;
+const int LLVM_CODEGEN_DEFAULT = 2;
+const int LLVM_RELOC_STATIC = 1;
+const int LLVM_CODE_MODEL_DEFAULT = 0;
+extern fn void ll_init_x86_ti() @cname("LLVMInitializeX86TargetInfo");
+extern fn void ll_init_x86_t() @cname("LLVMInitializeX86Target");
+extern fn void ll_init_x86_tmc() @cname("LLVMInitializeX86TargetMC");
+extern fn void ll_init_x86_asmp() @cname("LLVMInitializeX86AsmPrinter");
+extern fn void ll_init_x86_asmpa() @cname("LLVMInitializeX86AsmParser");
+// Every target LLVM was built with, not just x86-64. Bitcode can be emitted for
+// wasm32-freestanding, and the optimiser is measurably better with a target
+// machine (vector widths and cost decisions come from the target), so the target
+// that a requested triple names is the one that gets initialised.
+extern fn void ll_init_all_target_infos() @cname("LLVMInitializeAllTargetInfos");
+extern fn void ll_init_all_targets() @cname("LLVMInitializeAllTargets");
+extern fn void ll_init_all_target_mcs() @cname("LLVMInitializeAllTargetMCs");
+extern fn void ll_init_all_asm_printers() @cname("LLVMInitializeAllAsmPrinters");
+extern fn void ll_init_all_asm_parsers() @cname("LLVMInitializeAllAsmParsers");
+// The host machine, asked of LLVM rather than guessed from /proc/cpuinfo: the
+// target library already knows how to answer this for the platform it was built
+// for, and a second implementation would eventually disagree with it.
+//
+// Both return strings LLVM owns (it strdups them); they are deliberately not
+// freed here. A compiler process that leaks two strings at exit is correct; one
+// that frees them with the wrong allocator is not.
+extern fn char* ll_host_cpu_name() @cname("LLVMGetHostCPUName");
+extern fn char* ll_host_cpu_features() @cname("LLVMGetHostCPUFeatures");
+// Module linking. The source module is consumed whether the call succeeds or
+// fails, which is why every call site below drops its reference immediately.
+extern fn int ll_link_modules(void* dst, void* src) @cname("LLVMLinkModules2");
+extern fn char* ll_get_triple(void* m) @cname("LLVMGetTargetTriple");
+extern fn int ll_get_target_from_triple(char* triple, void** target, char** msg) @cname("LLVMGetTargetFromTriple");
+extern fn void* ll_create_tm(void* target, char* triple, char* cpu, char* features, int level, int reloc, int model) @cname("LLVMCreateTargetMachine");
+extern fn void ll_dispose_tm(void* tm) @cname("LLVMDisposeTargetMachine");
+extern fn int ll_tm_emit_to_file(void* tm, void* m, char* path, int file_type, char** msg) @cname("LLVMTargetMachineEmitToFile");
+// Reading bitcode back. The bitcode mode does not trust its own writer: after the
+// file is on disk it is loaded again with the same LLVM the compiler links
+// against, parsed into a module, and verified. A file that cannot be loaded is
+// not a bitcode artifact, and the compiler says so instead of publishing it.
+extern fn int ll_buffer_from_file(char* path, void** out_buf, char** msg) @cname("LLVMCreateMemoryBufferWithContentsOfFile");
+extern fn void ll_buffer_dispose(void* buf) @cname("LLVMDisposeMemoryBuffer");
+extern fn int ll_parse_bitcode(void* ctx, void* buf, void** out_mod) @cname("LLVMParseBitcodeInContext2");
+extern fn usz ll_buffer_size(void* buf) @cname("LLVMGetBufferSize");
+// The module's own symbol tables. A published artifact makes a promise about
+// what it exports, and that promise is checked here by walking the module before
+// optimisation and again after the file is loaded back.
+extern fn void* ll_first_function(void* m) @cname("LLVMGetFirstFunction");
+extern fn void* ll_next_function(void* f) @cname("LLVMGetNextFunction");
+extern fn void* ll_first_global(void* m) @cname("LLVMGetFirstGlobal");
+extern fn void* ll_next_global(void* g) @cname("LLVMGetNextGlobal");
+extern fn int ll_is_declaration(void* v) @cname("LLVMIsDeclaration");
+extern fn int ll_get_linkage(void* v) @cname("LLVMGetLinkage");
+extern fn char* ll_value_name(void* v, usz* length) @cname("LLVMGetValueName2");
+extern fn void* ll_get_named_function(void* m, char* name) @cname("LLVMGetNamedFunction");
+const int LLVM_EXTERNAL_LINKAGE = 0;
 fn bool same(char* a, char* b)
 {
     if (a == null || b == null) { return a == b; }
@@ -43,6 +122,363 @@ fn bool same(char* a, char* b)
     while (a[i] != 0 && b[i] != 0) { if (a[i] != b[i]) { return false; } i++; }
     return a[i] == b[i];
 }
+// m1_ir_write_string -- write the inside of an LLVM IR string literal.
+//
+// `source_filename` is the one place a user-controlled string (the input path)
+// reaches the module text, so it is escaped rather than pasted: a quote or a
+// backslash in a path would otherwise produce a module that does not parse, and
+// the failure would look like a compiler bug rather than an escaping bug.
+fn void m1_ir_write_string(void* f, char* text)
+{
+    if (text == null) { return; }
+    for (usz i = 0; text[i] != 0; i++)
+    {
+        int ch = (int)text[i] & 255;
+        if (ch == '"' || ch == 92) { fprintf(f, "\\%c", (char)ch); }
+        else if (ch >= 32 && ch < 127) { fprintf(f, "%c", (char)ch); }
+        else { fprintf(f, "\\%02X", ch); }
+    }
+}
+
+// m1_bitcode_roundtrip -- prove that the file just written is bitcode.
+//
+// Writing a file is not evidence that what landed on disk can be read: the writer
+// could have failed short, the path could be truncated, or the module could carry
+// a triple nobody asked for. So the artifact is loaded back, parsed into a module
+// in this context, verified, and its triple compared with the one requested. Only
+// then does the compiler publish it.
+//
+// On success `out_size` is the file's size and the function returns true. On
+// failure it returns false and `out_error` is a malloc'd message the caller frees
+// with ll_message_dispose.
+fn void* m1_bitcode_roundtrip(void* ctx, char* path, usz* out_size, char* want_triple, char** out_error)
+{
+    if (out_error != null) { *out_error = null; }
+    void* buf = null;
+    char* msg = null;
+    if (ll_buffer_from_file(path, &buf, &msg) != 0 || buf == null)
+    {
+        if (out_error != null) { *out_error = msg; } else if (msg != null) { ll_message_dispose(msg); }
+        return null;
+    }
+    if (out_size != null) { *out_size = ll_buffer_size(buf); }
+    // LLVMParseBitcodeInContext2 takes ownership of the memory buffer whether it
+    // succeeds or fails, so the buffer is never disposed here: doing so would free
+    // it twice. The size is therefore read before the parse, never after.
+    void* m = null;
+    if (ll_parse_bitcode(ctx, buf, &m) != 0 || m == null)
+    {
+        if (out_error != null) { *out_error = null; }
+        return null;
+    }
+    char* verr = null;
+    if (ll_verify_module(m, 1, &verr) != 0)
+    {
+        if (out_error != null) { *out_error = verr; } else if (verr != null) { ll_message_dispose(verr); }
+        ll_module_dispose(m);
+        return null;
+    }
+    if (want_triple != null)
+    {
+        char* triple = ll_get_triple(m);
+        if (triple == null || !same(triple, want_triple))
+        {
+            // The module parsed and verified, but it describes a different target
+            // than the one the user asked for. That is a silently wrong artifact,
+            // so it is a hard failure rather than a warning.
+            if (out_error != null) { *out_error = null; }
+            ll_module_dispose(m);
+            return null;
+        }
+    }
+    // The caller owns the module from here and must dispose it.
+    return m;
+}
+
+// ── the module's public interface ──────────────────────────────────────────
+//
+// Optimisation is allowed to delete anything that nobody outside the module can
+// observe. It is not allowed to delete something the module promised to export:
+// that would be a linker error for whoever links the published bitcode, and it
+// would show up far from the compile that caused it. So the external definitions
+// are recorded before the optimizer runs and every one of them is looked up again
+// in the module that was loaded back from the written file.
+//
+// Names are copied into one block rather than referenced, because the strings
+// LLVM hands out belong to the module that was disposed when the round trip
+// returned a new one.
+struct M1AbiSnapshot {
+    char* block;
+    usz cap;
+    usz used;
+    int[512] offs;
+    int count;
+    bool active;
+    bool overflow;
+}
+
+fn void m1_abi_snapshot_begin(M1AbiSnapshot* s, void* m)
+{
+    if (s == null) { return; }
+    s.count = 0;
+    s.active = false;
+    s.overflow = false;
+    s.used = 0;
+    s.cap = 65536;
+    s.block = (char*)malloc(s.cap);
+    if (s.block == null || m == null) { return; }
+    void* f = ll_first_function(m);
+    while (f != null)
+    {
+        // Only externally visible definitions are a promise. An internal function
+        // may legitimately vanish, which is the whole point of internalising.
+        if (ll_is_declaration(f) == 0 && ll_get_linkage(f) == LLVM_EXTERNAL_LINKAGE)
+        {
+            usz len = 0;
+            char* nm = ll_value_name(f, &len);
+            if (nm != null && len > 0 && s.count < 512 && s.used + len + 1 < s.cap)
+            {
+                s.offs[s.count] = (int)s.used;
+                s.count++;
+                for (usz i = 0; i < len; i++) { s.block[s.used] = nm[i]; s.used++; }
+                s.block[s.used] = 0;
+                s.used++;
+            }
+            // A name this table cannot hold is not a reason to fail the compile,
+            // but it is a reason to stop claiming the export list was checked:
+            // the flag says so rather than quietly checking a shorter list.
+            else { s.overflow = true; }
+        }
+        f = ll_next_function(f);
+    }
+    s.active = true;
+}
+
+fn void m1_abi_snapshot_end(M1AbiSnapshot* s)
+{
+    if (s == null) { return; }
+    if (s.block != null) { free(s.block); s.block = null; }
+    s.active = false;
+    s.count = 0;
+}
+
+// m1_abi_check -- every symbol that was exported before optimisation must still
+// be defined in the artifact. Returns false and names the first casualty.
+fn bool m1_abi_check(M1AbiSnapshot* s, void* m, char** missing)
+{
+    if (missing != null) { *missing = null; }
+    if (s == null || !s.active || m == null || s.overflow) { return true; }
+    for (int i = 0; i < s.count; i++)
+    {
+        if (s.offs[i] < 0) { continue; }
+        char* nm = &s.block[s.offs[i]];
+        void* f = ll_get_named_function(m, nm);
+        if (f == null || ll_is_declaration(f) != 0)
+        {
+            if (missing != null) { *missing = nm; }
+            return false;
+        }
+    }
+    return true;
+}
+
+// m1_verify_bitcode_file -- check a .bc that may not have come from this run,
+// or from this compiler at all.
+//
+// `--emit-bc` verifies what it just wrote, but that only helps the process that
+// wrote it. An artifact that has been copied, cached, or produced by another
+// PEAR 2 build needs to be checkable on its own, and a build system needs a
+// command that answers "is this file usable by this LLVM" with an exit status
+// rather than an opinion. That is what this mode is: load, parse, verify,
+// optionally compare the triple, and report the module's shape.
+fn int m1_verify_bitcode_file(char* path, char* want_triple, bool quiet)
+{
+    if (path == null) { return 2; }
+    void* ctx = ll_context_create();
+    if (ctx == null)
+    {
+        printf("pear2c: LLVM context creation failed\n");
+        return 3;
+    }
+    void* buf = null;
+    char* msg = null;
+    if (ll_buffer_from_file(path, &buf, &msg) != 0 || buf == null)
+    {
+        printf("pear2c: cannot read %s%s%s\n", path, msg == null ? (char*)"" : (char*)": ", msg == null ? (char*)"" : msg);
+        if (msg != null) { ll_message_dispose(msg); }
+        ll_context_dispose(ctx);
+        return 3;
+    }
+    usz size = ll_buffer_size(buf);
+    // The parse takes ownership of the buffer whatever it returns (see the note
+    // in m1_bitcode_roundtrip), so the size is read here and the buffer is never
+    // disposed by this function.
+    void* m = null;
+    if (ll_parse_bitcode(ctx, buf, &m) != 0 || m == null)
+    {
+        printf("pear2c: %s is not readable LLVM bitcode\n", path);
+        ll_context_dispose(ctx);
+        return 3;
+    }
+    char* verr = null;
+    if (ll_verify_module(m, 1, &verr) != 0)
+    {
+        printf("pear2c: %s parses but fails verification%s%s\n", path, verr == null ? (char*)"" : (char*)": ", verr == null ? (char*)"" : verr);
+        if (verr != null) { ll_message_dispose(verr); }
+        ll_module_dispose(m);
+        ll_context_dispose(ctx);
+        return 3;
+    }
+    char* triple = ll_get_triple(m);
+    if (want_triple != null && (triple == null || !same(triple, want_triple)))
+    {
+        printf("pear2c: %s targets %s, not the requested %s\n", path,
+               triple == null ? (char*)"<no triple>" : triple, want_triple);
+        ll_module_dispose(m);
+        ll_context_dispose(ctx);
+        return 3;
+    }
+    int defined = 0;
+    int declared = 0;
+    int globals = 0;
+    m1_count_symbols(m, &defined, &declared, &globals);
+    if (!quiet)
+    {
+        printf("pear2c: %s is valid bitcode (%d bytes, %d functions defined, %d declarations, %d globals, triple %s)\n",
+               path, (int)size, defined, declared, globals, triple == null ? (char*)"<none>" : triple);
+    }
+    ll_module_dispose(m);
+    ll_context_dispose(ctx);
+    return 0;
+}
+
+// m1_link_bitcode_input -- link one .bc file into the module under construction.
+//
+// The file is parsed in the same context, checked to describe the same target,
+// and then handed to LLVM's linker. That order matters: linking a wasm module
+// into an x86 one produces a module LLVM will happily verify and no backend will
+// emit, so the triple is compared before the link rather than after.
+//
+// LLVMLinkModules2 consumes the source module whether it succeeds or fails, so
+// there is no dispose after the call -- only before it, on the paths that never
+// reach it.
+fn bool m1_link_bitcode_input(char* path, void* ctx, void* dst)
+{
+    if (path == null || ctx == null || dst == null) { return false; }
+    void* buf = null;
+    char* msg = null;
+    if (ll_buffer_from_file(path, &buf, &msg) != 0 || buf == null)
+    {
+        printf("pear2c: cannot read %s%s%s\n", path, msg == null ? (char*)"" : (char*)": ", msg == null ? (char*)"" : msg);
+        if (msg != null) { ll_message_dispose(msg); }
+        return false;
+    }
+    // The parse takes ownership of the buffer whatever it returns.
+    void* src = null;
+    if (ll_parse_bitcode(ctx, buf, &src) != 0 || src == null)
+    {
+        printf("pear2c: %s is not readable LLVM bitcode\n", path);
+        return false;
+    }
+    char* triple = ll_get_triple(src);
+    if (triple == null || !same(triple, g_m1_target_triple))
+    {
+        printf("pear2c: %s targets %s, but this compile targets %s\n", path,
+               triple == null ? (char*)"<no triple>" : triple, g_m1_target_triple);
+        ll_module_dispose(src);
+        return false;
+    }
+    if (ll_link_modules(dst, src) != 0)
+    {
+        // src is consumed by the call, so it must not be disposed here.
+        printf("pear2c: LLVM could not link %s into this module\n", path);
+        return false;
+    }
+    return true;
+}
+
+// m1_shared_definition -- a symbol that two bitcode files both *define*.
+//
+// Two artifacts that define the same symbol cannot be linked, and finding that
+// out from the linker's message ("multiple definition of `x`") after a ten-minute
+// build is the wrong time. --verify-bc checks it up front when it is given more
+// than one file. The name is copied into `buf` because the string LLVM returns
+// dies with the module.
+fn char* m1_shared_definition(char* pa, char* pb, char* buf, usz cap)
+{
+    if (pa == null || pb == null || buf == null || cap < 2) { return null; }
+    buf[0] = 0;
+    void* ctx = ll_context_create();
+    if (ctx == null) { return null; }
+    void* ma = null;
+    void* mb = null;
+    char* msg = null;
+    void* bufa = null;
+    void* bufb = null;
+    if (ll_buffer_from_file(pa, &bufa, &msg) == 0 && bufa != null) { (void)ll_parse_bitcode(ctx, bufa, &ma); }
+    if (msg != null) { ll_message_dispose(msg); msg = null; }
+    if (ll_buffer_from_file(pb, &bufb, &msg) == 0 && bufb != null) { (void)ll_parse_bitcode(ctx, bufb, &mb); }
+    if (msg != null) { ll_message_dispose(msg); msg = null; }
+    bool found = false;
+    if (ma != null && mb != null)
+    {
+        char[512] probe;
+        void* f = ll_first_function(ma);
+        while (f != null && !found)
+        {
+            if (ll_is_declaration(f) == 0)
+            {
+                usz len = 0;
+                char* nm = ll_value_name(f, &len);
+                if (nm != null && len > 0 && len + 1 < cap && len < 512)
+                {
+                    for (usz i = 0; i < len; i++) { probe[i] = nm[i]; }
+                    probe[len] = 0;
+                    void* other = ll_get_named_function(mb, &probe[0]);
+                    if (other != null && ll_is_declaration(other) == 0)
+                    {
+                        for (usz i = 0; i <= len; i++) { buf[i] = probe[i]; }
+                        found = true;
+                    }
+                }
+            }
+            if (!found) { f = ll_next_function(f); }
+        }
+    }
+    if (ma != null) { ll_module_dispose(ma); }
+    if (mb != null) { ll_module_dispose(mb); }
+    ll_context_dispose(ctx);
+    return found ? buf : null;
+}
+
+// m1_count_symbols -- the shape of a module, for the artifact report and for
+// `--verify-bc`. Declarations are counted separately: they are what the artifact
+// needs from whoever links it.
+fn void m1_count_symbols(void* m, int* defined, int* declared, int* globals)
+{
+    int d = 0;
+    int e = 0;
+    int g = 0;
+    if (m != null)
+    {
+        void* f = ll_first_function(m);
+        while (f != null)
+        {
+            if (ll_is_declaration(f) != 0) { e++; } else { d++; }
+            f = ll_next_function(f);
+        }
+        void* v = ll_first_global(m);
+        while (v != null)
+        {
+            if (ll_is_declaration(v) == 0) { g++; }
+            v = ll_next_global(v);
+        }
+    }
+    if (defined != null) { *defined = d; }
+    if (declared != null) { *declared = e; }
+    if (globals != null) { *globals = g; }
+}
+
 struct M1Label
 {
     AirCmd* cmd;
@@ -85,16 +521,64 @@ const int M1PROV_HEAP = 2;
 const int M1PROV_GLOBAL = 3;
 const int M1PROV_STRING = 4;
 const int M1PROV_PARAM = 5;
+// A heap object whose size is only known once the program runs (`malloc(n)` for a
+// computed `n`). The extent cannot live in `long extent`, so `extent` carries this
+// marker and `extent_value` names the i64 register holding the byte count. Every
+// bound check against such an object compares against that register, which is a
+// runtime value: the check is not weaker, only later.
+const long M1EXTENT_RUNTIME = -1;
 struct M1String { char* data; usz len; char* name; char* symbol; bool terminate; }
-struct M1Provenance { char* value; char* allocation; AirTyp* pointee; int kind; int alignment; long extent; long offset; bool offset_known; bool freed; bool writable; }
-struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; }// M10 target profile: pointer width, triple and datalayout follow --target.
+// A tracked pointer. `offset_known` means the byte offset within the
+// allocation is a single constant, and `offset` is it. When the offset is not
+// known -- it came from a bounds-checked dynamic index -- `lo` and `hi` bound
+// every offset the pointer can hold, and the access rules reason about the whole
+// interval instead of one address. An interval is not a weaker promise than a
+// constant: after the runtime check that produced it, every address in
+// [lo, hi] is inside the allocation, which is exactly what a memory-safety
+// claim needs.
+struct M1Provenance { char* value; char* allocation; AirTyp* pointee; int kind; int alignment; long extent; char* extent_value; long offset; bool offset_known; bool freed; bool writable; long lo; long hi; }
+struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; char* value_extent_value; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; long value_lo; long value_hi; }// M10 target profile: pointer width, triple and datalayout follow --target.
 // wasm32-freestanding narrows isz/usz and the pointer representation to 32
 // bits; the default x86_64 profile keeps the historical 64-bit layout so
 // emitted IR is byte-identical to earlier slices.
 usz g_m1_target_ptr_bits = 64;
 bool g_m1_target_freestanding = false;
 char* g_m1_target_triple = (char*)"x86_64-unknown-linux-gnu";
+// Target tuning. These are not cosmetic: they are what makes the optimiser and
+// the instruction selector decide for the machine the code will actually run on,
+// and they are written into the module as function attributes so a published .bc
+// keeps the tuning after it has left this process.
+char* g_m1_cpu = (char*)"";
+char* g_m1_features = (char*)"";
+// LLVMRelocMode: Default=0, Static=1, PIC=2, DynamicNoPic=3. These values have
+// not changed across LLVM releases (unlike LLVMCodeModel, which is why only the
+// default code model is ever passed).
+// Initialised to LLVM_RELOC_STATIC's value (1) as a literal: a global
+// initializer is written as a literal here on purpose, since every other global
+// in this file is.
+int g_m1_reloc = 1;
+// A user-supplied pass pipeline (--passes=...), or null for the -On default.
+char* g_m1_pass_pipeline = null;
+// Inliner threshold for the pass builder. 250 is the value PEAR 1 uses, so one
+// flag means the same thing in both backends unless it is overridden.
+int g_m1_inline_threshold = 250;
 char* g_m1_target_datalayout = (char*)"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128";
+// M11: link-time visibility. A definition that is not `pub`, not `extern`,
+// is not the entry point, and carries no attribute that hands its symbol to
+// the linker (`export` renames it, `section` puts it in a named section) can
+// only be called from inside this module, so `internal` linkage is exact and
+// lets LLVM's inliner and GlobalDCE work on it. Off by default because
+// --emit-bc/--emit-obj hand a linkable object to someone else, who may call
+// any symbol; on by default for --emit-exe, where PEAR 2 links the whole
+// program itself and the only symbol the CRT needs is `main`.
+bool g_m1_internalize = false;
+fn bool m1_decl_linkage_internal(AirDecl* d)
+{
+    if (!g_m1_internalize || d == null || d.is_pub || d.is_extern || d.name == null) { return false; }
+    if (same(d.name, "main") || same(d.name, "pride_main") || same(d.name, "_start")) { return false; }
+    if (m1_decl_attr_string(d, "export") != null || m1_decl_attr_string(d, "section") != null) { return false; }
+    return true;
+}
 fn int m1_target_ptr_bytes() { return (int)(g_m1_target_ptr_bits / 8); }
 fn bool m1_has_prefix(char* s, char* prefix)
 {
@@ -107,6 +591,103 @@ fn bool m1_has_prefix(char* s, char* prefix)
     }
     return true;
 }
+// m1_parse_int -- a non-negative decimal integer, or -1. Only used for flags
+// whose values are small (an inliner threshold), so the ceiling is not the point;
+// rejecting anything that is not a plain digit string is.
+fn long m1_parse_int(char* s)
+{
+    if (s == null || s[0] == 0) { return -1; }
+    long value = 0;
+    for (usz i = 0; s[i] != 0; i++)
+    {
+        if (s[i] < '0' || s[i] > '9') { return -1; }
+        if (value > 100000000L) { return -1; }
+        value = value * 10 + (long)(s[i] - '0');
+    }
+    return value;
+}
+
+// m1_decl_named -- the declaration in this module with that name, or null.
+// Used to merge external declarations once when several inputs are compiled into
+// one module: every unit carries the same three prelude declarations, and a
+// second copy of a symbol is not a second symbol.
+fn AirDecl* m1_decl_named(AirModule* m, char* name)
+{
+    if (m == null || name == null) { return null; }
+    for (usz i = 0; i < m.decl_count; i++)
+    {
+        AirDecl* d = m.decls[i];
+        if (d != null && same(d.name, name)) { return d; }
+    }
+    return null;
+}
+
+// m1_defined_named -- the definition (not the declaration) with that name. Two
+// units that define the same symbol cannot be compiled into one module, and the
+// alternative to catching it here is LLVM rejecting the merged text with a
+// redefinition error that names neither file.
+fn AirDecl* m1_defined_named(AirModule* m, char* name)
+{
+    if (m == null || name == null) { return null; }
+    for (usz i = 0; i < m.decl_count; i++)
+    {
+        AirDecl* d = m.decls[i];
+        if (d == null || !same(d.name, name)) { continue; }
+        // Every tag that puts a *value* into the emitted module counts, not just
+        // DEF: a global and a coterm definition occupy a symbol too, and letting
+        // two inputs define the same one would reach LLVM as a redefinition with
+        // no file attached -- exactly what this check exists to prevent.
+        if (d.tag == ADECL_DEF || d.tag == ADECL_DEFCO || d.tag == ADECL_GLOBAL) { return d; }
+    }
+    return null;
+}
+
+// m1_type_decl_named -- the type declaration (data, codata, effect) with that
+// name. Types are the one thing a merged module cannot merge: the emitter writes
+// one identified struct per record, and LLVM does not unique two structs with the
+// same name -- the module simply fails to parse. Refusing here names the symbol
+// and the file; the alternative is an error about `%point` that names neither.
+fn AirDecl* m1_type_decl_named(AirModule* m, char* name)
+{
+    if (m == null || name == null) { return null; }
+    for (usz i = 0; i < m.decl_count; i++)
+    {
+        AirDecl* d = m.decls[i];
+        if (d == null || !same(d.name, name)) { continue; }
+        if (d.tag == ADECL_DATA || d.tag == ADECL_CODATA || d.tag == ADECL_EFFECT) { return d; }
+    }
+    return null;
+}
+
+// m1_is_bitcode_path -- does this input name a bitcode file?
+//
+// The extension decides, because that is the only thing the driver knows before
+// it reads anything. An input that ends in .bc is handed to LLVM's bitcode
+// reader; anything else is parsed as AIR. A .bc that is actually something else
+// fails in the reader with LLVM's own message, which names the file.
+fn bool m1_is_bitcode_path(char* path)
+{
+    if (path == null) { return false; }
+    usz n = 0;
+    while (path[n] != 0) { n++; }
+    return n >= 3 && path[n - 3] == '.' && path[n - 2] == 'b' && path[n - 1] == 'c';
+}
+
+// m1_count_inputs -- how many inputs are of each kind. Split out so the driver
+// can decide whether it is compiling, linking, or both before it allocates
+// anything.
+fn void m1_count_inputs(char** inputs, int count, int* airs, int* bcs)
+{
+    int air = 0;
+    int bc = 0;
+    for (int i = 0; i < count; i++)
+    {
+        if (m1_is_bitcode_path(inputs[i])) { bc++; } else { air++; }
+    }
+    if (airs != null) { *airs = air; }
+    if (bcs != null) { *bcs = bc; }
+}
+
 // M10 escape-only effect frames: each lexically enclosing `handle` owns one
 // frame; a `perform` resolves its operation innermost-first. Resuming or
 // multi-shot arms are rejected with source positions before any emission.
@@ -136,6 +717,21 @@ struct M1Gen
     usz[24] lam_sizes;
     int lam_count;
     int lam_serial;
+    // Recursive binding groups (`letrec`) register the lifted symbol of every
+    // member here while its own body is being emitted, so a member can name
+    // itself or a sibling before any closure value exists at run time. The table
+    // is scoped: `lower_letrec` restores the saved count once the group's bodies
+    // are rendered, so it can never leak into a later function.
+    char*[8] rec_names;
+    char*[8] rec_symbols;
+    AirTyp*[8] rec_types;
+    int rec_count;
+    // While a recursive group's members are being planned, one arm of a
+    // branch may be a call whose type is the very type being inferred. In that
+    // mode a single unresolvable arm is tolerated and the other arm decides the
+    // result type; every emission-time check still runs afterwards, so a wrong
+    // guess is a hard failure rather than mis-typed code.
+    bool relax_recursive_inference;
     // M9 loop-carried watch: while/for bodies record the latest mainline
     // redefinition of each tracked loop-carried name so the backedge phi
     // incoming value survives the body's scope restorations. A redefinition
@@ -183,6 +779,9 @@ struct M1Gen
     M1String[256] strings; int string_count;
     M1Provenance[1024] provenance; int provenance_count;
     M1PointerCell[512] pointer_cells; int pointer_cell_count;
+    // Cells that outlive a function: a pointer stored inside a global. They are
+    // recorded once, before any body is emitted, and every function sees them.
+    M1PointerCell[256] module_cells; int module_cell_count; bool at_module_scope;
     bool low_profile; char* input_path; char* current_function;
     M1FxFrame[8] fx_stack; usz fx_depth;
     int fail_line; int fail_col; int last_line; int last_col; char* fail_form;
@@ -934,6 +1533,30 @@ fn int M1Gen.global_alignment(M1Gen* g, AirDecl* d)
     }
     return alignment;
 }
+// A function named as a *value*: a vtable slot, a callback table entry, or a
+// first-class function held in a global. Returns its symbol, or null when the
+// name is not a function this backend may take the address of. A function with a
+// non-default calling convention is excluded: the address would be called with
+// the wrong one, and nothing at the use site could notice.
+fn char* M1Gen.function_symbol_value(M1Gen* g, char* name, AirTyp* expected, int depth)
+{
+    if (name == null || depth >= 8) { return null; }
+    AirDecl* target = g.find_function(name);
+    if (target == null || target.tag == ADECL_MODULE || target.tag == ADECL_IMPORT) { return null; }
+    if (!m1_safe_name(m1_link_name(target)) || m1_decl_callconv(target) != 0) { return null; }
+    AirTyp* actual = g.function_type(target);
+    if (actual == null) { return null; }
+    // An annotated arrow type is checked against the declaration, so a vtable
+    // built from a mismatched signature is refused here rather than becoming a
+    // call through a pointer of the wrong type. An opaque byte pointer (the
+    // shape a vtable slot has in lowered AIR) carries no signature to check.
+    if (m1_function_pointer_type(expected) && !m1_value_type_compatible(expected, actual, 0)) { return null; }
+    char[512] buf;
+    int n = snprintf(&buf[0], 512, (char*)"@%s", m1_link_name(target));
+    if (n < 0 || n >= 512) { return null; }
+    return g.arena.dup(&buf[0], (usz)n);
+}
+
 fn char* M1Gen.global_symbol(M1Gen* g, AirDecl* d)
 {
     if (d == null || !m1_safe_name(m1_link_name(d))) { return null; }
@@ -975,9 +1598,9 @@ fn int M1Gen.string_index(M1Gen* g, char* data, usz len, bool terminate)
     char[96] symbol; int sn = snprintf(&symbol[0], 96, (char*)"@%s", s.name);
     if (sn < 0 || sn >= 96) { g.failed = true; return -1; }
     s.symbol = g.arena.dup(&symbol[0], (usz)sn);
-    AirTyp* u8 = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
+    AirTyp* byte_ty = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
     long extent = (long)(len + (terminate ? (usz)1 : (usz)0));
-    if (u8 == null || !g.prov_set(s.symbol, u8, M1PROV_STRING, 1, extent, 0, true, false)) { g.failed = true; return -1; }
+    if (byte_ty == null || !g.prov_set(s.symbol, byte_ty, M1PROV_STRING, 1, extent, 0, true, false)) { g.failed = true; return -1; }
     return i;
 }
 fn char* M1Gen.string_pointer(M1Gen* g, AirPrd* p)
@@ -993,8 +1616,8 @@ fn char* M1Gen.string_pointer(M1Gen* g, AirPrd* p)
     char* first = g.tmp();
     if (first == null) { return null; }
     fprintf(g.out, "  %s = getelementptr inbounds [%d x i8], ptr %s, i64 0, i64 0\n", first, total, symbol);
-    AirTyp* u8 = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
-    if (!g.prov_set(first, u8, M1PROV_STRING, 1, total, 0, true, false)) { g.failed = true; return null; }
+    AirTyp* byte_ty = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
+    if (!g.prov_set(first, byte_ty, M1PROV_STRING, 1, total, 0, true, false)) { g.failed = true; return null; }
     g.prov(first).allocation = symbol;
     return first;
 }
@@ -1095,7 +1718,16 @@ fn AirTyp* M1Gen.expr_type(M1Gen* g, AirPrd* p)
     if (p.tag == APRD_ALLOCA) { return p.ty != null ? p.ty : air_ir::air_mk_typ_ptr(g.arena, p.ty_arg); }
     if (p.tag == APRD_SIZEOF || p.tag == APRD_ALIGNOF) { return g.int_repr(g.default_bits, g.default_unsigned); }
     if (p.ty != null && p.ty.tag != ATYP_INFER) { return p.ty; }
-    if (p.tag == APRD_VAR) { return g.lookup_type(p.name); }
+    if (p.tag == APRD_VAR)
+    {
+        AirTyp* bound = g.lookup_type(p.name);
+        // A member of the recursive group currently being lifted is not in the
+        // environment (its closure does not exist yet), so its type comes from
+        // the group table. This is what lets `infer_cmd_return_type` type a
+        // self-recursive call while the body is still being scanned.
+        if (bound == null) { return g.rec_type(p.name); }
+        return bound;
+    }
     if (p.tag == APRD_LAMBDA) { return g.lambda_closure_type(p); }
     if (p.tag == APRD_MU)
     {
@@ -1725,6 +2357,11 @@ fn AirTyp* M1Gen.infer_cmd_return_type(M1Gen* g, AirDecl* d, AirCmd* c, char* re
                     {
                         AirDecl* callee = g.find_function(c.prd.name);
                         if (callee != null && !same(callee.name, d.name)) { return g.decl_return_type(callee); }
+                        // A member of the recursive group under construction has
+                        // no declaration to consult; its planned closure type is
+                        // the declaration.
+                        AirTyp* rec_result = g.rec_return_type(c.prd.name);
+                        if (rec_result != null) { return rec_result; }
                     }
                     return null;
                 }
@@ -1768,6 +2405,13 @@ fn AirTyp* M1Gen.infer_cmd_return_type(M1Gen* g, AirDecl* d, AirCmd* c, char* re
     {
         AirTyp* then_type = g.infer_cmd_return_type(d, c.then_c, ret_name, depth + 1);
         AirTyp* else_type = g.infer_cmd_return_type(d, c.else_c, ret_name, depth + 1);
+        // While planning a recursive group one arm may be the recursive call
+        // itself; the other arm then decides the type, and emission re-checks.
+        if (g.relax_recursive_inference)
+        {
+            if (then_type == null && else_type != null) { return else_type; }
+            if (else_type == null && then_type != null) { return then_type; }
+        }
         return m1_same_inferred_type(then_type, else_type) ? then_type : null;
     }
     if (c.tag == ACMD_MATCH)
@@ -2061,7 +2705,7 @@ fn char* M1Gen.load_prd(M1Gen* g, AirPrd* p)
     }
     char* address = g.pointer_value(p.subs[0]);
     if (g.failed || address == null || !g.check_access(address, t, p.source_line, p.source_col, false)) { return null; }
-    char* ir = g.llvm_type_text(t); char* dst = g.tmp(); int align = g.type_alignment(t, 0);
+    char* ir = g.llvm_type_text(t); char* dst = g.tmp(); int align = g.access_alignment(address, t);
     if (g.failed || ir == null || dst == null || align <= 0) { return null; }
     fprintf(g.out, "  %s = load %s%s, ptr %s, align %d\n", dst, p.bval ? (char*)"volatile " : (char*)"", ir, address, align);
     if (m1_pointer_type(t) && !g.cell_restore(address, dst)) { g.failed = true; return null; }
@@ -2082,34 +2726,107 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
     }
     char* base = g.pointer_value(p.subs[0]);
     M1Provenance* base_prov = g.prov(base);
-    if (base == null || base_prov == null || base_prov.freed || !base_prov.offset_known)
+    if (base == null || base_prov == null || base_prov.freed)
     {
         g.note_failure(p.source_line, p.source_col, (char*)"GEP requires known live pointer provenance"); return null;
     }
+    // The base may already be an interval (a previous dynamic step). A constant
+    // step shifts the whole interval; that keeps `&p[i].field` working without
+    // pretending the address is known.
+    long base_lo = base_prov.offset_known ? base_prov.offset : base_prov.lo;
+    long base_hi = base_prov.offset_known ? base_prov.offset : base_prov.hi;
     long[16] indices;
     bool[16] is_field;
+    long lo_delta = 0;
+    long hi_delta = 0;
+    int dyn_at = -1;
+    long dyn_stride = 0;
+    bool open_span = false;
+    char* dyn_value = null;
     AirTyp* current = source_type;
-    long delta = 0;
     for (usz i = 1; i < p.sub_count; i++)
     {
         AirPrd* ix = p.subs[i];
-        if (ix == null || ix.tag != APRD_INT || !m1_integer_type(g.expr_type(ix)))
+        bool constant = ix != null && ix.tag == APRD_INT && m1_integer_type(g.expr_type(ix));
+        if (!constant)
         {
-            g.note_failure(p.source_line, p.source_col, (char*)"dynamic pointer offsets are unsupported without a static provenance bound"); return null;
+            // A dynamic index is only meaningful where the AIR says how many
+            // elements there are: the element step of the pointer itself (whose
+            // count comes from the tracked allocation extent) or an array step
+            // (whose count is the array length). Choosing a record field by a
+            // dynamic value has no layout at all, and a second dynamic step has
+            // no bound that a single check could establish, so both stay
+            // refused. A dynamic step followed by *constant* steps is fine: the
+            // constant part just moves the interval's floor.
+            if (ix == null || !m1_integer_type(g.expr_type(ix)))
+            {
+                g.note_failure(p.source_line, p.source_col, (char*)"dynamic pointer offsets are unsupported without a static provenance bound"); return null;
+            }
+            if (dyn_at >= 0)
+            {
+                g.note_failure(p.source_line, p.source_col, (char*)"at most one dynamic pointer offset is supported per GEP"); return null;
+            }
+            // The base needs a tracked object to check against, not an exact
+            // offset: `p[i][j]` is two GEPs, and the second one starts from a
+            // pointer whose span is already open. Every dereference is checked
+            // against the allocation the whole chain came from, so an exact
+            // base is only needed when a *compile-time* proof is being made.
+            // The object may be a `malloc(n)` whose size is a register: the
+            // count is not a literal, but it is still a bound, and the access
+            // check compares against it.
+            if (base_prov.extent == 0 || (base_prov.extent < 0 && base_prov.extent_value == null))
+            {
+                g.note_failure(p.source_line, p.source_col, (char*)"a dynamic pointer offset needs a known object extent"); return null;
+            }
+            long stride = 0;
+            if (i == 1)
+            {
+                stride = g.type_size(current, 0);
+                if (stride <= 0)
+                {
+                    g.note_failure(p.source_line, p.source_col, (char*)"dynamic pointer offset over an unsized type"); return null;
+                }
+            }
+            else if (current.tag == ATYP_ARRAY && current.arg_count == 1)
+            {
+                long element_size = g.type_size(current.args[0], 0);
+                int element_align = g.type_alignment(current.args[0], 0);
+                if (element_size <= 0 || element_align <= 0)
+                {
+                    g.note_failure(p.source_line, p.source_col, (char*)"dynamic array index over an unsized element"); return null;
+                }
+                stride = m1_align_up(element_size, element_align);
+            }
+            else
+            {
+                g.note_failure(p.source_line, p.source_col, (char*)"a dynamic pointer offset is only supported on the element step or an array element"); return null;
+            }
+            // The index itself is not clamped: computing an out-of-range address
+            // is legal (the pointer is just a value), and every dereference
+            // through it is checked at the point of use. What the GEP cannot say
+            // is how far the result may be from the base, so the span becomes
+            // open and the static proof stops applying to it.
+            dyn_at = (int)i; dyn_stride = stride; indices[i] = 0; is_field[i] = false;
+            dyn_value = g.index_as_i64(ix, g.expr_type(ix));
+            if (g.failed || dyn_value == null) { return null; }
+            if (i != 1) { current = current.args[0]; }
+            open_span = true;
+            continue;
         }
         long value = ix.ival; indices[i] = value; is_field[i] = false;
         if (i == 1)
         {
             long size = g.type_size(current, 0);
             if (size < 0 || value > 1048576 || value < -1048576) { g.note_failure(p.source_line, p.source_col, (char*)"GEP offset exceeds supported bounds"); return null; }
-            delta += value * size;
+            lo_delta += value * size; hi_delta += value * size;
         }
         else if (current.tag == ATYP_ARRAY && current.arg_count == 1)
         {
             if (value < 0 || value >= current.ival) { g.note_failure(p.source_line, p.source_col, (char*)"array GEP index is out of bounds"); return null; }
             long size = g.type_size(current.args[0], 0);
             if (size < 0) { g.note_failure(p.source_line, p.source_col, (char*)"unsized array GEP"); return null; }
-            delta += value * m1_align_up(size, g.type_alignment(current.args[0], 0));
+            long step = value * m1_align_up(size, g.type_alignment(current.args[0], 0));
+            lo_delta += step; hi_delta += step;
             current = current.args[0];
         }
         else if (current.tag == ATYP_TUPLE || current.tag == ATYP_NOMINAL)
@@ -2124,14 +2841,32 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
             if (value < 0 || value >= field_count) { g.note_failure(p.source_line, p.source_col, (char*)"record GEP field index is out of bounds"); return null; }
             long field_offset = g.field_offset(current, value);
             if (field_offset < 0) { g.note_failure(p.source_line, p.source_col, (char*)"unsupported GEP field layout"); return null; }
-            delta += field_offset; is_field[i] = true;
+            lo_delta += field_offset; hi_delta += field_offset; is_field[i] = true;
             if (current.tag == ATYP_TUPLE) { current = current.args[(usz)value]; }
             else { current = m1_record_field_ty(m1_find_record_decl(g.decls, g.decl_count, current.name), (usz)value); }
         }
         else { g.note_failure(p.source_line, p.source_col, (char*)"GEP index steps into a scalar type"); return null; }
     }
-    long new_offset = base_prov.offset + delta;
-    if (new_offset < 0 || new_offset > base_prov.extent) { g.note_failure(p.source_line, p.source_col, (char*)"GEP escapes the known object bounds"); return null; }
+    long new_lo = base_lo + lo_delta;
+    // `hi < 0` means the span is open: the offset is not bounded by anything the
+    // GEP knows, because a runtime index can be negative as easily as large.
+    // No static claim is made about such a pointer, so there is nothing to check
+    // here -- every dereference through it carries its own check.
+    long new_hi = (open_span || base_hi < 0) ? -1 : base_hi + hi_delta;
+    // With an open span `lo` is a hint, not a proof, and a negative static step
+    // before a runtime index says nothing about where the pointer ended up. The
+    // allocation floor is the only honest value; the runtime check does the rest.
+    if (new_hi < 0 && new_lo < 0) { new_lo = 0; }
+    // An object of unknown size cannot be escaped statically: `p[3]` into a
+    // `malloc(n)` is only out of bounds if `n` is small, and that is a question
+    // for the check at the access, not for the GEP. The offset stays exact --
+    // only the top of the object moves to run time -- so pointer-cell tracking
+    // keeps working on dynamically sized objects.
+    bool measurable_extent = base_prov.extent >= 0;
+    if (measurable_extent && new_hi >= 0 && (new_lo < 0 || new_hi < new_lo || new_hi > base_prov.extent))
+    {
+        g.note_failure(p.source_line, p.source_col, (char*)"GEP escapes the known object bounds"); return null;
+    }
     AirTyp* result_type = g.expr_type(p);
     if (m1_pointee_type(result_type) == null || !m1_value_type_compatible(m1_pointee_type(result_type), current, 0))
     {
@@ -2142,15 +2877,37 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
     fprintf(g.out, "  %s = getelementptr %s, ptr %s", out, source_ir, base);
     for (usz i = 1; i < p.sub_count; i++)
     {
-        if (is_field[i]) { fprintf(g.out, ", i32 %ld", indices[i]); }
+        if ((int)i == dyn_at) { fprintf(g.out, ", i64 %s", dyn_value); }
+        else if (is_field[i]) { fprintf(g.out, ", i32 %ld", indices[i]); }
         else { fprintf(g.out, ", i64 %ld", indices[i]); }
     }
     fprintf(g.out, "\n");
-    int align = m1_gcd(base_prov.alignment, (int)(new_offset == 0 ? base_prov.alignment : new_offset));
+    // Alignment of the result is the alignment the two stepping rules share: the
+    // allocation's own alignment and the element stride. A dynamic index cannot
+    // improve alignment, and must not be assumed to preserve anything finer.
+    // A dynamic step moves the address by a multiple of the element stride, so
+    // the alignment it can promise is the gcd of the base alignment, the stride,
+    // and every constant step taken along the way. Over-claiming here would let
+    // the static proof accept a misaligned access later, so anything the gcd
+    // helper cannot represent falls back to 1, which is always true.
+    int align = 1;
+    if (dyn_at >= 0)
+    {
+        if (lo_delta >= -1048576 && lo_delta <= 1048576) { align = m1_gcd(base_prov.alignment, m1_gcd((int)dyn_stride, (int)lo_delta)); }
+    }
+    else if (new_lo >= -1048576 && new_lo <= 1048576)
+    {
+        align = m1_gcd(base_prov.alignment, new_lo == 0 ? base_prov.alignment : (int)new_lo);
+    }
     char* allocation = base_prov.allocation; int kind = base_prov.kind;
-    long extent = base_prov.extent; bool writable = base_prov.writable;
-    if (!g.prov_set(out, current, kind, align, extent, new_offset, true, writable)) { g.failed = true; return null; }
+    long extent = base_prov.extent; char* extent_value = base_prov.extent_value; bool writable = base_prov.writable;
+    if (new_hi >= 0 && new_lo == new_hi)
+    {
+        if (!g.prov_set(out, current, kind, align, extent, new_lo, true, writable)) { g.failed = true; return null; }
+    }
+    else if (!g.prov_set_span(out, current, kind, align, extent, new_lo, new_hi, writable)) { g.failed = true; return null; }
     g.prov(out).allocation = allocation;
+    g.prov(out).extent_value = extent_value;
     return out;
 }
 
@@ -2160,6 +2917,27 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
 // ===== M8: first-class closures & environment capture =======================
 // A `lam` producer lambda-lifts to a module-level function that takes a hidden
 // leading environment pointer (`ptr %env`) followed by the declared binders.
+// Everything one `lam` needs in order to become a lifted function: the resolved
+// capture set, the parameter and result types, the reserved symbol, and the AIR
+// closure type. `plan_lambda` fills it; `emit_lifted_function` renders the
+// definition; `materialize_env`/`materialize_closure` build the run-time value.
+// Splitting the three apart is what lets a `letrec` group lift its members with
+// an empty environment (they are necessarily non-capturing) while an ordinary
+// `lam` still carries its captured bindings.
+struct LamInfo {
+    AirPrd* prd;
+    char* symbol;
+    AirTyp* closure_type;
+    char*[16] cap_names;
+    char*[16] cap_values;
+    AirTyp*[16] cap_types;
+    bool[16] cap_bools;
+    bool[16] cap_ptrs;
+    int cap_count;
+    AirTyp*[16] params;
+    usz param_count;
+    AirTyp* ret;
+}
 // The closure value itself is a fat pointer rendered as the LLVM aggregate
 // `{ ptr, ptr }` = { lifted code pointer, environment pointer } and typed in
 // AIR as `tuple(arrow(tuple(ptr u8, params...) -> ret), ptr u8)`.
@@ -2222,6 +3000,14 @@ fn bool m1_lambda_cmd_ok(AirCmd* c, int depth)
             return m1_lambda_cmd_ok(c.body, depth + 1);
         case ACMD_LET:
             return m1_lambda_prd_ok(c.prd, depth + 1) && m1_lambda_cmd_ok(c.body, depth + 1);
+        case ACMD_LETREC:
+            // A recursive group inside a lifted body is allowed as long as every
+            // member is itself a lambda in the subset; the group's own capture
+            // rule (nothing outside its parameters and its siblings) is enforced
+            // when the group is lowered.
+            if (c.mbinder_count != c.prd_count) { return false; }
+            for (usz i = 0; i < c.prd_count; i++) { if (c.prds[i] == null || c.prds[i].tag != APRD_LAMBDA || !m1_lambda_prd_ok(c.prds[i], depth + 1)) { return false; } }
+            return m1_lambda_cmd_ok(c.body, depth + 1);
         case ACMD_IF:
             // Value-position if inside a lifted body is supported when every arm
             // is a direct value production (the shape pfront emits for
@@ -2326,6 +3112,18 @@ fn void m1_lam_scan_cmd(AirCmd* c, char*[] bound, int* bound_count, char*[] read
                 *bound_count = saved;
             }
             return;
+        case ACMD_LETREC:
+            for (usz i = 0; i < c.prd_count; i++) { m1_lam_scan_prd(c.prds[i], bound, bound_count, reads, read_count, depth + 1); }
+            {
+                // The group's own names are bound for its body (and for each
+                // member's initializer, which is handled where the group is
+                // lowered), so a self or sibling reference is not a capture.
+                int saved = *bound_count;
+                for (usz i = 0; i < c.mbinder_count; i++) { if (c.mbinders[i] != null) { m1_lam_bind(bound, bound_count, c.mbinders[i].name); } }
+                m1_lam_scan_cmd(c.body, bound, bound_count, reads, read_count, depth + 1);
+                *bound_count = saved;
+            }
+            return;
         case ACMD_IF:
             m1_lam_scan_prd(c.prd, bound, bound_count, reads, read_count, depth + 1);
             m1_lam_scan_cmd(c.then_c, bound, bound_count, reads, read_count, depth + 1);
@@ -2349,7 +3147,10 @@ fn bool M1Gen.lambda_scan(M1Gen* g, AirPrd* p, bool diagnose,
     char*[] cap_names, char*[] cap_values, AirTyp*[] cap_types, bool[] cap_bools, bool[] cap_ptrs, int* cap_count_out,
     AirTyp*[] param_types, usz* param_count_out, AirTyp** ret_out)
 {
-    if (p == null || p.tag != APRD_LAMBDA || p.body == null || p.binder_count == 0 || p.binder_count > 15) { if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"malformed lambda producer"); } return false; }
+    // A nullary lambda is well formed: a recursive `letrec` member that takes no
+    // arguments is exactly `lam() -> ...`, and nothing in the lifting path needs
+    // at least one binder (the hidden `%env` parameter is separate).
+    if (p == null || p.tag != APRD_LAMBDA || p.body == null || p.binder_count > 15) { if (diagnose) { g.note_failure(p == null ? 0 : p.source_line, p == null ? 0 : p.source_col, (char*)"malformed lambda producer"); } return false; }
     if (!m1_lambda_cmd_ok(p.body, 0))
     { if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"lambda body uses a form outside the first-class closure subset (loops, labels, matches, effects)"); } return false; }
     char*[64] bound; int bound_count = 0;
@@ -2424,56 +3225,99 @@ fn AirTyp* M1Gen.lambda_closure_type(M1Gen* g, AirPrd* p)
     char*[16] cn; char*[16] cv; AirTyp*[16] ct; bool[16] cb; bool[16] cp; int cc = 0;
     AirTyp*[16] pd; usz pc = 0; AirTyp* ret = null;
     if (!g.lambda_scan(p, false, cn[..], cv[..], ct[..], cb[..], cp[..], &cc, pd[..], &pc, &ret)) { return null; }
-    AirTyp* u8 = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
-    AirTyp* u8p = air_ir::air_mk_typ_ptr(g.arena, u8);
+    AirTyp* byte_ty = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
+    AirTyp* byte_ptr_ty = air_ir::air_mk_typ_ptr(g.arena, byte_ty);
     AirTyp* argt = air_ir::air_mk_typ_simple(g.arena, ATYP_TUPLE);
     AirTyp* arrow = air_ir::air_mk_typ(g.arena, ATYP_ARROW);
     AirTyp* closure = air_ir::air_mk_typ_simple(g.arena, ATYP_TUPLE);
-    if (u8 == null || u8p == null || argt == null || arrow == null || closure == null) { return null; }
-    argt.args[0] = u8p; argt.arg_count = 1;
+    if (byte_ty == null || byte_ptr_ty == null || argt == null || arrow == null || closure == null) { return null; }
+    argt.args[0] = byte_ptr_ty; argt.arg_count = 1;
     for (usz i = 0; i < pc; i++) { argt.args[i + 1] = pd[i]; argt.arg_count++; }
     arrow.args[0] = argt; arrow.args[1] = ret; arrow.arg_count = 2;
-    closure.args[0] = arrow; closure.args[1] = u8p; closure.arg_count = 2;
+    closure.args[0] = arrow; closure.args[1] = byte_ptr_ty; closure.arg_count = 2;
     return closure;
 }
-// Lift the lambda: render the body as a module-level function taking
-// `ptr %env` plus its binders, buffer the definition for end-of-function
-// flush, then materialize the { code, env } fat pointer in the current stream.
-fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
+// plan_lambda -- validate one `lam` against the live environment, resolve its
+// capture set and parameter/result types, and reserve its lifted symbol name.
+// Nothing is emitted and no state outside the LamInfo is changed apart from the
+// serial counter, so a recursive group can plan every member before rendering
+// any of them (which is what makes mutual recursion possible).
+fn bool M1Gen.plan_lambda(M1Gen* g, AirPrd* p, LamInfo* info, bool diagnose)
 {
-    if (g.current_function == null)
-    { g.note_failure(p.source_line, p.source_col, (char*)"lambda producers may only appear inside function bodies"); return null; }
-    char*[16] cap_names; char*[16] cap_values; AirTyp*[16] cap_types; bool[16] cap_bools; bool[16] cap_ptrs; int cap_count = 0;
-    AirTyp*[16] params; usz param_count = 0; AirTyp* ret = null;
+    if (info == null) { return false; }
+    // Fill the record explicitly rather than assigning an empty literal through
+    // the pointer: the arrays are only ever read up to the counts set here.
+    info.prd = p;
+    info.symbol = null;
+    info.closure_type = null;
+    info.cap_count = 0;
+    info.param_count = 0;
+    info.ret = null;
+    if (p == null || g.current_function == null)
+    {
+        if (diagnose) { g.note_failure(p != null ? p.source_line : 0, p != null ? p.source_col : 0, (char*)"lambda producers may only appear inside function bodies"); }
+        return false;
+    }
     if (g.for_depth > 0 || g.watch_active)
-    { g.note_failure(p.source_line, p.source_col, (char*)"closures cannot be created inside loop bodies yet"); return null; }
-    if (!g.lambda_scan(p, true, cap_names[..], cap_values[..], cap_types[..], cap_bools[..], cap_ptrs[..], &cap_count, params[..], &param_count, &ret)) { return null; }
-    AirTyp* closure_type = g.lambda_closure_type(p);
-    if (closure_type == null) { g.failed = true; return null; }
-    char* ret_ir = g.llvm_abi_return_text(ret);
-    char* closure_ir = g.llvm_value_type_text(closure_type);
-    if (ret_ir == null || closure_ir == null) { g.failed = true; return null; }
+    {
+        if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"closures cannot be created inside loop bodies yet"); }
+        return false;
+    }
+    char*[16] cn; char*[16] cv; AirTyp*[16] ct; bool[16] cb; bool[16] cp; AirTyp*[16] pd; usz pc = 0; AirTyp* ret = null;
+    int cc = 0;
+    if (!g.lambda_scan(p, diagnose, cn[..], cv[..], ct[..], cb[..], cp[..], &cc, pd[..], &pc, &ret)) { return false; }
+    if (cc > 16 || pc > 16) { if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"lambda exceeds the capture or parameter budget"); } return false; }
+    for (int k = 0; k < cc; k++)
+    {
+        info.cap_names[(usz)k] = cn[(usz)k];
+        info.cap_values[(usz)k] = cv[(usz)k];
+        info.cap_types[(usz)k] = ct[(usz)k];
+        info.cap_bools[(usz)k] = cb[(usz)k];
+        info.cap_ptrs[(usz)k] = cp[(usz)k];
+    }
+    for (usz k = 0; k < pc; k++) { info.params[k] = pd[k]; }
+    info.cap_count = cc;
+    info.param_count = pc;
+    info.ret = ret;
+    info.closure_type = g.lambda_closure_type(p);
+    if (info.closure_type == null) { g.failed = true; return false; }
     if (g.lam_serial >= 1000000 || g.lam_count >= 24)
-    { g.note_failure(p.source_line, p.source_col, (char*)"too many lifted closures in one function"); return null; }
+    {
+        if (diagnose) { g.note_failure(p.source_line, p.source_col, (char*)"too many lifted closures in one function"); }
+        return false;
+    }
     char[160] name_buf;
     int nn = snprintf(&name_buf[0], 160, (char*)"pear2.lam.%s.%d", g.current_function, g.lam_serial);
     g.lam_serial++;
-    if (nn < 0 || nn >= 160) { g.failed = true; return null; }
-    char* lam_name = g.arena.dup(&name_buf[0], (usz)nn);
-    // Environment struct type from captured field types.
+    if (nn < 0 || nn >= 160) { g.failed = true; return false; }
+    info.symbol = g.arena.dup(&name_buf[0], (usz)nn);
+    return true;
+}
+
+// emit_lifted_function -- render one planned lambda as a module-level
+// definition taking `ptr %env` plus its binders, and buffer it for the
+// end-of-function flush. The body is emitted into a side stream with a saved
+// emission state so the enclosing function's block, env, and termination flags
+// survive; captures are re-read out of `%env` inside the body, never taken from
+// the enclosing function's SSA names.
+fn bool M1Gen.emit_lifted_function(M1Gen* g, LamInfo* info)
+{
+    if (info == null || info.prd == null || info.symbol == null) { return false; }
+    AirPrd* p = info.prd;
+    char* ret_ir = g.llvm_abi_return_text(info.ret);
+    if (ret_ir == null) { g.failed = true; return false; }
     char* env_ir = null;
-    if (cap_count > 0)
+    if (info.cap_count > 0)
     {
         AirTyp* env_struct = air_ir::air_mk_typ_simple(g.arena, ATYP_TUPLE);
-        if (env_struct == null) { g.failed = true; return null; }
-        for (int i = 0; i < cap_count; i++) { env_struct.args[(usz)i] = cap_types[(usz)i]; env_struct.arg_count++; }
+        if (env_struct == null) { g.failed = true; return false; }
+        for (int i = 0; i < info.cap_count; i++) { env_struct.args[(usz)i] = info.cap_types[(usz)i]; env_struct.arg_count++; }
         env_ir = g.llvm_value_type_text(env_struct);
-        if (env_ir == null) { g.failed = true; return null; }
+        if (env_ir == null) { g.failed = true; return false; }
     }
-    // Render the lifted body into a side buffer.
     char* body_buffer = null; usz body_size = 0;
     void* side = open_memstream(&body_buffer, &body_size);
-    if (side == null) { g.failed = true; return null; }
+    if (side == null) { g.failed = true; return false; }
     void* saved_out = g.out;
     char* saved_block = g.cur_block; bool saved_terminated = g.terminated;
     char* saved_current = g.current_function;
@@ -2485,47 +3329,47 @@ fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
     bool saved_guard = g.guard_active; char* saved_gn = g.guard_name; char* saved_gt = g.guard_true_label; char* saved_gf = g.guard_false_label;
     usz saved_env = g.env_count;
     g.out = side;
-    g.current_function = lam_name;
-    g.return_type = ret;
-    g.return_bool = m1_bool_type(ret); g.return_ptr = m1_pointer_repr_type(ret); g.return_unit = m1_unit_type(ret);
-    g.default_bits = m1_integer_type(ret) ? m1_int_bits(ret) : 64;
-    g.default_unsigned = m1_unsigned(ret);
+    g.current_function = info.symbol;
+    g.return_type = info.ret;
+    g.return_bool = m1_bool_type(info.ret); g.return_ptr = m1_pointer_repr_type(info.ret); g.return_unit = m1_unit_type(info.ret);
+    g.default_bits = m1_integer_type(info.ret) ? m1_int_bits(info.ret) : 64;
+    g.default_unsigned = m1_unsigned(info.ret);
     g.watch_active = false; g.watch_count = 0; g.branch_depth = 0; g.seq_depth = 0;
     g.guard_active = false; g.guard_name = null; g.guard_true_label = null; g.guard_false_label = null;
     g.terminated = false;
-    fprintf(side, "define internal %s @%s(ptr %%env", ret_ir, lam_name);
-    for (usz i = 0; i < param_count; i++)
+    fprintf(side, "define internal %s @%s(ptr %%env", ret_ir, info.symbol);
+    for (usz i = 0; i < info.param_count; i++)
     {
-        char* pt = g.llvm_value_type_text(params[i]);
-        if (pt == null) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return null; }
+        char* pt = g.llvm_value_type_text(info.params[i]);
+        if (pt == null) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return false; }
         fprintf(side, ", %s %%a%d", pt, (int)i);
     }
     fprintf(side, ") {\n");
     g.begin_block((char*)"entry");
-    for (int i = 0; i < cap_count; i++)
+    for (int i = 0; i < info.cap_count; i++)
     {
-        char* ft = g.llvm_value_type_text(cap_types[(usz)i]);
+        char* ft = g.llvm_value_type_text(info.cap_types[(usz)i]);
         char* gep = g.tmp(); char* ld = g.tmp();
-        if (ft == null || gep == null || ld == null) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return null; }
+        if (ft == null || gep == null || ld == null) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return false; }
         fprintf(side, "  %s = getelementptr %s, ptr %%env, i32 0, i32 %d\n", gep, env_ir, i);
         fprintf(side, "  %s = load %s, ptr %s, align 1\n", ld, ft, gep);
-        if (!g.bind_rep(cap_names[(usz)i], ld, cap_bools[(usz)i], cap_ptrs[(usz)i], cap_types[(usz)i])) { fclose(side); free(body_buffer); g.out = saved_out; return null; }
+        if (!g.bind_rep(info.cap_names[(usz)i], ld, info.cap_bools[(usz)i], info.cap_ptrs[(usz)i], info.cap_types[(usz)i])) { fclose(side); free(body_buffer); g.out = saved_out; return false; }
     }
-    for (usz i = 0; i < param_count; i++)
+    for (usz i = 0; i < info.param_count; i++)
     {
         AirBinder* b = p.binders[i];
         if (b == null || b.name == null || same(b.name, "_")) { continue; }
         char[16] an;
         int na = snprintf(&an[0], 16, (char*)"%%a%d", (int)i);
-        if (na < 0 || na >= 16) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return null; }
-        if (!g.bind_rep(b.name, g.arena.dup(&an[0], (usz)na), m1_bool_type(params[i]), m1_pointer_repr_type(params[i]), params[i])) { fclose(side); free(body_buffer); g.out = saved_out; return null; }
+        if (na < 0 || na >= 16) { fclose(side); free(body_buffer); g.out = saved_out; g.failed = true; return false; }
+        if (!g.bind_rep(b.name, g.arena.dup(&an[0], (usz)na), m1_bool_type(info.params[i]), m1_pointer_repr_type(info.params[i]), info.params[i])) { fclose(side); free(body_buffer); g.out = saved_out; return false; }
     }
     char* lam_body_ret = m1_cmd_return_covar(p.body, 0);
     if (lam_body_ret == null) { lam_body_ret = (char*)"%ret"; }
     bool cmd_ok = g.command(p.body, lam_body_ret);
     bool body_ok = cmd_ok && g.terminated;
     if (body_ok) { fprintf(side, "}\n"); }
-    if (fclose(side) != 0) { g.out = saved_out; g.failed = true; return null; }
+    if (fclose(side) != 0) { g.out = saved_out; g.failed = true; return false; }
     // Restore the enclosing emission state before touching its stream again.
     g.out = saved_out; g.cur_block = saved_block; g.terminated = saved_terminated;
     g.current_function = saved_current;
@@ -2540,31 +3384,62 @@ fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
         // The lifted body failed to emit under the closure subset; the generic
         // "could not lower" message alone violates fail-closed diagnostics.
         g.note_failure(p.source_line, p.source_col, (char*)"closure body could not be emitted (captured raw-pointer element type is indeterminate; ascribe element usage or prefer typed load/store)");
-        free(body_buffer); return null;
+        free(body_buffer); return false;
     }
     g.lam_buffers[(usz)g.lam_count] = body_buffer; g.lam_sizes[(usz)g.lam_count] = body_size; g.lam_count++;
-    // Materialize the environment and the fat closure value in the host stream.
-    char* env_operand = (char*)"null";
-    if (cap_count > 0)
+    return true;
+}
+
+// materialize_env -- build the capture struct in the enclosing function and
+// return the pointer the closure carries. No captures means the canonical null
+// environment, which is exactly what a lifted function ignores.
+fn char* M1Gen.materialize_env(M1Gen* g, LamInfo* info)
+{
+    if (info == null) { return null; }
+    if (info.cap_count <= 0) { return (char*)"null"; }
+    AirTyp* env_struct = air_ir::air_mk_typ_simple(g.arena, ATYP_TUPLE);
+    if (env_struct == null) { g.failed = true; return null; }
+    for (int i = 0; i < info.cap_count; i++) { env_struct.args[(usz)i] = info.cap_types[(usz)i]; env_struct.arg_count++; }
+    char* env_ir = g.llvm_value_type_text(env_struct);
+    char* slot = g.tmp();
+    if (env_ir == null || slot == null) { g.failed = true; return null; }
+    fprintf(g.out, "  %s = alloca %s, align 8\n", slot, env_ir);
+    for (int i = 0; i < info.cap_count; i++)
     {
-        char* slot = g.tmp();
-        if (slot == null) { g.failed = true; return null; }
-        fprintf(g.out, "  %s = alloca %s, align 8\n", slot, env_ir);
-        for (int i = 0; i < cap_count; i++)
-        {
-            char* ft = g.llvm_value_type_text(cap_types[(usz)i]);
-            char* gep = g.tmp();
-            if (ft == null || gep == null) { g.failed = true; return null; }
-            fprintf(g.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n", gep, env_ir, slot, i);
-            fprintf(g.out, "  store %s %s, ptr %s, align 1\n", ft, cap_values[(usz)i], gep);
-        }
-        env_operand = slot;
+        char* ft = g.llvm_value_type_text(info.cap_types[(usz)i]);
+        char* gep = g.tmp();
+        if (ft == null || gep == null) { g.failed = true; return null; }
+        fprintf(g.out, "  %s = getelementptr %s, ptr %s, i32 0, i32 %d\n", gep, env_ir, slot, i);
+        fprintf(g.out, "  store %s %s, ptr %s, align 1\n", ft, info.cap_values[(usz)i], gep);
     }
+    return slot;
+}
+
+// materialize_closure -- the fat `{ code, env }` value itself. A null
+// environment operand is the canonical "captures nothing" pointer.
+fn char* M1Gen.materialize_closure(M1Gen* g, LamInfo* info, char* env_operand)
+{
+    if (info == null || info.symbol == null || info.closure_type == null) { g.failed = true; return null; }
+    char* closure_ir = g.llvm_value_type_text(info.closure_type);
+    if (closure_ir == null) { g.failed = true; return null; }
+    char* env_text = env_operand != null ? env_operand : (char*)"null";
     char* c0 = g.tmp(); char* c1 = g.tmp();
     if (c0 == null || c1 == null) { g.failed = true; return null; }
-    fprintf(g.out, "  %s = insertvalue %s undef, ptr @%s, 0\n", c0, closure_ir, lam_name);
-    fprintf(g.out, "  %s = insertvalue %s %s, ptr %s, 1\n", c1, closure_ir, c0, env_operand);
+    fprintf(g.out, "  %s = insertvalue %s undef, ptr @%s, 0\n", c0, closure_ir, info.symbol);
+    fprintf(g.out, "  %s = insertvalue %s %s, ptr %s, 1\n", c1, closure_ir, c0, env_text);
     return c1;
+}
+
+// Lift the lambda: plan it, render its definition, then materialize the
+// { code, env } fat pointer in the current stream.
+fn char* M1Gen.lambda_value(M1Gen* g, AirPrd* p)
+{
+    LamInfo info = {};
+    if (!g.plan_lambda(p, &info, true)) { return null; }
+    if (!g.emit_lifted_function(&info)) { return null; }
+    char* env_operand = g.materialize_env(&info);
+    if (env_operand == null) { return null; }
+    return g.materialize_closure(&info, env_operand);
 }
 // Append buffered lifted-closure definitions after the enclosing function.
 fn bool M1Gen.flush_lambdas(M1Gen* g)
@@ -2799,6 +3674,21 @@ fn char* M1Gen.prd(M1Gen* g, AirPrd* p)
     }
     if (p.tag == APRD_VAR)
     {
+        // Inside a lifted member, naming the group is the only way to reach the
+        // closure value: the environment holds nothing for a non-capturing
+        // group, so the constant { code, null } is rebuilt here. LLVM folds the
+        // extractvalue pair back into a direct call.
+        if (g.env_index(p.name) < 0)
+        {
+            int ri = g.rec_index(p.name);
+            if (ri >= 0)
+            {
+                LamInfo rec = {};
+                rec.symbol = g.rec_symbols[(usz)ri];
+                rec.closure_type = g.rec_types[(usz)ri];
+                return g.materialize_closure(&rec, null);
+            }
+        }
         AirTyp* value_type = g.expr_type(p);
         if (m1_function_pointer_type(value_type)) { return g.pointer_value(p); }
         char* value = g.lookup(p.name);
@@ -3661,12 +4551,16 @@ fn bool M1Gen.emit_constant(M1Gen* g, AirPrd* p, AirTyp* t, int depth)
         fprintf(g.out, "getelementptr inbounds ([%d x i8], ptr @%s, i64 0, i64 0)", count, s.name);
         return true;
     }
-    if (p.tag == APRD_VAR && m1_pointer_type(t))
+    if (p.tag == APRD_VAR && m1_pointer_repr_type(t))
     {
         AirDecl* global = g.find_global(p.name);
-        if (global == null || !m1_value_type_compatible(m1_pointee_type(t), global.ret_ty, 0)) {
- return false; }
-        fprintf(g.out, "%s", g.global_symbol(global)); return true;
+        if (global != null && m1_pointer_type(t) && m1_value_type_compatible(m1_pointee_type(t), global.ret_ty, 0))
+        {
+            fprintf(g.out, "%s", g.global_symbol(global)); return true;
+        }
+        char* symbol = g.function_symbol_value(p.name, t, depth);
+        if (symbol != null) { fprintf(g.out, "%s", symbol); return true; }
+        return false;
     }
     if (p.tag == APRD_ARRAY || p.tag == APRD_TUPLE)
     {
@@ -3732,7 +4626,13 @@ fn bool M1Gen.record_global_cells(M1Gen* g, AirTyp* t, AirPrd* init, char* alloc
         {
             AirDecl* target = g.find_global(init.name);
             char* target_pointer = target == null ? null : g.global_pointer(target);
-            return target_pointer != null && g.cell_set_at(allocation, base_offset, target_pointer, false);
+            if (target_pointer != null) { return g.cell_set_at(allocation, base_offset, target_pointer, false); }
+            // A function symbol has an address but no allocation: the cell says
+            // "a live non-null pointer lives here, with nothing known behind it".
+            // A load of it therefore yields a value that can be called and cannot
+            // be dereferenced, which is what a function pointer is.
+            char* symbol = g.function_symbol_value(init.name, t, depth);
+            return symbol != null && g.cell_set_symbol(allocation, base_offset, symbol);
         }
  return false;
     }
@@ -3793,6 +4693,9 @@ fn bool M1Gen.record_global_cells(M1Gen* g, AirTyp* t, AirPrd* init, char* alloc
 }
 fn bool M1Gen.emit_globals(M1Gen* g)
 {
+    // Cells created here outlive every function: they describe pointers already
+    // inside a global, and a body that loads one has to find it again.
+    g.at_module_scope = true;
     for (usz i = 0; i < g.decl_count; i++)
     {
         AirDecl* d = g.decls[i];
@@ -3807,7 +4710,7 @@ fn bool M1Gen.emit_globals(M1Gen* g)
             fprintf(g.out, "external %s %s, align %d\n", d.g_mut ? (char*)"global" : (char*)"constant", ty, align);
             continue;
         }
-        fprintf(g.out, "%s %s ", d.g_mut ? (char*)"global" : (char*)"constant", ty);
+        fprintf(g.out, "%s%s %s ", m1_decl_linkage_internal(d) ? (char*)"internal " : "", d.g_mut ? (char*)"global" : (char*)"constant", ty);
         if (d.g_init == null) { fprintf(g.out, "zeroinitializer"); }
         else if (!g.emit_constant(d.g_init, d.ret_ty, 0))
         {
@@ -3821,6 +4724,7 @@ fn bool M1Gen.emit_globals(M1Gen* g)
         fprintf(g.out, ", align %d\n", align);
     }
     fprintf(g.out, "\n");
+    g.at_module_scope = false;
     return true;
 }
 fn bool M1Gen.emit_string_constants(M1Gen* g)
@@ -4405,6 +5309,24 @@ fn char* m1_air_order_text(int order)
         default: return null;
     }
 }
+// cmpxchg carries TWO orderings in LLVM: the success path stores, so it may be
+// release/acq_rel/seq_cst, while the failure path performed no store and may
+// only be monotonic/acquire/seq_cst. AIR has a single ORDER, so the failure
+// ordering is the strongest one that ordering permits -- the same weakening the
+// AIR 3 reference consumer (air_ll.c3) applies.
+fn char* m1_air_failure_order_text(int order)
+{
+    switch (order)
+    {
+        case 0: return (char*)"monotonic";   // relaxed
+        case 1: return (char*)"acquire";     // acquire
+        case 2: return (char*)"monotonic";   // release: a failed compare released nothing
+        case 3: return (char*)"acquire";     // acq_rel: keep the acquire half
+        case 4: return (char*)"seq_cst";     // seq_cst
+        default: return null;
+    }
+}
+
 fn bool M1Gen.fence_cmd(M1Gen* g, AirCmd* c)
 {
     // LLVM admits acquire/release/acq_rel/seq_cst on a fence; a relaxed
@@ -4425,17 +5347,14 @@ fn bool M1Gen.atomic_cmd(M1Gen* g, AirCmd* c, char* ret_name)
         return false;
     }
     if (c.prd == null) { g.note_failure(c.source_line, c.source_col, (char*)"atomic operation is missing its pointer operand"); return false; }
-    if (c.atomic_op == 13)
-    {
-        g.note_failure(c.source_line, c.source_col, (char*)"atomic cmpxchg is not lowerable: the AIR grammar carries a single ORDER, but cmpxchg needs separate success/failure orderings");
-        return false;
-    }
-    if (c.atomic_op < 0 || c.atomic_op > 12) { g.note_failure(c.source_line, c.source_col, (char*)"unknown atomic operation"); return false; }
-    bool is_load = c.atomic_op == 0; bool is_store = c.atomic_op == 1;
-    int want = is_load ? 0 : 1;
+    if (c.atomic_op < 0 || c.atomic_op > 13) { g.note_failure(c.source_line, c.source_col, (char*)"unknown atomic operation"); return false; }
+    bool is_load = c.atomic_op == 0; bool is_store = c.atomic_op == 1; bool is_cmpxchg = c.atomic_op == 13;
+    int want = is_load ? 0 : (is_cmpxchg ? 2 : 1);
     if ((int)c.prd_count != want)
     {
-        g.note_failure(c.source_line, c.source_col, is_load ? (char*)"atomic load takes only its pointer operand" : (char*)"atomic operation takes exactly one value operand");
+        g.note_failure(c.source_line, c.source_col, is_load ? (char*)"atomic load takes only its pointer operand" :
+                       (is_cmpxchg ? (char*)"atomic cmpxchg takes an expected and a replacement operand" :
+                        (char*)"atomic operation takes exactly one value operand"));
         return false;
     }
     if (is_load && (c.atomic_order == 2 || c.atomic_order == 3))
@@ -4449,6 +5368,11 @@ fn bool M1Gen.atomic_cmd(M1Gen* g, AirCmd* c, char* ret_name)
     { g.note_failure(c.source_line, c.source_col, (char*)"atomic pointee must be an 8/16/32/64-bit integer (pointer, bool, float, and 128-bit atomics are unsupported)"); return false; }
     char* address = g.pointer_value(c.prd);
     if (g.failed || address == null) { return false; }
+    // Exactness is decided before the access check: an atomic must be naturally
+    // aligned, which no runtime check can establish, and asking the access check
+    // first would emit a bounds check into a function that is about to be thrown
+    // away by this diagnostic.
+    if (!g.address_is_exact(address, c.source_line, c.source_col)) { return false; }
     if (!g.check_access(address, element, c.source_line, c.source_col, !is_load)) { return false; }
     char* ety = g.llvm_type_text(element);
     int align = g.type_alignment(element, 0);
@@ -4473,6 +5397,28 @@ fn bool M1Gen.atomic_cmd(M1Gen* g, AirCmd* c, char* ret_name)
         fprintf(g.out, "  store atomic %s %s, ptr %s %s, align %d\n", ety, value, address, order, align);
         if (c.cns == null) { return true; }
         return g.consume_unit(c.cns, ret_name);
+    }
+    if (is_cmpxchg)
+    {
+        // `atomic_cmpxchg(p, expected, new)` yields the OLD value (AIR3.md), so
+        // the lowered shape is the cmpxchg pair plus extractvalue 0.
+        AirPrd* rp = c.prds[1];
+        bool rok = rp != null && (m1_value_type_compatible(element, g.expr_type(rp), 0) || g.integer_value_compatible(rp, element));
+        if (!rok)
+        {
+            g.note_failure(c.source_line, c.source_col, (char*)"atomic cmpxchg replacement operand must be an integer compatible with the pointee type");
+            return false;
+        }
+        char* replacement = g.prd(rp);
+        if (g.failed || replacement == null) { return false; }
+        char* failure_order = m1_air_failure_order_text(c.atomic_order);
+        if (failure_order == null) { g.note_failure(c.source_line, c.source_col, (char*)"atomic cmpxchg has an out-of-range memory ordering"); return false; }
+        char* pair = g.tmp(); char* dst = g.tmp();
+        if (pair == null || dst == null) { return false; }
+        fprintf(g.out, "  %s = cmpxchg ptr %s, %s %s, %s %s %s %s\n", pair, address, ety, value, ety, replacement, order, failure_order);
+        fprintf(g.out, "  %s = extractvalue { %s, i1 } %s, 0\n", dst, ety, pair);
+        if (c.cns == null) { return true; }
+        return g.consume(dst, false, false, element, c.cns, ret_name);
     }
     char* opn = null;
     switch (c.atomic_op)
@@ -4516,8 +5462,19 @@ fn bool M1Gen.syscall_cmd(M1Gen* g, AirCmd* c, char* ret_name)
     {
         AirPrd* ap = c.prds[i];
         AirTyp* at = ap != null ? g.expr_type(ap) : null;
-        if (at != null && !m1_integer_type(at) && !m1_pointer_repr_type(at))
-        { g.note_failure(c.source_line, c.source_col, (char*)"syscall arguments must be integers or pointers (bool/float/aggregate arguments are unsupported)"); return false; }
+        if (at != null && !m1_integer_type(at) && !m1_pointer_repr_type(at) && at.tag != ATYP_BOOL)
+        { g.note_failure(c.source_line, c.source_col, (char*)"syscall arguments must be integers, bools, or pointers (float and aggregate arguments are unsupported)"); return false; }
+        if (at != null && at.tag == ATYP_BOOL)
+        {
+            // A bool travels as 0/1 in a register, the same way C passes a
+            // _Bool to a variadic or system call. g.prd yields an i1 here.
+            char* bv = g.prd(ap);
+            if (g.failed || bv == null) { return false; }
+            char* wi = g.tmp(); if (wi == null) { return false; }
+            fprintf(g.out, "  %s = zext i1 %s to i64\n", wi, bv);
+            args[i] = wi;
+            continue;
+        }
         if (at != null && m1_pointer_repr_type(at))
         {
             char* pv = g.pointer_value(ap);
@@ -4687,16 +5644,32 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         bool stored_ptr = m1_pointer_type(element);
         bool stored_bool = m1_bool_type(element);
         char* value = stored_bool ? g.condition(c.prds[1]) : (stored_ptr ? g.pointer_value(c.prds[1]) : g.prd(c.prds[1]));
-        char* ty = g.llvm_type_text(element); int align = g.type_alignment(element, 0);        if (g.failed || value == null || ty == null || align <= 0) {
+        char* ty = g.llvm_type_text(element); int align = g.access_alignment(address, element);        if (g.failed || value == null || ty == null || align <= 0) {
  return false; }
+        // A stored pointer must be one the model can still describe afterwards:
+        // either a tracked pointer, a null, or a function symbol (whose address is
+        // known and whose contents are not data). Anything else would leave the
+        // cell claiming a provenance that does not exist.
+        char* stored_symbol = null;
         if (stored_ptr && c.prds[1].tag != APRD_NULL)
         {
             M1Provenance* vp = g.prov(value);
-            if (vp == null || vp.freed) { g.note_failure(c.source_line, c.source_col, (char*)"storing a pointer without live provenance"); return false; }
+            if (vp == null || vp.freed)
+            {
+                if (c.prds[1].tag == APRD_VAR) { stored_symbol = g.function_symbol_value(c.prds[1].name, element, 0); }
+                if (stored_symbol == null) { g.note_failure(c.source_line, c.source_col, (char*)"storing a pointer without live provenance"); return false; }
+            }
         }
         fprintf(g.out, "  store %s%s %s, ptr %s, align %d\n", c.vol ? (char*)"volatile " : (char*)"", ty, value, address, align);
-        if (stored_ptr && !g.cell_set(address, value, c.prds[1].tag == APRD_NULL))
-        { g.note_failure(c.source_line, c.source_col, (char*)"pointer store could not preserve value provenance"); return false; }
+        if (stored_ptr)
+        {
+            M1Provenance* address_prov = g.prov(address);
+            bool recorded = stored_symbol != null && address_prov != null && address_prov.offset_known
+                ? g.cell_set_symbol(address_prov.allocation, address_prov.offset, stored_symbol)
+                : g.cell_set(address, value, c.prds[1].tag == APRD_NULL);
+            if (!recorded)
+            { g.note_failure(c.source_line, c.source_col, (char*)"pointer store could not preserve value provenance"); return false; }
+        }
         return true;
     }
     if (c.tag == ACMD_SEQ)
@@ -5092,6 +6065,7 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
 
         return ok;
     }
+    if (c.tag == ACMD_LETREC) { return g.lower_letrec(c, ret_name); }
     if (c.tag == ACMD_MATCH) { return g.match_cmd(c, ret_name); }
     if (c.tag == ACMD_CUT)
     {
@@ -5205,12 +6179,22 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     for (usz p = 0; p < d.param_count; p++) { if (d.params[p] == null || (d.params[p].ty != null && d.params[p].ty.tag != ATYP_INFER && !m1_backend_type(d.params[p].ty, g.decls, g.decl_count, 0))) { return false; } }
     g.current_function = d.name;
     g.env_count = 0; g.provenance_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0;
+    // Pointer cells are per function for a reason: a local allocation is named by
+    // an SSA temporary (`%t7`) whose numbering restarts in every function, so a
+    // cell left behind by the previous body would match an unrelated object here
+    // and hand a load the provenance of a dead stack slot. Module-scope cells live
+    // in their own table and survive.
+    g.pointer_cell_count = 0; g.at_module_scope = false;
     g.default_unsigned = m1_unsigned(d.ret_ty);
     g.default_bits = m1_integer_type(d.ret_ty) ? m1_int_bits(d.ret_ty) : 64;
     g.guard_active = false; g.guard_name = null; g.guard_true_label = null; g.guard_false_label = null;
     g.terminated = false;
     g.has_for = false; g.for_depth = 0; g.seq_depth = 0; g.fx_depth = 0; g.mu_depth = 0; g.mu_drain_count = 0; g.in_label_replay = false;
     g.watch_active = false; g.watch_count = 0; g.branch_depth = 0; g.watch_branch_depth = 0;
+    // Closure lifting state is per function: a recursive group left registered by
+    // an earlier function would make an unrelated name resolve to a stale symbol.
+    g.rec_count = 0; g.relax_recursive_inference = false;
+    g.lam_count = 0; g.lam_serial = 0;
     AirCmd* body = d.def_body;
     char* ret_name = null;
     if (body != null && body.tag == ACMD_MUTILDE) { ret_name = body.binder; body = body.body; }
@@ -5240,7 +6224,7 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
         if (!m1_value_type(parameter_types[i], 0)) { return false; }
     }
     int fn_cc = m1_decl_callconv(d);
-    fprintf(g.out, "define %s%s @%s(", fn_cc == 1 ? "fastcc " : "", return_type_ir, m1_link_name(d));
+    fprintf(g.out, "define %s%s%s @%s(", m1_decl_linkage_internal(d) ? "internal " : "", fn_cc == 1 ? "fastcc " : "", return_type_ir, m1_link_name(d));
     for (usz i = 0; i < emitted_param_count; i++)
     {
         AirBinder* p = d.params[i];
@@ -5254,6 +6238,10 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     if (m1_decl_flag(d, "naked")) { fprintf(g.out, " naked"); }
     char* fn_section = m1_decl_attr_string(d, "section");
     if (fn_section != null) { fprintf(g.out, " section \"%s\"", fn_section); }
+    // Target tuning travels with the function, not with the command line. A .bc
+    // that leaves this process is linked somewhere else, possibly by a tool that
+    // has never heard of --cpu, and the tuning is part of what the code means.
+    if (g_m1_cpu[0] != 0 || g_m1_features[0] != 0) { fprintf(g.out, " #0"); }
     fprintf(g.out, " {\nentry:\n");
     g.cur_block = (char*)"entry";
     for (usz i = 0; i < emitted_param_count; i++)
@@ -5265,9 +6253,20 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
         char* arg_name = g.arena.dup(&arg[0], (usz)n);
         if (p.name != null && !same(p.name, "_") && !g.bind_typed(p.name, arg_name, m1_bool_type(parameter_types[i]), m1_pointer_repr_type(parameter_types[i]), parameter_types[i])) { return false; }
     }
-    if (!g.command(body, ret_name) || !g.terminated)
+    bool body_lowered = g.command(body, ret_name);
+    if (!body_lowered || !g.terminated)
     {
-        if (g.low_profile && g.fail_form == null) { g.note_failure(g.last_line != 0 ? g.last_line : d.source_line, g.last_col != 0 ? g.last_col : d.source_col, (char*)"unsupported AIR 3 command/producer in function body"); }
+        // Two different failures were sharing one message. A body that lowers and
+        // then falls off the end is a *shape* problem -- a missing return or a
+        // continuation that never delivers -- and saying "unsupported command"
+        // about it sends the reader looking in the wrong place.
+        if (g.low_profile && g.fail_form == null)
+        {
+            int line = g.last_line != 0 ? g.last_line : d.source_line;
+            int col = g.last_col != 0 ? g.last_col : d.source_col;
+            if (!body_lowered) { g.note_failure(line, col, (char*)"unsupported AIR 3 command/producer in function body"); }
+            else { g.note_failure(line, col, (char*)"the function body does not end in a terminator (no return or delivered continuation)"); }
+        }
         return false;
     }    for (usz i = 0; i < g.label_count; i++) { if (!g.buffer_label_body(&g.labels[i], ret_name)) { return false; } }
     for (usz i = 0; i < g.label_count; i++) { if (!g.replay_label_block(&g.labels[i])) { return false; } }
@@ -5275,21 +6274,6 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     fprintf(g.out, "}\n");
     return g.flush_lambdas();
 }
-fn bool m1_contains_letrec(AirCmd* c, int depth)
-{
-    if (c == null || depth >= 128) { return false; }
-    if (c.tag == ACMD_LETREC) { return true; }
-    if (m1_contains_letrec(c.body, depth + 1) || m1_contains_letrec(c.next, depth + 1) ||
-        m1_contains_letrec(c.then_c, depth + 1) || m1_contains_letrec(c.else_c, depth + 1) ||
-        m1_contains_letrec(c.handled, depth + 1)) { return true; }
-    for (usz i = 0; i < c.branch_count; i++)
-    {
-        AirBranch* branch = c.branches[i];
-        if (branch != null && (m1_contains_letrec(branch.body, depth + 1) || m1_contains_letrec(branch.guard, depth + 1))) { return true; }
-    }
-    return false;
-}
-
 fn bool append_text(char* out, usz cap, usz* length, char* text)
 {
     for (usz i = 0; text[i] != 0; i++)
@@ -5327,21 +6311,277 @@ fn bool append_shell_word(char* out, usz cap, usz* length, char* word)
     out[*length] = 0;
     return true;
 }
-fn bool make_executable(char* bitcode, char* output)
+// m1_emit_object -- run LLVM's own instruction selection over the verified
+// in-process module and write a native object. This is the step clang used to
+// perform: the module never leaves the process, no textual IR is handed to an
+// external compiler, and the object is produced by the same LLVM the bitcode
+// comes from. Only the x86-64 backend is registered, so any other triple fails
+// closed with LLVM's message instead of emitting a wrong-architecture file.
+// `--emit-asm` is the same call with LLVMAssemblyFile: the printed assembly is
+// what the object was assembled from, not a second compilation.
+//
+// Instruction selection always runs at LLVM's default codegen level. The -O
+// tier was already applied to the IR by m1_optimize_llvm (and to the AIR by
+// pear2_opt); letting codegen vary as well would make one flag mean two
+// different things.
+fn bool m1_emit_object(void* m, char* path, char** failure)
 {
-    char* clang = getenv((char*)"PEAR2_CLANG");
-    if (clang == null || clang[0] == 0) { clang = (char*)"clang"; }
+    return m1_emit_native(m, path, LLVM_CG_OBJ_FILE, failure);
+}
+// m1_emit_native -- the one code-generation entry point. `file_type` is
+// LLVMCodeGenFileType: the object the linker consumes, or the assembly text a
+// human reads. Both come out of the same target machine, so `--emit-asm` and
+// `--emit-obj` can never disagree about what the program compiled to.
+fn bool m1_emit_native(void* m, char* path, int file_type, char** failure)
+{
+    if (failure != null) { *failure = null; }
+    if (m == null) { return false; }
+    char* triple = ll_get_triple(m);
+    if (triple == null || triple[0] == 0)
+    {
+        if (failure != null) { *failure = (char*)"the module does not name a target triple"; }
+        return false;
+    }
+    // The x86-64 entry points stay because they are what the object/executable
+    // modes use; the All* registration is what makes a wasm32 request work.
+    ll_init_x86_ti();
+    ll_init_x86_t();
+    ll_init_x86_tmc();
+    ll_init_x86_asmp();
+    ll_init_x86_asmpa();
+    ll_init_all_target_infos();
+    ll_init_all_targets();
+    ll_init_all_target_mcs();
+    ll_init_all_asm_printers();
+    ll_init_all_asm_parsers();
+    void* target = null;
+    char* err = null;
+    if (ll_get_target_from_triple(triple, &target, &err) != 0 || target == null)
+    {
+        if (failure != null) { *failure = err == null ? (char*)"unknown target triple for object emission" : err; }
+        else if (err != null) { ll_message_dispose(err); }
+        return false;
+    }
+    void* tm = ll_create_tm(target, triple, g_m1_cpu, g_m1_features, LLVM_CODEGEN_DEFAULT, g_m1_reloc, LLVM_CODE_MODEL_DEFAULT);
+    if (tm == null)
+    {
+        if (failure != null) { *failure = (char*)"could not create a target machine"; }
+        return false;
+    }
+    int rc = ll_tm_emit_to_file(tm, m, path, file_type, &err);
+    ll_dispose_tm(tm);
+    if (rc != 0)
+    {
+        if (failure != null) { *failure = err == null ? (char*)"target machine could not emit an object" : err; }
+        else if (err != null) { ll_message_dispose(err); }
+        return false;
+    }
+    if (err != null) { ll_message_dispose(err); }
+    return true;
+}
+
+// m1_link_object -- link the object PEAR 2 just produced. The object is ours, so
+// the driver is only a linker: glibc's crt1.o supplies `_start` (which calls
+// `main`), crti.o/crtn.o bracket the init/fini arrays, and -lc resolves the C
+// symbols the runtime declares. PEAR 1 links with the same flag set.
+//
+// LD_LIBRARY_PATH is cleared for the command: the compiler runs with a directory
+// on that path that holds LLVM's libc shim, and ld would try to parse it as
+// libc. PEAR2_CRT_DIR overrides where crt1.o/crti.o/crtn.o are found;
+// PEAR2_LINK=clang swaps in a clang driver over the same object.
+fn bool m1_link_object(char* object, char* output)
+{
     char[16384] command;
     usz length = 0;
-    if (!append_shell_word(&command[0], 16384, &length, clang) ||
-        !append_text(&command[0], 16384, &length, (char*)" -Wno-override-module ") ||
-        !append_shell_word(&command[0], 16384, &length, bitcode) ||
+    char* driver = getenv((char*)"PEAR2_LINK");
+    if (driver != null && same(driver, (char*)"clang"))
+    {
+        char* clang = getenv((char*)"PEAR2_CLANG");
+        if (clang == null || clang[0] == 0) { clang = (char*)"clang"; }
+        // clang only drives the linker here; the object is already machine code.
+        if (!append_shell_word(&command[0], 16384, &length, clang) ||
+            !append_text(&command[0], 16384, &length, (char*)" -o ") ||
+            !append_shell_word(&command[0], 16384, &length, output) ||
+            !append_text(&command[0], 16384, &length, (char*)" ") ||
+            !append_shell_word(&command[0], 16384, &length, object)) { return false; }
+        return system(&command[0]) == 0;
+    }
+    char* crt = getenv((char*)"PEAR2_CRT_DIR");
+    if (crt == null || crt[0] == 0) { crt = (char*)"/usr/lib/x86_64-linux-gnu"; }
+    char[4096] lib_flag;
+    char[4096] crt1;
+    char[4096] crti;
+    char[4096] crtn;
+    int lf = snprintf(&lib_flag[0], 4096, (char*)"-L%s", crt);
+    int c1 = snprintf(&crt1[0], 4096, (char*)"%s/crt1.o", crt);
+    int ci = snprintf(&crti[0], 4096, (char*)"%s/crti.o", crt);
+    int cn = snprintf(&crtn[0], 4096, (char*)"%s/crtn.o", crt);
+    if (lf < 0 || (usz)lf >= 4096 || c1 < 0 || (usz)c1 >= 4096 || ci < 0 || (usz)ci >= 4096 ||
+        cn < 0 || (usz)cn >= 4096) { return false; }
+    if (!append_text(&command[0], 16384, &length, (char*)"LD_LIBRARY_PATH= ld ") ||
+        !append_shell_word(&command[0], 16384, &length, &lib_flag[0]) ||
+        !append_text(&command[0], 16384, &length, (char*)" -L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu ") ||
+        !append_shell_word(&command[0], 16384, &length, &crt1[0]) ||
+        !append_text(&command[0], 16384, &length, (char*)" ") ||
+        !append_shell_word(&command[0], 16384, &length, &crti[0]) ||
+        !append_text(&command[0], 16384, &length, (char*)" ") ||
+        !append_shell_word(&command[0], 16384, &length, object) ||
+        !append_text(&command[0], 16384, &length, (char*)" ") ||
+        !append_shell_word(&command[0], 16384, &length, &crtn[0]) ||
         !append_text(&command[0], 16384, &length, (char*)" -o ") ||
-        !append_shell_word(&command[0], 16384, &length, output)) { return false; }
+        !append_shell_word(&command[0], 16384, &length, output) ||
+        !append_text(&command[0], 16384, &length,
+                     (char*)" --entry=_start -no-pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 -lc")) { return false; }
     return system(&command[0]) == 0;
 }
+// m1_optimize_llvm -- run LLVM's own optimisation pipeline over the parsed
+// module. PEAR 2 hands LLVM the same `default<On>` pipelines it would use for a
+// .ll input (`default<Os>` for the size tier), so a build combines two
+// orthogonal layers:
+//
+//   pear2_opt   AIR rewrites the AIR-level pass can justify (folding,
+//               algebraic identities, strength reduction, let specialization)
+//   this        downstream IR optimisation the AIR pass cannot express --
+//               mem2reg/SROA (PEAR 2 lowers label parameters to slots, so this
+//               is where most of the win is), instcombine, GVN/CSE, inlining,
+//               loop opts, DCE
+//
+// At -O0 no pipeline runs and the published bitcode is exactly what PEAR 2
+// emitted. `*failure` receives LLVM's message on failure; the caller owns it
+// and must dispose it with ll_message_dispose().
+// m1_target_machine -- the target machine for the module's own triple, used so
+// LLVM's IR pipeline can run its target-aware analyses (loop and SLP
+// vectorisation, interleaving, cost models) instead of the generic defaults.
+// Returning null is not an error: the pipeline then runs target independently,
+// which is what it did before, so a host without the backend still produces
+// bitcode.
+fn void* m1_target_machine(void* m)
+{
+    if (m == null) { return null; }
+    char* triple = ll_get_triple(m);
+    if (triple == null || triple[0] == 0) { return null; }
+    ll_init_x86_ti();
+    ll_init_x86_t();
+    ll_init_x86_tmc();
+    ll_init_x86_asmp();
+    ll_init_x86_asmpa();
+    void* target = null;
+    char* err = null;
+    if (ll_get_target_from_triple(triple, &target, &err) != 0 || target == null)
+    {
+        if (err != null) { ll_message_dispose(err); }
+        return null;
+    }
+    if (err != null) { ll_message_dispose(err); }
+    // The tuning flags reach the target machine here. Passing them empty -- which
+    // is what this used to do -- means the optimiser assumes a generic baseline
+    // CPU and never uses an instruction the machine actually has.
+    return ll_create_tm(target, triple, g_m1_cpu, g_m1_features, LLVM_CODEGEN_DEFAULT, g_m1_reloc, LLVM_CODE_MODEL_DEFAULT);
+}
+// m1_contains -- does `haystack` contain `needle`? Used once, to decide whether a
+// user-supplied pipeline already ends in a verification step.
+fn bool m1_contains(char* haystack, char* needle)
+{
+    if (haystack == null || needle == null) { return false; }
+    usz n = 0;
+    while (needle[n] != 0) { n++; }
+    if (n == 0) { return true; }
+    for (usz i = 0; haystack[i] != 0; i++)
+    {
+        usz j = 0;
+        while (j < n && haystack[i + j] != 0 && haystack[i + j] == needle[j]) { j++; }
+        if (j == n) { return true; }
+    }
+    return false;
+}
+
+// The relocation model has a name in three places (the target machine, the
+// printed pipeline, and --stats); one function spells it so they cannot drift.
+fn char* m1_reloc_name(int reloc)
+{
+    if (reloc == 0) { return (char*)"default"; }
+    if (reloc == 2) { return (char*)"pic"; }
+    if (reloc == 3) { return (char*)"dynamic-no-pic"; }
+    return (char*)"static";
+}
+
+// m1_pipeline_for -- the exact pass pipeline this run will feed to LLVMRunPasses.
+//
+// Two rules are decided here rather than at the call site, because there are
+// three callers (optimisation, --print-pipeline, --stats) and they must never
+// disagree about what ran:
+//
+//   * a user pipeline (--passes=...) is used verbatim, except that `verify` is
+//     appended when it is not already present. A custom pipeline that skips
+//     verification could publish a module nobody checked, and "I asked for
+//     mem2reg" is not a reason to disable the safety net;
+//   * otherwise the tier chooses the pipeline, and -Ofast-style variants are just
+//     tiers: -Os is `default<Os>`, -Oz is `default<Oz>`.
+fn void m1_pipeline_for(int opt_level, bool opt_size, bool opt_tiny, char* out, usz cap)
+{
+    if (out == null || cap == 0) { return; }
+    out[0] = 0;
+    if (g_m1_pass_pipeline != null && g_m1_pass_pipeline[0] != 0)
+    {
+        usz n = 0;
+        while (g_m1_pass_pipeline[n] != 0 && n + 1 < cap) { out[n] = g_m1_pass_pipeline[n]; n++; }
+        out[n] = 0;
+        if (m1_contains(&out[0], (char*)"verify")) { return; }
+        char* suffix = (char*)",verify";
+        for (usz i = 0; suffix[i] != 0 && n + 1 < cap; i++) { out[n] = suffix[i]; n++; }
+        out[n] = 0;
+        return;
+    }
+    if (opt_level <= 0) { return; }
+    char* pipeline = (char*)"default<O1>";
+    if (opt_tiny) { pipeline = (char*)"default<Oz>"; }
+    else if (opt_size) { pipeline = (char*)"default<Os>"; }
+    else if (opt_level >= 3) { pipeline = (char*)"default<O3>"; }
+    else if (opt_level == 2) { pipeline = (char*)"default<O2>"; }
+    usz n = 0;
+    while (pipeline[n] != 0 && n + 1 < cap) { out[n] = pipeline[n]; n++; }
+    out[n] = 0;
+}
+
+fn bool m1_optimize_llvm(void* m, int opt_level, bool opt_size, bool opt_tiny, char** failure)
+{
+    if (failure != null) { *failure = null; }
+    if (m == null) { return true; }
+    char[512] pipeline_buf;
+    m1_pipeline_for(opt_level, opt_size, opt_tiny, &pipeline_buf[0], 512);
+    char* pipeline = &pipeline_buf[0];
+    // An empty pipeline means "no optimisation": that is -O0 with no --passes.
+    if (pipeline[0] == 0) { return true; }
+    void* opts = ll_create_pb_opts();
+    if (opts == null)
+    {
+        if (failure != null) { *failure = (char*)"could not create pass-builder options"; }
+        return false;
+    }
+    // PEAR 1 uses the same threshold by default, so a given -O tier means the
+    // same thing in both backends unless --inline-threshold overrides it.
+    ll_pb_set_inliner_threshold(opts, g_m1_inline_threshold);
+    // A target machine makes the pipeline target-aware: without one, vectorisers
+    // fall back to generic widths and skip target-specific cost decisions, which
+    // is a real difference on x86-64.
+    void* tm = m1_target_machine(m);
+    void* error = ll_run_passes(m, pipeline, tm, opts);
+    if (tm != null) { ll_dispose_tm(tm); }
+    bool ok = error == null;
+    if (!ok)
+    {
+        // LLVM 23: LLVMGetErrorMessage takes the Error BY VALUE and consumes it.
+        // Do not also call LLVMConsumeError -- that double-frees (PEAR 1 hit it
+        // as an out-of-bounds access inside LLVMConsumeError).
+        char* text = ll_get_err_msg(error);
+        if (failure != null) { *failure = text; }
+        else if (text != null) { ll_message_dispose(text); }
+    }
+    ll_dispose_pb_opts(opts);
+    return ok;
+}
 // Output modes: 0 = native executable, 1 = LLVM bitcode, 2 = textual LLVM IR.
-fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, char* temp_bc, char* temp_exe)
+fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, char* temp_bc, char* temp_exe, char* temp_obj)
 {
     int slash = -1;
     int dot = -1;
@@ -5356,6 +6596,8 @@ fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, cha
     if (stem + 4 >= cap) { return false; }
     for (usz i = 0; i < stem; i++) { out[i] = input[i]; }
     if (mode == 0) { out[stem] = 0; }
+    else if (mode == 3) { out[stem] = '.'; out[stem + 1] = 'o'; out[stem + 2] = 0; }
+    else if (mode == 4) { out[stem] = '.'; out[stem + 1] = 's'; out[stem + 2] = 0; }
     else
     {
         out[stem] = '.'; out[stem + 1] = mode == 1 ? 'b' : 'l'; out[stem + 2] = mode == 1 ? 'c' : 'l'; out[stem + 3] = 0;
@@ -5364,22 +6606,26 @@ fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, cha
     int ll_n = snprintf(temp_ll, cap, (char*)"%s.pear2-%ld.ll", out, pid);
     int bc_n = snprintf(temp_bc, cap, (char*)"%s.pear2-%ld.tmp.bc", out, pid);
     int exe_n = snprintf(temp_exe, cap, (char*)"%s.pear2-%ld.tmp.exe", out, pid);
-    return ll_n >= 0 && (usz)ll_n < cap && bc_n >= 0 && (usz)bc_n < cap && exe_n >= 0 && (usz)exe_n < cap;
+    int obj_n = snprintf(temp_obj, cap, (char*)"%s.pear2-%ld.tmp.o", out, pid);
+    return ll_n >= 0 && (usz)ll_n < cap && bc_n >= 0 && (usz)bc_n < cap && exe_n >= 0 && (usz)exe_n < cap &&
+           obj_n >= 0 && (usz)obj_n < cap;
 }
 fn void clear_stale_outputs(char* input)
 {
-    for (int mode = 0; mode <= 2; mode++)
+    for (int mode = 0; mode <= 4; mode++)
     {
         char[4096] out_path;
         char[4096] ll_path;
         char[4096] bc_tmp;
         char[4096] exe_tmp;
-        if (make_paths(input, mode, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0]))
+        char[4096] obj_tmp;
+        if (make_paths(input, mode, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
         {
             (void)remove(&out_path[0]);
             (void)remove(&ll_path[0]);
             (void)remove(&bc_tmp[0]);
             (void)remove(&exe_tmp[0]);
+            (void)remove(&obj_tmp[0]);
         }
     }
 }
@@ -5389,9 +6635,32 @@ fn int main(String[] args)
     bool quiet = false;
     bool emit_exe = true;
     bool emit_ll = false;
+    bool emit_obj = false;
+    bool emit_asm = false;
+    bool emit_native = false;
+    bool emit_native_entry = false;
+    bool verify_bc = false;
+    bool target_pinned = false;
     bool mode_seen = false;
+    bool print_pipeline = false;
+    // --check stops after the AIR verifier: it answers "is this program valid"
+    // without writing an artifact, which is what a CI gate wants.
+    bool check_only = false;
+    // --probe goes one gate further: it runs the whole IR emitter over every
+    // function and reports which ones the backend can lower, without needing
+    // LLVM at all. That is the difference between "the AIR is valid" and "this
+    // backend can compile it", and only the second answers the question a
+    // program actually asks.
+    bool probe_only = false;
+    int probe_ok = 0;
+    int probe_bad = 0;
     int opt_level = 2;
+    bool opt_size = false;
+    bool opt_tiny = false;
+    char*[16] inputs;
+    int input_count = 0;
     bool show_opt_stats = false;
+    bool linkage_pinned = false;
     bool usage_error = false;
     char* bad_option = null;
     for (usz i = 1; i < args.len; i++)
@@ -5400,29 +6669,111 @@ fn int main(String[] args)
         if (same(a, "--quiet")) { quiet = true; }
         else if (same(a, "--emit-exe"))
         {
-            if (mode_seen && (emit_ll || !emit_exe)) { usage_error = true; }
-            else { emit_exe = true; emit_ll = false; mode_seen = true; }
+            if (mode_seen && (emit_ll || emit_obj || emit_asm || emit_native || !emit_exe)) { usage_error = true; }
+            else { emit_exe = true; emit_ll = false; emit_obj = false; emit_asm = false; emit_native = false; mode_seen = true; }
         }
         else if (same(a, "--emit-bc"))
         {
-            if (mode_seen && (emit_ll || emit_exe)) { usage_error = true; }
-            else { emit_exe = false; emit_ll = false; mode_seen = true; }
+            if (mode_seen && (emit_ll || emit_obj || emit_asm || emit_native || emit_exe)) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = false; emit_native = false; mode_seen = true; }
         }
         // --emit-ll publishes the verified textual IR after the optimization
         // pipeline, so -O0 passes and lowered shapes can be inspected directly.
         else if (same(a, "--emit-ll"))
         {
             if (mode_seen) { usage_error = true; }
-            else { emit_exe = false; emit_ll = true; mode_seen = true; }
+            else { emit_exe = false; emit_ll = true; emit_obj = false; emit_asm = false; emit_native = false; mode_seen = true; }
         }
-        else if (same(a, "-O0")) { opt_level = 0; }
-        else if (same(a, "-O1")) { opt_level = 1; }
-        else if (same(a, "-O2")) { opt_level = 2; }
-        else if (same(a, "-O3")) { opt_level = 3; }
+        // --emit-obj publishes the machine-code object LLVM's backend produced
+        // in process: the same code the executable is linked from, with no
+        // linker involved.
+        else if (same(a, "--emit-obj"))
+        {
+            if (mode_seen) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = true; emit_asm = false; emit_native = false; mode_seen = true; }
+        }
+        // --emit-asm publishes the assembly listing the object was assembled
+        // from. It is the same target-machine call as --emit-obj with the
+        // assembly file type, not a second compilation, so a listing can never
+        // show something other than what the object contains.
+        else if (same(a, "--emit-asm"))
+        {
+            if (mode_seen) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = true; emit_native = false; mode_seen = true; }
+        }
+        // --emit-native compiles to an x86-64 ELF object with this compiler's
+        // own pipeline: AIR -> PIR -> machine code -> ELF. LLVM is not entered at
+        // all -- no context, no IR text, no target machine.
+        else if (same(a, "--emit-native"))
+        {
+            if (mode_seen) { usage_error = true; }
+            else { emit_exe = false; emit_ll = false; emit_obj = false; emit_asm = false; emit_native = true; mode_seen = true; }
+        }
+        // --native-entry adds a `_start` that calls `main` and exits with its
+        // result, so `ld prog.o -o prog` produces a runnable program with no C
+        // runtime and no linker script.
+        else if (same(a, "--native-entry")) { emit_native_entry = true; }
+        // --verify-bc takes a .bc as its input instead of a .air: load, parse,
+        // verify, report. It writes no artifact and touches none, so it can check
+        // a file that has been copied or cached long after the compile.
+        else if (same(a, "--verify-bc")) { verify_bc = true; }
+        else if (same(a, "-O0")) { opt_level = 0; opt_size = false; opt_tiny = false; }
+        else if (same(a, "-O1")) { opt_level = 1; opt_size = false; opt_tiny = false; }
+        else if (same(a, "-O2")) { opt_level = 2; opt_size = false; opt_tiny = false; }
+        else if (same(a, "-O3")) { opt_level = 3; opt_size = false; opt_tiny = false; }
+        // -Os is -O2's AIR pipeline with LLVM's size-oriented pipeline, which is
+        // exactly what a user of -Os gets from clang: the same IR-level
+        // guarantees, a different cost model.
+        else if (same(a, "-Os")) { opt_level = 2; opt_size = true; opt_tiny = false; }
+        else if (same(a, "--internalize")) { g_m1_internalize = true; linkage_pinned = true; }
+        // --no-internalize keeps every definition externally visible, which is
+        // what a program that is linked against by name from outside needs.
+        else if (same(a, "--no-internalize")) { g_m1_internalize = false; linkage_pinned = true; }
         else if (same(a, "--stats")) { show_opt_stats = true; }
+        // -Oz is -O2's AIR tier with LLVM's minimum-size pipeline. It is a tier
+        // like -Os, not a separate mode.
+        else if (same(a, "-Oz")) { opt_level = 2; opt_tiny = true; opt_size = false; }
+        // Target tuning. `native` is resolved against the host after parsing, so
+        // --print-pipeline can report what it resolved to.
+        else if (m1_has_prefix(a, "--cpu=")) { g_m1_cpu = a + 6; }
+        else if (m1_has_prefix(a, "--features=")) { g_m1_features = a + 11; }
+        // Relocation model. PIC is what a shared library needs; the default stays
+        // static, which is what the executable path has always used.
+        else if (same(a, "-fPIC")) { g_m1_reloc = 2; }
+        else if (same(a, "-fno-PIC")) { g_m1_reloc = LLVM_RELOC_STATIC; }
+        else if (m1_has_prefix(a, "--reloc="))
+        {
+            char* rname = a + 8;
+            if (same(rname, "static")) { g_m1_reloc = LLVM_RELOC_STATIC; }
+            else if (same(rname, "pic")) { g_m1_reloc = 2; }
+            else if (same(rname, "dynamic-no-pic")) { g_m1_reloc = 3; }
+            else if (same(rname, "default")) { g_m1_reloc = 0; }
+            else { usage_error = true; bad_option = a; }
+        }
+        // An explicit pass pipeline replaces the -On default. `verify` is still
+        // appended when it is missing (see m1_pipeline_for).
+        else if (m1_has_prefix(a, "--passes="))
+        {
+            g_m1_pass_pipeline = a + 9;
+            if (g_m1_pass_pipeline[0] == 0) { usage_error = true; bad_option = a; }
+        }
+        else if (m1_has_prefix(a, "--inline-threshold="))
+        {
+            long value = m1_parse_int(a + 19);
+            // A negative threshold is not a smaller threshold: it is how the pass
+            // builder spells "never inline", so 0 is the floor a user can ask for.
+            if (value < 0 || value > 1000000) { usage_error = true; bad_option = a; }
+            else { g_m1_inline_threshold = (int)value; }
+        }
+        // --print-pipeline answers "what would this compile actually run?" and
+        // writes no artifact, so a build can record it and a human can diff it.
+        else if (same(a, "--print-pipeline")) { print_pipeline = true; }
+        else if (same(a, "--check")) { check_only = true; }
+        else if (same(a, "--probe")) { probe_only = true; }
         else if (m1_has_prefix(a, "--target="))
         {
             char* tname = a + 9;
+            target_pinned = true;
             if (same(tname, "x86_64"))
             {
                 g_m1_target_ptr_bits = 64;
@@ -5441,8 +6792,11 @@ fn int main(String[] args)
         }
         else if (a[0] != '-')
         {
-            if (input != null) { usage_error = true; }
-            else { input = a; }
+            // Several inputs compile into one module. `.air` files are parsed and
+            // lowered; `.bc` files are linked in as they are, which is what makes
+            // "compile this and link that prebuilt library" one command.
+            if (input_count >= 16) { usage_error = true; }
+            else { inputs[input_count] = a; input_count++; }
         }
         else { usage_error = true; bad_option = a; }
     }
@@ -5453,24 +6807,164 @@ fn int main(String[] args)
         else { printf("pear2c: invalid arguments; choose one input and one output mode\n"); }
         return 2;
     }
-    if (input == null)
+    if (emit_native_entry && !emit_native)
     {
-        printf("usage: pear2c FILE.air [--emit-exe|--emit-bc|--emit-ll] [-O0|-O1|-O2|-O3] [--target=x86_64|wasm32-freestanding] [--stats] [--quiet]\n");
+        printf("pear2c: --native-entry only applies to --emit-native\n");
         return 2;
     }
-    if (g_m1_target_freestanding && emit_exe)
+    // The primary input names the output: the first `.air` in the list, or the
+    // first input at all when the command is pure bitcode linking. Every other
+    // input contributes code, not names.
+    if (input_count > 0)
+    {
+        input = inputs[0];
+        for (int i = 0; i < input_count; i++)
+        {
+            if (!m1_is_bitcode_path(inputs[i])) { input = inputs[i]; break; }
+        }
+    }
+    // Which kinds of input this run has, decided once: it drives multi-unit
+    // compilation, bitcode linking, and whether a program mode can be satisfied.
+    int air_units = 0;
+    int bc_links = 0;
+    m1_count_inputs(&inputs[0], input_count, &air_units, &bc_links);
+    // `--cpu=native` and `--features=native` are resolved here rather than at
+    // parse time so that --print-pipeline can report the concrete values and so
+    // that a typo in a file name is reported before the host is queried.
+    // LLVM returns these as freshly allocated C strings that the caller owns.
+    // They are wanted until the process exits and are read by the target machine,
+    // the attribute emitter and --stats, so they are deliberately not freed:
+    // freeing them after the last use would buy nothing and there is no single
+    // "last use" to free them at.
+    // A host query can fail (LLVM returns null when the host triple has no
+    // registered target); falling back to the empty string -- "generic" -- is
+    // what an unset --cpu already means, so the failure is not fatal.
+    if (same(g_m1_cpu, (char*)"native"))
+    {
+        char* host_cpu = ll_host_cpu_name();
+        g_m1_cpu = host_cpu == null ? (char*)"" : host_cpu;
+    }
+    if (same(g_m1_features, (char*)"native"))
+    {
+        char* host_features = ll_host_cpu_features();
+        g_m1_features = host_features == null ? (char*)"" : host_features;
+    }
+    // --print-pipeline writes nothing and needs no input: it answers what the
+    // rest of the flags would do.
+    if (print_pipeline)
+    {
+        char[512] shown;
+        m1_pipeline_for(opt_level, opt_size, opt_tiny, &shown[0], 512);
+        char* reloc = m1_reloc_name(g_m1_reloc);
+        printf("pear2c: pipeline=%s target=%s cpu=%s features=%s reloc=%s inline-threshold=%d inputs=%d\n",
+               shown[0] == 0 ? (char*)"none" : &shown[0], g_m1_target_triple,
+               g_m1_cpu[0] == 0 ? (char*)"generic" : g_m1_cpu,
+               g_m1_features[0] == 0 ? (char*)"-" : g_m1_features,
+               reloc, g_m1_inline_threshold, input_count);
+        return 0;
+    }
+    if (input == null)
+    {
+        printf("usage: pear2c FILE.air [FILE.air...] [FILE.bc...] [--emit-exe|--emit-bc|--emit-obj|--emit-asm|--emit-ll|--emit-native]\n");
+        printf("              [-O0|-O1|-O2|-O3|-Os|-Oz] [--target=x86_64|wasm32-freestanding] [--cpu=NAME|native]\n");
+        printf("              [--features=LIST|native] [--reloc=static|pic|dynamic-no-pic|default] [-fPIC]\n");
+        printf("              [--passes=PIPELINE] [--inline-threshold=N] [--print-pipeline] [--check] [--probe]\n");
+        printf("              [--internalize|--no-internalize] [--native-entry] [--stats] [--quiet]\n");
+        printf("       pear2c FILE.bc [FILE.bc...] --verify-bc [--target=...] [--quiet]\n");
+        return 2;
+    }
+    // --verify-bc reads an artifact and writes none, so it runs before anything
+    // computes output paths: clear_stale_outputs would delete the very file the
+    // user asked to have checked.
+    if (verify_bc)
+    {
+        if (mode_seen)
+        {
+            printf("pear2c: --verify-bc checks an existing file and cannot be combined with an --emit-* mode\n");
+            return 2;
+        }
+        int worst = 0;
+        for (int i = 0; i < input_count; i++)
+        {
+            int one = m1_verify_bitcode_file(inputs[i], target_pinned ? g_m1_target_triple : null, quiet);
+            if (one != 0) { worst = one; }
+        }
+        // More than one artifact is a question about linking them, so answer it:
+        // two definitions of one symbol cannot be linked, and saying so here is
+        // cheaper than saying so from the linker later.
+        if (worst == 0 && input_count > 1)
+        {
+            for (int i = 0; i < input_count && worst == 0; i++)
+            {
+                for (int j = i + 1; j < input_count && worst == 0; j++)
+                {
+                    char[512] clash;
+                    if (m1_shared_definition(inputs[i], inputs[j], &clash[0], 512) != null)
+                    {
+                        printf("pear2c: %s and %s both define `%s`, so they cannot be linked together\n",
+                               inputs[i], inputs[j], &clash[0]);
+                        worst = 3;
+                    }
+                }
+            }
+            if (worst == 0 && !quiet)
+            {
+                printf("pear2c: %d artifacts define no shared symbols and can be linked\n", input_count);
+            }
+        }
+        return worst;
+    }
+    // Default linkage policy per output mode; an explicit flag above wins.
+    if (!linkage_pinned) { g_m1_internalize = emit_exe; }
+    if (g_m1_target_freestanding && (emit_exe || emit_obj))
     {
         clear_stale_outputs(input);
         printf("pear2c: --target=wasm32-freestanding emits LLVM IR or bitcode only; use --emit-ll/--emit-bc and link with a wasm toolchain\n");
         return 2;
     }
+    // The native backend reads AIR, not LLVM bitcode, so a .bc input would be
+    // silently dropped rather than linked. Refuse instead of compiling half of
+    // what the user asked for.
+    if (emit_native && bc_links > 0)
+    {
+        clear_stale_outputs(input);
+        printf("pear2c: --emit-native cannot link .bc inputs; use --emit-bc/--emit-obj for bitcode linking\n");
+        return 2;
+    }
+    // --check never writes and never links: a .bc input would be reported as
+    // checked without having been read, so it is refused instead.
+    if (check_only && bc_links > 0)
+    {
+        printf("pear2c: --check validates AIR only; use --verify-bc for a .bc input\n");
+        return 2;
+    }
+    if (check_only && mode_seen)
+    {
+        printf("pear2c: --check writes no artifact and cannot be combined with an --emit-* mode\n");
+        return 2;
+    }
+    if (probe_only && mode_seen)
+    {
+        printf("pear2c: --probe writes no artifact and cannot be combined with an --emit-* mode\n");
+        return 2;
+    }
+    // --probe answers a question about this backend and the AIR it reads. A .bc
+    // input it never opens would quietly make the answer narrower than the
+    // program, so it is refused for the same reason --check refuses one.
+    if (probe_only && bc_links > 0)
+    {
+        printf("pear2c: --probe lowers AIR only; a .bc input is never read in this mode\n");
+        return 2;
+    }
     // Clear artifacts from either output mode before any validation can fail.
-    clear_stale_outputs(input);
+    // --check is the exception: it must not delete what it is not replacing.
+    if (!check_only && !probe_only) { clear_stale_outputs(input); }
     char[4096] out_path;
     char[4096] ll_path;
     char[4096] bc_tmp;
     char[4096] exe_tmp;
-    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : 1), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0]))
+    char[4096] obj_tmp;
+    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : ((emit_obj || emit_native) ? 3 : (emit_asm ? 4 : 1))), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
     {
         printf("pear2c: output path too long\n"); return 2;
     }
@@ -5478,8 +6972,113 @@ fn int main(String[] args)
     // both modes before parsing, so no failure can leave a prior artifact.
     AirArena arena;
     if (!arena.init()) { printf("pear2c: out of memory\n"); return 3; }
+    // ── multi-unit compilation ─────────────────────────────────────────────
+    //
+    // Every `.air` input is parsed into its own arena and merged into ONE module
+    // before anything else runs, so the AIR optimizer and LLVM both see the whole
+    // program: a call from unit A into unit B can be inlined, and a name defined
+    // once is defined once. `.bc` inputs are not parsed as AIR at all; they are
+    // linked into the parsed module further down, by LLVM itself.
+    //
+    // The merged module owns nothing of its own except the declaration list: each
+    // declaration stays in the arena it was parsed into, and those arenas live
+    // until the compiler exits. That is why the unit arrays are heap-allocated --
+    // sixteen AirModules would be half a megabyte of stack.
     AirModule mod;
-    if (!air_read::read_file(input, &arena, &mod, false)) { arena.destroy(); return 1; }
+    if (!mod.init(&arena, (char*)"Main", input))
+    {
+        printf("pear2c: out of memory\n");
+        arena.destroy();
+        return 3;
+    }
+    AirArena* unit_arenas = null;
+    AirModule* unit_mods = null;
+    if (air_units > 0)
+    {
+        unit_arenas = (AirArena*)malloc((usz)air_units * AirArena::size);
+        unit_mods = (AirModule*)malloc((usz)air_units * AirModule::size);
+        if (unit_arenas == null || unit_mods == null)
+        {
+            printf("pear2c: out of memory\n");
+            arena.destroy();
+            return 3;
+        }
+    }
+    int units_read = 0;
+    for (int ui = 0; ui < input_count; ui++)
+    {
+        if (m1_is_bitcode_path(inputs[ui])) { continue; }
+        if (units_read >= air_units) { break; }
+        AirArena* ua = &unit_arenas[units_read];
+        AirModule* um = &unit_mods[units_read];
+        units_read++;
+        if (!ua.init())
+        {
+            printf("pear2c: out of memory\n");
+            arena.destroy();
+            return 3;
+        }
+        if (!air_read::read_file(inputs[ui], ua, um, false))
+        {
+            printf("pear2c: could not read %s\n", inputs[ui]);
+            arena.destroy();
+            return 1;
+        }
+        // Each unit is verified on its own first, so an invalid unit is reported
+        // against the file it came from rather than against the merged module.
+        int[8] unit_counts;
+        int unit_invalid = air_verify::verify_module(um, &unit_counts[0], true, 0);
+        if (unit_invalid != 0)
+        {
+            printf("pear2c: refusing invalid AIR in %s (violations=%d; V1=%d V2=%d V3=%d V4=%d)\n",
+                   inputs[ui], unit_invalid, unit_counts[0], unit_counts[1], unit_counts[2], unit_counts[3]);
+            arena.destroy();
+            return 1;
+        }
+        // Merge. Module records are per unit and are not part of the program, so
+        // they stay behind; an external declaration is merged once by name --
+        // the first unit to declare a symbol defines its signature, and every
+        // unit carries the same three prelude declarations for libc.
+        for (usz di = 0; di < um.decl_count; di++)
+        {
+            AirDecl* decl = um.decls[di];
+            if (decl == null || decl.tag == ADECL_MODULE) { continue; }
+            // An import names nothing in the emitted module; two units importing
+            // the same module is not a conflict, it is the normal case.
+            if (decl.tag == ADECL_DECLARE || decl.tag == ADECL_IMPORT)
+            {
+                if (m1_decl_named(&mod, decl.name) != null) { continue; }
+            }
+            if (m1_type_decl_named(&mod, decl.name) != null)
+            {
+                printf("pear2c: `%s` is declared as a type in more than one input (%s and an earlier unit), and two type definitions cannot be merged\n",
+                       decl.name == null ? (char*)"?" : decl.name, inputs[ui]);
+                arena.destroy();
+                return 3;
+            }
+            if (m1_defined_named(&mod, decl.name) != null)
+            {
+                printf("pear2c: `%s` is defined in more than one input (%s and an earlier unit)\n",
+                       decl.name == null ? (char*)"?" : decl.name, inputs[ui]);
+                arena.destroy();
+                return 3;
+            }
+            if (mod.decl_count >= 4096)
+            {
+                printf("pear2c: more than 4096 declarations across the inputs\n");
+                arena.destroy();
+                return 3;
+            }
+            mod.add_decl(decl);
+        }
+        if (um.low) { mod.low = true; }
+    }
+    if (air_units > 0 && units_read == 0)
+    {
+        printf("pear2c: no .air input was read\n");
+        arena.destroy();
+        return 1;
+    }
     int[8] counts;
     int invalid = air_verify::verify_module(&mod, &counts[0], true, 0);
     if (invalid != 0)
@@ -5487,6 +7086,22 @@ fn int main(String[] args)
         printf("pear2c: refusing invalid AIR (violations=%d; V1=%d V2=%d V3=%d V4=%d)\n",
                invalid, counts[0], counts[1], counts[2], counts[3]);
         arena.destroy(); return 1;
+    }
+    if (check_only)
+    {
+        // The merged module has already been verified, so this is the same
+        // verdict a full compile would reach at its first gate -- only faster,
+        // and without touching the filesystem.
+        printf("pear2c: %s checks clean (%d declarations, %d .air unit(s), violations=0)\n",
+               input, (int)mod.decl_count, air_units);
+        if (unit_arenas != null)
+        {
+            for (int i = 0; i < units_read; i++) { unit_arenas[i].destroy(); }
+            free(unit_arenas);
+        }
+        if (unit_mods != null) { free(unit_mods); }
+        arena.destroy();
+        return 0;
     }
     pear2_opt::OptStats opt_stats;
     int opt_passes = 0;
@@ -5497,16 +7112,29 @@ fn int main(String[] args)
     opt_stats.shift_combinations = 0;
     opt_stats.branch_reductions = 0;
     opt_stats.let_specializations = 0;
+    opt_stats.dead_bindings = 0;
+    opt_stats.propagated_bindings = 0;
+    opt_stats.pure_dead_bindings = 0;
+    opt_stats.cse_replacements = 0;
+    opt_stats.loop_eliminations = 0;
+    opt_stats.literal_matches = 0;
+    opt_stats.dead_commands = 0;
+    opt_stats.reassociations = 0;
+    opt_stats.self_folds = 0;
+    opt_stats.match_folds = 0;
+    opt_stats.copy_bindings = 0;
+    opt_stats.drop_dead = false;
+    opt_stats.propagate_bindings = false;
     opt_stats.arena = null;
     if (opt_level > 0)
     {
-        // Higher levels repeat the same conservative AIR pass to a bounded
-        // fixed point; later passes can expose opportunities created by a
-        // prior rewrite without changing the fail-closed rewrite rules.
+        // The tier selects WHICH passes run (see pear2_opt::optimize_module_at);
+        // higher tiers then repeat that set to a bounded fixed point, because a
+        // later pass can expose opportunities the next iteration can use.
         int max_opt_iterations = opt_level == 1 ? 1 : (opt_level == 2 ? 4 : 8);
         for (int iteration = 0; iteration < max_opt_iterations; iteration++)
         {
-            pear2_opt::OptStats pass_stats = pear2_opt::optimize_module(&mod);
+            pear2_opt::OptStats pass_stats = pear2_opt::optimize_module_at(&mod, opt_level);
             opt_passes++;
             opt_stats.rewrites += pass_stats.rewrites;
             opt_stats.constant_folds += pass_stats.constant_folds;
@@ -5515,6 +7143,17 @@ fn int main(String[] args)
             opt_stats.shift_combinations += pass_stats.shift_combinations;
             opt_stats.branch_reductions += pass_stats.branch_reductions;
             opt_stats.let_specializations += pass_stats.let_specializations;
+            opt_stats.dead_bindings += pass_stats.dead_bindings;
+            opt_stats.propagated_bindings += pass_stats.propagated_bindings;
+            opt_stats.pure_dead_bindings += pass_stats.pure_dead_bindings;
+            opt_stats.cse_replacements += pass_stats.cse_replacements;
+            opt_stats.loop_eliminations += pass_stats.loop_eliminations;
+            opt_stats.literal_matches += pass_stats.literal_matches;
+            opt_stats.dead_commands += pass_stats.dead_commands;
+            opt_stats.reassociations += pass_stats.reassociations;
+            opt_stats.self_folds += pass_stats.self_folds;
+            opt_stats.match_folds += pass_stats.match_folds;
+            opt_stats.copy_bindings += pass_stats.copy_bindings;
             if (pass_stats.rewrites == 0) { break; }
         }
         int[8] post_counts;
@@ -5528,10 +7167,25 @@ fn int main(String[] args)
     }
     if (show_opt_stats)
     {
-        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u level=%d passes=%d\n",
+        char* pipe_name = (char*)"none";
+        if (opt_tiny) { pipe_name = (char*)"Oz"; }
+        else if (opt_size) { pipe_name = (char*)"Os"; }
+        else if (opt_level == 1) { pipe_name = (char*)"O1"; }
+        else if (opt_level == 2) { pipe_name = (char*)"O2"; }
+        else if (opt_level >= 3) { pipe_name = (char*)"O3"; }
+        if (g_m1_pass_pipeline != null) { pipe_name = (char*)"custom"; }
+        printf("pear2c: optimization %s; rewrites=%u folds=%u operands=%u strength=%u shift-combinations=%u branches=%u let-specializations=%u dead=%u propagated=%u pure-dead=%u cse=%u loops=%u matches=%u dead-cmds=%u reassoc=%u self=%u match-folds=%u copies=%u level=%d pipe=%s passes=%d linkage=%s\n",
                opt_level > 0 ? "enabled" : "disabled", opt_stats.rewrites, opt_stats.constant_folds,
                opt_stats.operand_rewrites, opt_stats.strength_reductions, opt_stats.shift_combinations,
-               opt_stats.branch_reductions, opt_stats.let_specializations, opt_level, opt_passes);
+               opt_stats.branch_reductions, opt_stats.let_specializations, opt_stats.dead_bindings,
+               opt_stats.propagated_bindings, opt_stats.pure_dead_bindings, opt_stats.cse_replacements,
+               opt_stats.loop_eliminations, opt_stats.literal_matches, opt_stats.dead_commands,
+               opt_stats.reassociations, opt_stats.self_folds, opt_stats.match_folds, opt_stats.copy_bindings,
+               opt_level, pipe_name, opt_passes, g_m1_internalize ? "internal" : "external");
+        printf("pear2c: target cpu=%s features=%s reloc=%s inline-threshold=%d inputs=%d\n",
+               g_m1_cpu[0] == 0 ? (char*)"generic" : g_m1_cpu,
+               g_m1_features[0] == 0 ? (char*)"-" : g_m1_features,
+               m1_reloc_name(g_m1_reloc), g_m1_inline_threshold, input_count);
     }
     // AIR carries candidate claims, never trusted backend facts; recompute facts
     // on the exact post-optimization graph consumed by the lowering pass.
@@ -5546,18 +7200,49 @@ fn int main(String[] args)
             m1_infer_record_params_walk(d, d.def_body, &mod.decls[0], mod.decl_count, &arena, 0);
         }
     }
-    // The program entry module is the declarations before the first module
-    // record. PEAR2 M1 lowers this module's functions; imported/prelude modules
-    // remain available in parsed AIR but are not emitted as unrelated bodies.
-    usz root_decl_count = mod.decl_count;
+    // Every declaration in the parsed file is part of the program. The root
+    // module's declarations come first; an imported or prelude module follows a
+    // module record. This used to stop at the first module record, which meant a
+    // program that called into an imported module emitted a *call* to every one
+    // of its functions and no body for any of them -- the link failed with an
+    // undefined symbol far from the compile that caused it, and a program that
+    // merely imported something got a module smaller than its source. Emitting
+    // the whole file is what makes "compile a program that uses a library" mean
+    // what it says.
+    // Two bodies for one name is not valid IR, and refusing is better than
+    // letting LLVM report a redefinition with no position attached. The same is
+    // true of types: `%point = type {...}` twice is a parse error, and the
+    // parser reports the type name and neither definition.
     for (usz i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
-        if (d != null && d.tag == ADECL_MODULE) { root_decl_count = i; break; }
+        if (d == null || d.name == null) { continue; }
+        bool d_is_value = d.tag == ADECL_DEF || d.tag == ADECL_DEFCO || d.tag == ADECL_GLOBAL;
+        bool d_is_type = d.tag == ADECL_DATA || d.tag == ADECL_CODATA || d.tag == ADECL_EFFECT;
+        if (!d_is_value && !d_is_type) { continue; }
+        for (usz j = i + 1; j < mod.decl_count; j++)
+        {
+            AirDecl* e = mod.decls[j];
+            if (e == null || e.name == null || !same(e.name, d.name)) { continue; }
+            bool e_is_value = e.tag == ADECL_DEF || e.tag == ADECL_DEFCO || e.tag == ADECL_GLOBAL;
+            bool e_is_type = e.tag == ADECL_DATA || e.tag == ADECL_CODATA || e.tag == ADECL_EFFECT;
+            if (d_is_value && e_is_value)
+            {
+                printf("%s:%d:%d: pear2c: `%s` is defined twice in this file (again at %d:%d); one module may define a symbol once\n",
+                       input, e.source_line, e.source_col, d.name, d.source_line, d.source_col);
+                arena.destroy(); return 3;
+            }
+            if (d_is_type && e_is_type)
+            {
+                printf("%s:%d:%d: pear2c: type `%s` is declared twice in this file (again at %d:%d); two identified types cannot share a name\n",
+                       input, e.source_line, e.source_col, d.name, d.source_line, d.source_col);
+                arena.destroy(); return 3;
+            }
+        }
     }
     AirDecl* main_decl = null;
     int main_count = 0;
-    for (usz i = 0; i < root_decl_count; i++)
+    for (usz i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
         if (d == null || d.tag == ADECL_MODULE) { continue; }
@@ -5569,7 +7254,7 @@ fn int main(String[] args)
             {
                 AirEffectOp* eo = d.ops[oi];
                 if (eo == null || eo.name == null || eo.op_ty == null) { effect_ok = false; break; }
-                if (eo.op_ty.tag != ATYP_INFER && !m1_backend_type(eo.op_ty, &mod.decls[0], root_decl_count, 0)) { effect_ok = false; break; }
+                if (eo.op_ty.tag != ATYP_INFER && !m1_backend_type(eo.op_ty, &mod.decls[0], mod.decl_count, 0)) { effect_ok = false; break; }
             }
             if (!effect_ok)
             {
@@ -5581,7 +7266,7 @@ fn int main(String[] args)
         if (d.tag == ADECL_GLOBAL)
         {
             if (!mod.low || !m1_safe_name(d.name) || !m1_safe_name(m1_link_name(d)) || d.typaram_count != 0 ||
-                !m1_backend_type(d.ret_ty, &mod.decls[0], root_decl_count, 0))
+                !m1_backend_type(d.ret_ty, &mod.decls[0], mod.decl_count, 0))
             {
                 printf("%s:%d:%d: pear2c: unsupported AIR global declaration `%s`\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
                 arena.destroy(); return 3;
@@ -5602,7 +7287,7 @@ fn int main(String[] args)
                 printf("%s:%d:%d: pear2c: unsupported global attribute (only power-of-two align up to 4096 is supported)\n", input, d.source_line, d.source_col);
                 arena.destroy(); return 3;
             }
-            for (usz j = 0; j < root_decl_count; j++)
+            for (usz j = 0; j < mod.decl_count; j++)
             {
                 if (j == i) { continue; }
                 AirDecl* prior = mod.decls[j];
@@ -5618,7 +7303,7 @@ fn int main(String[] args)
         if (d.tag == ADECL_DATA)
         {
             AirTyp nominal; nominal.tag = ATYP_NOMINAL; nominal.name = d.name; nominal.arg_count = 0;
-            if (!m1_backend_type(&nominal, &mod.decls[0], root_decl_count, 0))
+            if (!m1_backend_type(&nominal, &mod.decls[0], mod.decl_count, 0))
             {                printf("%s:%d:%d: pear2c: unsupported data form in declaration `%s`: PEAR2 supports plain product records and nullary tagged enums; payload-bearing, generic, attributed, or otherwise complex variants are unsupported\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
                 arena.destroy(); return 3;
             }
@@ -5632,7 +7317,7 @@ fn int main(String[] args)
                 arena.destroy(); return 3;
             }
             AirTyp nominal; nominal.tag = ATYP_NOMINAL; nominal.name = d.name; nominal.arg_count = 0;
-            if (!m1_backend_type(&nominal, &mod.decls[0], root_decl_count, 0))
+            if (!m1_backend_type(&nominal, &mod.decls[0], mod.decl_count, 0))
             {
                 printf("%s:%d:%d: pear2c: unsupported codata record field types in declaration `%s`\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
                 arena.destroy(); return 3;
@@ -5649,10 +7334,10 @@ fn int main(String[] args)
             printf("pear2c: function name `%s` is reserved by a required LLVM intrinsic\n", d.name);
             arena.destroy(); return 3;
         }
-        bool signature_types_ok = d.ret_ty == null || d.ret_ty.tag == ATYP_INFER || m1_backend_type(d.ret_ty, &mod.decls[0], root_decl_count, 0);
+        bool signature_types_ok = d.ret_ty == null || d.ret_ty.tag == ATYP_INFER || m1_backend_type(d.ret_ty, &mod.decls[0], mod.decl_count, 0);
         for (usz p = 0; p < d.param_count; p++)
         {
-            if (d.params[p] == null || (d.params[p].ty != null && d.params[p].ty.tag != ATYP_INFER && !m1_backend_type(d.params[p].ty, &mod.decls[0], root_decl_count, 0))) { signature_types_ok = false; }
+            if (d.params[p] == null || (d.params[p].ty != null && d.params[p].ty.tag != ATYP_INFER && !m1_backend_type(d.params[p].ty, &mod.decls[0], mod.decl_count, 0))) { signature_types_ok = false; }
         }
         if (!m1_safe_name(d.name) || !m1_function_signature(d) || d.typaram_count != 0 || !signature_types_ok)
         {
@@ -5683,74 +7368,256 @@ fn int main(String[] args)
     bool ignored_main_parameter = main_decl != null && main_decl.param_count == 1 && main_decl.params[0] != null &&
                                   same(main_decl.params[0].name, "_") &&
                                   (main_decl.params[0].ty == null || main_decl.params[0].ty.tag == ATYP_INFER);
-    if (main_count != 1 || main_decl == null || (main_decl.param_count != 0 && !ignored_main_parameter) ||
-        (main_decl.ret_ty != null && main_decl.ret_ty.tag != ATYP_INFER && (!m1_integer_type(main_decl.ret_ty) || m1_int_bits(main_decl.ret_ty) != 64)))
+    // `main` is required only when this run has to produce a *program*: an
+    // executable, or a native object with an entry stub that calls main. A library
+    // published as bitcode, object, listing or IR may define no main at all --
+    // that is the ordinary shape of a library, and demanding one made --emit-bc
+    // useless for anything but a whole program.
+    bool needs_main = emit_exe || (emit_native && emit_native_entry);
+    if (main_count > 1)
     {
-        printf("pear2c: M1 requires exactly one zero-argument definition of `main`\n");
+        printf("pear2c: more than one definition of `main`\n");
         arena.destroy(); return 3;
     }
-    void* f = fopen(&ll_path[0], "w");
-    if (f == null) { printf("pear2c: cannot create temporary LLVM IR\n"); arena.destroy(); return 3; }
-    fprintf(f, mod.low ? (char*)"; PEAR 2: AIR 3 globals, strings and typed-memory lowering\n" : (char*)"; PEAR 2: scalar and local aggregate lowering with direct calls\n");    fprintf(f, "target datalayout = \"%s\"\ntarget triple = \"%s\"\n", g_m1_target_datalayout, g_m1_target_triple);
+    if (main_decl != null &&
+        ((main_decl.param_count != 0 && !ignored_main_parameter) ||
+         (main_decl.ret_ty != null && main_decl.ret_ty.tag != ATYP_INFER && (!m1_integer_type(main_decl.ret_ty) || m1_int_bits(main_decl.ret_ty) != 64))))
+    {
+        printf("pear2c: M1 requires a zero-argument definition of `main` returning i64\n");
+        arena.destroy(); return 3;
+    }
+    // When bitcode is linked in, `main` may be defined there rather than in the
+    // AIR, so the requirement is checked against the linked module below instead
+    // of against the AIR declaration list.
+    if (needs_main && main_decl == null && bc_links == 0)
+    {
+        printf("pear2c: %s needs a definition of `main`; compile a library with --emit-bc, --emit-obj or --emit-ll\n",
+               emit_exe ? (char*)"--emit-exe" : (char*)"--emit-native --native-entry");
+        arena.destroy(); return 3;
+    }
+    // ── the native path ────────────────────────────────────────────────────
+    //
+    // Everything above this point is shared with the LLVM path: the same AIR, the
+    // same checks, the same diagnostics. From here the two part company. The
+    // native path builds PIR from the AIR declarations, selects x86-64 bytes for
+    // every instruction, attaches relocations, and serialises an ELF object --
+    // all in this process, with no textual IR anywhere in the pipeline.
+    //
+    // The speed claim is not a hope: the LLVM path prints a module, copies it
+    // into an LLVM buffer, parses it, verifies twice, runs a pass pipeline, and
+    // drives a target machine. This path appends bytes to a growing buffer and
+    // writes it once.
+    if (emit_native)
+    {
+        char* native_data = null;
+        usz native_size = 0;
+        char* fail_name = null;
+        char* fail_message = null;
+        int fail_line = 0;
+        int fail_col = 0;
+        if (!nat_emit_module(&mod.decls[0], mod.decl_count, emit_native_entry, &native_data, &native_size,
+                             &fail_name, &fail_line, &fail_col, &fail_message))
+        {
+            if (fail_name != null && fail_message != null)
+            {
+                printf("%s:%d:%d: pear2c: function `%s` is outside the native subset: %s\n",
+                       input, fail_line, fail_col, fail_name, fail_message);
+            }
+            else
+            {
+                printf("pear2c: the native backend could not emit this module\n");
+            }
+            arena.destroy();
+            return 3;
+        }
+        // Written through the same temporary-then-rename path every other output
+        // mode uses, so a failed write cannot leave a half-finished object where a
+        // build system expects a complete one.
+        void* nf = fopen(&obj_tmp[0], (char*)"wb");
+        if (nf == null)
+        {
+            printf("pear2c: cannot open the native object for writing\n");
+            arena.destroy();
+            return 3;
+        }
+        usz wrote = native_size == 0 ? 0 : fwrite(native_data, 1, native_size, nf);
+        int closed = fclose(nf);
+        if (wrote != native_size || closed != 0)
+        {
+            remove(&obj_tmp[0]);
+            printf("pear2c: could not write the native object\n");
+            arena.destroy();
+            return 3;
+        }
+        if (rename(&obj_tmp[0], &out_path[0]) != 0)
+        {
+            remove(&obj_tmp[0]);
+            printf("pear2c: could not publish the native object atomically\n");
+            arena.destroy();
+            return 3;
+        }
+        if (!quiet)
+        {
+            printf("%s . %s (native x86-64 object, %d bytes)\n", input, &out_path[0], (int)native_size);
+        }
+        arena.destroy();
+        return 0;
+    }
+    // Render the module into memory. LLVM parses this buffer directly, so the
+    // success path creates no temporary .ll file and nothing to clean up.
+    char* mod_text = null;
+    usz mod_size = 0;
+    void* f = open_memstream(&mod_text, &mod_size);
+    if (f == null) { printf("pear2c: cannot allocate the LLVM IR buffer\n"); arena.destroy(); return 3; }
+    fprintf(f, mod.low ? (char*)"; PEAR 2: AIR 3 globals, strings and typed-memory lowering\n" : (char*)"; PEAR 2: scalar and local aggregate lowering with direct calls\n");
+    // source_filename makes the module self-describing: a .ll or .bc that has
+    // travelled away from the command line still says which source it came from.
+    fprintf(f, "source_filename = \"");
+    m1_ir_write_string(f, input);
+    fprintf(f, "\"\n");
+    fprintf(f, "target datalayout = \"%s\"\ntarget triple = \"%s\"\n", g_m1_target_datalayout, g_m1_target_triple);
     fprintf(f, "declare void @llvm.trap()\ndeclare void @llvm.assume(i1 noundef)\ndeclare ptr @llvm.stacksave()\ndeclare void @llvm.stackrestore(ptr)\n");
     M1Gen g;
-    g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = root_decl_count;
-    g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0; g.default_unsigned = false; g.default_bits = 64; g.return_type = null; g.return_bool = false; g.return_ptr = false; g.return_unit = false; g.terminated = false; g.failed = false;    g.low_profile = mod.low; g.input_path = input; g.current_function = null; g.string_count = 0; g.provenance_count = 0; g.fx_depth = 0; g.fail_line = 0; g.fail_col = 0; g.last_line = 0; g.last_col = 0; g.fail_form = null; g.error = null;
+    g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = mod.decl_count;
+    g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0; g.default_unsigned = false; g.default_bits = 64; g.return_type = null; g.return_bool = false; g.return_ptr = false; g.return_unit = false; g.terminated = false; g.failed = false;    g.low_profile = mod.low; g.input_path = input; g.current_function = null; g.string_count = 0;
+    g.rec_count = 0; g.relax_recursive_inference = false; g.lam_count = 0; g.lam_serial = 0; g.provenance_count = 0; g.fx_depth = 0; g.fail_line = 0; g.fail_col = 0; g.last_line = 0; g.last_col = 0; g.fail_form = null; g.error = null;
     if (!g.emit_data_types())
     {
-        fclose(f); (void)remove(&ll_path[0]);
+        fclose(f); free(mod_text);
         printf("pear2c: could not emit supported record type declarations\n");
         arena.destroy(); return 3;
     }
     if (!g.emit_extern_declarations())
     {
-        fclose(f); (void)remove(&ll_path[0]);
+        fclose(f); free(mod_text);
         printf("pear2c: conflicting declarations for an external ABI symbol\n");
         arena.destroy(); return 3;
     }
     if (!g.emit_globals())
     {
-        fclose(f); (void)remove(&ll_path[0]);
+        fclose(f); free(mod_text);
         printf("%s:%d:%d: pear2c: %s\n", input, g.fail_line, g.fail_col, g.fail_form == null ? (char*)"unsupported global initializer" : g.fail_form);
         arena.destroy(); return 3;
     }
     bool emitted = true;
-    for (usz i = 0; i < root_decl_count; i++)
+    for (usz i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
-        if (d != null && d.tag == ADECL_DEF && !g.emit_function(d))
+        if (d == null || d.tag != ADECL_DEF) { continue; }
+        if (g.emit_function(d)) { probe_ok++; continue; }
+        if (!probe_only)
         {
             if (g.fail_form == null)
             {
-                if (m1_contains_letrec(d.def_body, 0)) { printf("pear2c: unsupported AIR construct `letrec` in function `%s`\n", d.name == null ? (char*)"?" : d.name); }
-                else { printf("pear2c: could not lower function `%s` in the supported PEAR2 subset\n", d.name == null ? (char*)"?" : d.name); }
+                printf("pear2c: could not lower function `%s` in the supported PEAR2 subset\n", d.name == null ? (char*)"?" : d.name);
             }
             emitted = false;
             break;
         }
+        // Probe: record the refusal and keep going, so one message per function
+        // instead of only the first. The IR written so far for this function is
+        // half a function and is thrown away with the stream.
+        probe_bad++;
+        // A declaration does not record which input it came from, so a position
+        // is only claimed when there is exactly one input to attribute it to.
+        if (units_read > 1)
+        {
+            printf("pear2c: cannot lower `%s`%s%s\n",
+                   d.name == null ? (char*)"?" : d.name,
+                   g.fail_form == null ? (char*)" (outside the supported PEAR2 subset)" : (char*)": ",
+                   g.fail_form == null ? (char*)"" : g.fail_form);
+        }
+        else
+        {
+            printf("%s:%d:%d: pear2c: cannot lower `%s`%s%s\n", input,
+                   g.fail_line == 0 ? d.source_line : g.fail_line,
+                   g.fail_col == 0 ? d.source_col : g.fail_col,
+                   d.name == null ? (char*)"?" : d.name,
+                   g.fail_form == null ? (char*)" (outside the supported PEAR2 subset)" : (char*)": ",
+                   g.fail_form == null ? (char*)"" : g.fail_form);
+        }
+        g.failed = false; g.fail_form = null; g.fail_line = 0; g.fail_col = 0;
+    }
+    if (probe_only)
+    {
+        fclose(f);
+        free(mod_text);
+        printf("pear2c: %s: %d function(s), %d lower, %d refuse\n", input, probe_ok + probe_bad, probe_ok, probe_bad);
+        if (unit_arenas != null)
+        {
+            for (int i = 0; i < units_read; i++) { unit_arenas[i].destroy(); }
+            free(unit_arenas);
+        }
+        if (unit_mods != null) { free(unit_mods); }
+        arena.destroy();
+        return probe_bad == 0 ? 0 : 3;
     }
     if (emitted && !g.emit_string_constants()) { emitted = false; }
     if (!emitted)
     {
-        fclose(f); (void)remove(&ll_path[0]);
+        fclose(f); free(mod_text);
         if (g.fail_form != null) { printf("%s:%d:%d: pear2c: %s\n", input, g.fail_line, g.fail_col, g.fail_form); }
         else { printf("pear2c: unsupported function body; PEAR2 subset includes scalar/aggregate values, direct calls, terminal if/match, and label/jump CFG\n"); }
         arena.destroy(); return 3;
     }
+    if (g_m1_cpu[0] != 0 || g_m1_features[0] != 0)
+    {
+        fprintf(f, "\nattributes #0 = {");
+        if (g_m1_cpu[0] != 0) { fprintf(f, " \"target-cpu\"=\"%s\"", g_m1_cpu); }
+        if (g_m1_features[0] != 0) { fprintf(f, " \"target-features\"=\"%s\"", g_m1_features); }
+        fprintf(f, " }\n");
+    }
+    // Provenance. !llvm.ident is the standard place for "what produced this
+    // module", every LLVM tool reads it, and it survives the optimisation
+    // pipeline, so a published .bc records the backend and the target it was
+    // built for instead of looking like anonymous LLVM output.
+    fprintf(f, "\n!llvm.ident = !{!0}\n!0 = !{!\"pear2c (%s, %s)\"}\n",
+            mod.low ? (char*)"AIR 3.0 low profile" : (char*)"AIR 2.2 subset", g_m1_target_triple);
+    // Module flags. Every clang-produced Linux module carries these and some
+    // consumers read them instead of assuming: wchar_t is 4 bytes here, and
+    // unwinding tables are emitted (behavior 7 = Max, so a module that disagrees
+    // is diagnosed by the linker rather than silently merged). Leaving them out
+    // is legal, which is exactly why it is easy to leave them out and wrong.
+    // PIC Level is a promise about the code in this module, not a command-line
+    // memory: a .bc compiled -fPIC and linked into a non-PIC link silently
+    // produces text relocations. clang records it with Min behavior (LLVM's
+    // Module::setPICLevel does the same), which is the merge rule that keeps the
+    // *least* position-independent answer when two modules disagree -- a non-PIC
+    // object and a PIC object can only be used as non-PIC.
+    bool record_pic = g_m1_reloc == 2;
+    if (record_pic) { fprintf(f, "!llvm.module.flags = !{!1, !2, !3}\n"); }
+    else { fprintf(f, "!llvm.module.flags = !{!1, !2}\n"); }
+    fprintf(f, "!1 = !{i32 1, !\"wchar_size\", i32 4}\n");
+    fprintf(f, "!2 = !{i32 7, !\"uwtable\", i32 2}\n");
+    if (record_pic) { fprintf(f, "!3 = !{i32 8, !\"PIC Level\", i32 2}\n"); }
     fclose(f);
+    if (mod_text == null) { printf("pear2c: could not render the LLVM IR buffer\n"); arena.destroy(); return 3; }
     void* ctx = ll_context_create();
     void* mb = null;
     void* m = null;
     char* msg = null;
+    char* obj_msg = null;
+    char* rt_msg = null;
+    usz bc_size = 0;
+    int bc_functions = 0;
+    int bc_declarations = 0;
+    int bc_globals = 0;
+    M1AbiSnapshot abi;
+    abi.block = null;
+    abi.cap = 0;
+    abi.used = 0;
+    abi.count = 0;
+    abi.active = false;
+    abi.overflow = false;
     int rc = 0;
-    // Determinism: LLVMParseIRInContext stamps the module's source identifier
-    // with the pid-suffixed temp path; normalize it to the input name so
-    // published bitcode is byte-identical across runs.
-    usz input_name_len = 0;
-    while (input[input_name_len] != 0) { input_name_len++; }
-    if (ctx == null || ll_buffer_from_file(&ll_path[0], &mb, &msg) != 0)
+    // Determinism: the buffer is named with the input path, so the module's
+    // source identifier comes out as that path (the old code had to rewrite a
+    // pid-suffixed temporary name here) and published bitcode is byte-identical
+    // across runs.
+    if (ctx == null) { printf("pear2c: LLVM context creation failed\n"); rc = 3; }
+    else if ((mb = ll_buffer_from_mem(mod_text, mod_size, input)) == null)
     {
-        printf("pear2c: LLVM could not read generated IR%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
+        printf("pear2c: LLVM could not copy the generated IR buffer\n");
         rc = 3;
     }
     else if (ll_parse_ir(ctx, mb, &m, &msg) != 0)
@@ -5760,39 +7627,133 @@ fn int main(String[] args)
     }
     else
     {
-        // Parsed OK: normalize the source identifier, then verify and write.
-        ll_set_source_file_name(m, input, input_name_len);
+        // Link the bitcode inputs before anything looks at the module: the ABI
+        // snapshot, the verifier and the optimiser all have to see the same
+        // merged module that will be written out.
+        for (int li = 0; li < input_count && rc == 0; li++)
+        {
+            if (!m1_is_bitcode_path(inputs[li])) { continue; }
+            if (!m1_link_bitcode_input(inputs[li], ctx, m)) { rc = 3; }
+        }
+        // A program needs `main` *after* linking, not before: it may come from a
+        // .bc library rather than from any AIR unit.
+        if (rc == 0 && (emit_exe || (emit_native && emit_native_entry)))
+        {
+            void* main_fn = ll_get_named_function(m, (char*)"main");
+            if (main_fn == null || ll_is_declaration(main_fn) != 0)
+            {
+                printf("pear2c: the linked module defines no `main`\n");
+                rc = 3;
+            }
+        }
+        // Record what the module promises to export before anything rewrites it.
+        // The check after the round trip is what makes the promise binding.
+        if (rc == 0) { m1_abi_snapshot_begin(&abi, m); }
+        // Parsed OK: verify, optimise, re-verify, then serialize.
         if (ll_verify_module(m, 1, &msg) != 0)
         {
             printf("pear2c: LLVM verifier rejected generated module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
             rc = 3;
         }
-        else if (!emit_ll && ll_write_bitcode(m, &bc_tmp[0]) != 0)
+        else if (!m1_optimize_llvm(m, opt_level, opt_size, opt_tiny, &msg))
         {
-            printf("pear2c: LLVM failed to write bitcode\n");
+            printf("pear2c: LLVM optimisation pipeline failed%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
             rc = 3;
         }
+        else if (ll_verify_module(m, 1, &msg) != 0)
+        {
+            printf("pear2c: LLVM verifier rejected the optimised module%s%s\n", msg == null ? "" : ": ", msg == null ? "" : msg);
+            rc = 3;
+        }
+        else if (emit_exe || emit_obj || emit_asm)
+        {
+            // Machine code from LLVM's backend in this process. No clang, no
+            // temporary .bc, no textual IR handed to another compiler.
+            // --emit-asm asks the same target machine for the assembly file
+            // type, so the listing is what the object was assembled from.
+            int file_type = emit_asm ? LLVM_CG_ASM_FILE : LLVM_CG_OBJ_FILE;
+            if (!m1_emit_native(m, &obj_tmp[0], file_type, &obj_msg))
+            {
+                if (emit_asm) { printf("pear2c: LLVM could not emit assembly text%s%s\n", obj_msg == null ? "" : ": ", obj_msg == null ? "" : obj_msg); }
+                else { printf("pear2c: LLVM could not emit native object code%s%s\n", obj_msg == null ? "" : ": ", obj_msg == null ? "" : obj_msg); }
+                rc = 3;
+            }
+        }
+        else if (!emit_ll)
+        {
+            // Bitcode is the other artifact this compiler publishes, and it is
+            // checked the same way an object is: write it, load it back with the
+            // same LLVM, parse it, verify it, and compare its triple. Only a file
+            // that survives all four is published.
+            if (ll_write_bitcode(m, &bc_tmp[0]) != 0)
+            {
+                printf("pear2c: LLVM failed to write bitcode\n");
+                rc = 3;
+            }
+            else
+            {
+                void* loaded = m1_bitcode_roundtrip(ctx, &bc_tmp[0], &bc_size, g_m1_target_triple, &rt_msg);
+                if (loaded == null)
+                {
+                    if (rt_msg != null)
+                    {
+                        printf("pear2c: the bitcode this compiler wrote did not load back: %s\n", rt_msg);
+                        ll_message_dispose(rt_msg);
+                        rt_msg = null;
+                    }
+                    else
+                    {
+                        printf("pear2c: the bitcode this compiler wrote did not load back as a verifiable module for %s\n", g_m1_target_triple);
+                    }
+                    rc = 3;
+                }
+                else
+                {
+                    // The file loaded. The last question is whether it still
+                    // exports what the source declared: the optimizer may delete
+                    // internal symbols freely, but dropping an exported one
+                    // breaks every user of the published artifact, and the
+                    // failure would surface at link time somewhere else.
+                    char* missing = null;
+                    if (!m1_abi_check(&abi, loaded, &missing))
+                    {
+                        printf("pear2c: the published bitcode no longer defines exported symbol `%s`\n",
+                               missing == null ? (char*)"?" : missing);
+                        rc = 3;
+                    }
+                    m1_count_symbols(loaded, &bc_functions, &bc_declarations, &bc_globals);
+                    ll_module_dispose(loaded);
+                }
+                if (rc != 0) { (void)remove(&bc_tmp[0]); }
+            }
+        }
     }
-    if (msg != null) { ll_message_dispose(msg); }
-    if (m != null) { ll_module_dispose(m); }
-    if (ctx != null) { ll_context_dispose(ctx); }
-    // --emit-ll keeps the verified text IR for publication; other modes
-    // publish the bitcode/executable and drop the text form.
-    if (rc == 0 && emit_ll)
+    // Publish the textual IR from the MODULE, not from the pre-parse buffer, so
+    // an -On build shows the IR the bitcode was actually produced from.
+    if (rc == 0 && m != null && (emit_ll || getenv((char*)"PEAR2_KEEPLL") != null))
     {
-        if (rename(&ll_path[0], &out_path[0]) != 0)
+        if (ll_print_module(m, &ll_path[0]) != 0)
+        {
+            if (emit_ll) { printf("pear2c: could not publish LLVM IR atomically\n"); rc = 3; }
+            else { (void)remove(&ll_path[0]); }
+        }
+        else if (emit_ll && rename(&ll_path[0], &out_path[0]) != 0)
         {
             printf("pear2c: could not publish LLVM IR atomically\n");
             (void)remove(&ll_path[0]);
             rc = 3;
         }
     }
-    else if (getenv((char*)"PEAR2_KEEPLL") == null) { (void)remove(&ll_path[0]); }
+    if (msg != null) { ll_message_dispose(msg); }
+    if (obj_msg != null) { ll_message_dispose(obj_msg); }
+    if (m != null) { ll_module_dispose(m); }
+    if (ctx != null) { ll_context_dispose(ctx); }
+    free(mod_text);
     if (rc == 0 && emit_exe && !emit_ll)
     {
-        if (!make_executable(&bc_tmp[0], &exe_tmp[0]))
+        if (!m1_link_object(&obj_tmp[0], &exe_tmp[0]))
         {
-            printf("pear2c: native linker failed (set PEAR2_CLANG to an LLVM-compatible clang)\n");
+            printf("pear2c: native link failed (set PEAR2_LINK=clang to link the object with a clang driver, PEAR2_CRT_DIR to relocate crt1.o/crti.o/crtn.o)\n");
             rc = 3;
         }
         else if (rename(&exe_tmp[0], &out_path[0]) != 0)
@@ -5801,15 +7762,45 @@ fn int main(String[] args)
             rc = 3;
         }
     }
-    else if (rc == 0 && !emit_ll && rename(&bc_tmp[0], &out_path[0]) != 0)
+    else if (rc == 0 && !emit_ll)
     {
-        printf("pear2c: could not publish bitcode atomically\n");
-        rc = 3;
+        char* produced = (emit_obj || emit_asm) ? &obj_tmp[0] : &bc_tmp[0];
+        char* kind = (char*)"bitcode";
+        if (emit_obj) { kind = (char*)"object file"; }
+        else if (emit_asm) { kind = (char*)"assembly listing"; }
+        if (rename(produced, &out_path[0]) != 0)
+        {
+            printf("pear2c: could not publish %s atomically\n", kind);
+            rc = 3;
+        }
     }
     (void)remove(&bc_tmp[0]);
     (void)remove(&exe_tmp[0]);
+    (void)remove(&obj_tmp[0]);
     if (rc != 0) { (void)remove(&out_path[0]); }
-    else if (!quiet) { printf("pear2c: wrote %s\n", &out_path[0]); }
+    else if (!quiet)
+    {
+        // The bitcode mode reports the byte count it proved the file has, so a
+        // build log records the size of the artifact that was actually verified
+        // rather than the size the writer claimed.
+        if (!emit_ll && bc_size > 0 && !emit_exe && !emit_obj && !emit_asm)
+        {
+            printf("pear2c: wrote %s (%d bytes of bitcode, %d functions defined, %d declarations, %d globals)\n",
+                   &out_path[0], (int)bc_size, bc_functions, bc_declarations, bc_globals);
+        }
+        else { printf("pear2c: wrote %s\n", &out_path[0]); }
+    }
+    m1_abi_snapshot_end(&abi);
+    // The unit arenas own the declarations that were merged into `mod`, so they
+    // are released last. Error paths above return before this point and leak
+    // them deliberately: the process is about to exit and threading cleanup
+    // through forty returns would be a worse trade than an exit-time free.
+    if (unit_arenas != null)
+    {
+        for (int i = 0; i < units_read; i++) { unit_arenas[i].destroy(); }
+        free(unit_arenas);
+    }
+    if (unit_mods != null) { free(unit_mods); }
     arena.destroy();
     return rc;
 }

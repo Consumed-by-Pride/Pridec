@@ -1,0 +1,23 @@
+// PEAR 2 pass 1: operations decided by their own operands.
+//
+// `eq x x` is true for every integer, and `x - x` is zero, so both are decided
+// without a constant in sight. The operand here is a parameter, which keeps the
+// expressions from being folded by constant propagation and makes the counters
+// unambiguous.
+//
+// Expected: 0 + 42 = 42, with `self=2` (the comparison and the subtraction)
+// reported at -O1 and above. Each operation needs an integer ascription: an
+// untyped `(sub a b)` spells float subtraction just as well, and `a - a` is NaN
+// there rather than zero.
+air 2.2 Main "opt_self_main.pie";
+
+def pick(x : i64) : i64 =
+  mu~ %ret.
+    if (eq x x : i64) then
+      <(add (sub x x : i64) 42 : i64) | %ret>
+    else
+      <0 : i64 | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <pick | call · 7 : i64 · %ret>;

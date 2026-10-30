@@ -76,6 +76,309 @@ printf stale > "$W/default"
 verify_bitcode "$W/default.bc" || { echo "FAIL: LLVM 23 did not parse and verify emitted bitcode"; exit 1; }
 echo "PASS: explicit --emit-bc emits verifiable bitcode"
 
+# Bitcode is a published artifact, so the bytes carry claims that are checked
+# here rather than trusted: the same input compiles to the same bytes, the module
+# says what produced it, and a wasm32 request really is a wasm32 module.
+cp "$W/default.bc" "$W/bc_first.bc"
+"$PEAR2_BIN" "$W/default.air" --emit-bc -O3 --quiet || { echo "FAIL: second --emit-bc run rejected"; exit 1; }
+cmp -s "$W/bc_first.bc" "$W/default.bc" || { echo "FAIL: two --emit-bc runs of one input produced different bytes"; exit 1; }
+echo "PASS: bitcode is byte-identical across runs"
+rm -f "$W/bc_first.bc"
+
+"$PEAR2_BIN" "$W/default.air" --emit-ll --quiet || { echo "FAIL: --emit-ll rejected"; exit 1; }
+grep -q '^source_filename = ' "$W/default.ll" || { echo "FAIL: emitted IR has no source_filename"; exit 1; }
+grep -q '!llvm.ident' "$W/default.ll" || { echo "FAIL: emitted IR records no producer in !llvm.ident"; exit 1; }
+grep -q 'pear2c (AIR' "$W/default.ll" || { echo "FAIL: !llvm.ident does not name the compiler"; exit 1; }
+echo "PASS: emitted IR carries source_filename and a producer ident"
+
+"$PEAR2_BIN" "$W/default.air" --emit-bc --target=wasm32-freestanding --quiet \
+    || { echo "FAIL: --emit-bc --target=wasm32-freestanding rejected"; exit 1; }
+# The triple is a plain string inside the bitcode, so it can be found without a
+# disassembler; the independent parser below is what proves the file is valid.
+grep -qa 'wasm32-unknown-unknown' "$W/default.bc" || { echo "FAIL: wasm32 bitcode does not carry the wasm32 triple"; exit 1; }
+grep -qa 'x86_64-unknown-linux-gnu' "$W/default.bc" && { echo "FAIL: wasm32 bitcode still names the x86-64 triple"; exit 1; }
+verify_bitcode "$W/default.bc" || { echo "FAIL: LLVM 23 did not parse the wasm32 bitcode"; exit 1; }
+echo "PASS: --emit-bc honours --target=wasm32-freestanding"
+# Back to the default target so later fixtures are unaffected.
+"$PEAR2_BIN" "$W/default.air" --emit-bc -O3 --quiet || { echo "FAIL: could not restore the x86-64 bitcode"; exit 1; }
+
+# A library has no `main`. Publishing one as bitcode is the ordinary use of the
+# mode, so it must work; producing a *program* still requires an entry point and
+# must say so.
+cat > "$W/library.air" <<'AIR'
+air 2.2 Main "library.pie";
+
+def twice(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 2 : i64) | %ret>;
+AIR
+"$PEAR2_BIN" "$W/library.air" --emit-bc --quiet || { echo "FAIL: --emit-bc rejected a library without main"; exit 1; }
+[ -f "$W/library.bc" ] || { echo "FAIL: --emit-bc wrote no bitcode for the library"; exit 1; }
+verify_bitcode "$W/library.bc" || { echo "FAIL: library bitcode did not verify"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/library.air" --emit-exe >"$W/library_exe.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: --emit-exe without main returned $rc, expected 3"; exit 1; }
+[ ! -e "$W/library" ] || { echo "FAIL: --emit-exe without main left an artifact"; exit 1; }
+grep -q 'needs a definition of `main`' "$W/library_exe.log" || { echo "FAIL: --emit-exe without main did not explain itself"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/library.air" --emit-bc --native-entry >"$W/library_entry.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: --native-entry with --emit-bc returned $rc, expected 2"; exit 1; }
+echo "PASS: --emit-bc publishes a library, and program modes still demand main"
+
+# --verify-bc checks an artifact this run did not necessarily produce: load,
+# parse, verify, triple-check, report. It writes nothing and must not delete the
+# file it was asked to inspect.
+"$PEAR2_BIN" --verify-bc "$W/library.bc" >"$W/verify_ok.log" 2>&1 || { echo "FAIL: --verify-bc rejected bitcode this compiler produced"; cat "$W/verify_ok.log"; exit 1; }
+[ -f "$W/library.bc" ] || { echo "FAIL: --verify-bc deleted the file it checked"; exit 1; }
+grep -q 'functions defined' "$W/verify_ok.log" || { echo "FAIL: --verify-bc reported no module shape"; exit 1; }
+"$PEAR2_BIN" --verify-bc "$W/library.bc" --quiet || { echo "FAIL: --verify-bc --quiet rejected valid bitcode"; exit 1; }
+echo "PASS: --verify-bc reports on a published artifact"
+
+set +e
+"$PEAR2_BIN" --verify-bc "$W/library.air" >"$W/verify_bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: --verify-bc on a .air file returned $rc, expected 3"; exit 1; }
+grep -q 'not readable LLVM bitcode' "$W/verify_bad.log" || { echo "FAIL: --verify-bc did not name the problem"; exit 1; }
+
+set +e
+"$PEAR2_BIN" --verify-bc "$W/library.bc" --target=wasm32-freestanding >"$W/verify_triple.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: --verify-bc with the wrong triple returned $rc, expected 3"; exit 1; }
+grep -q 'not the requested' "$W/verify_triple.log" || { echo "FAIL: --verify-bc did not report the triple mismatch"; exit 1; }
+
+set +e
+"$PEAR2_BIN" --verify-bc "$W/library.bc" --emit-bc >"$W/verify_conflict.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: --verify-bc with an emit mode returned $rc, expected 2"; exit 1; }
+echo "PASS: --verify-bc refuses non-bitcode, a wrong triple, and a mode conflict"
+
+# Module flags: what every clang-produced Linux module carries and what a consumer
+# reads instead of assuming (wchar_t width, unwind tables).
+grep -q '!llvm.module.flags' "$W/default.ll" || { echo "FAIL: emitted IR has no module flags"; exit 1; }
+grep -q 'wchar_size", i32 4' "$W/default.ll" || { echo "FAIL: module flags do not pin wchar_size"; exit 1; }
+grep -q 'uwtable", i32 2' "$W/default.ll" || { echo "FAIL: module flags do not declare unwinding tables"; exit 1; }
+echo "PASS: emitted IR carries llvm.module.flags"
+
+# The export list survives optimisation. `pub def` on a library is a promise to
+# whoever links the bitcode, so -O3 must not delete or internalise it.
+cat > "$W/exports.air" <<'AIR'
+air 2.2 Main "exports.pie";
+
+pub def twice(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 2 : i64) | %ret>;
+
+pub def unused_pub() : i64 =
+  mu~ %ret.
+    <7 | %ret>;
+
+def main() : i64 =
+  mu~ %ret_2.
+    <twice | call · 21 : i64 · comu _x1.
+      <_x1 : i64 | %ret_2>>;
+AIR
+"$PEAR2_BIN" "$W/exports.air" --emit-bc -O3 --quiet || { echo "FAIL: -O3 --emit-bc rejected the exports fixture"; exit 1; }
+"$PEAR2_BIN" "$W/exports.air" --emit-ll -O3 --quiet || { echo "FAIL: -O3 --emit-ll rejected the exports fixture"; exit 1; }
+grep -q 'define .*@twice(' "$W/exports.ll" || { echo "FAIL: -O3 dropped the exported `twice`"; exit 1; }
+grep -q 'define .*@unused_pub(' "$W/exports.ll" || { echo "FAIL: -O3 dropped the exported-but-unused `unused_pub`"; exit 1; }
+! grep -q 'internal .*@unused_pub(' "$W/exports.ll" || { echo "FAIL: -O3 internalised an exported symbol"; exit 1; }
+"$PEAR2_BIN" --verify-bc "$W/exports.bc" || { echo "FAIL: the exports bitcode did not verify"; exit 1; }
+echo "PASS: -O3 keeps every exported symbol"
+
+# ── multi-unit compilation ────────────────────────────────────────────────
+#
+# Two .air files compile into ONE module, so a call from one unit into the other
+# is an ordinary direct call and the optimiser sees both bodies.
+cat > "$W/unit_a.air" <<'AIR'
+air 2.2 Main "unit_a.pie";
+
+pub def twice(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 2 : i64) | %ret>;
+AIR
+cat > "$W/unit_b.air" <<'AIR'
+air 2.2 Main "unit_b.pie";
+
+extern declare twice(x : i64) : i64;
+
+def main() : i64 =
+  mu~ %ret_2.
+    <twice | call · 21 : i64 · comu _x1.
+      <_x1 : i64 | %ret_2>>;
+AIR
+"$PEAR2_BIN" "$W/unit_b.air" "$W/unit_a.air" --emit-bc -O2 --quiet \
+    || { echo "FAIL: multi-unit --emit-bc rejected two .air inputs"; exit 1; }
+[ -f "$W/unit_b.bc" ] || { echo "FAIL: multi-unit compile wrote no bitcode"; exit 1; }
+verify_bitcode "$W/unit_b.bc" || { echo "FAIL: multi-unit bitcode did not verify"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/unit_b.bc" -o "$W/unit_b" || { echo "FAIL: multi-unit bitcode did not link"; exit 1; }
+set +e
+timeout 5 "$W/unit_b" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: multi-unit program returned $rc, expected 42"; exit 1; }
+echo "PASS: two .air inputs compile into one module and run"
+
+# Two inputs that define the same symbol cannot become one module. The refusal
+# names the symbol and the input that repeats it, rather than letting LLVM report
+# a redefinition with no file attached.
+cp "$W/unit_a.air" "$W/unit_a_copy.air"
+set +e
+"$PEAR2_BIN" "$W/unit_a.air" "$W/unit_a_copy.air" --emit-ll >"$W/dup.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: duplicate definitions across inputs returned $rc, expected 3"; cat "$W/dup.log"; exit 1; }
+grep -q '`twice` is defined in more than one input' "$W/dup.log" || { echo "FAIL: duplicate report did not name the symbol"; cat "$W/dup.log"; exit 1; }
+echo "PASS: a symbol defined by two inputs is refused by name"
+
+# ── bitcode inputs are linked, not parsed ─────────────────────────────────
+"$PEAR2_BIN" "$W/unit_a.air" --emit-bc --quiet || { echo "FAIL: could not build the library bitcode"; exit 1; }
+"$PEAR2_BIN" "$W/unit_b.air" "$W/unit_a.bc" --emit-bc -O2 --quiet \
+    || { echo "FAIL: AIR plus a .bc input was rejected"; exit 1; }
+verify_bitcode "$W/unit_b.bc" || { echo "FAIL: linked bitcode did not verify"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/unit_b.bc" -o "$W/unit_b_bc" || { echo "FAIL: linked bitcode did not link"; exit 1; }
+set +e
+timeout 5 "$W/unit_b_bc" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: AIR+bitcode program returned $rc, expected 42"; exit 1; }
+echo "PASS: a .bc input is linked into the compiled module"
+
+# A declaration after a module record used to be dropped from the emitted module,
+# which turned an imported function into an undefined symbol at link time. The
+# whole file is the program now.
+cat > "$W/twomod.air" <<'AIR'
+air 2.2 Main "twomod.pie";
+
+def main() : i64 =
+  mu~ %ret_2.
+    <helper | call · 21 : i64 · comu _x1.
+      <_x1 : i64 | %ret_2>>;
+
+module Lib;
+
+def helper(x : i64) : i64 =
+  mu~ %ret.
+    <(add x 21 : i64) | %ret>;
+AIR
+"$PEAR2_BIN" "$W/twomod.air" --emit-ll --quiet || { echo "FAIL: a file with a second module record was rejected"; exit 1; }
+grep -q 'define .*@helper(' "$W/twomod.ll" || { echo "FAIL: the imported module body was dropped from the emitted module"; cat "$W/twomod.ll"; exit 1; }
+grep -q '@helper' "$W/twomod.ll" || { echo "FAIL: the call to the imported symbol disappeared"; exit 1; }
+echo "PASS: declarations after a module record are part of the emitted program"
+
+# ── verify-bc over several artifacts ──────────────────────────────────────
+cp "$W/unit_a.air" "$W/unit_a2.air"
+"$PEAR2_BIN" "$W/unit_a2.air" --emit-bc --quiet || { echo "FAIL: could not build the second library"; exit 1; }
+set +e
+"$PEAR2_BIN" --verify-bc "$W/unit_a.bc" "$W/unit_a2.bc" >"$W/clash.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: two artifacts defining one symbol returned $rc, expected 3"; cat "$W/clash.log"; exit 1; }
+grep -q 'both define' "$W/clash.log" || { echo "FAIL: --verify-bc did not report the shared definition"; exit 1; }
+# `unit_a` defines `twice`; this one defines `quadruple`, so the two share no
+# definition and linking them is legal even though both have a `main`.
+cat > "$W/unit_c.air" <<'AIR'
+air 2.2 Main "unit_c.pie";
+
+pub def quadruple(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 4 : i64) | %ret>;
+AIR
+"$PEAR2_BIN" "$W/unit_c.air" --emit-bc --quiet || { echo "FAIL: could not build the third library"; exit 1; }
+"$PEAR2_BIN" --verify-bc "$W/unit_a.bc" "$W/unit_c.bc" >"$W/pair.log" 2>&1 \
+    || { echo "FAIL: --verify-bc rejected two artifacts with no shared symbols"; cat "$W/pair.log"; exit 1; }
+grep -q 'can be linked' "$W/pair.log" || { echo "FAIL: --verify-bc did not confirm the pair is linkable"; exit 1; }
+echo "PASS: --verify-bc answers whether artifacts can be linked"
+
+# ── target tuning and pipeline control ────────────────────────────────────
+"$PEAR2_BIN" --print-pipeline -O2 >"$W/pipe_02.log" 2>&1 || { echo "FAIL: --print-pipeline rejected"; exit 1; }
+grep -q 'pipeline=default<O2>' "$W/pipe_02.log" || { echo "FAIL: -O2 did not select default<O2>"; cat "$W/pipe_02.log"; exit 1; }
+"$PEAR2_BIN" --print-pipeline -Oz >"$W/pipe_oz.log" 2>&1 || { echo "FAIL: -Oz rejected"; exit 1; }
+grep -q 'pipeline=default<Oz>' "$W/pipe_oz.log" || { echo "FAIL: -Oz did not select default<Oz>"; exit 1; }
+# A custom pipeline is used as written, but verification is never dropped.
+"$PEAR2_BIN" --print-pipeline --passes=mem2reg >"$W/pipe_custom.log" 2>&1 || { echo "FAIL: --passes rejected"; exit 1; }
+grep -q 'pipeline=mem2reg,verify' "$W/pipe_custom.log" || { echo "FAIL: a custom pipeline did not get verification appended"; cat "$W/pipe_custom.log"; exit 1; }
+"$PEAR2_BIN" --print-pipeline --passes=mem2reg,verify >"$W/pipe_custom2.log" 2>&1 || { echo "FAIL: --passes with verify rejected"; exit 1; }
+[ "$(grep -o 'verify' "$W/pipe_custom2.log" | wc -l | tr -d ' ')" = 1 ] \
+    || { echo "FAIL: an existing verify was duplicated"; cat "$W/pipe_custom2.log"; exit 1; }
+"$PEAR2_BIN" --print-pipeline --cpu=native >"$W/pipe_cpu.log" 2>&1 || { echo "FAIL: --cpu=native rejected"; exit 1; }
+grep -q 'cpu=native' "$W/pipe_cpu.log" && { echo "FAIL: --cpu=native was not resolved to a real CPU"; exit 1; }
+"$PEAR2_BIN" --print-pipeline -fPIC >"$W/pipe_pic.log" 2>&1 || { echo "FAIL: -fPIC rejected"; exit 1; }
+grep -q 'reloc=pic' "$W/pipe_pic.log" || { echo "FAIL: -fPIC did not select the PIC relocation model"; exit 1; }
+"$PEAR2_BIN" --print-pipeline --inline-threshold=1000 >"$W/pipe_inl.log" 2>&1 || { echo "FAIL: --inline-threshold rejected"; exit 1; }
+grep -q 'inline-threshold=1000' "$W/pipe_inl.log" || { echo "FAIL: --inline-threshold was not honoured"; exit 1; }
+set +e
+"$PEAR2_BIN" --print-pipeline --inline-threshold=-5 >"$W/pipe_bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: a negative inline threshold returned $rc, expected 2"; exit 1; }
+echo "PASS: --print-pipeline reports the pipeline and tuning that would run"
+
+# --check is the CI gate: parse, merge and verify, then stop. It must not write,
+# and it must not delete the artifact a previous real build published.
+"$PEAR2_BIN" "$W/default.air" --emit-bc -O2 --quiet || { echo "FAIL: could not build the artifact --check must leave alone"; exit 1; }
+"$PEAR2_BIN" "$W/default.air" --check >"$W/check.log" 2>&1 || { echo "FAIL: --check rejected valid AIR"; cat "$W/check.log"; exit 1; }
+grep -q 'checks clean' "$W/check.log" || { echo "FAIL: --check did not report a verdict"; cat "$W/check.log"; exit 1; }
+[ -f "$W/default.bc" ] || { echo "FAIL: --check deleted a published artifact"; exit 1; }
+"$PEAR2_BIN" "$W/unit_a.air" "$W/unit_b.air" --check >"$W/check_multi.log" 2>&1 \
+    || { echo "FAIL: --check rejected two valid units"; cat "$W/check_multi.log"; exit 1; }
+grep -q '2 .air unit' "$W/check_multi.log" || { echo "FAIL: --check did not report both units"; cat "$W/check_multi.log"; exit 1; }
+printf 'not AIR\n' > "$W/check_invalid.air"
+set +e
+"$PEAR2_BIN" "$W/check_invalid.air" --check >"$W/check_bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 1 ] || { echo "FAIL: --check on invalid AIR returned $rc, expected 1"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/default.air" --check --emit-bc >"$W/check_mode.log" 2>&1; rc=$?
+"$PEAR2_BIN" "$W/default.bc" --check >"$W/check_bc.log" 2>&1; rc2=$?
+set -e
+[ "$rc" = 2 ] && [ "$rc2" = 2 ] || { echo "FAIL: --check conflicts returned $rc/$rc2, expected 2/2"; exit 1; }
+echo "PASS: --check validates AIR and writes nothing"
+
+# --probe answers the next question after --check: not "is this AIR valid" but
+# "can this backend lower it". It runs the real emitter over every function and
+# needs no LLVM, so it is the one capability gate that works on a machine without
+# a toolchain.
+"$PEAR2_BIN" "$W/unit_a.air" "$W/unit_b.air" --probe >"$W/probe_ok.log" 2>&1 \
+    || { echo "FAIL: --probe rejected a program the backend can compile"; cat "$W/probe_ok.log"; exit 1; }
+grep -q '2 function(s), 2 lower, 0 refuse' "$W/probe_ok.log" \
+    || { echo "FAIL: --probe did not report both functions lowered"; cat "$W/probe_ok.log"; exit 1; }
+grep -q 'cannot lower' "$W/probe_ok.log" && { echo "FAIL: --probe reported a refusal for a supported program"; exit 1; }
+[ -f "$W/unit_a.bc" ] && [ -f "$W/unit_b.bc" ] && { echo "FAIL: --probe wrote an artifact"; exit 1; }
+set +e
+"$PEAR2_BIN" tests/pear2/unsupported_main.air --probe >"$W/probe_bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: --probe on an unsupported function returned $rc, expected 3"; cat "$W/probe_bad.log"; exit 1; }
+grep -q 'unsupported function body' "$W/probe_bad.log" || { echo "FAIL: --probe did not name the refused form"; cat "$W/probe_bad.log"; exit 1; }
+grep -q '1 refuse' "$W/probe_bad.log" || { echo "FAIL: --probe did not count the refusal"; cat "$W/probe_bad.log"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/unit_a.air" --probe --emit-bc >"$W/probe_mode.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: --probe with an emit mode returned $rc, expected 2"; exit 1; }
+# A .bc input is never opened in probe mode, so accepting one would make the
+# answer describe a smaller program than the one on the command line.
+: > "$W/probe_ignored.bc"
+set +e
+"$PEAR2_BIN" "$W/unit_a.air" "$W/probe_ignored.bc" --probe >"$W/probe_bc.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: --probe with a .bc input returned $rc, expected 2"; cat "$W/probe_bc.log"; exit 1; }
+echo "PASS: --probe reports which functions the backend can lower"
+
+# Tuning travels with the module, not with the command line: a published .bc that
+# is linked somewhere else must still say which CPU it was built for.
+"$PEAR2_BIN" "$W/default.air" --emit-ll --cpu=x86-64-v3 --features=+sse4.2 --quiet \
+    || { echo "FAIL: --cpu/--features rejected"; exit 1; }
+grep -q '^attributes #0 = {' "$W/default.ll" || { echo "FAIL: tuned module has no attribute group"; exit 1; }
+grep -q '"target-cpu"="x86-64-v3"' "$W/default.ll" || { echo "FAIL: target-cpu attribute missing"; exit 1; }
+grep -q '"target-features"="+sse4.2"' "$W/default.ll" || { echo "FAIL: target-features attribute missing"; exit 1; }
+grep -q '^define .*#0 {' "$W/default.ll" || { echo "FAIL: definitions do not reference the tuning group"; exit 1; }
+"$PEAR2_BIN" "$W/default.air" --emit-bc --cpu=x86-64-v3 --quiet || { echo "FAIL: tuned --emit-bc rejected"; exit 1; }
+verify_bitcode "$W/default.bc" || { echo "FAIL: tuned bitcode did not verify"; exit 1; }
+# -fPIC is a property of the code in the module, not of the command line that
+# made it, so it is recorded where a linker will read it.
+"$PEAR2_BIN" "$W/default.air" --emit-ll -fPIC --quiet || { echo "FAIL: -fPIC --emit-ll rejected"; exit 1; }
+grep -q '"PIC Level", i32 2' "$W/default.ll" || { echo "FAIL: -fPIC did not record a PIC level"; cat "$W/default.ll"; exit 1; }
+"$PEAR2_BIN" "$W/default.air" --emit-ll -O2 --quiet || { echo "FAIL: untuned rebuild rejected"; exit 1; }
+grep -q '^attributes #0' "$W/default.ll" && { echo "FAIL: an untuned module still emits an attribute group"; exit 1; }
+grep -q 'PIC Level' "$W/default.ll" && { echo "FAIL: a static module still claims a PIC level"; exit 1; }
+echo "PASS: --cpu/--features are recorded in the module and absent when unset"
+
 # Exit 2: usage/option errors. Exit 1: invalid AIR. Exit 3: valid AIR outside
 # the supported backend subset. Every failure must remove a stale artifact.
 set +e
@@ -105,7 +408,7 @@ set +e
 "$PEAR2_BIN" "$W/unsupported_cli.air" --emit-exe --quiet >"$W/unsupported_cli.log" 2>&1; rc=$?
 set -e
 [ "$rc" = 3 ] && [ ! -e "$W/unsupported_cli" ] || { echo "FAIL: unsupported AIR returned $rc or retained stale executable"; cat "$W/unsupported_cli.log"; exit 1; }
-grep -q 'unsupported AIR construct `letrec` in function `main`' "$W/unsupported_cli.log" || { echo "FAIL: unsupported letrec diagnostic did not name the form and definition"; cat "$W/unsupported_cli.log"; exit 1; }
+grep -q 'unsupported function body' "$W/unsupported_cli.log" || { echo "FAIL: unsupported-construct diagnostic missing"; cat "$W/unsupported_cli.log"; exit 1; }
 cat > "$W/fail-linker" <<'FAKE_CLANG'
 #!/usr/bin/env bash
 printf partial > "$4"
@@ -114,9 +417,16 @@ FAKE_CLANG
 chmod +x "$W/fail-linker"
 printf stale > "$W/default"
 set +e
-PEAR2_CLANG="$W/fail-linker" "$PEAR2_BIN" "$W/default.air" --quiet >"$W/link_failure.log" 2>&1; rc=$?
+PEAR2_LINK=clang PEAR2_CLANG="$W/fail-linker" "$PEAR2_BIN" "$W/default.air" --quiet >"$W/link_failure.log" 2>&1; rc=$?
 set -e
-[ "$rc" = 3 ] && [ ! -e "$W/default" ] || { echo "FAIL: linker failure returned $rc or retained stale executable"; cat "$W/link_failure.log"; exit 1; }
+[ "$rc" = 3 ] && [ ! -e "$W/default" ] || { echo "FAIL: clang-driver link failure returned $rc or retained stale executable"; cat "$W/link_failure.log"; exit 1; }
+# The default link is ld + the C runtime objects, so pointing PEAR2_CRT_DIR at an
+# empty directory has to fail closed in exactly the same way.
+printf stale > "$W/default"
+set +e
+PEAR2_CRT_DIR="$W/no-such-crt" "$PEAR2_BIN" "$W/default.air" --quiet >"$W/link_failure_ld.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] && [ ! -e "$W/default" ] || { echo "FAIL: ld link failure returned $rc or retained stale executable"; cat "$W/link_failure_ld.log"; exit 1; }
 printf stale > "$W/default"
 printf stale > "$W/default.bc"
 set +e
@@ -125,6 +435,37 @@ set -e
 [ "$rc" = 2 ] && [ ! -e "$W/default" ] && [ ! -e "$W/default.bc" ] || { echo "FAIL: conflicting output modes returned $rc or retained stale outputs"; exit 1; }
 find "$W" -maxdepth 1 -name '*.pear2-*' -print -quit | grep -q . && { echo "FAIL: temporary artifact leaked after CLI failures"; exit 1; } || true
 echo "PASS: CLI exit codes 0/1/2/3 and failure cleanup"
+
+# Machine code comes from LLVM's backend inside pear2c. --emit-obj publishes the
+# object the executable is linked from, with neither clang nor a linker involved.
+"$PEAR2_BIN" "$W/default.air" --emit-obj -O2 --quiet || { echo "FAIL: --emit-obj rejected"; exit 1; }
+[ -s "$W/default.o" ] || { echo "FAIL: --emit-obj published no object"; exit 1; }
+python3 - "$W/default.o" <<'PY'
+import pathlib, sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+if data[:4] != b"\x7fELF":
+    raise SystemExit("FAIL: --emit-obj output is not an ELF object")
+if len(data) < 64:
+    raise SystemExit(f"FAIL: --emit-obj object is implausibly small ({len(data)} bytes)")
+print(f"PASS: --emit-obj published a {len(data)}-byte ELF object from LLVM's backend")
+PY
+
+# --emit-asm is the same target-machine call with the assembly file type, so the
+# listing and the object cannot be produced from different code. The listing has
+# to be real x86-64 assembly for the entry point, and publishing it must not
+# leave an object or an executable behind.
+"$PEAR2_BIN" "$W/default.air" --emit-asm -O2 --quiet || { echo "FAIL: --emit-asm rejected"; exit 1; }
+[ -s "$W/default.s" ] || { echo "FAIL: --emit-asm published no assembly"; exit 1; }
+[ ! -e "$W/default.o" ] || { echo "FAIL: --emit-asm also published an object"; exit 1; }
+[ ! -e "$W/default" ] || { echo "FAIL: --emit-asm also published an executable"; exit 1; }
+grep -q '^main:' "$W/default.s" || { echo "FAIL: --emit-asm listing has no main label"; head -20 "$W/default.s"; exit 1; }
+grep -q 'ret' "$W/default.s" || { echo "FAIL: --emit-asm listing contains no ret"; head -20 "$W/default.s"; exit 1; }
+echo "PASS: --emit-asm published an x86-64 assembly listing and nothing else"
+set +e
+"$PEAR2_BIN" "$W/default.air" --emit-asm --emit-obj --quiet >"$W/conflict_asm.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] && [ ! -e "$W/default.s" ] && [ ! -e "$W/default.o" ] || { echo "FAIL: --emit-asm/--emit-obj conflict returned $rc or retained an artifact"; cat "$W/conflict_asm.log"; exit 1; }
+echo "PASS: --emit-asm and --emit-obj are mutually exclusive"
 
 # All remaining cases explicitly exercise the bitcode mode and independently
 # Parse and verify every successful artifact with LLVM 23 opt, or clang if opt is absent.
@@ -159,6 +500,22 @@ set -e
 [ "$rc" = 42 ] || { echo "FAIL: AIR 3 global/string fixture returned $rc, expected 42"; exit 1; }
 echo "PASS: AIR 3 typed globals, linked external symbol, pooled string and GEP execute (42)"
 
+# A global can hold a function address. That is the shape every vtable, callback
+# table and dispatch array has, and it is a third kind of constant address: not
+# data, not a tracked allocation, but still a live non-null pointer.
+cp tests/pear2/global_fnptr_main.air "$W/global_fnptr_main.air"
+"$PEAR2" "$W/global_fnptr_main.air" --emit-ll --quiet || { echo "FAIL: a global holding a function address was rejected"; exit 1; }
+grep -q 'ptr @twice' "$W/global_fnptr_main.ll" || { echo "FAIL: the function address did not reach the global initializer"; grep '@ops' "$W/global_fnptr_main.ll"; exit 1; }
+grep -q '@ops = .*constant \[2 x ptr\]' "$W/global_fnptr_main.ll" || { echo "FAIL: the function-pointer global is not a constant array of pointers"; grep '@ops' "$W/global_fnptr_main.ll"; exit 1; }
+"$PEAR2" "$W/global_fnptr_main.air" --quiet || { echo "FAIL: function-pointer global fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/global_fnptr_main.bc" -o "$W/global_fnptr_main" || { echo "FAIL: function-pointer global fixture failed to link"; exit 1; }
+set +e
+"$W/global_fnptr_main"
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: function-pointer global fixture returned $rc, expected 42"; exit 1; }
+echo "PASS: AIR 3 globals can hold function addresses (42)"
+
 cp tests/pear2/typed_memory_main.air "$W/typed_memory_main.air"
 "$PEAR2" "$W/typed_memory_main.air" --quiet || { echo "FAIL: AIR 3 typed-memory fixture rejected"; exit 1; }
 "$PEAR2_CLANG" -Wno-override-module "$W/typed_memory_main.bc" -o "$W/typed_memory_main" || { echo "FAIL: AIR 3 typed-memory fixture failed to link"; exit 1; }
@@ -179,7 +536,109 @@ set -e
 [ "$rc" = 42 ] || { echo "FAIL: AIR 3 pointer-cell fixture returned $rc, expected 42"; exit 1; }
 echo "PASS: AIR 3 pointer-cell provenance survives store/load and free (42)"
 
-for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main; do
+cp tests/pear2/dynamic_index_main.air "$W/dynamic_index_main.air"
+"$PEAR2" "$W/dynamic_index_main.air" --emit-ll --quiet || { echo "FAIL: dynamic-indexed array read rejected"; exit 1; }
+# The check is the feature: an address the compiler cannot bound statically must
+# carry a comparison against the tracked allocation and a trap edge, or the
+# access is unchecked and the whole memory-safety claim is gone.
+grep -q 'getelementptr i8, ptr' "$W/dynamic_index_main.ll" || { echo "FAIL: the dynamic access computed no allocation end"; cat "$W/dynamic_index_main.ll"; exit 1; }
+grep -q 'icmp uge ptr' "$W/dynamic_index_main.ll" || { echo "FAIL: the dynamic access emitted no lower bounds check"; exit 1; }
+grep -q 'icmp ule ptr' "$W/dynamic_index_main.ll" || { echo "FAIL: the dynamic access emitted no upper bounds check"; exit 1; }
+grep -q 'call void @llvm.trap()' "$W/dynamic_index_main.ll" || { echo "FAIL: the bounds check has no trap edge"; exit 1; }
+"$PEAR2" "$W/dynamic_index_main.air" --quiet || { echo "FAIL: dynamic-index fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/dynamic_index_main.bc" -o "$W/dynamic_index_main" || { echo "FAIL: dynamic-index fixture failed to link"; exit 1; }
+set +e
+"$W/dynamic_index_main"
+rc=$?
+set -e
+[ "$rc" = 10 ] || { echo "FAIL: dynamic-index fixture returned $rc, expected 10"; exit 1; }
+echo "PASS: AIR 3 dynamic array reads are bounds-checked at the access (10)"
+
+# Two chained dynamic indices (`base[i][j]`) plus a dynamic index into a heap
+# buffer: the second step starts from a pointer whose offset nobody knows, and it
+# is still safe because each dereference is checked against the allocation the
+# whole chain came from.
+cp tests/pear2/dynamic_grid_main.air "$W/dynamic_grid_main.air"
+"$PEAR2" "$W/dynamic_grid_main.air" --quiet || { echo "FAIL: a 2-D array walked with chained dynamic indices was rejected"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/dynamic_grid_main.bc" -o "$W/dynamic_grid_main" || { echo "FAIL: dynamic-grid fixture failed to link"; exit 1; }
+set +e
+"$W/dynamic_grid_main"
+rc=$?
+set -e
+[ "$rc" = 35 ] || { echo "FAIL: dynamic-grid fixture returned $rc, expected 35"; exit 1; }
+echo "PASS: AIR 3 chained dynamic indices over stack and heap memory (35)"
+
+# A heap object whose size is decided by the program. The extent moves into a
+# register and every access against it is checked against that register, which is
+# what a growable container is built out of.
+cp tests/pear2/dynamic_malloc_main.air "$W/dynamic_malloc_main.air"
+"$PEAR2" "$W/dynamic_malloc_main.air" --emit-ll --quiet || { echo "FAIL: malloc with a computed size was rejected"; exit 1; }
+grep -q 'getelementptr i8, ptr %.*, i64 %' "$W/dynamic_malloc_main.ll" || { echo "FAIL: the runtime extent never reached a bound check"; exit 1; }
+"$PEAR2" "$W/dynamic_malloc_main.air" --quiet || { echo "FAIL: computed-size malloc fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/dynamic_malloc_main.bc" -o "$W/dynamic_malloc_main" || { echo "FAIL: computed-size malloc fixture failed to link"; exit 1; }
+set +e
+"$W/dynamic_malloc_main"
+rc=$?
+set -e
+[ "$rc" = 46 ] || { echo "FAIL: computed-size malloc fixture returned $rc, expected 46"; exit 1; }
+echo "PASS: AIR 3 heap objects sized at run time (46)"
+
+# Pointer cells are per function. Two bodies use the same temporary names for
+# different objects; if the cells were shared, the second body would inherit the
+# first one's extent and refuse an access that is perfectly in bounds.
+cp tests/pear2/pointer_cell_scopes_main.air "$W/pointer_cell_scopes_main.air"
+"$PEAR2" "$W/pointer_cell_scopes_main.air" --quiet || { echo "FAIL: per-function pointer cells leaked across bodies"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/pointer_cell_scopes_main.bc" -o "$W/pointer_cell_scopes_main" || { echo "FAIL: pointer-cell scope fixture failed to link"; exit 1; }
+set +e
+"$W/pointer_cell_scopes_main"
+rc=$?
+set -e
+[ "$rc" = 12 ] || { echo "FAIL: pointer-cell scope fixture returned $rc, expected 12"; exit 1; }
+echo "PASS: AIR 3 pointer cells are scoped to their function (12)"
+
+# `realloc` is how a container grows: the old pointer is gone and the new one
+# carries the requested size, so an index the old object could not hold is in
+# bounds afterwards.
+cp tests/pear2/realloc_grow_main.air "$W/realloc_grow_main.air"
+"$PEAR2" "$W/realloc_grow_main.air" --emit-ll --quiet || { echo "FAIL: realloc was rejected"; exit 1; }
+grep -q 'call ptr @realloc' "$W/realloc_grow_main.ll" || { echo "FAIL: realloc did not reach the module as a call"; exit 1; }
+"$PEAR2" "$W/realloc_grow_main.air" --quiet || { echo "FAIL: realloc fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/realloc_grow_main.bc" -o "$W/realloc_grow_main" || { echo "FAIL: realloc fixture failed to link"; exit 1; }
+set +e
+"$W/realloc_grow_main"
+rc=$?
+set -e
+[ "$rc" = 41 ] || { echo "FAIL: realloc fixture returned $rc, expected 41"; exit 1; }
+echo "PASS: AIR 3 a buffer grows with realloc and is indexed at the new size (41)"
+
+# A call that cannot write leaves the caller's cells alone. The precision half of
+# the rule: a read-only helper must not be fatal to a container of pointers.
+cp tests/pear2/call_keeps_cells_main.air "$W/call_keeps_cells_main.air"
+"$PEAR2" "$W/call_keeps_cells_main.air" --quiet || { echo "FAIL: a read-only call discarded the caller's pointer cells"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/call_keeps_cells_main.bc" -o "$W/call_keeps_cells_main" || { echo "FAIL: read-only-call fixture failed to link"; exit 1; }
+set +e
+"$W/call_keeps_cells_main"
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: read-only-call fixture returned $rc, expected 42"; exit 1; }
+echo "PASS: AIR 3 a call that cannot write keeps pointer cells alive (42)"
+
+# `memcpy` is checked like any other access. It has no element type, so the only
+# thing to establish is the bound -- and because the length is an argument, that
+# bound is allowed to be a register.
+cp tests/pear2/bulk_copy_main.air "$W/bulk_copy_main.air"
+"$PEAR2" "$W/bulk_copy_main.air" --emit-ll --quiet || { echo "FAIL: a checked memcpy was rejected"; exit 1; }
+grep -q 'getelementptr i8, ptr .*, i64 %' "$W/bulk_copy_main.ll" || { echo "FAIL: the run-time copy length never reached a bound check"; exit 1; }
+"$PEAR2" "$W/bulk_copy_main.air" --quiet || { echo "FAIL: bulk-copy fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/bulk_copy_main.bc" -o "$W/bulk_copy_main" || { echo "FAIL: bulk-copy fixture failed to link"; exit 1; }
+set +e
+"$W/bulk_copy_main"
+rc=$?
+set -e
+[ "$rc" = 8 ] || { echo "FAIL: bulk-copy fixture returned $rc, expected 8"; exit 1; }
+echo "PASS: AIR 3 bulk copies are bounds-checked, by literal and by register (8)"
+
+for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main reject_cell_after_call_main reject_bulk_copy_main; do
     cp "tests/pear2/$fixture.air" "$W/$fixture.air"
     printf 'stale bitcode' > "$W/$fixture.bc"
     set +e
@@ -189,11 +648,13 @@ for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_fre
     [ "$rc" = 3 ] && [ ! -e "$W/$fixture.bc" ] || { echo "FAIL: $fixture did not fail closed with exit 3 and clean output"; cat "$W/$fixture.log"; exit 1; }
     grep -Eq "$W/$fixture.air:[0-9]+:[0-9]+: pear2c:" "$W/$fixture.log" || { echo "FAIL: $fixture lacked a file:line:col diagnostic"; cat "$W/$fixture.log"; exit 1; }
 done
-grep -q 'dynamic pointer offsets are unsupported' "$W/reject_dynamic_gep_main.log" || { echo "FAIL: dynamic GEP rejection was not specific"; cat "$W/reject_dynamic_gep_main.log"; exit 1; }
-grep -q 'heap allocation requires a positive constant size' "$W/reject_dynamic_malloc_main.log" || { echo "FAIL: dynamic malloc rejection was not specific"; cat "$W/reject_dynamic_malloc_main.log"; exit 1; }
+grep -q 'at most one dynamic pointer offset' "$W/reject_dynamic_gep_main.log" || { echo "FAIL: dynamic GEP rejection was not specific"; cat "$W/reject_dynamic_gep_main.log"; exit 1; }
+grep -q 'a constant heap size must be positive' "$W/reject_dynamic_malloc_main.log" || { echo "FAIL: zero-size malloc rejection was not specific"; cat "$W/reject_dynamic_malloc_main.log"; exit 1; }
 grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/reject_use_after_free_main.log" || { echo "FAIL: pointer-cell use-after-free was not rejected"; cat "$W/reject_use_after_free_main.log"; exit 1; }
 grep -q 'free requires the live base pointer' "$W/reject_interior_free_main.log" || { echo "FAIL: interior-pointer free was not rejected"; cat "$W/reject_interior_free_main.log"; exit 1; }
 grep -q 'free requires the live base pointer' "$W/reject_double_free_main.log" || { echo "FAIL: double free was not rejected"; cat "$W/reject_double_free_main.log"; exit 1; }
+grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/reject_cell_after_call_main.log" || { echo "FAIL: a pointer cell survived a call that can write"; cat "$W/reject_cell_after_call_main.log"; exit 1; }
+grep -q 'a bulk memory operation exceeds the object' "$W/reject_bulk_copy_main.log" || { echo "FAIL: an oversized constant memcpy was not rejected"; cat "$W/reject_bulk_copy_main.log"; exit 1; }
 echo "PASS: AIR 3 dynamic/provenance/alignment/lifetime violations fail closed with source locations"
 
 cp tests/pear2/literal_main.air "$W/literal.air"
@@ -717,7 +1178,7 @@ set -e
 [ "$rc" = 3 ] || { echo "FAIL: unsupported AIR returned $rc, expected 3"; cat "$W/unsupported.log"; exit 1; }
 [ ! -e "$W/unsupported.bc" ] || { echo "FAIL: unsupported AIR left a bitcode artifact"; exit 1; }
 grep -q 'unsupported function body' "$W/unsupported.log" || { echo "FAIL: missing unsupported-form diagnostic"; cat "$W/unsupported.log"; exit 1; }
-echo "PASS: unsupported AIR rejected without an artifact"
+echo "PASS: unsupported AIR (`defer` has no lowering) rejected without an artifact"
 
 # Exercise integer let propagation on a real arithmetic binding fixture.
 cp tests/pear2/bindings_main.air "$W/binding_optimizer.air"
@@ -739,6 +1200,166 @@ cp tests/pear2/integer_let_chain.air "$W/integer_let_chain.air"
 grep -Eq '(^| )folds=2( |$)' "$W/integer_let_chain.stats" || { echo "FAIL: expected two folds through the integer-let chain"; cat "$W/integer_let_chain.stats"; exit 1; }
 grep -Eq '(^| )let-specializations=2( |$)' "$W/integer_let_chain.stats" || { echo "FAIL: expected two chained integer-let specializations"; cat "$W/integer_let_chain.stats"; exit 1; }
 [ -f "$W/integer_let_chain.bc" ] || { echo "FAIL: chained-let AIR did not emit bitcode"; exit 1; }
+
+# The -O2 tier adds the dead-binding pass; -O1 must not. A binding nothing reads
+# is the smallest case where the two tiers differ in what runs, not how often.
+cp tests/pear2/dead_binding_main.air "$W/dead_binding.air"
+"$PEAR2" "$W/dead_binding.air" --stats --quiet >"$W/dead_binding.stats"
+grep -Eq '(^| )dead=1( |$)' "$W/dead_binding.stats" || { echo "FAIL: expected one dead binding removed at -O2"; cat "$W/dead_binding.stats"; exit 1; }
+"$PEAR2" "$W/dead_binding.air" -O1 --stats --quiet >"$W/dead_binding_O1.stats"
+grep -Eq '(^| )dead=0( |$)' "$W/dead_binding_O1.stats" || { echo "FAIL: -O1 must not run the dead-binding pass"; cat "$W/dead_binding_O1.stats"; exit 1; }
+echo "PASS: dead-binding elimination is a -O2 pass and a no-op at -O1"
+
+# Pass 3 is the whole-body census: -O3 propagates a literal to every use in
+# the body and removes an unused binding whose initializer is pure even when
+# it is not inert. -O2 must not run either half, so the tiers differ in
+# which passes run rather than how often the same set runs.
+cp tests/pear2/opt_propagate_main.air "$W/opt_propagate.air"
+"$PEAR2" "$W/opt_propagate.air" -O2 --stats --quiet >"$W/opt_propagate_O2.stats"
+"$PEAR2" "$W/opt_propagate.air" -O3 --stats --quiet >"$W/opt_propagate_O3.stats"
+grep -Eq '(^| )propagated=0( |$)' "$W/opt_propagate_O2.stats" || { echo "FAIL: -O2 must not run whole-body propagation"; cat "$W/opt_propagate_O2.stats"; exit 1; }
+grep -Eq '(^| )propagated=[2-9][0-9]*( |$)' "$W/opt_propagate_O3.stats" || { echo "FAIL: -O3 did not propagate both constants"; cat "$W/opt_propagate_O3.stats"; exit 1; }
+grep -Eq '(^| )folds=[3-9][0-9]*( |$)' "$W/opt_propagate_O3.stats" || { echo "FAIL: propagated constants did not fold the comparison and the sum"; cat "$W/opt_propagate_O3.stats"; exit 1; }
+cp tests/pear2/opt_pure_dead_main.air "$W/opt_pure_dead.air"
+"$PEAR2" "$W/opt_pure_dead.air" -O2 --stats --quiet >"$W/opt_pure_dead_O2.stats"
+"$PEAR2" "$W/opt_pure_dead.air" -O3 --stats --quiet >"$W/opt_pure_dead_O3.stats"
+grep -Eq '(^| )pure-dead=0( |$)' "$W/opt_pure_dead_O2.stats" || { echo "FAIL: -O2 removed a non-inert binding"; cat "$W/opt_pure_dead_O2.stats"; exit 1; }
+grep -Eq '(^| )pure-dead=1( |$)' "$W/opt_pure_dead_O3.stats" || { echo "FAIL: -O3 did not remove the unused pure initializer"; cat "$W/opt_pure_dead_O3.stats"; exit 1; }
+grep -Eq '(^| )dead=0( |$)' "$W/opt_pure_dead_O3.stats" || { echo "FAIL: the pure removal was miscounted as an inert dead binding"; cat "$W/opt_pure_dead_O3.stats"; exit 1; }
+# Folding more must not change the answer: run both fixtures at both tiers.
+for fixture in opt_propagate opt_pure_dead; do
+    for level in 2 3; do
+        "$PEAR2" "$W/$fixture.air" -O$level --quiet || { echo "FAIL: $fixture -O$level rejected"; exit 1; }
+        verify_bitcode "$W/$fixture.bc" || { echo "FAIL: $fixture -O$level bitcode did not verify"; exit 1; }
+        "$PEAR2_CLANG" -Wno-override-module "$W/$fixture.bc" -o "$W/$fixture.O$level" >"$W/$fixture.O$level.link.log" 2>&1 || { echo "FAIL: clang link $fixture -O$level"; cat "$W/$fixture.O$level.link.log"; exit 1; }
+        set +e
+        timeout 5 "$W/$fixture.O$level" >/dev/null 2>&1
+        rc=$?
+        set -e
+        [ "$rc" = 42 ] || { echo "FAIL: $fixture -O$level returned $rc, expected 42"; exit 1; }
+    done
+done
+cp tests/pear2/opt_cse_main.air "$W/opt_cse.air"
+"$PEAR2" "$W/opt_cse.air" -O2 --stats --quiet >"$W/opt_cse_O2.stats"
+"$PEAR2" "$W/opt_cse.air" -O3 --stats --quiet >"$W/opt_cse_O3.stats"
+grep -Eq '(^| )cse=0( |$)' "$W/opt_cse_O2.stats" || { echo "FAIL: -O2 must not run the value table"; cat "$W/opt_cse_O2.stats"; exit 1; }
+grep -Eq '(^| )cse=1( |$)' "$W/opt_cse_O3.stats" || { echo "FAIL: -O3 did not reuse the identical pure value"; cat "$W/opt_cse_O3.stats"; exit 1; }
+grep -Eq '(^| )pure-dead=[2-9][0-9]*( |$)' "$W/opt_cse_O3.stats" || { echo "FAIL: the reused binding was not then removed as dead"; cat "$W/opt_cse_O3.stats"; exit 1; }
+"$PEAR2" "$W/opt_cse.air" -O3 --quiet || { echo "FAIL: opt_cse -O3 rejected"; exit 1; }
+verify_bitcode "$W/opt_cse.bc" || { echo "FAIL: opt_cse bitcode did not verify"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/opt_cse.bc" -o "$W/opt_cse" >"$W/opt_cse.link.log" 2>&1 || { echo "FAIL: clang link opt_cse"; cat "$W/opt_cse.link.log"; exit 1; }
+set +e
+timeout 5 "$W/opt_cse" >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: opt_cse returned $rc, expected 42"; exit 1; }
+echo "PASS: -O3 reuses an identical pure value from the enclosing let chain (cse=1, exit 42)"
+
+# Pass 3 also folds control flow that a literal decides: a loop whose condition
+# is `false`, and a dispatch whose subject is a literal. Neither pass 1 nor
+# pass 2 looks at control flow, so both shapes survive to the emitter at -O2.
+for fx in opt_while_false opt_literal_match; do
+    cp "tests/pear2/${fx}_main.air" "$W/$fx.air"
+    "$PEAR2" "$W/$fx.air" -O2 --stats --quiet >"$W/$fx.O2.stats" 2>&1
+    "$PEAR2" "$W/$fx.air" -O3 --stats --quiet >"$W/$fx.O3.stats" 2>&1
+    case $fx in
+        opt_while_false) field=loops ;;
+        *) field=matches ;;
+    esac
+    grep -Eq "(^| )${field}=0( |$)" "$W/$fx.O2.stats" || { echo "FAIL: $fx folded $field at -O2"; cat "$W/$fx.O2.stats"; exit 1; }
+    grep -Eq "(^| )${field}=1( |$)" "$W/$fx.O3.stats" || { echo "FAIL: $fx did not fold $field at -O3"; cat "$W/$fx.O3.stats"; exit 1; }
+    for tier in O2 O3; do
+        rm -f "$W/$fx"
+        "$PEAR2" "$W/$fx.air" "-$tier" --quiet || { echo "FAIL: $fx -$tier rejected"; exit 1; }
+        set +e
+        timeout 5 "$W/$fx" >/dev/null 2>&1
+        fx_rc=$?
+        set -e
+        [ "$fx_rc" = 42 ] || { echo "FAIL: $fx -$tier returned $fx_rc, expected 42"; exit 1; }
+    done
+done
+echo "PASS: -O3 folds literal-decided control flow (loop=false, match=literal; exit 42 at -O2 and -O3)"
+
+# Pass 1 grows two expression families, and pass 3 two binding families. Each
+# fixture uses a parameter so a whole expression cannot be constant-folded away
+# before the pass under test sees it, and each one runs at 42 on both tiers.
+check_opt_counter() {
+    local fx=$1 tier=$2 field=$3 want=$4
+    grep -Eq "(^| )${field}=${want}( |$)" "$W/$fx.$tier.stats" || {
+        echo "FAIL: $fx at -$tier expected ${field}=${want}"; cat "$W/$fx.$tier.stats"; exit 1; }
+}
+for fx in opt_reassoc opt_self; do
+    cp "tests/pear2/${fx}_main.air" "$W/$fx.air"
+    for tier in 1 2 3; do
+        rm -f "$W/$fx"
+        "$PEAR2" "$W/$fx.air" "-O$tier" --stats --quiet >"$W/$fx.O$tier.stats" 2>&1 \
+            || { echo "FAIL: $fx rejected at -O$tier"; cat "$W/$fx.O$tier.stats"; exit 1; }
+        set +e
+        timeout 5 "$W/$fx" >/dev/null 2>&1
+        fx_rc=$?
+        set -e
+        [ "$fx_rc" = 42 ] || { echo "FAIL: $fx at -O$tier returned $fx_rc, expected 42"; exit 1; }
+    done
+done
+check_opt_counter opt_reassoc O1 reassoc 1
+check_opt_counter opt_self O1 self 2
+# -O0 must not rewrite anything: the same fixtures still return 42 unoptimized.
+for fx in opt_reassoc opt_self; do
+    rm -f "$W/$fx"
+    "$PEAR2" "$W/$fx.air" -O0 --stats --quiet >"$W/$fx.O0.stats" 2>&1 || { echo "FAIL: $fx -O0 rejected"; exit 1; }
+    check_opt_counter "$fx" O0 reassoc 0
+    check_opt_counter "$fx" O0 self 0
+    set +e
+    timeout 5 "$W/$fx" >/dev/null 2>&1
+    fx_rc=$?
+    set -e
+    [ "$fx_rc" = 42 ] || { echo "FAIL: $fx -O0 returned $fx_rc, expected 42"; exit 1; }
+done
+echo "PASS: pass 1 reassociates constants and decides self-operations (reassoc=1, self=2, exit 42)"
+
+for fx in opt_match_bind opt_copy; do
+    cp "tests/pear2/${fx}_main.air" "$W/$fx.air"
+    "$PEAR2" "$W/$fx.air" -O2 --stats --quiet >"$W/$fx.O2.stats" 2>&1 || { echo "FAIL: $fx -O2 rejected"; exit 1; }
+    "$PEAR2" "$W/$fx.air" -O3 --stats --quiet >"$W/$fx.O3.stats" 2>&1 || { echo "FAIL: $fx -O3 rejected"; exit 1; }
+    for tier in O2 O3; do
+        rm -f "$W/$fx"
+        "$PEAR2" "$W/$fx.air" "-$tier" --quiet || { echo "FAIL: $fx -$tier rejected"; exit 1; }
+        set +e
+        timeout 5 "$W/$fx" >/dev/null 2>&1
+        fx_rc=$?
+        set -e
+        [ "$fx_rc" = 42 ] || { echo "FAIL: $fx at -$tier returned $fx_rc, expected 42"; exit 1; }
+    done
+done
+check_opt_counter opt_match_bind O2 match-folds 0
+check_opt_counter opt_match_bind O3 match-folds 1
+check_opt_counter opt_copy O2 copies 0
+check_opt_counter opt_copy O3 copies 1
+# The one-armed match is gone from the emitted IR, not merely optimized by LLVM:
+# --emit-ll prints the AIR-lowered text before the LLVM pipeline runs.
+"$PEAR2" "$W/opt_match_bind.air" --emit-ll -O3 --quiet || { echo "FAIL: opt_match_bind --emit-ll rejected"; exit 1; }
+! grep -q 'switch' "$W/opt_match_bind.ll" || { echo "FAIL: the one-armed match survived as a switch"; exit 1; }
+echo "PASS: -O3 folds a one-armed match and propagates copies (match-folds=1, copies=1, exit 42)"
+
+# -Os is -O2's AIR pipeline with LLVM's size-oriented pipeline: the AIR-level
+# result must be identical and the tier must be visible in the stats line.
+cp tests/pear2/arithmetic_main.air "$W/os_tier.air"
+"$PEAR2" "$W/os_tier.air" -Os --stats --quiet >"$W/os_tier.stats" 2>&1
+grep -Eq '(^| )pipe=Os( |$)' "$W/os_tier.stats" || { echo "FAIL: -Os did not select the size pipeline"; cat "$W/os_tier.stats"; exit 1; }
+grep -Eq '(^| )level=2( |$)' "$W/os_tier.stats" || { echo "FAIL: -Os did not run the -O2 AIR tier"; cat "$W/os_tier.stats"; exit 1; }
+rm -f "$W/os_tier"
+"$PEAR2" "$W/os_tier.air" -Os --quiet || { echo "FAIL: -Os rejected"; exit 1; }
+"$PEAR2" "$W/os_tier.air" -O2 --stats --quiet >"$W/os_tier.O2.stats" 2>&1
+# The AIR-level counters must match -O2 exactly; only the LLVM pipeline differs.
+o2_line=$(sed -e 's/.*rewrites=//' -e 's/ level=.*//' "$W/os_tier.O2.stats")
+os_line=$(sed -e 's/.*rewrites=//' -e 's/ level=.*//' "$W/os_tier.stats")
+[ "$o2_line" = "$os_line" ] || { echo "FAIL: -Os changed AIR-level counters"; echo "  O2: $o2_line"; echo "  Os: $os_line"; exit 1; }
+set +e
+timeout 5 "$W/os_tier" >/dev/null 2>&1
+os_rc=$?
+set -e
+[ "$os_rc" = 42 ] || { echo "FAIL: -Os executable returned $os_rc, expected 42"; exit 1; }
+echo "PASS: -Os keeps the -O2 AIR tier and switches LLVM to default<Os> (exit 42)"
 
 # Exercise PEAR2's AIR optimizer on a real bool-let/if fixture. The comparison,
 # negation, let-condition specialization, and literal branch should all reduce.
@@ -954,6 +1575,32 @@ grep -q 'define fastcc i64 @pear2_fast_add(i64 %a0, i64 %a1) noinline' "$W/$name
 grep -q 'call fastcc i64 @pear2_fast_add(' "$W/$name.ll" || { echo "FAIL: $name call site lost the fastcc marker"; exit 1; }
 echo "PASS: fastcc/export/noinline markers survive define and call lines"
 
+# Linkage. A definition nothing outside the module can name gets `internal`
+# linkage, so LLVM is free to inline it everywhere and drop it if unused.
+# `main` must stay external (the CRT references it) and `#export` renames a
+# symbol for the linker, so it stays external too.
+cp tests/pear2/linkage_internal_main.air "$W/linkage.air"
+"$PEAR2_BIN" "$W/linkage.air" --emit-ll --internalize --quiet || { echo "FAIL: --internalize rejected"; exit 1; }
+grep -q '^define internal i64 @local_add(' "$W/linkage.ll" || { echo "FAIL: --internalize left local_add externally visible"; grep '^define' "$W/linkage.ll"; exit 1; }
+grep -q '^define i64 @main(' "$W/linkage.ll" || { echo "FAIL: --internalize made the entry point internal"; grep '^define' "$W/linkage.ll"; exit 1; }
+grep -q '^define i64 @pear2_exported_add(' "$W/linkage.ll" || { echo "FAIL: --internalize internalized an #export symbol"; grep '^define' "$W/linkage.ll"; exit 1; }
+"$PEAR2_BIN" "$W/linkage.air" --emit-ll --no-internalize --quiet || { echo "FAIL: --no-internalize rejected"; exit 1; }
+! grep -q '^define internal' "$W/linkage.ll" || { echo "FAIL: --no-internalize still produced internal linkage"; grep '^define' "$W/linkage.ll"; exit 1; }
+# --emit-ll publishes inspected IR, so the default there is external linkage.
+"$PEAR2_BIN" "$W/linkage.air" --emit-ll --quiet || { echo "FAIL: --emit-ll rejected"; exit 1; }
+! grep -q '^define internal' "$W/linkage.ll" || { echo "FAIL: --emit-ll must not internalize by default"; exit 1; }
+# Internal linkage must not change what the program does on the clang path.
+"$PEAR2_BIN" "$W/linkage.air" --emit-bc --internalize --quiet || { echo "FAIL: --emit-bc --internalize rejected"; exit 1; }
+verify_bitcode "$W/linkage.bc" || { echo "FAIL: internalized bitcode did not verify"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/linkage.bc" -o "$W/linkage" >"$W/linkage.link.log" 2>&1 || { echo "FAIL: clang link of internalized bitcode"; cat "$W/linkage.link.log"; exit 1; }
+set +e
+timeout 5 "$W/linkage" >/dev/null 2>&1; rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: internalized program returned $rc, expected 42"; exit 1; }
+"$PEAR2_BIN" "$W/linkage.air" --emit-ll --internalize --stats --quiet >"$W/linkage.stats" || { echo "FAIL: --stats with --internalize rejected"; exit 1; }
+grep -Eq '(^| )linkage=internal( |$)' "$W/linkage.stats" || { echo "FAIL: --stats did not report the effective linkage"; cat "$W/linkage.stats"; exit 1; }
+echo "PASS: non-pub definitions internalize while main and #export stay visible"
+
 # Target profiles: the one fixture asserts i64 under x86_64 and i32 under
 # wasm32-freestanding; wasm emits IR/bitcode only.
 name=target_profile_main
@@ -997,7 +1644,33 @@ m10_reject reject_fx_resume_command tests/pear2/reject_fx_resume_command_main.ai
 m10_reject reject_abi_callconv tests/pear2/reject_abi_callconv_main.air 'unsupported calling convention'
 m10_reject reject_abi_main_export tests/pear2/reject_abi_main_export_main.air 'entry point `main` keeps the default calling convention'
 m10_reject reject_wasm32_effects tests/pear2/reject_wasm32_effects_main.air 'freestanding wasm32 target profile' --target=wasm32-freestanding --emit-ll
-echo "PASS: M10 rejects (multi-shot/resume/no-handler/nested-handler/infer-payload/bad-callconv/main-pinning/wasm32-effects) all fail closed with source positions"
+m10_reject reject_letrec_capture tests/pear2/reject_letrec_capture_main.air 'may not capture bindings outside its own group'
+m10_reject reject_letrec_non_lambda tests/pear2/reject_letrec_non_lambda_main.air 'every letrec initializer must be a lambda'
+echo "PASS: M10 rejects (multi-shot/resume/no-handler/nested-handler/infer-payload/bad-callconv/main-pinning/wasm32-effects/letrec-capture/letrec-non-lambda) all fail closed with source positions"
+
+# --- letrec: self and mutual recursion lift to internal functions -----------
+for fx in letrec_factorial letrec_mutual; do
+    rm -f "$W/$fx.air" "$W/$fx"
+    cp "tests/pear2/${fx}_main.air" "$W/$fx.air"
+    for tier in 0 1 2 3; do
+        rm -f "$W/$fx"
+        "$PEAR2_BIN" "$W/$fx.air" "-O$tier" --quiet || { echo "FAIL: $fx rejected at -O$tier"; exit 1; }
+        set +e
+        timeout 10 "$W/$fx" >/dev/null 2>&1
+        fx_rc=$?
+        set -e
+        [ "$fx_rc" = 42 ] || { echo "FAIL: $fx at -O$tier returned $fx_rc, expected 42"; exit 1; }
+    done
+    # The lifted definitions are module-private: a recursive binding has no
+    # external name, so internal linkage is the honest default for --emit-ll.
+    rm -f "$W/$fx.ll"
+    "$PEAR2_BIN" "$W/$fx.air" --emit-ll -O0 --quiet || { echo "FAIL: $fx --emit-ll rejected"; exit 1; }
+    grep -q '^define internal i64 @pear2\.lam\.' "$W/$fx.ll" || { echo "FAIL: $fx lifted definition is not module-private"; exit 1; }
+    grep -Eq 'insertvalue .* undef, ptr @pear2\.lam\.' "$W/$fx.ll" || { echo "FAIL: $fx closure value does not carry a code pointer"; exit 1; }
+    # A recursive binding carries a null environment: nothing to capture.
+    grep -q 'ptr null, 1' "$W/$fx.ll" || { echo "FAIL: $fx recursive closure is not environment-free"; exit 1; }
+done
+echo "PASS: letrec lifts to internal functions with null environments and exits 42 at -O0..-O3"
 
 # --- External aggregate ABI fixture (records + tuples by value over C) -----
 # Hydrated repository content (docs/pear2/CONTRACT.md aggregate ABI boundary)
@@ -1043,7 +1716,7 @@ m10_reject reject_sum_match_partial tests/pear2/reject_sum_match_partial_main.ai
 # Machine-form slice (AIR 2.1 fence/atomic/syscall + AIR 3.0 inline asm):
 # atomicrmw/load/store over typed allocas with C11 orderings, raw x86-64
 # syscall ABI through pinned-register inline asm, constraint-checked asm.
-for fixture in atomic_fence_main syscall_main asm_main; do
+for fixture in atomic_fence_main atomic_cmpxchg_main syscall_main asm_main; do
     cp "tests/pear2/$fixture.air" "$W/$fixture.air"
     for level in 0 1 2 3; do
         "$PEAR2_BIN" "$W/$fixture.air" --emit-bc -O$level --quiet || { echo "FAIL: $fixture -O$level bitcode rejected"; exit 1; }
@@ -1079,7 +1752,6 @@ m10_reject reject_codata_method tests/pear2/reject_codata_method_main.air 'unsup
 m10_reject reject_codata_ambiguous tests/pear2/reject_codata_ambiguous_main.air 'ambiguous record field projection'
 echo "PASS: codata parameterized-dtor declarations and ambiguous projections fail closed with source positions"
 
-m10_reject reject_atomic_cmpxchg tests/pear2/reject_atomic_cmpxchg_main.air 'cmpxchg needs separate success/failure orderings'
 m10_reject reject_atomic_float tests/pear2/reject_atomic_float_main.air 'atomic pointee must be an 8/16/32/64-bit integer'
 m10_reject reject_atomic_load_order tests/pear2/reject_atomic_load_order_main.air 'atomic load ordering must be relaxed, acquire, or seq_cst'
 m10_reject reject_asm_bool tests/pear2/reject_asm_bool_main.air 'asm result type must not be bool'

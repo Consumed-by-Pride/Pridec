@@ -1,0 +1,57 @@
+// AIR 3: a program shaped like a program.
+//
+// A 2-D stack array walked with *two chained* dynamic indices, a heap buffer
+// written and read through a runtime index, and a free of the live base
+// pointer. `rowp` is `base[i]` -- a pointer whose offset nothing knows -- and the
+// load goes through `rowp[j]`. Each dereference carries its own check against the
+// 32-byte alloca it ultimately came from, so the second GEP does not need the
+// first one's offset to be a constant.
+//
+// grid_sum = 10 + 20 = 30; heap_pick(1) = 5; exit 35.
+air 3.0 Main "dynamic_grid_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare free(p : ptr(i64)) : unit;
+
+def grid_sum() : i64 =
+  mu~ %ret.
+    <alloca(array#2(array#2(i64))) : ptr(array#2(array#2(i64))) | comu base.
+      seq {
+        store(gep[array#2(array#2(i64))](base, 0 : i64, 0 : i64, 0 : i64) : ptr(i64), 10 : i64);
+        store(gep[array#2(array#2(i64))](base, 0 : i64, 1 : i64, 1 : i64) : ptr(i64), 20 : i64);
+        let i = 0 : i64 in
+          let acc = 0 : i64 in
+            seq {
+              label done().
+                <acc | %ret>;
+              seq {
+                while (lt i 2 : i64) do {
+                  let rowp = gep[array#2(array#2(i64))](base, 0 : i64, i) : ptr(array#2(i64)) in
+                    let j = (add i 0 : i64) in
+                      let cell = load(gep[array#2(i64)](rowp, 0 : i64, j) : ptr(i64)) : i64 in
+                        let acc = (add acc cell : i64) in
+                          let i = (add i 1 : i64) in
+                            nop
+                };
+                jump done()
+              }
+            }
+      };
+
+def heap_pick(index : i64) : i64 =
+  mu~ %ret.
+    <malloc | call · 24 : i64 · comu heap.
+      seq {
+        store(gep[i64](heap, 0 : i64) : ptr(i64), 4 : i64);
+        store(gep[i64](heap, 1 : i64) : ptr(i64), 5 : i64);
+        store(gep[i64](heap, 2 : i64) : ptr(i64), 6 : i64);
+        let cell = load(gep[i64](heap, index) : ptr(i64)) : i64 in
+          <free | call · heap · comu _.
+            <cell | %ret>>
+      };
+
+def main() : i64 =
+  mu~ %ret.
+    <grid_sum | call · comu g.
+      <heap_pick | call · 1 : i64 · comu h.
+        <(add g h) : i64 | %ret>>>;

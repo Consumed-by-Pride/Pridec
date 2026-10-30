@@ -1,0 +1,42 @@
+// AIR 3: `malloc(n)` where `n` is computed.
+//
+// The size of a heap object does not have to be a literal. A computed size moves
+// the object's extent into a register, and every bound check against the object
+// compares against that register instead of against a constant: the guarantee is
+// the same one, only established later. That is what a growable container needs,
+// because its capacity is decided by the program and not by the compiler.
+//
+// The loop writes `i + 10` into element `i` and reads it back through a second
+// dynamic GEP, so both the store and the load are checked against the runtime
+// extent. For n = 4 the sum is 10+11+12+13 = 46.
+air 3.0 Main "dynamic_malloc_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare free(p : ptr(i64)) : unit;
+
+def sum_sized(n : i64) : i64 =
+  mu~ %ret.
+    <malloc | call · n · comu buf.
+      let i = 0 : i64 in
+        let acc = 0 : i64 in
+          seq {
+            label done().
+              <free | call · buf · comu _.
+                <acc | %ret>>;
+            seq {
+              while (lt i n : i64) do {
+                seq {
+                  store(gep[i64](buf, i) : ptr(i64), (add i 10 : i64));
+                  let element = load(gep[i64](buf, i) : ptr(i64)) : i64 in
+                    let acc = (add acc element : i64) in
+                      let i = (add i 1 : i64) in
+                        nop
+                }
+              };
+              jump done()
+            }
+          }>;
+
+def main() : i64 =
+  mu~ %ret.
+    <sum_sized | call · 4 : i64 · %ret>;

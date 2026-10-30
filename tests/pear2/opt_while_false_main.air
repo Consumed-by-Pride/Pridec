@@ -1,0 +1,19 @@
+// PEAR 2 pass 3: a loop whose condition is a literal `false` (-O3).
+//
+// Neither pass 1 nor pass 2 looks at control flow, so the loop reaches the
+// emitter at -O2 and becomes an empty rotating loop: a header branch, an
+// unreachable body, and a latch. Pass 3 folds it away because the condition is
+// decided before the loop runs, which is also what makes the fold independent
+// of how many times the body would have executed.
+//
+// Both tiers must return 42.
+air 2.2 Main "opt_while_false_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    seq {
+      while (false : bool) do {
+        nop
+      };
+      <42 : i64 | %ret>
+    };

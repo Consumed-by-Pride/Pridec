@@ -1,0 +1,30 @@
+// A pointer cell does not survive a call that can write through it.
+//
+// `clobber` is external, so this backend has no idea what it stores where. The
+// table's first slot held a tracked heap pointer before the call; afterwards the
+// cell that described it is gone, and the pointer read back out of the table has
+// no provenance at all. Writing through it is refused rather than checked against
+// an extent that may belong to something else by now.
+air 3.0 Main "reject_cell_after_call_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare clobber(p : ptr(ptr(i64))) : unit;
+
+def main() : i64 =
+  mu~ %ret.
+    <alloca(array#2(ptr(i64))) : ptr(array#2(ptr(i64))) | comu table.
+      <malloc | call · 8 : i64 · comu heap.
+        seq {
+          store(gep[array#2(ptr(i64))](table, 0 : i64, 0 : i64) : ptr(ptr(i64)), heap);
+          <clobber | call · table · comu _.
+            <load(gep[array#2(ptr(i64))](table, 0 : i64, 0 : i64) : ptr(ptr(i64))) : ptr(i64) | comu alias.
+              seq {
+                store(alias, 42 : i64);
+                <load(alias) : i64 | comu got.
+                  <got | %ret>
+              }
+            >
+          >
+        }
+      >
+    >;

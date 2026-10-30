@@ -1,0 +1,8 @@
+-- EXPECT: HI\n
+-- EXIT: 0
+-- AIR 2.2 syscall payload: write(1, buf, 2) where the buffer is a static byte
+-- literal rather than heap memory, so the payload address is a pooled constant.
+fn main(_) -> i64 ! [IO] {
+  syscall(1, 1, "HI\n" as i64, 3);
+  return 0;
+}

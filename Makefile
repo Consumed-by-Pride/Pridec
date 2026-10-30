@@ -68,7 +68,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
+.PHONY: all c3c probe-pear2 test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -175,7 +175,7 @@ $(AIRTOOL): $(AIR_CORE) | c3c
 # PEAR 2 bootstrap backend. It is a separate executable and links the shared
 # AIR reader/verifier plus LLVM 23; it does not link PEAR 1 or pfrontc.
 PEAR2_BIN := pear2/pear2c
-PEAR2_SRC := $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_opt.c3 pear2/pear2c_main.c3
+PEAR2_SRC := $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3
 PEAR2_LDFLAGS ?= -L $(LLVM23_LIBDIR) -l LLVM-23
 LLVM23_BIN ?= $(LLVM23_DIR)/bin
 PEAR2_CLANG ?= $(LLVM23_BIN)/clang
@@ -194,19 +194,53 @@ $(PEAR2_OPT_TEST): $(PEAR2_OPT_TEST_SRC) | c3c
 test-pear2: $(PEAR2_BIN) $(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) C3C="$(C3C)" LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" bash tests/pear2/run.sh ./$(PEAR2_BIN)
+	# The native backend needs no LLVM at all: object, ld, exit status.
+	bash tests/pear2/native.sh ./$(PEAR2_BIN)
 
 test-pear2-exec: $(BINARY) $(PEAR2_BIN) $(PEAR2_OPT_TEST) pear2c
 	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" BACKEND=./pear2c bash tests/exec/run.sh
 	$(C3_RUNTIME_ENV) LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" BACKEND=./pear2c bash tests/exec/pear/run.sh
 
+# The capability gate: ask the backend, fixture by fixture, which functions it
+# can actually lower. --probe runs the real emitter and creates no LLVM context,
+# so this answers "can the backend compile this program" without a toolchain at
+# run time.
+#
+# The gate fails when a *positive* fixture stops lowering. A `reject_*` fixture
+# that lowers is reported but does not fail the gate: those fixtures are pinned
+# in tests/pear2/run.sh, which also covers the rejects that only fire after
+# lowering (ABI and verifier checks), and duplicating that authority here would
+# turn this measurement into a second, weaker copy of run.sh.
+probe-pear2: $(PEAR2_BIN)
+	@log=$$(mktemp); ok=0; refused=0; leak=0; bad=0; \
+	for f in tests/pear2/*.air; do \
+	    case "$$f" in \
+	        */reject_*|*/unsupported_main.air) expect_refusal=1 ;; \
+	        *) expect_refusal=0 ;; \
+	    esac; \
+	    ./$(PEAR2_BIN) "$$f" --probe >"$$log" 2>&1; rc=$$?; \
+	    if [ "$$rc" = 0 ]; then \
+	        ok=$$((ok+1)); \
+	        if [ "$$expect_refusal" = 1 ]; then leak=$$((leak+1)); echo "NOTE: $$f lowers now (it was a refusal pin; run.sh is authoritative)"; fi; \
+	    elif [ "$$rc" = 3 ]; then \
+	        refused=$$((refused+1)); \
+	        if [ "$$expect_refusal" = 0 ]; then bad=$$((bad+1)); echo "FAIL: $$f does not lower"; cat "$$log"; fi; \
+	    else \
+	        bad=$$((bad+1)); echo "FAIL: $$f probe exited $$rc (expected 0 or 3)"; cat "$$log"; \
+	    fi; \
+	done; rm -f "$$log"; \
+	echo "probe-pear2: $$ok fixture(s) lower completely, $$refused refused, $$leak refusal pin(s) that now lower, $$bad regression(s)"; \
+	[ "$$bad" = 0 ]
+
 # Syntax/type-check PEAR2 and the structural optimizer harness without linking
 # LLVM, then run LLVM-independent arithmetic model tests. This does not replace
 # executing the optimizer or backend fixtures.
 check-pear2: | c3c
-	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_opt.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
 	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
 	bash -n tests/pear2/run.sh
+	bash -n tests/pear2/native.sh
 	python3 tests/pear2/signed_division_model_test.py
 
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc

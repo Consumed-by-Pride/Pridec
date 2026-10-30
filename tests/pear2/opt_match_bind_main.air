@@ -1,0 +1,21 @@
+// PEAR 2 pass 3: a one-armed `bind` match is a binding, not a dispatch.
+//
+// This is the shape a front end emits for `match x { y -> ... }`, and lowering
+// it verbatim costs a switch with a single case. Pass 3 rewrites it to
+// `let y = x in body`, which then lets copy propagation replace the uses and
+// pass 2 drop the binding, so the function ends up as a plain return.
+//
+// Expected: -O2 keeps the match (`match-folds=0`), -O3 removes it
+// (`match-folds=1`) and the emitted IR has no `switch` at all; both exit 42.
+air 2.2 Main "opt_match_bind_main.pie";
+
+def twice(x : i64) : i64 =
+  mu~ %ret.
+    match x {
+      bind y ->
+        <(mul y 2 : i64) | %ret>;
+    };
+
+def main() : i64 =
+  mu~ %ret.
+    <twice | call · 21 : i64 · %ret>;

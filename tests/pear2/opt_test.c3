@@ -1073,7 +1073,9 @@ fn int main()
     mod.decls[6] = range_decl;
     mod.decl_count = 75;
 
-    pear2_opt::OptStats stats = pear2_opt::optimize_module(&mod);
+    // Level 1 pins the expression pass alone: this harness asserts exact
+    // counter values, so it must not also run the -O2 dead-binding pass.
+    pear2_opt::OptStats stats = pear2_opt::optimize_module_at(&mod, 1);
     uint rewrites = stats.rewrites;
     if (rewrites != 65 || stats.constant_folds != 21 || stats.operand_rewrites != 25 || stats.strength_reductions != 11 ||
         stats.shift_combinations != 2 || stats.branch_reductions != 2 || stats.let_specializations != 4)

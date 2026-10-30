@@ -1,0 +1,43 @@
+// AIR 3: a call that cannot write leaves the caller's pointer cells alone.
+//
+// The table holds a heap pointer in its first slot. `peek` is a function in this
+// file that loads and never stores, so the cell describing that slot is still
+// true after the call, and the pointer read back out of the table can be written
+// through. This is the precision half of the rule that a call invalidates what it
+// can reach: refusing here would make every helper function fatal to a container
+// holding pointers.
+//
+// exit 42.
+air 3.0 Main "call_keeps_cells_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare free(p : ptr(i64)) : unit;
+
+def peek(spare : ptr(ptr(i64))) : i64 =
+  mu~ %ret.
+    <alloca(i64) : ptr(i64) | comu tmp.
+      <tmp | load · comu v.
+        <v | %ret>
+      >
+    >;
+
+def main() : i64 =
+  mu~ %ret.
+    <alloca(array#2(ptr(i64))) : ptr(array#2(ptr(i64))) | comu table.
+      <malloc | call · 8 : i64 · comu heap.
+        seq {
+          store(gep[array#2(ptr(i64))](table, 0 : i64, 0 : i64) : ptr(ptr(i64)), heap);
+          <peek | call · table · comu ignored.
+            <load(gep[array#2(ptr(i64))](table, 0 : i64, 0 : i64) : ptr(ptr(i64))) : ptr(i64) | comu alias.
+              seq {
+                store(alias, 42 : i64);
+                <load(alias) : i64 | comu got.
+                  <free | call · alias · comu _.
+                    <got | %ret>
+                  >
+              }
+            >
+          >
+        }
+      >
+    >;
