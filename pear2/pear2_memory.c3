@@ -212,7 +212,7 @@ fn bool M1Gen.check_access(M1Gen* g, char* address, AirTyp* ty, int line, int co
         }
         // An exact offset over an object of unknown size is still an exact
         // address: only the top of the object has to be learned at run time.
-        if (p.extent < 0) { return g.check_access_runtime(p, address, size, line, col); }
+        if (p.extent < 0) { return g.check_access_runtime(p, address, size, null, line, col); }
         if (p.offset + size > p.extent)
         {
             return g.note_failure(line, col, (char*)"memory access with unknown/out-of-bounds/misaligned provenance");
@@ -220,12 +220,12 @@ fn bool M1Gen.check_access(M1Gen* g, char* address, AirTyp* ty, int line, int co
         return true;
     }
     if (p.extent >= 0 && p.hi >= 0 && p.lo >= 0 && p.hi + size <= p.extent && p.alignment >= need_align) { return true; }
-    return g.check_access_runtime(p, address, size, line, col);
+    return g.check_access_runtime(p, address, size, null, line, col);
 }
 
 // `p` describes an address whose offset is not a constant. Emit the check that
 // makes the access safe for whatever the address turned out to be.
-fn bool M1Gen.check_access_runtime(M1Gen* g, M1Provenance* p, char* address, long size, int line, int col)
+fn bool M1Gen.check_access_runtime(M1Gen* g, M1Provenance* p, char* address, long size, char* size_value, int line, int col)
 {
     if (p == null || address == null || p.allocation == null || p.extent == 0 ||
         (p.extent < 0 && p.extent_value == null))
@@ -253,7 +253,8 @@ fn bool M1Gen.check_access_runtime(M1Gen* g, M1Provenance* p, char* address, lon
     // it undefined behaviour before the check ever ran.
     if (runtime_extent) { fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %s\n", end, p.allocation, p.extent_value); }
     else { fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %ld\n", end, p.allocation, p.extent); }
-    fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %ld\n", last, address, size);
+    if (size_value != null) { fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %s\n", last, address, size_value); }
+    else { fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %ld\n", last, address, size); }
     fprintf(g.out, "  %s = icmp uge ptr %s, ptr %s\n", above_base, address, p.allocation);
     fprintf(g.out, "  %s = icmp ule ptr %s, ptr %s\n", below_end, last, end);
     fprintf(g.out, "  %s = and i1 %s, %s\n", inside, above_base, below_end);
@@ -269,6 +270,31 @@ fn bool M1Gen.check_access_runtime(M1Gen* g, M1Provenance* p, char* address, lon
     g.begin_block(ok_label);
     g.terminated = false;
     return true;
+}
+
+// A byte-range access: `memcpy(dst, src, n)`, `memset(dst, c, n)`. There is no
+// element type and no alignment requirement, so the only thing left to establish
+// is the bound -- proved here when the length is a literal, checked at run time
+// when the length is a register, exactly as a typed access is.
+fn bool M1Gen.check_range(M1Gen* g, char* address, long size, char* size_value, int line, int col, bool write_access)
+{
+    if (address == null || (size < 0 && size_value == null))
+    { return g.note_failure(line, col, (char*)"a bulk memory operation needs a known byte count"); }
+    M1Provenance* p = g.prov(address);
+    if (p == null || p.kind == M1PROV_UNKNOWN || p.freed || (write_access && !p.writable))
+    { return g.note_failure(line, col, (char*)"a bulk memory operation needs a tracked address with the right permission"); }
+    if (size_value == null && size >= 0 && p.extent >= 0)
+    {
+        // Both ends constant: the answer is a proof or a refusal, never a check.
+        if (p.offset_known || p.hi >= 0)
+        {
+            long top = p.offset_known ? p.offset : p.hi;
+            if (top + size > p.extent)
+            { return g.note_failure(line, col, (char*)"a bulk memory operation exceeds the object"); }
+            return true;
+        }
+    }
+    return g.check_access_runtime(p, address, size, size_value, line, col);
 }
 
 // Alignment to claim for an access through `address`. A constant offset keeps

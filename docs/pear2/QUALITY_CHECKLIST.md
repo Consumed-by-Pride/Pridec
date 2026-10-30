@@ -715,13 +715,39 @@ wrong object.
       longer able to corrupt provenance tracking, but those writes are still not
       bounds-checked — the model proves the accesses the compiler emits.
 
+## 21. Bulk copies are bounds-checked (5)
+
+`memcpy` has no element type and no alignment requirement, but it does have a
+length, and a length is a bound. Leaving it unchecked would have left the model
+with one hole exactly where a buffer overflow is easiest to write: a copy into a
+tracked buffer whose size nobody compared with the count.
+
+- [x] 21.1 `check_range` proves a byte range the way a typed access proves an
+      element address: constant length against a constant extent is a proof or a
+      refusal (`a bulk memory operation exceeds the object`), anything else
+      becomes a runtime check.
+- [x] 21.2 The runtime check takes the length as a register
+      (`check_access_runtime` gained a `size_value`), so `memcpy(dst, src, n)` for
+      a computed `n` is checked against the object the destination came from, and
+      the same null-base rule applies when the object's extent is a register.
+- [x] 21.3 `memcpy`, `memmove` and `memset` are recognised by their linker symbol
+      with the same low-profile gate as `malloc`/`free`; a signature that is not
+      `(pointer, pointer, integer)` or `(pointer, integer, integer)` is refused
+      with a position rather than lowered on trust. The destination must be
+      tracked and writable, and the source must be tracked: a copy the compiler
+      cannot bound is refused, not assumed fine.
+- [x] 21.4 Fixtures: `tests/pear2/bulk_copy_main.air` (literal and register
+      lengths; exit 8) and `tests/pear2/reject_bulk_copy_main.air` (32 bytes into
+      eight, refused at compile time).
+- [ ] 21.5 Neither has been executed: no LLVM and no executable compiler here.
+
 ## Score
 
-**198 items: 187 complete with evidence, 11 open** (the count is the file's own
+**203 items: 191 complete with evidence, 12 open** (the count is the file's own
 inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.5
 (token rotation), 11.6
 (the native end-to-end script has not been run here: no C3 compiler, no linker),
-12.6, 13.5, 14.7, 15.6, 16.7, 17.5, 18.7, 19.5 and 20.6 (the new bitcode
+12.6, 13.5, 14.7, 15.6, 16.7, 17.5, 18.7, 19.5, 20.6 and 21.5 (the new bitcode
 assertions have not been run for the same reason).
-Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All eleven are an
+Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All twelve are an
 unrun test or an owner action, not a known defect: none lowers the safety floor.

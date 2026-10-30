@@ -276,6 +276,43 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
             heap_allocation = hp.allocation;
         }
     }
+    // The three bulk operations are the only libc calls whose byte ranges this
+    // backend can still reason about: the length is an argument, so the same bound
+    // that guards a typed access guards a copy, proved when it is a literal and
+    // checked when it is a register. Without this the model would have one hole
+    // exactly where a buffer overflow is easiest to write.
+    bool is_memcpy = direct && g.low_profile && (same(m1_link_name(target), "memcpy") || same(m1_link_name(target), "memmove"));
+    bool is_memset = direct && g.low_profile && same(m1_link_name(target), "memset");
+    if (is_memcpy)
+    {
+        if (argc != 3 || args[0] == null || args[1] == null || args[2] == null ||
+            !m1_pointer_type(target_params[0]) || !m1_pointer_type(target_params[1]) || !m1_integer_type(target_params[2]))
+        { g.note_failure(callee.source_line, callee.source_col, (char*)"memcpy/memmove take (pointer, pointer, integer)"); return false; }
+    }
+    if (is_memset)
+    {
+        if (argc != 3 || args[0] == null || args[1] == null || args[2] == null ||
+            !m1_pointer_type(target_params[0]) || !m1_integer_type(target_params[1]) || !m1_integer_type(target_params[2]))
+        { g.note_failure(callee.source_line, callee.source_col, (char*)"memset takes (pointer, integer, integer)"); return false; }
+    }
+    if (is_memcpy || is_memset)
+    {
+        long bulk_size = -1; char* bulk_size_value = null;
+        if (args[2].tag == APRD_INT)
+        {
+            if (args[2].ival < 0)
+            { g.note_failure(args[2].source_line, args[2].source_col, (char*)"a bulk memory length cannot be negative"); return false; }
+            bulk_size = args[2].ival;
+        }
+        else
+        {
+            if (m1_int_bits(target_params[2]) != 64 || values[2] == null)
+            { g.note_failure(args[2].source_line, args[2].source_col, (char*)"a run-time bulk memory length must be a 64-bit integer"); return false; }
+            bulk_size_value = values[2];
+        }
+        if (!g.check_range(values[0], bulk_size, bulk_size_value, args[0].source_line, args[0].source_col, true)) { return false; }
+        if (is_memcpy && !g.check_range(values[1], bulk_size, bulk_size_value, args[1].source_line, args[1].source_col, false)) { return false; }
+    }
     // Any other call can write through what it is given, and this backend does not
     // see it happen. Dropping the cells inside those objects is the fail-closed
     // answer: the next load of a pointer from that memory yields a value with no

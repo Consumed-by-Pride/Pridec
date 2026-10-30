@@ -623,7 +623,22 @@ set -e
 [ "$rc" = 42 ] || { echo "FAIL: read-only-call fixture returned $rc, expected 42"; exit 1; }
 echo "PASS: AIR 3 a call that cannot write keeps pointer cells alive (42)"
 
-for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main reject_cell_after_call_main; do
+# `memcpy` is checked like any other access. It has no element type, so the only
+# thing to establish is the bound -- and because the length is an argument, that
+# bound is allowed to be a register.
+cp tests/pear2/bulk_copy_main.air "$W/bulk_copy_main.air"
+"$PEAR2" "$W/bulk_copy_main.air" --emit-ll --quiet || { echo "FAIL: a checked memcpy was rejected"; exit 1; }
+grep -q 'getelementptr i8, ptr .*, i64 %' "$W/bulk_copy_main.ll" || { echo "FAIL: the run-time copy length never reached a bound check"; exit 1; }
+"$PEAR2" "$W/bulk_copy_main.air" --quiet || { echo "FAIL: bulk-copy fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/bulk_copy_main.bc" -o "$W/bulk_copy_main" || { echo "FAIL: bulk-copy fixture failed to link"; exit 1; }
+set +e
+"$W/bulk_copy_main"
+rc=$?
+set -e
+[ "$rc" = 8 ] || { echo "FAIL: bulk-copy fixture returned $rc, expected 8"; exit 1; }
+echo "PASS: AIR 3 bulk copies are bounds-checked, by literal and by register (8)"
+
+for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main reject_cell_after_call_main reject_bulk_copy_main; do
     cp "tests/pear2/$fixture.air" "$W/$fixture.air"
     printf 'stale bitcode' > "$W/$fixture.bc"
     set +e
@@ -639,6 +654,7 @@ grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/rej
 grep -q 'free requires the live base pointer' "$W/reject_interior_free_main.log" || { echo "FAIL: interior-pointer free was not rejected"; cat "$W/reject_interior_free_main.log"; exit 1; }
 grep -q 'free requires the live base pointer' "$W/reject_double_free_main.log" || { echo "FAIL: double free was not rejected"; cat "$W/reject_double_free_main.log"; exit 1; }
 grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/reject_cell_after_call_main.log" || { echo "FAIL: a pointer cell survived a call that can write"; cat "$W/reject_cell_after_call_main.log"; exit 1; }
+grep -q 'a bulk memory operation exceeds the object' "$W/reject_bulk_copy_main.log" || { echo "FAIL: an oversized constant memcpy was not rejected"; cat "$W/reject_bulk_copy_main.log"; exit 1; }
 echo "PASS: AIR 3 dynamic/provenance/alignment/lifetime violations fail closed with source locations"
 
 cp tests/pear2/literal_main.air "$W/literal.air"
