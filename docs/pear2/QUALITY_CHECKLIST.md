@@ -649,13 +649,41 @@ by letting the extent itself be a register.
       `getelementptr i8, ptr %…, i64 %…` assertion in `run.sh` have not been
       executed: no LLVM and no executable compiler in this workspace.
 
+## 19. Provenance state does not cross a function boundary (5)
+
+A pointer cell is keyed by `(allocation name, byte offset)`, and a local
+allocation is named by an SSA temporary: `%t7`. Temporaries restart at `%t0` in
+every function, so a cell recorded while emitting one body names an object in the
+*next* body too. Cells were never reset per function, which made that name
+collision a real one — a load in the second body could restore the provenance of
+a dead stack slot from the first, and every soundness claim built on that
+provenance would then be about the wrong object. The budget was also shared, so a
+longer program exhausted 512 cells and failed with no diagnostic at all.
+
+- [x] 19.1 `pointer_cell_count` is reset per function, so a local cell can only be
+      found by the body that created it.
+- [x] 19.2 Cells that must outlive a body — a pointer already stored inside a
+      global — live in a separate `module_cells` table, filled while
+      `emit_globals` runs (`at_module_scope`) and searched after the local table.
+      `cell_find` consults both; `mark_allocation_freed` invalidates both.
+- [x] 19.3 Running out of cells is a positioned diagnostic
+      (`more than 512 pointer cells are tracked in one function`, and 256 for
+      module cells) instead of a silent `false` that surfaced later as
+      "unsupported command".
+- [x] 19.4 `tests/pear2/pointer_cell_scopes_main.air` is the regression: two
+      functions with identical shapes and different sizes. Shared cells make the
+      second one's `gep(quad, 3)` an escape from an eight-byte object and the
+      compile fails; scoped cells lower it and the program exits 12.
+- [ ] 19.5 That fixture has not been executed, for the same reason as every other
+      bitcode assertion here: no LLVM and no executable compiler.
+
 ## Score
 
-**187 items: 178 complete with evidence, 9 open** (the count is the file's own
+**192 items: 182 complete with evidence, 10 open** (the count is the file's own
 inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.5
 (token rotation), 11.6
 (the native end-to-end script has not been run here: no C3 compiler, no linker),
-12.6, 13.5, 14.7, 15.6, 16.7, 17.5 and 18.7 (the new bitcode assertions have not
-been run for the same reason).
-Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All nine are an
+12.6, 13.5, 14.7, 15.6, 16.7, 17.5, 18.7 and 19.5 (the new bitcode assertions
+have not been run for the same reason).
+Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All ten are an
 unrun test or an owner action, not a known defect: none lowers the safety floor.

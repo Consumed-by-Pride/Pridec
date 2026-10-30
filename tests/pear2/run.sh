@@ -583,6 +583,19 @@ set -e
 [ "$rc" = 46 ] || { echo "FAIL: computed-size malloc fixture returned $rc, expected 46"; exit 1; }
 echo "PASS: AIR 3 heap objects sized at run time (46)"
 
+# Pointer cells are per function. Two bodies use the same temporary names for
+# different objects; if the cells were shared, the second body would inherit the
+# first one's extent and refuse an access that is perfectly in bounds.
+cp tests/pear2/pointer_cell_scopes_main.air "$W/pointer_cell_scopes_main.air"
+"$PEAR2" "$W/pointer_cell_scopes_main.air" --quiet || { echo "FAIL: per-function pointer cells leaked across bodies"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/pointer_cell_scopes_main.bc" -o "$W/pointer_cell_scopes_main" || { echo "FAIL: pointer-cell scope fixture failed to link"; exit 1; }
+set +e
+"$W/pointer_cell_scopes_main"
+rc=$?
+set -e
+[ "$rc" = 12 ] || { echo "FAIL: pointer-cell scope fixture returned $rc, expected 12"; exit 1; }
+echo "PASS: AIR 3 pointer cells are scoped to their function (12)"
+
 for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main; do
     cp "tests/pear2/$fixture.air" "$W/$fixture.air"
     printf 'stale bitcode' > "$W/$fixture.bc"

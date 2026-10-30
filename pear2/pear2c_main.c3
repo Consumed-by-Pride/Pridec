@@ -779,6 +779,9 @@ struct M1Gen
     M1String[256] strings; int string_count;
     M1Provenance[1024] provenance; int provenance_count;
     M1PointerCell[512] pointer_cells; int pointer_cell_count;
+    // Cells that outlive a function: a pointer stored inside a global. They are
+    // recorded once, before any body is emitted, and every function sees them.
+    M1PointerCell[256] module_cells; int module_cell_count; bool at_module_scope;
     bool low_profile; char* input_path; char* current_function;
     M1FxFrame[8] fx_stack; usz fx_depth;
     int fail_line; int fail_col; int last_line; int last_col; char* fail_form;
@@ -4690,6 +4693,9 @@ fn bool M1Gen.record_global_cells(M1Gen* g, AirTyp* t, AirPrd* init, char* alloc
 }
 fn bool M1Gen.emit_globals(M1Gen* g)
 {
+    // Cells created here outlive every function: they describe pointers already
+    // inside a global, and a body that loads one has to find it again.
+    g.at_module_scope = true;
     for (usz i = 0; i < g.decl_count; i++)
     {
         AirDecl* d = g.decls[i];
@@ -4718,6 +4724,7 @@ fn bool M1Gen.emit_globals(M1Gen* g)
         fprintf(g.out, ", align %d\n", align);
     }
     fprintf(g.out, "\n");
+    g.at_module_scope = false;
     return true;
 }
 fn bool M1Gen.emit_string_constants(M1Gen* g)
@@ -6172,6 +6179,12 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     for (usz p = 0; p < d.param_count; p++) { if (d.params[p] == null || (d.params[p].ty != null && d.params[p].ty.tag != ATYP_INFER && !m1_backend_type(d.params[p].ty, g.decls, g.decl_count, 0))) { return false; } }
     g.current_function = d.name;
     g.env_count = 0; g.provenance_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0;
+    // Pointer cells are per function for a reason: a local allocation is named by
+    // an SSA temporary (`%t7`) whose numbering restarts in every function, so a
+    // cell left behind by the previous body would match an unrelated object here
+    // and hand a load the provenance of a dead stack slot. Module-scope cells live
+    // in their own table and survive.
+    g.pointer_cell_count = 0; g.at_module_scope = false;
     g.default_unsigned = m1_unsigned(d.ret_ty);
     g.default_bits = m1_integer_type(d.ret_ty) ? m1_int_bits(d.ret_ty) : 64;
     g.guard_active = false; g.guard_name = null; g.guard_true_label = null; g.guard_false_label = null;

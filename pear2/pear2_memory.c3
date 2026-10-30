@@ -86,24 +86,44 @@ fn bool M1Gen.retype_pointer(M1Gen* g, char* value, AirTyp* pointee)
     M1Provenance* q = g.prov(value); q.freed = was_freed; q.extent_value = extent_value; q.lo = lo; q.hi = hi;
     return true;
 }
-fn int M1Gen.cell_index(M1Gen* g, char* allocation, long offset)
+// Pointer cells are keyed by (allocation name, byte offset). The name is not
+// enough on its own: a local allocation is an SSA temporary, and `%t7` names a
+// different object in every function. Function-local cells are searched first
+// and only ever belong to the body being emitted; module cells were recorded
+// before any body and are shared by all of them, which is what a pointer stored
+// inside a global needs.
+fn M1PointerCell* M1Gen.cell_find(M1Gen* g, char* allocation, long offset)
 {
+    if (allocation == null) { return null; }
     for (int i = g.pointer_cell_count - 1; i >= 0; i--)
     {
-        if (same(g.pointer_cells[i].allocation, allocation) && g.pointer_cells[i].offset == offset) { return i; }
+        if (same(g.pointer_cells[i].allocation, allocation) && g.pointer_cells[i].offset == offset) { return &g.pointer_cells[i]; }
     }
-    return -1;
+    for (int i = g.module_cell_count - 1; i >= 0; i--)
+    {
+        if (same(g.module_cells[i].allocation, allocation) && g.module_cells[i].offset == offset) { return &g.module_cells[i]; }
+    }
+    return null;
+}
+// A fresh cell, in the table that matches the scope the store happens in. Running
+// out is a budget the program can see: a function that tracks more than 512
+// pointer values is beyond what this model carries, and saying so is better than
+// silently forgetting one.
+fn M1PointerCell* M1Gen.cell_new(M1Gen* g)
+{
+    if (g.at_module_scope)
+    {
+        if (g.module_cell_count >= 256) { g.note_failure(g.last_line, g.last_col, (char*)"more than 256 pointer-valued global cells are tracked"); return null; }
+        return &g.module_cells[g.module_cell_count++];
+    }
+    if (g.pointer_cell_count >= 512) { g.note_failure(g.last_line, g.last_col, (char*)"more than 512 pointer cells are tracked in one function"); return null; }
+    return &g.pointer_cells[g.pointer_cell_count++];
 }
 fn bool M1Gen.cell_set_at(M1Gen* g, char* allocation, long offset, char* value, bool is_null)
 {
     if (allocation == null || offset < 0) { return false; }
-    int ix = g.cell_index(allocation, offset);
-    if (ix < 0)
-    {
-        if (g.pointer_cell_count >= 512) { return false; }
-        ix = g.pointer_cell_count++;
-    }
-    M1PointerCell* c = &g.pointer_cells[ix];
+    M1PointerCell* c = g.cell_find(allocation, offset);
+    if (c == null) { c = g.cell_new(); if (c == null) { return false; } }
     c.allocation = allocation; c.offset = offset; c.is_null = is_null;
     c.value_allocation = null; c.pointee = null; c.kind = M1PROV_UNKNOWN; c.alignment = 1; c.extent = 0;
     c.value_extent_value = null; c.value_offset = 0;
@@ -130,13 +150,8 @@ fn bool M1Gen.cell_set_at(M1Gen* g, char* allocation, long offset, char* value, 
 fn bool M1Gen.cell_set_symbol(M1Gen* g, char* allocation, long offset, char* symbol)
 {
     if (allocation == null || offset < 0 || symbol == null) { return false; }
-    int ix = g.cell_index(allocation, offset);
-    if (ix < 0)
-    {
-        if (g.pointer_cell_count >= 512) { return false; }
-        ix = g.pointer_cell_count++;
-    }
-    M1PointerCell* c = &g.pointer_cells[ix];
+    M1PointerCell* c = g.cell_find(allocation, offset);
+    if (c == null) { c = g.cell_new(); if (c == null) { return false; } }
     c.allocation = allocation; c.offset = offset; c.is_null = false;
     c.value_allocation = symbol; c.pointee = null; c.kind = M1PROV_UNKNOWN;
     c.alignment = 1; c.extent = 0; c.value_extent_value = null; c.value_offset = 0; c.offset_known = false;
@@ -154,9 +169,8 @@ fn bool M1Gen.cell_restore(M1Gen* g, char* address, char* result)
 {
     M1Provenance* ap = g.prov(address);
     if (ap == null || result == null || !ap.offset_known) { return true; }   // no exact cell for an interval address
-    int ix = g.cell_index(ap.allocation, ap.offset);
-    if (ix < 0 || g.pointer_cells[ix].is_null) { return true; }
-    M1PointerCell* c = &g.pointer_cells[ix];
+    M1PointerCell* c = g.cell_find(ap.allocation, ap.offset);
+    if (c == null || c.is_null) { return true; }
     if (!g.prov_set(result, c.pointee, c.kind, c.alignment, c.extent, c.value_offset, c.offset_known, c.writable)) { return false; }
     M1Provenance* p = g.prov(result); p.allocation = c.value_allocation; p.freed = c.freed;
     p.extent_value = c.value_extent_value;
@@ -290,5 +304,9 @@ fn void M1Gen.mark_allocation_freed(M1Gen* g, char* allocation)
     for (int i = 0; i < g.pointer_cell_count; i++)
     {
         if (same(g.pointer_cells[i].value_allocation, allocation)) { g.pointer_cells[i].freed = true; }
+    }
+    for (int i = 0; i < g.module_cell_count; i++)
+    {
+        if (same(g.module_cells[i].value_allocation, allocation)) { g.module_cells[i].freed = true; }
     }
 }
