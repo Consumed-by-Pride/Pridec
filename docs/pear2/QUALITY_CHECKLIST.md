@@ -562,7 +562,9 @@ bitcode-determinism fix committed with this checklist revision).
       the two shapes that have a length: the element step of a tracked pointer
       (count from the allocation extent) and an array step (count from the array
       type). A dynamic record-field selector is still refused — there is no
-      layout for it.
+      layout for it. A dynamic step may start from a pointer whose offset is
+      already unknown, so `p[i][j]` (two GEPs) lowers; two dynamic indices inside
+      one GEP do not.
 - [x] 16.2 `M1Provenance` carries `offset_known` plus a `[lo, hi]` span. Exact =
       a constant offset; bounded = an interval that a compile-time proof covers;
       open (`hi < 0`) = only "at or after `lo`".
@@ -583,9 +585,11 @@ bitcode-determinism fix committed with this checklist revision).
       `value_lo`/`value_hi` so a reload does not narrow it.
 - [ ] 16.7 `tests/pear2/dynamic_index_main.air` (a while loop summing four
       elements through a dynamic index; expects 10, plus `icmp uge ptr`,
-      `icmp ule ptr` and `llvm.trap` in the `.ll`), and the re-pointed
-      `reject_dynamic_gep_main.air` (two dynamic steps in one GEP) have not been
-      executed: no LLVM and no executable compiler in this workspace.
+      `icmp ule ptr` and `llvm.trap` in the `.ll`), `dynamic_grid_main.air`
+      (chained `base[i][j]` over a stack grid and a runtime index into a heap
+      buffer; expects 35), and the re-pointed `reject_dynamic_gep_main.air` (two
+      dynamic steps in one GEP) have not been executed: no LLVM and no executable
+      compiler in this workspace.
 
 ## 17. Function addresses as constants (5)
 
@@ -608,13 +612,50 @@ bitcode-determinism fix committed with this checklist revision).
       `@ops = ... constant [2 x ptr]` and `ptr @twice` assertions in run.sh) has
       not been executed: no LLVM and no executable compiler here.
 
+## 18. Objects whose size the program decides (7)
+
+The reason `malloc` takes an argument is that a program does not always know how
+much memory it needs. A backend that only accepts `malloc(16)` can hold arrays
+and cannot hold a container: every `Vec`, `String`, `HashMap`, and parser buffer
+in a real library grows. Round 6 removes that limit without weakening the model,
+by letting the extent itself be a register.
+
+- [x] 18.1 `M1Provenance` carries `extent_value`, the `i64` register holding a
+      runtime byte count, and `extent` carries `M1EXTENT_RUNTIME` (-1) to say so.
+      `prov_set` accepts exactly that one negative marker and refuses anything
+      below it, so "unknown size" cannot be spelled by accident.
+- [x] 18.2 The runtime bound check is the same check: `%end` becomes
+      `getelementptr i8, ptr <alloc>, i64 <register>` instead of a literal, and the
+      comparison `addr >= base && addr + size <= end` is emitted unchanged.
+- [x] 18.3 A failed allocation cannot masquerade as a zero-byte object. The
+      runtime-extent path adds `icmp ne ptr <alloc>, null` to the conjunction, so
+      `malloc` returning null traps at the first access rather than comparing
+      equal to itself.
+- [x] 18.4 Exactness survives. `malloc(n)` followed by a constant GEP keeps
+      `offset_known`, so pointer cells still track stores into dynamically sized
+      objects; only the *top* of the object moves to run time. `gep_prd` skips the
+      static escape proof when the extent is not a constant, and keeps it when it
+      is.
+- [x] 18.5 `extent_value` travels with the value: `prov_copy`, `retype_pointer`,
+      `cell_set_at`/`cell_restore`, and the GEP result all carry it, so a pointer
+      to a `malloc(n)` object that is stored in memory and loaded back is still
+      bounded.
+- [x] 18.6 A constant non-positive heap size is still a compile-time error
+      (`a constant heap size must be positive`), re-pointed in
+      `tests/pear2/reject_dynamic_malloc_main.air`; the shape that used to be
+      refused outright is now `tests/pear2/dynamic_malloc_main.air`.
+- [ ] 18.7 `tests/pear2/dynamic_malloc_main.air` (computed size, a store and a
+      load through two dynamic GEPs, then `free`; expects 46) and the
+      `getelementptr i8, ptr %…, i64 %…` assertion in `run.sh` have not been
+      executed: no LLVM and no executable compiler in this workspace.
+
 ## Score
 
-**180 items: 172 complete with evidence, 8 open** (the count is the file's own
+**187 items: 178 complete with evidence, 9 open** (the count is the file's own
 inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.5
 (token rotation), 11.6
 (the native end-to-end script has not been run here: no C3 compiler, no linker),
-12.6, 13.5, 14.7, 15.6, 16.7 and 17.5 (the new bitcode assertions have not been run for the same
-reason).
-Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All eight are an
+12.6, 13.5, 14.7, 15.6, 16.7, 17.5 and 18.7 (the new bitcode assertions have not
+been run for the same reason).
+Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All nine are an
 unrun test or an owner action, not a known defect: none lowers the safety floor.

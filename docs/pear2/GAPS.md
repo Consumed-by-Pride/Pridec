@@ -28,7 +28,7 @@ larger than the language implies.
 | atomics through a dynamic address | `an atomic operation needs a constant address (a dynamic index has no provable alignment)` | an unaligned atomic is not atomic; no runtime check can add alignment without changing the operation | M |
 | constructor payload layouts outside the supported sum slice | `unsupported constructor payload layout`, `unsupported or ambiguous constructor value` | the payload packing rules are fixed by the supported slice; general layout needs the AIR-side layout contract finished first | M |
 | record GEP layouts with padding the backend does not model | `unsupported GEP field layout`, `unsupported GEP record layout` | needs the record layout to be authoritative rather than recomputed | M |
-| unusual `alloca` shapes (oversized or non-statically-sized) | `unsupported alloca type/size` | bounded allocation is a deliberate guard (1 MiB, static) | S |
+| unusual `alloca` shapes (oversized or non-statically-sized) | `unsupported alloca type/size` | a stack object must be sized at compile time; a stack frame of unknown size has no frame layout. Heap objects have no such limit: `malloc(n)` takes any `i64` | S |
 | globals with non-constant initialisers | `unsupported global initializer` — but a **function address** is a supported constant now (`ptr @f`), which is what a vtable, a callback table or a dispatch array is made of | a genuinely dynamic initialiser (`global x = f()`) needs a static initialiser graph and an init function | M |
 | effect declarations whose operations are not `name + lowerable payload` | `unsupported effect declaration` | effects currently lower only in the supported handler shapes | L |
 | declaration attributes beyond the seven handled | `unsupported function attribute (supported: callconv, noinline, alwaysinline, cold, naked, section, export)` | each new attribute needs a meaning, not just a spelling | S each |
@@ -57,9 +57,15 @@ is what landed, and it has three tiers rather than one:
 A pointer with no provenance at all is still refused. The runtime tier does not
 widen what the compiler is willing to touch; it converts "this index cannot be
 proved" into "this index is checked when it runs", which is the same promise a
-safe systems language makes. One dynamic step per GEP is supported; two
-(`p[i][j]`) are not, because the second bound depends on the first value and one
-check cannot establish it.
+safe systems language makes.
+
+The unit of the promise is the *access*, not the GEP. `p[i][j]` is two GEPs, the
+second starting from a pointer whose offset nobody knows, and it works: the load
+at the end checks its own address against the allocation the whole chain came
+from. What is refused is two dynamic indices inside **one** GEP (`gep[T](p, i, j)`),
+because AIR then has a single producer with one result type and no place to
+attach two different checks. The lowering pass emits a GEP per source index, so
+that shape does not arise from a source program.
 
 Not a gap, worth stating because it looks like one: `relaxed` fences and
 `release`/`acq_rel` atomic loads are rejected by the *AIR verifier*, not by

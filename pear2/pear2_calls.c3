@@ -177,12 +177,28 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
     }
     bool is_malloc = direct && g.low_profile && same(m1_link_name(target), "malloc");
     bool is_free = direct && g.low_profile && same(m1_link_name(target), "free");
-    long heap_size = 0; char* heap_allocation = null;
+    long heap_size = 0; char* heap_allocation = null; char* heap_size_value = null;
     if (is_malloc)
     {
-        if (argc != 1 || !m1_pointer_type(target_return) || args[0].tag != APRD_INT || args[0].ival <= 0 || args[0].ival > 1048576)
-        { g.note_failure(callee.source_line, callee.source_col, (char*)"heap allocation requires a positive constant size no greater than 1 MiB"); return false; }
-        heap_size = args[0].ival;
+        if (argc != 1 || !m1_pointer_type(target_return) || args[0] == null || !m1_integer_type(target_params[0]))
+        { g.note_failure(callee.source_line, callee.source_col, (char*)"heap allocation requires one integer size argument and a pointer result"); return false; }
+        if (args[0].tag == APRD_INT)
+        {
+            // A constant size is proved here, so a non-positive one is a bug in
+            // the program rather than a fact to discover later.
+            if (args[0].ival <= 0)
+            { g.note_failure(callee.source_line, callee.source_col, (char*)"a constant heap size must be positive"); return false; }
+            heap_size = args[0].ival;
+        }
+        else
+        {
+            // A computed size is the reason `malloc` takes an argument at all.
+            // The extent moves into a register and every bound check against the
+            // object compares against it, so nothing is given up but the literal.
+            if (m1_int_bits(target_params[0]) != 64 || values[0] == null)
+            { g.note_failure(callee.source_line, callee.source_col, (char*)"a runtime heap size must be a 64-bit integer"); return false; }
+            heap_size = M1EXTENT_RUNTIME; heap_size_value = values[0];
+        }
     }
     if (is_free)
     {
@@ -302,8 +318,13 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
  return false; }
         fprintf(g.out, "  %s = load %s, ptr %s, align %d\n", dst, sret_type, sret_slot, sret_align);
     }
-    if (is_malloc && !g.prov_set(dst, m1_pointee_type(target_return), M1PROV_HEAP, 16, heap_size, 0, true, true)) { g.failed = true;
- return false; }
+    if (is_malloc)
+    {
+        bool ok = heap_size_value != null
+            ? g.prov_set_dynamic_extent(dst, m1_pointee_type(target_return), M1PROV_HEAP, 16, heap_size_value)
+            : g.prov_set(dst, m1_pointee_type(target_return), M1PROV_HEAP, 16, heap_size, 0, true, true);
+        if (!ok) { g.failed = true; return false; }
+    }
     if (is_free && heap_allocation != null) { g.mark_allocation_freed(heap_allocation); }
     if (result_unit) { return g.consume_unit(tail, ret_name); }
     return g.consume(dst, result_bool, result_ptr, target_return, tail, ret_name);

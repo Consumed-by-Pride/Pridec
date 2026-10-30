@@ -554,6 +554,35 @@ set -e
 [ "$rc" = 10 ] || { echo "FAIL: dynamic-index fixture returned $rc, expected 10"; exit 1; }
 echo "PASS: AIR 3 dynamic array reads are bounds-checked at the access (10)"
 
+# Two chained dynamic indices (`base[i][j]`) plus a dynamic index into a heap
+# buffer: the second step starts from a pointer whose offset nobody knows, and it
+# is still safe because each dereference is checked against the allocation the
+# whole chain came from.
+cp tests/pear2/dynamic_grid_main.air "$W/dynamic_grid_main.air"
+"$PEAR2" "$W/dynamic_grid_main.air" --quiet || { echo "FAIL: a 2-D array walked with chained dynamic indices was rejected"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/dynamic_grid_main.bc" -o "$W/dynamic_grid_main" || { echo "FAIL: dynamic-grid fixture failed to link"; exit 1; }
+set +e
+"$W/dynamic_grid_main"
+rc=$?
+set -e
+[ "$rc" = 35 ] || { echo "FAIL: dynamic-grid fixture returned $rc, expected 35"; exit 1; }
+echo "PASS: AIR 3 chained dynamic indices over stack and heap memory (35)"
+
+# A heap object whose size is decided by the program. The extent moves into a
+# register and every access against it is checked against that register, which is
+# what a growable container is built out of.
+cp tests/pear2/dynamic_malloc_main.air "$W/dynamic_malloc_main.air"
+"$PEAR2" "$W/dynamic_malloc_main.air" --emit-ll --quiet || { echo "FAIL: malloc with a computed size was rejected"; exit 1; }
+grep -q 'getelementptr i8, ptr %.*, i64 %' "$W/dynamic_malloc_main.ll" || { echo "FAIL: the runtime extent never reached a bound check"; exit 1; }
+"$PEAR2" "$W/dynamic_malloc_main.air" --quiet || { echo "FAIL: computed-size malloc fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/dynamic_malloc_main.bc" -o "$W/dynamic_malloc_main" || { echo "FAIL: computed-size malloc fixture failed to link"; exit 1; }
+set +e
+"$W/dynamic_malloc_main"
+rc=$?
+set -e
+[ "$rc" = 46 ] || { echo "FAIL: computed-size malloc fixture returned $rc, expected 46"; exit 1; }
+echo "PASS: AIR 3 heap objects sized at run time (46)"
+
 for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main; do
     cp "tests/pear2/$fixture.air" "$W/$fixture.air"
     printf 'stale bitcode' > "$W/$fixture.bc"
@@ -565,7 +594,7 @@ for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_fre
     grep -Eq "$W/$fixture.air:[0-9]+:[0-9]+: pear2c:" "$W/$fixture.log" || { echo "FAIL: $fixture lacked a file:line:col diagnostic"; cat "$W/$fixture.log"; exit 1; }
 done
 grep -q 'at most one dynamic pointer offset' "$W/reject_dynamic_gep_main.log" || { echo "FAIL: dynamic GEP rejection was not specific"; cat "$W/reject_dynamic_gep_main.log"; exit 1; }
-grep -q 'heap allocation requires a positive constant size' "$W/reject_dynamic_malloc_main.log" || { echo "FAIL: dynamic malloc rejection was not specific"; cat "$W/reject_dynamic_malloc_main.log"; exit 1; }
+grep -q 'a constant heap size must be positive' "$W/reject_dynamic_malloc_main.log" || { echo "FAIL: zero-size malloc rejection was not specific"; cat "$W/reject_dynamic_malloc_main.log"; exit 1; }
 grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/reject_use_after_free_main.log" || { echo "FAIL: pointer-cell use-after-free was not rejected"; cat "$W/reject_use_after_free_main.log"; exit 1; }
 grep -q 'free requires the live base pointer' "$W/reject_interior_free_main.log" || { echo "FAIL: interior-pointer free was not rejected"; cat "$W/reject_interior_free_main.log"; exit 1; }
 grep -q 'free requires the live base pointer' "$W/reject_double_free_main.log" || { echo "FAIL: double free was not rejected"; cat "$W/reject_double_free_main.log"; exit 1; }

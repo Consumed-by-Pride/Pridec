@@ -11,14 +11,14 @@ fn int M1Gen.prov_index(M1Gen* g, char* value)
 }
 fn bool M1Gen.prov_set(M1Gen* g, char* value, AirTyp* pointee, int kind, int alignment, long extent, long offset, bool offset_known, bool writable)
 {
-    if (value == null || alignment <= 0 || extent < 0) { return false; }
+    if (value == null || alignment <= 0 || extent < M1EXTENT_RUNTIME) { return false; }
     int at = g.prov_index(value);
     bool fresh = at < 0;
     if (fresh) { if (g.provenance_count >= 1024) { return false; } at = g.provenance_count++; }
     M1Provenance* p = &g.provenance[at];
     if (fresh) { p.allocation = value; }
     p.value = value; p.pointee = pointee; p.kind = kind; p.alignment = alignment;
-    p.extent = extent; p.offset = offset; p.offset_known = offset_known; p.freed = false; p.writable = writable;
+    p.extent = extent; p.extent_value = null; p.offset = offset; p.offset_known = offset_known; p.freed = false; p.writable = writable;
     p.lo = offset; p.hi = offset;
     return true;
 }
@@ -34,11 +34,24 @@ fn bool M1Gen.prov_set_span(M1Gen* g, char* value, AirTyp* pointee, int kind, in
     // `hi < 0` records an open span: the pointer is at or after `lo`, and no
     // static claim is made about the top. A tight span must sit inside the
     // object, because a tight span is used as a compile-time proof.
-    if (lo < 0 || hi > extent || (hi >= 0 && hi < lo)) { return false; }
+    if (lo < 0 || (hi >= 0 && (extent < 0 || hi > extent || hi < lo))) { return false; }
     if (!g.prov_set(value, pointee, kind, alignment, extent, lo, false, writable)) { return false; }
     M1Provenance* p = g.prov(value);
     if (p == null) { return false; }
     p.lo = lo; p.hi = hi;
+    return true;
+}
+// A heap object whose byte count is a register, not a literal. `extent` becomes
+// M1EXTENT_RUNTIME and `extent_value` carries the i64 count; every later proof
+// that would have compared against `extent` turns into a runtime comparison
+// against `extent_value`, so the guarantee is unchanged and the constant is gone.
+fn bool M1Gen.prov_set_dynamic_extent(M1Gen* g, char* value, AirTyp* pointee, int kind, int alignment, char* extent_value)
+{
+    if (extent_value == null) { return false; }
+    if (!g.prov_set(value, pointee, kind, alignment, M1EXTENT_RUNTIME, 0, true, true)) { return false; }
+    M1Provenance* p = g.prov(value);
+    if (p == null) { return false; }
+    p.extent_value = extent_value;
     return true;
 }
 fn M1Provenance* M1Gen.prov(M1Gen* g, char* value)
@@ -52,10 +65,12 @@ fn bool M1Gen.prov_copy(M1Gen* g, char* from, char* to)
     if (p == null || to == null) { return true; }
     AirTyp* pointee = p.pointee; int kind = p.kind;
     int alignment = p.alignment; long extent = p.extent; long offset = p.offset;
+    char* extent_value = p.extent_value;
     bool known = p.offset_known; bool was_freed = p.freed; bool writable = p.writable; char* allocation = p.allocation;
     long lo = p.lo; long hi = p.hi;
     if (!g.prov_set(to, pointee, kind, alignment, extent, offset, known, writable)) { return false; }
     M1Provenance* copy = g.prov(to); copy.freed = was_freed; copy.allocation = allocation;
+    copy.extent_value = extent_value;
     copy.lo = lo; copy.hi = hi;
     return true;
 }
@@ -64,10 +79,11 @@ fn bool M1Gen.retype_pointer(M1Gen* g, char* value, AirTyp* pointee)
     M1Provenance* p = g.prov(value);
     if (p == null) { return true; }
     int kind = p.kind; int alignment = p.alignment; long extent = p.extent;
+    char* extent_value = p.extent_value;
     long offset = p.offset; bool known = p.offset_known; bool writable = p.writable; bool was_freed = p.freed;
     long lo = p.lo; long hi = p.hi;
     if (!g.prov_set(value, pointee, kind, alignment, extent, offset, known, writable)) { return false; }
-    M1Provenance* q = g.prov(value); q.freed = was_freed; q.lo = lo; q.hi = hi;
+    M1Provenance* q = g.prov(value); q.freed = was_freed; q.extent_value = extent_value; q.lo = lo; q.hi = hi;
     return true;
 }
 fn int M1Gen.cell_index(M1Gen* g, char* allocation, long offset)
@@ -89,14 +105,16 @@ fn bool M1Gen.cell_set_at(M1Gen* g, char* allocation, long offset, char* value, 
     }
     M1PointerCell* c = &g.pointer_cells[ix];
     c.allocation = allocation; c.offset = offset; c.is_null = is_null;
-    c.value_allocation = null; c.pointee = null; c.kind = M1PROV_UNKNOWN; c.alignment = 1; c.extent = 0; c.value_offset = 0;
+    c.value_allocation = null; c.pointee = null; c.kind = M1PROV_UNKNOWN; c.alignment = 1; c.extent = 0;
+    c.value_extent_value = null; c.value_offset = 0;
     c.offset_known = false; c.freed = false; c.writable = false; c.value_lo = 0; c.value_hi = 0;
     if (!is_null)
     {
         M1Provenance* p = g.prov(value);
         if (p == null || p.freed) { return false; }
         c.value_allocation = p.allocation; c.pointee = p.pointee; c.kind = p.kind; c.alignment = p.alignment;
-        c.extent = p.extent; c.value_offset = p.offset; c.offset_known = p.offset_known; c.freed = p.freed; c.writable = p.writable;
+        c.extent = p.extent; c.value_extent_value = p.extent_value; c.value_offset = p.offset;
+        c.offset_known = p.offset_known; c.freed = p.freed; c.writable = p.writable;
         // A cell can hold a pointer whose offset is an interval (it came from a
         // bounds-checked dynamic index). Restoring only the point would widen the
         // pointer's apparent bounds when it is loaded again, so the interval
@@ -121,7 +139,7 @@ fn bool M1Gen.cell_set_symbol(M1Gen* g, char* allocation, long offset, char* sym
     M1PointerCell* c = &g.pointer_cells[ix];
     c.allocation = allocation; c.offset = offset; c.is_null = false;
     c.value_allocation = symbol; c.pointee = null; c.kind = M1PROV_UNKNOWN;
-    c.alignment = 1; c.extent = 0; c.value_offset = 0; c.offset_known = false;
+    c.alignment = 1; c.extent = 0; c.value_extent_value = null; c.value_offset = 0; c.offset_known = false;
     c.freed = false; c.writable = false; c.value_lo = 0; c.value_hi = 0;
     return true;
 }
@@ -141,6 +159,7 @@ fn bool M1Gen.cell_restore(M1Gen* g, char* address, char* result)
     M1PointerCell* c = &g.pointer_cells[ix];
     if (!g.prov_set(result, c.pointee, c.kind, c.alignment, c.extent, c.value_offset, c.offset_known, c.writable)) { return false; }
     M1Provenance* p = g.prov(result); p.allocation = c.value_allocation; p.freed = c.freed;
+    p.extent_value = c.value_extent_value;
     p.lo = c.value_lo; p.hi = c.value_hi;
     return true;
 }
@@ -173,13 +192,20 @@ fn bool M1Gen.check_access(M1Gen* g, char* address, AirTyp* ty, int line, int co
     }
     if (p.offset_known)
     {
-        if (p.offset < 0 || p.offset + size > p.extent || p.alignment < need_align)
+        if (p.offset < 0 || p.alignment < need_align)
+        {
+            return g.note_failure(line, col, (char*)"memory access with unknown/out-of-bounds/misaligned provenance");
+        }
+        // An exact offset over an object of unknown size is still an exact
+        // address: only the top of the object has to be learned at run time.
+        if (p.extent < 0) { return g.check_access_runtime(p, address, size, line, col); }
+        if (p.offset + size > p.extent)
         {
             return g.note_failure(line, col, (char*)"memory access with unknown/out-of-bounds/misaligned provenance");
         }
         return true;
     }
-    if (p.hi >= 0 && p.lo >= 0 && p.hi + size <= p.extent && p.alignment >= need_align) { return true; }
+    if (p.extent >= 0 && p.hi >= 0 && p.lo >= 0 && p.hi + size <= p.extent && p.alignment >= need_align) { return true; }
     return g.check_access_runtime(p, address, size, line, col);
 }
 
@@ -187,10 +213,18 @@ fn bool M1Gen.check_access(M1Gen* g, char* address, AirTyp* ty, int line, int co
 // makes the access safe for whatever the address turned out to be.
 fn bool M1Gen.check_access_runtime(M1Gen* g, M1Provenance* p, char* address, long size, int line, int col)
 {
-    if (p == null || address == null || p.allocation == null || p.extent <= 0)
+    if (p == null || address == null || p.allocation == null || p.extent == 0 ||
+        (p.extent < 0 && p.extent_value == null))
     {
         return g.note_failure(line, col, (char*)"memory access with unknown/out-of-bounds/misaligned provenance");
     }
+    // `malloc(n)` can fail, and a null object has no addressable byte. The check
+    // is the only place that knows the object's identity, so it is the place that
+    // has to rule the null case out: without this, `[null, null+size)` would
+    // compare equal to a null base and let a dereference through.
+    bool runtime_extent = p.extent < 0;
+    char* nonnull = runtime_extent ? g.tmp() : null;
+    char* guarded = runtime_extent ? g.tmp() : null;
     char* end = g.tmp();
     char* last = g.tmp();
     char* above_base = g.tmp();
@@ -199,16 +233,22 @@ fn bool M1Gen.check_access_runtime(M1Gen* g, M1Provenance* p, char* address, lon
     char* ok_label = g.label((char*)"access.ok.");
     char* bad_label = g.label((char*)"access.bounds.");
     if (g.failed || end == null || last == null || above_base == null || below_end == null || inside == null ||
-        ok_label == null || bad_label == null) { return false; }
+        ok_label == null || bad_label == null || (runtime_extent && (nonnull == null || guarded == null))) { return false; }
     // Neither GEP may be `inbounds`: the whole point of the check is that the
     // address might be outside the object, and `inbounds` would make computing
     // it undefined behaviour before the check ever ran.
-    fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %ld\n", end, p.allocation, p.extent);
+    if (runtime_extent) { fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %s\n", end, p.allocation, p.extent_value); }
+    else { fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %ld\n", end, p.allocation, p.extent); }
     fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %ld\n", last, address, size);
     fprintf(g.out, "  %s = icmp uge ptr %s, ptr %s\n", above_base, address, p.allocation);
     fprintf(g.out, "  %s = icmp ule ptr %s, ptr %s\n", below_end, last, end);
     fprintf(g.out, "  %s = and i1 %s, %s\n", inside, above_base, below_end);
-    fprintf(g.out, "  br i1 %s, label %%%s, label %%%s\n", inside, ok_label, bad_label);
+    if (runtime_extent)
+    {
+        fprintf(g.out, "  %s = icmp ne ptr %s, null\n", nonnull, p.allocation);
+        fprintf(g.out, "  %s = and i1 %s, %s\n", guarded, inside, nonnull);
+    }
+    fprintf(g.out, "  br i1 %s, label %%%s, label %%%s\n", runtime_extent ? guarded : inside, ok_label, bad_label);
     g.terminated = true;
     g.begin_block(bad_label);
     fprintf(g.out, "  call void @llvm.trap()\n  unreachable\n");

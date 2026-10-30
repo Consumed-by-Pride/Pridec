@@ -1,8 +1,10 @@
 // AIR 3 dynamic pointer offsets: what is still refused.
 //
-// One dynamic step is checked at the point of use. Two of them are not: the
-// second index would need a bound that depends on the value of the first, and a
-// single check cannot establish it. Refusing is the honest answer, and it is
+// One dynamic step is checked at the point of use, and a chain of GEPs may each
+// carry one (`p[i][j]`). Two dynamic indices inside a *single* GEP cannot be
+// handled the same way: the producer has one result type and one address, so
+// there is nowhere to attach two checks, and the second index's bound would
+// depend on the value of the first. Refusing is the honest answer, and it is
 // reported at the GEP with a source position rather than becoming an unchecked
 // access later.
 air 3.0 Main "reject_dynamic_gep_main.pie";

@@ -521,6 +521,12 @@ const int M1PROV_HEAP = 2;
 const int M1PROV_GLOBAL = 3;
 const int M1PROV_STRING = 4;
 const int M1PROV_PARAM = 5;
+// A heap object whose size is only known once the program runs (`malloc(n)` for a
+// computed `n`). The extent cannot live in `long extent`, so `extent` carries this
+// marker and `extent_value` names the i64 register holding the byte count. Every
+// bound check against such an object compares against that register, which is a
+// runtime value: the check is not weaker, only later.
+const long M1EXTENT_RUNTIME = -1;
 struct M1String { char* data; usz len; char* name; char* symbol; bool terminate; }
 // A tracked pointer. `offset_known` means the byte offset within the
 // allocation is a single constant, and `offset` is it. When the offset is not
@@ -530,8 +536,8 @@ struct M1String { char* data; usz len; char* name; char* symbol; bool terminate;
 // constant: after the runtime check that produced it, every address in
 // [lo, hi] is inside the allocation, which is exactly what a memory-safety
 // claim needs.
-struct M1Provenance { char* value; char* allocation; AirTyp* pointee; int kind; int alignment; long extent; long offset; bool offset_known; bool freed; bool writable; long lo; long hi; }
-struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; long value_lo; long value_hi; }// M10 target profile: pointer width, triple and datalayout follow --target.
+struct M1Provenance { char* value; char* allocation; AirTyp* pointee; int kind; int alignment; long extent; char* extent_value; long offset; bool offset_known; bool freed; bool writable; long lo; long hi; }
+struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; char* value_extent_value; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; long value_lo; long value_hi; }// M10 target profile: pointer width, triple and datalayout follow --target.
 // wasm32-freestanding narrows isz/usz and the pointer representation to 32
 // bits; the default x86_64 profile keeps the historical 64-bit layout so
 // emitted IR is byte-identical to earlier slices.
@@ -2757,9 +2763,17 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
             {
                 g.note_failure(p.source_line, p.source_col, (char*)"at most one dynamic pointer offset is supported per GEP"); return null;
             }
-            if (!base_prov.offset_known || base_prov.extent <= 0)
+            // The base needs a tracked object to check against, not an exact
+            // offset: `p[i][j]` is two GEPs, and the second one starts from a
+            // pointer whose span is already open. Every dereference is checked
+            // against the allocation the whole chain came from, so an exact
+            // base is only needed when a *compile-time* proof is being made.
+            // The object may be a `malloc(n)` whose size is a register: the
+            // count is not a literal, but it is still a bound, and the access
+            // check compares against it.
+            if (base_prov.extent == 0 || (base_prov.extent < 0 && base_prov.extent_value == null))
             {
-                g.note_failure(p.source_line, p.source_col, (char*)"a dynamic pointer offset needs an exact base offset and a known object extent"); return null;
+                g.note_failure(p.source_line, p.source_col, (char*)"a dynamic pointer offset needs a known object extent"); return null;
             }
             long stride = 0;
             if (i == 1)
@@ -2831,10 +2845,22 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
         else { g.note_failure(p.source_line, p.source_col, (char*)"GEP index steps into a scalar type"); return null; }
     }
     long new_lo = base_lo + lo_delta;
-    // `hi < 0` means the span is open: the pointer is somewhere at or after
-    // `lo`, and every access through it must be checked when it runs.
+    // `hi < 0` means the span is open: the offset is not bounded by anything the
+    // GEP knows, because a runtime index can be negative as easily as large.
+    // No static claim is made about such a pointer, so there is nothing to check
+    // here -- every dereference through it carries its own check.
     long new_hi = (open_span || base_hi < 0) ? -1 : base_hi + hi_delta;
-    if (new_lo < 0 || (new_hi >= 0 && (new_hi < new_lo || new_hi > base_prov.extent)))
+    // With an open span `lo` is a hint, not a proof, and a negative static step
+    // before a runtime index says nothing about where the pointer ended up. The
+    // allocation floor is the only honest value; the runtime check does the rest.
+    if (new_hi < 0 && new_lo < 0) { new_lo = 0; }
+    // An object of unknown size cannot be escaped statically: `p[3]` into a
+    // `malloc(n)` is only out of bounds if `n` is small, and that is a question
+    // for the check at the access, not for the GEP. The offset stays exact --
+    // only the top of the object moves to run time -- so pointer-cell tracking
+    // keeps working on dynamically sized objects.
+    bool measurable_extent = base_prov.extent >= 0;
+    if (measurable_extent && new_hi >= 0 && (new_lo < 0 || new_hi < new_lo || new_hi > base_prov.extent))
     {
         g.note_failure(p.source_line, p.source_col, (char*)"GEP escapes the known object bounds"); return null;
     }
@@ -2871,13 +2897,14 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
         align = m1_gcd(base_prov.alignment, new_lo == 0 ? base_prov.alignment : (int)new_lo);
     }
     char* allocation = base_prov.allocation; int kind = base_prov.kind;
-    long extent = base_prov.extent; bool writable = base_prov.writable;
+    long extent = base_prov.extent; char* extent_value = base_prov.extent_value; bool writable = base_prov.writable;
     if (new_hi >= 0 && new_lo == new_hi)
     {
         if (!g.prov_set(out, current, kind, align, extent, new_lo, true, writable)) { g.failed = true; return null; }
     }
     else if (!g.prov_set_span(out, current, kind, align, extent, new_lo, new_hi, writable)) { g.failed = true; return null; }
     g.prov(out).allocation = allocation;
+    g.prov(out).extent_value = extent_value;
     return out;
 }
 
