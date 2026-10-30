@@ -21,6 +21,68 @@ fn bool m1_cns_delivers_to_return(AirCns* k, char* ret_name, int depth)
     return false;
 }
 
+// Does a call possibly write through a pointer it is handed?
+//
+// For a body in this file the answer is a scan of that body; for an external
+// symbol, an indirect call, or a body nested past the scan budget, the honest
+// answer is yes. What the answer decides is whether the pointer cells inside the
+// argument's object survive the call: "yes" costs precision (the caller has to
+// store the pointer again before reading it back), while a wrong "no" would leave
+// a cell describing memory the callee has already overwritten, and hand a load
+// the provenance of whatever used to live there.
+fn bool M1Gen.call_writes(M1Gen* g, AirDecl* target, bool direct, int depth)
+{
+    if (!direct || target == null || target.is_extern || target.def_body == null) { return true; }
+    if (depth >= 4) { return true; }
+    return g.cmd_writes(target.def_body, depth + 1);
+}
+fn bool M1Gen.cns_writes(M1Gen* g, AirCns* k, int depth)
+{
+    if (k == null) { return false; }
+    if (depth >= 48) { return true; }
+    if (k.tag == ACNS_COMU && g.cmd_writes(k.body, depth + 1)) { return true; }
+    for (usz i = 0; i < k.branch_count; i++) { if (k.branches[i] != null && g.cmd_writes(k.branches[i].body, depth + 1)) { return true; } }
+    for (usz i = 0; i < k.cobranch_count; i++) { if (k.cobranches[i] != null && g.cmd_writes(k.cobranches[i].body, depth + 1)) { return true; } }
+    return g.cns_writes(k.tail, depth + 1);
+}
+fn bool M1Gen.cmd_writes(M1Gen* g, AirCmd* c, int depth)
+{
+    if (c == null) { return false; }
+    if (depth >= 48) { return true; }
+    if (c.tag == ACMD_STORE || c.tag == ACMD_ATOMIC || c.tag == ACMD_SYSCALL || c.tag == ACMD_ASM) { return true; }
+    // A call is a cut whose continuation is ACNS_CALL; the callee is the producer.
+    if (c.tag == ACMD_CUT && c.cns != null && c.cns.tag == ACNS_CALL)
+    {
+        AirDecl* target = (c.prd != null && c.prd.tag == APRD_VAR && g.lookup(c.prd.name) == null) ? g.find_function(c.prd.name) : null;
+        if (target == null) { return true; }
+        if (g.call_writes(target, true, depth + 1)) { return true; }
+    }
+    if (g.cns_writes(c.cns, depth + 1)) { return true; }
+    if (g.cmd_writes(c.body, depth + 1)) { return true; }
+    if (g.cmd_writes(c.then_c, depth + 1)) { return true; }
+    if (g.cmd_writes(c.else_c, depth + 1)) { return true; }
+    for (usz i = 0; i < c.branch_count; i++) { if (c.branches[i] != null && g.cmd_writes(c.branches[i].body, depth + 1)) { return true; } }
+    return g.cmd_writes(c.next, depth + 1);
+}
+// The byte count of a heap call. A literal is proved here, so a non-positive one
+// is a bug the compiler can point at; anything else becomes the register that
+// every bound check against the object compares with.
+fn bool M1Gen.heap_size_operand(M1Gen* g, AirPrd* arg, char* value, AirTyp* param_ty, long* out_size, char** out_value, int line, int col)
+{
+    *out_size = 0; *out_value = null;
+    if (arg == null || param_ty == null) { return g.note_failure(line, col, (char*)"heap size operand is missing"); }
+    if (arg.tag == APRD_INT)
+    {
+        if (arg.ival <= 0) { return g.note_failure(line, col, (char*)"a constant heap size must be positive"); }
+        *out_size = arg.ival;
+        return true;
+    }
+    if (m1_int_bits(param_ty) != 64 || value == null)
+    { return g.note_failure(line, col, (char*)"a runtime heap size must be a 64-bit integer"); }
+    *out_size = M1EXTENT_RUNTIME; *out_value = value;
+    return true;
+}
+
 fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
 {
     if (callee == null || k == null || k.tag != ACNS_CALL)
@@ -177,27 +239,29 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
     }
     bool is_malloc = direct && g.low_profile && same(m1_link_name(target), "malloc");
     bool is_free = direct && g.low_profile && same(m1_link_name(target), "free");
+    // `realloc` is the growth step a container is built on. The call itself is
+    // ordinary; what the backend has to record is that the old pointer is gone and
+    // that the new one carries the requested size.
+    bool is_realloc = direct && g.low_profile && same(m1_link_name(target), "realloc");
     long heap_size = 0; char* heap_allocation = null; char* heap_size_value = null;
     if (is_malloc)
     {
         if (argc != 1 || !m1_pointer_type(target_return) || args[0] == null || !m1_integer_type(target_params[0]))
         { g.note_failure(callee.source_line, callee.source_col, (char*)"heap allocation requires one integer size argument and a pointer result"); return false; }
-        if (args[0].tag == APRD_INT)
+        if (!g.heap_size_operand(args[0], values[0], target_params[0], &heap_size, &heap_size_value, callee.source_line, callee.source_col)) { return false; }
+    }
+    if (is_realloc)
+    {
+        if (argc != 2 || !m1_pointer_type(target_return) || args[0] == null || args[1] == null ||
+            !m1_pointer_type(target_params[0]) || !m1_integer_type(target_params[1]))
+        { g.note_failure(callee.source_line, callee.source_col, (char*)"realloc takes (pointer, integer) and returns a pointer"); return false; }
+        if (!g.heap_size_operand(args[1], values[1], target_params[1], &heap_size, &heap_size_value, callee.source_line, callee.source_col)) { return false; }
+        if (args[0].tag != APRD_NULL)
         {
-            // A constant size is proved here, so a non-positive one is a bug in
-            // the program rather than a fact to discover later.
-            if (args[0].ival <= 0)
-            { g.note_failure(callee.source_line, callee.source_col, (char*)"a constant heap size must be positive"); return false; }
-            heap_size = args[0].ival;
-        }
-        else
-        {
-            // A computed size is the reason `malloc` takes an argument at all.
-            // The extent moves into a register and every bound check against the
-            // object compares against it, so nothing is given up but the literal.
-            if (m1_int_bits(target_params[0]) != 64 || values[0] == null)
-            { g.note_failure(callee.source_line, callee.source_col, (char*)"a runtime heap size must be a 64-bit integer"); return false; }
-            heap_size = M1EXTENT_RUNTIME; heap_size_value = values[0];
+            M1Provenance* hp = g.prov(values[0]);
+            if (hp == null || hp.kind != M1PROV_HEAP || hp.freed || !hp.offset_known || hp.offset != 0)
+            { g.note_failure(args[0].source_line, args[0].source_col, (char*)"realloc requires the live base pointer of a known heap allocation"); return false; }
+            heap_allocation = hp.allocation;
         }
     }
     if (is_free)
@@ -210,6 +274,21 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
             if (hp == null || hp.kind != M1PROV_HEAP || hp.freed || !hp.offset_known || hp.offset != 0)
             { g.note_failure(args[0].source_line, args[0].source_col, (char*)"free requires the live base pointer of a known heap allocation"); return false; }
             heap_allocation = hp.allocation;
+        }
+    }
+    // Any other call can write through what it is given, and this backend does not
+    // see it happen. Dropping the cells inside those objects is the fail-closed
+    // answer: the next load of a pointer from that memory yields a value with no
+    // provenance, which cannot be dereferenced until the program stores a tracked
+    // pointer there again. The three modelled calls above keep their cells because
+    // their effect is recorded exactly.
+    if (!(is_malloc || is_free || is_realloc) && g.call_writes(target, direct, 0))
+    {
+        for (usz i = 0; i < argc; i++)
+        {
+            if (!m1_pointer_type(target_params[i])) { continue; }
+            M1Provenance* ap = g.prov(values[i]);
+            if (ap != null) { g.forget_cells_in(ap.allocation); }
         }
     }
     if (external_abi)
@@ -318,7 +397,7 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
  return false; }
         fprintf(g.out, "  %s = load %s, ptr %s, align %d\n", dst, sret_type, sret_slot, sret_align);
     }
-    if (is_malloc)
+    if (is_malloc || is_realloc)
     {
         bool ok = heap_size_value != null
             ? g.prov_set_dynamic_extent(dst, m1_pointee_type(target_return), M1PROV_HEAP, 16, heap_size_value)
@@ -326,6 +405,13 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
         if (!ok) { g.failed = true; return false; }
     }
     if (is_free && heap_allocation != null) { g.mark_allocation_freed(heap_allocation); }
+    if (is_realloc && heap_allocation != null)
+    {
+        // The object may have moved: its cells describe memory this program no
+        // longer owns, and every alias of the old pointer has to fail closed.
+        g.forget_cells_in(heap_allocation);
+        g.mark_allocation_freed(heap_allocation);
+    }
     if (result_unit) { return g.consume_unit(tail, ret_name); }
     return g.consume(dst, result_bool, result_ptr, target_return, tail, ret_name);
 }

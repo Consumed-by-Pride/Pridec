@@ -295,6 +295,34 @@ fn bool M1Gen.address_is_exact(M1Gen* g, char* address, int line, int col)
     return true;
 }
 
+// Drop every cell that lives inside `allocation`. Something the compiler cannot
+// see may have written there: an external call, a callee that stores through its
+// parameter, or a `realloc` that moved the object. Forgetting is fail-closed --
+// the next load of a pointer from that memory has no provenance at all, so it
+// cannot be dereferenced until the program stores a tracked pointer there again.
+// The alternative, keeping the cell, would attach the provenance of whatever used
+// to be at that address to whatever the callee put there instead.
+fn void M1Gen.forget_cells_in(M1Gen* g, char* allocation)
+{
+    if (allocation == null) { return; }
+    int keep = 0;
+    for (int i = 0; i < g.pointer_cell_count; i++)
+    {
+        if (same(g.pointer_cells[i].allocation, allocation)) { continue; }
+        if (keep != i) { g.pointer_cells[keep] = g.pointer_cells[i]; }
+        keep++;
+    }
+    g.pointer_cell_count = keep;
+    keep = 0;
+    for (int i = 0; i < g.module_cell_count; i++)
+    {
+        if (same(g.module_cells[i].allocation, allocation)) { continue; }
+        if (keep != i) { g.module_cells[keep] = g.module_cells[i]; }
+        keep++;
+    }
+    g.module_cell_count = keep;
+}
+
 fn void M1Gen.mark_allocation_freed(M1Gen* g, char* allocation)
 {
     for (int i = 0; i < g.provenance_count; i++)

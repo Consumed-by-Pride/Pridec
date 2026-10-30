@@ -596,7 +596,34 @@ set -e
 [ "$rc" = 12 ] || { echo "FAIL: pointer-cell scope fixture returned $rc, expected 12"; exit 1; }
 echo "PASS: AIR 3 pointer cells are scoped to their function (12)"
 
-for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main; do
+# `realloc` is how a container grows: the old pointer is gone and the new one
+# carries the requested size, so an index the old object could not hold is in
+# bounds afterwards.
+cp tests/pear2/realloc_grow_main.air "$W/realloc_grow_main.air"
+"$PEAR2" "$W/realloc_grow_main.air" --emit-ll --quiet || { echo "FAIL: realloc was rejected"; exit 1; }
+grep -q 'call ptr @realloc' "$W/realloc_grow_main.ll" || { echo "FAIL: realloc did not reach the module as a call"; exit 1; }
+"$PEAR2" "$W/realloc_grow_main.air" --quiet || { echo "FAIL: realloc fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/realloc_grow_main.bc" -o "$W/realloc_grow_main" || { echo "FAIL: realloc fixture failed to link"; exit 1; }
+set +e
+"$W/realloc_grow_main"
+rc=$?
+set -e
+[ "$rc" = 41 ] || { echo "FAIL: realloc fixture returned $rc, expected 41"; exit 1; }
+echo "PASS: AIR 3 a buffer grows with realloc and is indexed at the new size (41)"
+
+# A call that cannot write leaves the caller's cells alone. The precision half of
+# the rule: a read-only helper must not be fatal to a container of pointers.
+cp tests/pear2/call_keeps_cells_main.air "$W/call_keeps_cells_main.air"
+"$PEAR2" "$W/call_keeps_cells_main.air" --quiet || { echo "FAIL: a read-only call discarded the caller's pointer cells"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/call_keeps_cells_main.bc" -o "$W/call_keeps_cells_main" || { echo "FAIL: read-only-call fixture failed to link"; exit 1; }
+set +e
+"$W/call_keeps_cells_main"
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: read-only-call fixture returned $rc, expected 42"; exit 1; }
+echo "PASS: AIR 3 a call that cannot write keeps pointer cells alive (42)"
+
+for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main reject_cell_after_call_main; do
     cp "tests/pear2/$fixture.air" "$W/$fixture.air"
     printf 'stale bitcode' > "$W/$fixture.bc"
     set +e
@@ -611,6 +638,7 @@ grep -q 'a constant heap size must be positive' "$W/reject_dynamic_malloc_main.l
 grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/reject_use_after_free_main.log" || { echo "FAIL: pointer-cell use-after-free was not rejected"; cat "$W/reject_use_after_free_main.log"; exit 1; }
 grep -q 'free requires the live base pointer' "$W/reject_interior_free_main.log" || { echo "FAIL: interior-pointer free was not rejected"; cat "$W/reject_interior_free_main.log"; exit 1; }
 grep -q 'free requires the live base pointer' "$W/reject_double_free_main.log" || { echo "FAIL: double free was not rejected"; cat "$W/reject_double_free_main.log"; exit 1; }
+grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/reject_cell_after_call_main.log" || { echo "FAIL: a pointer cell survived a call that can write"; cat "$W/reject_cell_after_call_main.log"; exit 1; }
 echo "PASS: AIR 3 dynamic/provenance/alignment/lifetime violations fail closed with source locations"
 
 cp tests/pear2/literal_main.air "$W/literal.air"

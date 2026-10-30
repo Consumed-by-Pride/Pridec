@@ -677,13 +677,51 @@ longer program exhausted 512 cells and failed with no diagnostic at all.
 - [ ] 19.5 That fixture has not been executed, for the same reason as every other
       bitcode assertion here: no LLVM and no executable compiler.
 
+## 20. A call is not invisible to the memory model (6)
+
+A pointer cell says "the eight bytes at `allocation + offset` hold a live pointer
+to this object". A call can break that sentence: the callee may store anything it
+likes through the pointer it was handed, and this backend sees none of it. Keeping
+the cell would attach the provenance of whatever used to be at that address to
+whatever arrived instead — and every bound proved from it would then be about the
+wrong object.
+
+- [x] 20.1 After a call that can write through a pointer argument, the cells
+      inside that argument's object are dropped (`forget_cells_in`). A later load
+      of a pointer from that memory yields a value with no provenance, which is
+      refused, instead of a value with someone else's provenance, which is worse.
+- [x] 20.2 "Can write" is answered by scanning the callee's body when it is
+      defined in this file — a store, an atomic, a syscall, an asm block, or a
+      call that itself can write, depth-limited — and answered *yes* for external
+      symbols, indirect calls and bodies past the scan budget. The precision this
+      buys is not cosmetic: without it every helper function would be fatal to a
+      container holding pointers.
+- [x] 20.3 `realloc(p, n)` is modelled rather than passed through: the old object
+      is marked freed (so every alias fails closed), its cells are dropped, and
+      the new pointer carries the requested size, literal or register. A
+      non-base or non-heap first argument is refused with the same rule `free`
+      uses.
+- [x] 20.4 `malloc` and `realloc` share one size rule (`heap_size_operand`), so
+      the diagnostics for a non-positive literal and for a run-time size that is
+      not a 64-bit integer are identical in both.
+- [x] 20.5 Fixtures: `tests/pear2/realloc_grow_main.air` (grow 1 element to `n`,
+      write element 3, exit 41), `tests/pear2/call_keeps_cells_main.air` (a
+      read-only callee leaves the caller's cell alone, exit 42), and
+      `tests/pear2/reject_cell_after_call_main.air` (an external callee takes the
+      cell with it, refused with a position).
+- [ ] 20.6 None of the three has been executed: no LLVM and no executable
+      compiler in this workspace. The gap this round does *not* close is recorded
+      in `GAPS.md`: bytes written inside libc (`memcpy`, `memset`, `read`) are no
+      longer able to corrupt provenance tracking, but those writes are still not
+      bounds-checked — the model proves the accesses the compiler emits.
+
 ## Score
 
-**192 items: 182 complete with evidence, 10 open** (the count is the file's own
+**198 items: 187 complete with evidence, 11 open** (the count is the file's own
 inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.5
 (token rotation), 11.6
 (the native end-to-end script has not been run here: no C3 compiler, no linker),
-12.6, 13.5, 14.7, 15.6, 16.7, 17.5, 18.7 and 19.5 (the new bitcode assertions
-have not been run for the same reason).
-Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All ten are an
+12.6, 13.5, 14.7, 15.6, 16.7, 17.5, 18.7, 19.5 and 20.6 (the new bitcode
+assertions have not been run for the same reason).
+Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All eleven are an
 unrun test or an owner action, not a known defect: none lowers the safety floor.
