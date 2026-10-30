@@ -247,11 +247,11 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
         // Prepend the captured environment as the hidden first argument.
         usz shift = argc;
         while (shift >= 1) { values[shift] = values[shift - 1]; target_params[shift] = target_params[shift - 1]; shift--; }
-        AirTyp* u8 = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
-        AirTyp* u8p = air_ir::air_mk_typ_ptr(g.arena, u8);
-        if (u8 == null || u8p == null) { return false; }
+        AirTyp* byte_ty = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
+        AirTyp* byte_ptr_ty = air_ir::air_mk_typ_ptr(g.arena, byte_ty);
+        if (byte_ty == null || byte_ptr_ty == null) { return false; }
         values[0] = closure_env;
-        target_params[0] = u8p;
+        target_params[0] = byte_ptr_ty;
         argc++;
     }
     char* call_result_type = sret_result ? (char*)"void" : g.llvm_abi_return_text(target_return);

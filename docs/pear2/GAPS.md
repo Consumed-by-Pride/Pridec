@@ -22,8 +22,10 @@ larger than the language implies.
 
 | form | what happens today | why it is hard | size |
 |---|---|---|---|
-| `letrec` — local recursive bindings | rejected outright (`m1_contains_letrec`, `unsupported AIR construct 'letrec' in function ...`) | a non-capturing recursive lambda can be lifted to an `internal` function like any other lambda; a capturing one needs a self-referential environment slot, which the current closure conversion does not build | M |
-| AIR 3 dynamic pointer offsets | `dynamic pointer offsets are unsupported without a static provenance bound` | the typed-memory slice tracks provenance, and an unprovable index has no tracked base; the honest fix is a bounds model, not a lowering tweak | L |
+| `letrec` members that **capture** | a non-capturing group is lifted to `internal` functions and its self/sibling references become the constant closure `{ @symbol, null }`; a member whose body captures fails closed with a positioned diagnostic | the closure value of a group member does not exist while its own body is being emitted, so a capture needs a two-phase environment (a boxed cell whose address is known before the bodies are rendered) | M |
+| AIR 3 dynamic pointer offsets — **closed**, see §1.1 | one dynamic step per GEP is lowered and checked at the point of use; a query that needs two of them (`p[i][j]`) or that steps into a record field by a dynamic value is still refused | — | done |
+| a dynamic step on a pointer with no tracked allocation | `a dynamic pointer offset needs an exact base offset and a known object extent` | the model can only check against an extent it knows; a parameter pointer has none, and inventing one would be the unchecked access the model exists to prevent | M (needs a callee-side extent annotation) |
+| atomics through a dynamic address | `an atomic operation needs a constant address (a dynamic index has no provable alignment)` | an unaligned atomic is not atomic; no runtime check can add alignment without changing the operation | M |
 | constructor payload layouts outside the supported sum slice | `unsupported constructor payload layout`, `unsupported or ambiguous constructor value` | the payload packing rules are fixed by the supported slice; general layout needs the AIR-side layout contract finished first | M |
 | record GEP layouts with padding the backend does not model | `unsupported GEP field layout`, `unsupported GEP record layout` | needs the record layout to be authoritative rather than recomputed | M |
 | unusual `alloca` shapes (oversized or non-statically-sized) | `unsupported alloca type/size` | bounded allocation is a deliberate guard (1 MiB, static) | S |
@@ -37,15 +39,40 @@ larger than the language implies.
 | `syscall` with float or aggregate arguments | `syscall arguments must be integers, bools, or pointers` | the register ABI carries words; floats would need a documented bit-pattern convention | S |
 | `--target=wasm32-freestanding` producing object/binary | rejected: IR or bitcode only | needs a wasm linker path and a runtime | L |
 
+### 1.1 Dynamic indexing, and what replaced the refusal
+
+The old row said the honest fix was "a bounds model, not a lowering tweak". That
+is what landed, and it has three tiers rather than one:
+
+1. **constant offset** — bounds and alignment are proved at compile time, as
+   before, and the access costs nothing;
+2. **bounded interval** — the offset came from a checked index whose range fits
+   inside the object, so the compile-time proof covers every value the index can
+   take;
+3. **runtime check** — the offset is only `base + something`. The access emits
+   `addr >= base && addr + size <= base + extent` and traps on failure, and
+   claims `align 1` instead of the type's natural alignment, because a dynamic
+   index cannot promise it.
+
+A pointer with no provenance at all is still refused. The runtime tier does not
+widen what the compiler is willing to touch; it converts "this index cannot be
+proved" into "this index is checked when it runs", which is the same promise a
+safe systems language makes. One dynamic step per GEP is supported; two
+(`p[i][j]`) are not, because the second bound depends on the first value and one
+check cannot establish it.
+
 Not a gap, worth stating because it looks like one: `relaxed` fences and
 `release`/`acq_rel` atomic loads are rejected by the *AIR verifier*, not by
 PEAR 2, because those orderings have no C11 meaning.
 
 ## 2. Optimizer — what the AIR level does not do
 
-`pear2_opt` is two passes: a bottom-up, expression-local rewrite (pass 1) and a
-lexical dead-binding sweep (pass 2). Everything that needs a control-flow graph
-is simply absent.
+`pear2_opt` is three passes: a bottom-up, expression-local rewrite (pass 1), a
+lexical dead-binding sweep (pass 2), and a whole-body census at `-O3` (pass 3:
+literal propagation, pure dead-binding removal, a scoped CSE, literal-driven
+branch/match folding, and copy propagation). What the three passes share is that
+none of them builds a control-flow graph, so everything that needs dominance,
+loops, or path sensitivity is absent — LLVM does that layer after lowering.
 
 | absent | consequence | size |
 |---|---|---|

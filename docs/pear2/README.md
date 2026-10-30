@@ -90,6 +90,15 @@ tests/exec/pear/p03_fib; echo $?                     # 55
   shared inliner threshold of 250. `--print-pipeline` prints the resolved
   pipeline, target, CPU, features, relocation model, threshold and input count,
   writes nothing, and exits 0.
+- The **whole file is the program**: every declaration after a `module` record is
+  emitted, not just the entry module's. Before this, a program that imported
+  anything emitted calls to imported functions and no bodies for them, which
+  surfaced as an undefined symbol at link time. Two bodies for one name, and two
+  same-named types, are refused with both positions rather than reaching LLVM.
+- `--probe` is the capability gate: it runs the real emitter over every function,
+  prints one positioned line per refusal plus `N function(s), M lower, K refuse`,
+  and needs no LLVM at all — so "can this backend compile this program" is
+  answerable on a machine that cannot build the compiler.
 - `--check` is the CI gate: parse, merge and verify the AIR, print a verdict,
   write nothing, and delete nothing (unlike every emitting mode, it does not clear
   stale outputs first). Exit 0 clean, 1 invalid, 2 if combined with `--emit-*` or a

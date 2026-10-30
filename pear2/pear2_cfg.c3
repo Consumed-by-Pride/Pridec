@@ -38,9 +38,6 @@
 module pear2c;
 import air_ir;
 
-extern fn void* malloc(usz size_);
-extern fn void  free(void* ptr);
-extern fn void* memset(void* dst, int value, usz n);
 
 // ── PIR instruction set ────────────────────────────────────────────────────
 //
@@ -148,7 +145,7 @@ struct PFunc {
 // saved height is the direct model. The stack is what makes shadowing in nested
 // lambdas and match arms behave the way the AIR scoping rules say it does.
 struct PBuilder {
-    PFunc* fn;
+    PFunc* func;
     PBinding[512] bindings;
     int binding_count;
     int cur_block;
@@ -160,27 +157,27 @@ struct PBuilder {
 
 // ── allocation helpers ─────────────────────────────────────────────────────
 
-fn PBlock* pblock_new(PFunc* fn, char* name)
+fn PBlock* pblock_new(PFunc* func, char* name)
 {
-    if (fn == null) { return null; }
-    if (fn.block_count >= fn.block_cap)
+    if (func == null) { return null; }
+    if (func.block_count >= func.block_cap)
     {
-        int next = fn.block_cap <= 0 ? 8 : fn.block_cap * 2;
+        int next = func.block_cap <= 0 ? 8 : func.block_cap * 2;
         PBlock* grown = (PBlock*)malloc((usz)next * PBlock::size);
         if (grown == null) { return null; }
         memset(grown, 0, (usz)next * PBlock::size);
-        for (int i = 0; i < fn.block_count; i++) { grown[i] = fn.blocks[i]; }
-        if (fn.blocks != null) { free(fn.blocks); }
-        fn.blocks = grown;
-        fn.block_cap = next;
+        for (int i = 0; i < func.block_count; i++) { grown[i] = func.blocks[i]; }
+        if (func.blocks != null) { free(func.blocks); }
+        func.blocks = grown;
+        func.block_cap = next;
     }
-    PBlock* b = &fn.blocks[fn.block_count];
-    b.id = fn.block_count;
+    PBlock* b = &func.blocks[func.block_count];
+    b.id = func.block_count;
     b.name = name;
     b.code = null;
     b.count = 0;
     b.cap = 0;
-    fn.block_count++;
+    func.block_count++;
     return b;
 }
 
@@ -222,9 +219,9 @@ fn PInst* pblock_push(PBlock* b)
 
 fn int pvreg_new(PBuilder* pb)
 {
-    if (pb == null || pb.fn == null) { return -1; }
-    int v = pb.fn.vreg_count;
-    pb.fn.vreg_count++;
+    if (pb == null || pb.func == null) { return -1; }
+    int v = pb.func.vreg_count;
+    pb.func.vreg_count++;
     return v;
 }
 
@@ -233,11 +230,11 @@ fn int pvreg_new(PBuilder* pb)
 // convention it uses (and a future allocator will want to split slots).
 fn int pslot_new(PBuilder* pb, int width)
 {
-    if (pb == null || pb.fn == null) { return -1; }
-    int slot = pb.fn.slot_count;
-    pb.fn.slot_count++;
-    pb.fn.slot_bytes += 8;
-    if (width > 8) { pb.fn.slot_bytes = pb.fn.slot_bytes + (width / 8) * 8 - 8; }
+    if (pb == null || pb.func == null) { return -1; }
+    int slot = pb.func.slot_count;
+    pb.func.slot_count++;
+    pb.func.slot_bytes += 8;
+    if (width > 8) { pb.func.slot_bytes = pb.func.slot_bytes + (width / 8) * 8 - 8; }
     return slot;
 }
 
@@ -258,9 +255,9 @@ fn bool pb_fail(PBuilder* pb, int line, int col, char* message)
 
 fn PInst* pb_emit(PBuilder* pb, POp op)
 {
-    if (pb == null || pb.fn == null || pb.failed) { return null; }
-    if (pb.cur_block < 0 || pb.cur_block >= pb.fn.block_count) { return null; }
-    PInst* ins = pblock_push(&pb.fn.blocks[pb.cur_block]);
+    if (pb == null || pb.func == null || pb.failed) { return null; }
+    if (pb.cur_block < 0 || pb.cur_block >= pb.func.block_count) { return null; }
+    PInst* ins = pblock_push(&pb.func.blocks[pb.cur_block]);
     if (ins == null) { pb_fail(pb, 0, 0, (char*)"out of memory building the middle representation"); return null; }
     ins.op = op;
     return ins;
@@ -268,8 +265,8 @@ fn PInst* pb_emit(PBuilder* pb, POp op)
 
 fn bool pb_terminated(PBuilder* pb)
 {
-    if (pb == null || pb.fn == null || pb.cur_block < 0) { return true; }
-    PBlock* b = &pb.fn.blocks[pb.cur_block];
+    if (pb == null || pb.func == null || pb.cur_block < 0) { return true; }
+    PBlock* b = &pb.func.blocks[pb.cur_block];
     if (b.count == 0) { return false; }
     POp last = b.code[b.count - 1].op;
     return last == PO_JMP || last == PO_BR || last == PO_RET;
@@ -370,7 +367,7 @@ fn int p_width_of(AirTyp* t)
 {
     if (t == null) { return 64; }
     if (m1_bool_type(t)) { return 8; }
-    if (m1_pointer_type(t) || t.tag == ATYP_FN) { return 64; }
+    if (m1_pointer_type(t) || t.tag == ATYP_ARROW) { return 64; }
     if (m1_integer_type(t))
     {
         int bits = m1_int_bits(t);
@@ -391,8 +388,8 @@ fn bool p_signed_of(AirTyp* t)
 
 // ── producers ──────────────────────────────────────────────────────────────
 
-fn int pb_prd(PBuilder* pb, AirPrd* p, int width, bool sign);
-
+// No prototype: C3 resolves module-level functions regardless of order, and a
+// `fn ... ;` without a body is parsed as a declaration and rejected.
 // pb_binop -- map an AIR binary operator onto PIR. The predicate is chosen from
 // the operator *and* the operand signedness, because AIR spells `lt` once and
 // the type decides whether that is a signed or an unsigned comparison.
@@ -500,7 +497,7 @@ fn int pb_prd(PBuilder* pb, AirPrd* p, int width, bool sign)
                 ins.dst = dst;
                 ins.a = left;
                 ins.imm = p.subs[1].ival;
-                ins.pred = pred;
+                ins.pred = pred.ordinal;
                 ins.width = width;
                 ins.sign = sign;
                 return dst;
@@ -514,7 +511,7 @@ fn int pb_prd(PBuilder* pb, AirPrd* p, int width, bool sign)
             ins.dst = dst;
             ins.a = left;
             ins.b = right;
-            ins.pred = pred;
+            ins.pred = pred.ordinal;
             ins.width = width;
             ins.sign = sign;
             return dst;
@@ -629,8 +626,6 @@ fn int pb_prd(PBuilder* pb, AirPrd* p, int width, bool sign)
 // ── commands ───────────────────────────────────────────────────────────────
 
 
-fn bool pb_cmd(PBuilder* pb, AirCmd* c, char* ret_name);
-fn bool pb_call(PBuilder* pb, AirCmd* c, AirCns* k, char* ret_name);
 
 // pb_cond -- a producer in condition position. PIR branches test a value for
 // non-zero, so a boolean value is already the right shape; a comparison lowers
@@ -683,17 +678,17 @@ fn bool pb_cut(PBuilder* pb, AirCmd* c, char* ret_name)
         // name check would reject legal code the LLVM path accepts.
         // The value is optional: a unit function returns before it has anything
         // to return, and AIR states that as a bare cut.
-        if (pb.fn.ret_unit || c.prd == null)
+        if (pb.func.ret_unit || c.prd == null)
         {
             PInst* ins = pb_emit(pb, PO_RET);
             return ins != null;
         }
-        int value = pb_prd(pb, c.prd, pb.fn.ret_width, pb.fn.ret_sign);
+        int value = pb_prd(pb, c.prd, pb.func.ret_width, pb.func.ret_sign);
         if (value < 0) { return false; }
         PInst* ins = pb_emit(pb, PO_RET);
         if (ins == null) { return false; }
         ins.a = value;
-        ins.width = pb.fn.ret_width;
+        ins.width = pb.func.ret_width;
         return true;
     }
     if (k.tag == ACNS_COMU)
@@ -760,13 +755,13 @@ fn bool pb_call(PBuilder* pb, AirCmd* c, AirCns* k, char* ret_name)
         // call+ret is always correct.
         PInst* ins = pb_emit(pb, PO_RET);
         if (ins == null) { return false; }
-        if (!pb.fn.ret_unit)
+        if (!pb.func.ret_unit)
         {
             int dst = pvreg_new(pb);
             if (dst < 0) { return false; }
             call.dst = dst;
             ins.a = dst;
-            ins.width = pb.fn.ret_width;
+            ins.width = pb.func.ret_width;
         }
         return true;
     }
@@ -784,9 +779,9 @@ fn bool pb_if(PBuilder* pb, AirCmd* c, char* ret_name)
 {
     int cond = pb_cond(pb, c.prd, c.source_line, c.source_col);
     if (cond < 0) { return false; }
-    PBlock* then_block = pblock_new(pb.fn, (char*)"if.then");
-    PBlock* else_block = pblock_new(pb.fn, (char*)"if.else");
-    PBlock* join_block = pblock_new(pb.fn, (char*)"if.join");
+    PBlock* then_block = pblock_new(pb.func, (char*)"if.then");
+    PBlock* else_block = pblock_new(pb.func, (char*)"if.else");
+    PBlock* join_block = pblock_new(pb.func, (char*)"if.join");
     if (then_block == null || else_block == null || join_block == null) { return pb_fail(pb, c.source_line, c.source_col, (char*)"out of memory"); }
     PInst* br = pb_emit(pb, PO_BR);
     if (br == null) { return false; }
@@ -828,9 +823,9 @@ fn bool pb_if(PBuilder* pb, AirCmd* c, char* ret_name)
 // edges back to the header.
 fn bool pb_while(PBuilder* pb, AirCmd* c, char* ret_name)
 {
-    PBlock* header = pblock_new(pb.fn, (char*)"while.header");
-    PBlock* body = pblock_new(pb.fn, (char*)"while.body");
-    PBlock* exit_block = pblock_new(pb.fn, (char*)"while.exit");
+    PBlock* header = pblock_new(pb.func, (char*)"while.header");
+    PBlock* body = pblock_new(pb.func, (char*)"while.body");
+    PBlock* exit_block = pblock_new(pb.func, (char*)"while.exit");
     if (header == null || body == null || exit_block == null) { return pb_fail(pb, c.source_line, c.source_col, (char*)"out of memory"); }
     PInst* entry_jump = pb_emit(pb, PO_JMP);
     if (entry_jump == null) { return false; }
@@ -861,10 +856,10 @@ fn bool pb_while(PBuilder* pb, AirCmd* c, char* ret_name)
 // reference the builder has not seen yet.
 fn int pb_find_block(PBuilder* pb, char* name)
 {
-    if (pb == null || name == null || pb.fn == null) { return -1; }
-    for (int i = 0; i < pb.fn.block_count; i++)
+    if (pb == null || name == null || pb.func == null) { return -1; }
+    for (int i = 0; i < pb.func.block_count; i++)
     {
-        if (pb.fn.blocks[i].name != null && same(pb.fn.blocks[i].name, name)) { return i; }
+        if (pb.func.blocks[i].name != null && same(pb.func.blocks[i].name, name)) { return i; }
     }
     return -1;
 }
@@ -880,7 +875,7 @@ fn bool pb_jump(PBuilder* pb, AirCmd* c, char* ret_name)
     if (c.target_label == null) { return pb_fail(pb, c.source_line, c.source_col, (char*)"jump without a target"); }
     int target = pb_find_block(pb, c.target_label);
     if (target < 0) { return pb_fail(pb, c.source_line, c.source_col, (char*)"jump to an undeclared label"); }
-    PBlock* dest = &pb.fn.blocks[target];
+    PBlock* dest = &pb.func.blocks[target];
     if (c.jump_arg_count != (usz)dest.param_count)
     {
         return pb_fail(pb, c.source_line, c.source_col, (char*)"jump argument count does not match the label's parameters");
@@ -945,7 +940,7 @@ fn bool pb_match(PBuilder* pb, AirCmd* c, char* ret_name)
     }
     int scrutinee = pb_prd(pb, c.prd, 32, true);
     if (scrutinee < 0) { return false; }
-    PBlock* join_block = pblock_new(pb.fn, (char*)"match.join");
+    PBlock* join_block = pblock_new(pb.func, (char*)"match.join");
     if (join_block == null) { return pb_fail(pb, c.source_line, c.source_col, (char*)"out of memory"); }
     bool any_falls = false;
     int test_block = pb.cur_block;
@@ -966,12 +961,12 @@ fn bool pb_match(PBuilder* pb, AirCmd* c, char* ret_name)
         {
             return pb_fail(pb, c.source_line, c.source_col, (char*)"a catch-all match arm must be last");
         }
-        PBlock* arm_block = pblock_new(pb.fn, (char*)"match.arm");
+        PBlock* arm_block = pblock_new(pb.func, (char*)"match.arm");
         if (arm_block == null) { return pb_fail(pb, c.source_line, c.source_col, (char*)"out of memory"); }
         PBlock* next_test = null;
         if (!is_last)
         {
-            next_test = pblock_new(pb.fn, (char*)"match.test");
+            next_test = pblock_new(pb.func, (char*)"match.test");
             if (next_test == null) { return pb_fail(pb, c.source_line, c.source_col, (char*)"out of memory"); }
         }
         pb.cur_block = test_block;
@@ -994,7 +989,7 @@ fn bool pb_match(PBuilder* pb, AirCmd* c, char* ret_name)
             test.dst = dst;
             test.a = scrutinee;
             test.imm = arm.pat.tag == APAT_BOOL ? (arm.pat.ival != 0 ? 1 : 0) : arm.pat.ival;
-            test.pred = PP_EQ;
+            test.pred = PPred.PP_EQ.ordinal;
             test.width = 32;
             test.sign = true;
             PInst* br = pb_emit(pb, PO_BR);
@@ -1062,12 +1057,12 @@ fn bool pb_cmd(PBuilder* pb, AirCmd* c, char* ret_name)
         {
             PInst* ins = pb_emit(pb, PO_RET);
             if (ins == null) { return false; }
-            if (c.prd != null && !pb.fn.ret_unit)
+            if (c.prd != null && !pb.func.ret_unit)
             {
-                int value = pb_prd(pb, c.prd, pb.fn.ret_width, pb.fn.ret_sign);
+                int value = pb_prd(pb, c.prd, pb.func.ret_width, pb.func.ret_sign);
                 if (value < 0) { return false; }
                 ins.a = value;
-                ins.width = pb.fn.ret_width;
+                ins.width = pb.func.ret_width;
             }
             return true;
         }
@@ -1099,8 +1094,8 @@ fn bool pb_cmd(PBuilder* pb, AirCmd* c, char* ret_name)
 // name and a single flat scope would make the second shadow the first.
 fn bool pfunc_peel_label(PBuilder* pb, AirCmd* lb)
 {
-    if (pb == null || pb.fn == null || lb == null) { return false; }
-    PBlock* block = pblock_new(pb.fn, lb.binder);
+    if (pb == null || pb.func == null || lb == null) { return false; }
+    PBlock* block = pblock_new(pb.func, lb.binder);
     if (block == null) { return pb_fail(pb, lb.source_line, lb.source_col, (char*)"out of memory"); }
     for (usz i = 0; i < lb.mbinder_count && i < 16; i++)
     {
@@ -1132,16 +1127,16 @@ fn bool pfunc_peel_label(PBuilder* pb, AirCmd* lb)
 // the labels are peeled into blocks (with their own parameter slots) and the
 // entry body is built afterwards. A jump into a block stores the arguments into
 // that block's parameter slots; the block's body reloads them.
-fn bool pfunc_build(AirDecl* d, PFunc* fn, PBuilder* pb)
+fn bool pfunc_build(AirDecl* d, PFunc* func, PBuilder* pb)
 {
-    if (d == null || fn == null || pb == null) { return false; }
-    fn.name = d.name;
-    fn.is_public = d.is_pub;
-    fn.block_count = 0;
-    fn.vreg_count = 0;
-    fn.slot_count = 0;
-    fn.param_count = 0;
-    pb.fn = fn;
+    if (d == null || func == null || pb == null) { return false; }
+    func.name = d.name;
+    func.is_public = d.is_pub;
+    func.block_count = 0;
+    func.vreg_count = 0;
+    func.slot_count = 0;
+    func.param_count = 0;
+    pb.func = func;
     pb.binding_count = 0;
     pb.failed = false;
     pb.fail_line = d.source_line;
@@ -1149,14 +1144,14 @@ fn bool pfunc_build(AirDecl* d, PFunc* fn, PBuilder* pb)
 
     // Return shape.
     AirTyp* rt = d.ret_ty;
-    fn.ret_unit = rt == null || rt.tag == ATYP_UNIT || rt.tag == ATYP_BOTTOM || p_width_of(rt) == 0;
-    fn.ret_width = fn.ret_unit ? 0 : p_width_of(rt);
-    fn.ret_sign = fn.ret_unit ? true : p_signed_of(rt);
-    fn.ret_ptr = fn.ret_unit ? false : m1_pointer_type(rt);
+    func.ret_unit = rt == null || rt.tag == ATYP_UNIT || rt.tag == ATYP_BOTTOM || p_width_of(rt) == 0;
+    func.ret_width = func.ret_unit ? 0 : p_width_of(rt);
+    func.ret_sign = func.ret_unit ? true : p_signed_of(rt);
+    func.ret_ptr = func.ret_unit ? false : m1_pointer_type(rt);
 
-    PBlock* entry = pblock_new(fn, (char*)"entry");
+    PBlock* entry = pblock_new(func, (char*)"entry");
     if (entry == null) { return pb_fail(pb, d.source_line, d.source_col, (char*)"out of memory"); }
-    fn.entry = entry.id;
+    func.entry = entry.id;
 
     // Parameters: one slot each, bound for the whole body. The machine layer
     // stores the incoming ABI registers into these slots in the prologue, which
@@ -1169,14 +1164,14 @@ fn bool pfunc_build(AirDecl* d, PFunc* fn, PBuilder* pb)
         if (width == 0) { return pb_fail(pb, d.source_line, d.source_col, (char*)"parameter type outside the native subset"); }
         int slot = pslot_new(pb, width);
         if (slot < 0) { return false; }
-        PParam* p = &fn.params[fn.param_count];
+        PParam* p = &func.params[func.param_count];
         p.name = b.name;
         p.slot = slot;
         p.vreg = -1;
         p.width = width;
         p.sign = p_signed_of(b.ty);
         p.is_ptr = m1_pointer_type(b.ty);
-        fn.param_count++;
+        func.param_count++;
         if (pb_push_binding(pb, b.name, slot, width, p_signed_of(b.ty), m1_pointer_type(b.ty)) < 0) { return false; }
     }
 
@@ -1191,7 +1186,7 @@ fn bool pfunc_build(AirDecl* d, PFunc* fn, PBuilder* pb)
         if (peeled >= 64) { return pb_fail(pb, c.source_line, c.source_col, (char*)"more than 64 labels in one function"); }
         if (!pfunc_peel_label(pb, c.body)) { return false; }
         label_body[peeled] = c.body.body;
-        label_block[peeled] = pb.fn.block_count - 1;
+        label_block[peeled] = pb.func.block_count - 1;
         label_scope[peeled] = pb.binding_count;
         peeled++;
         c = c.next;
@@ -1201,7 +1196,7 @@ fn bool pfunc_build(AirDecl* d, PFunc* fn, PBuilder* pb)
         if (peeled >= 64) { return pb_fail(pb, c.source_line, c.source_col, (char*)"more than 64 labels in one function"); }
         if (!pfunc_peel_label(pb, c)) { return false; }
         label_body[peeled] = c.body;
-        label_block[peeled] = pb.fn.block_count - 1;
+        label_block[peeled] = pb.func.block_count - 1;
         label_scope[peeled] = pb.binding_count;
         peeled++;
         c = null;
@@ -1215,7 +1210,7 @@ fn bool pfunc_build(AirDecl* d, PFunc* fn, PBuilder* pb)
         // Falling off the end of a unit function is legal in AIR and returns unit;
         // falling off a value function is not, and is reported rather than
         // silently returning whatever happened to be in RAX.
-        if (!fn.ret_unit)
+        if (!func.ret_unit)
         {
             return pb_fail(pb, d.source_line, d.source_col, (char*)"function falls off its end without returning a value");
         }
@@ -1226,7 +1221,7 @@ fn bool pfunc_build(AirDecl* d, PFunc* fn, PBuilder* pb)
     // Label bodies, each in its own block with its parameters in scope.
     for (int i = 0; i < peeled; i++)
     {
-        PBlock* block = &pb.fn.blocks[label_block[i]];
+        PBlock* block = &pb.func.blocks[label_block[i]];
         int saved = pb.binding_count;
         for (int k = 0; k < block.param_count; k++)
         {
@@ -1237,7 +1232,7 @@ fn bool pfunc_build(AirDecl* d, PFunc* fn, PBuilder* pb)
         if (!pb_cmd(pb, label_body[i], d.name)) { return false; }
         if (!pb_terminated(pb))
         {
-            if (!fn.ret_unit)
+            if (!func.ret_unit)
             {
                 return pb_fail(pb, d.source_line, d.source_col, (char*)"label body falls off its end without transferring control");
             }

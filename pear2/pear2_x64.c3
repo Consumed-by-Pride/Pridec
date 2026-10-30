@@ -28,9 +28,6 @@
 module pear2c;
 import air_ir;
 
-extern fn void* malloc(usz size_);
-extern fn void  free(void* ptr);
-extern fn void* memset(void* dst, int value, usz n);
 
 // ── byte buffer with fixup sites ───────────────────────────────────────────
 
@@ -44,7 +41,7 @@ const int XF_REL32 = 0;
 const int XF_PCREL32 = 1;
 
 struct XBuf {
-    u8* data;
+    char* data;
     usz len;
     usz cap;
     bool failed;
@@ -56,7 +53,7 @@ struct XBuf {
 fn bool xbuf_init(XBuf* b, usz capacity)
 {
     if (b == null) { return false; }
-    b.data = (u8*)malloc(capacity);
+    b.data = (char*)malloc(capacity);
     if (b.data == null) { return false; }
     memset(b.data, 0, capacity);
     b.len = 0;
@@ -85,7 +82,7 @@ fn bool xbuf_reserve(XBuf* b, usz extra)
     if (b.len + extra <= b.cap) { return true; }
     usz next = b.cap == 0 ? 1024 : b.cap;
     while (next < b.len + extra) { next = next * 2; }
-    u8* grown = (u8*)malloc(next);
+    char* grown = (char*)malloc(next);
     if (grown == null) { b.failed = true; return false; }
     memset(grown, 0, next);
     if (b.data != null)
@@ -98,7 +95,7 @@ fn bool xbuf_reserve(XBuf* b, usz extra)
     return true;
 }
 
-fn void xb8(XBuf* b, u8 v)
+fn void xb8(XBuf* b, char v)
 {
     if (!xbuf_reserve(b, 1)) { return; }
     b.data[b.len] = v;
@@ -107,10 +104,10 @@ fn void xb8(XBuf* b, u8 v)
 
 fn void xb32(XBuf* b, uint v)
 {
-    xb8(b, (u8)(v & 0xFF));
-    xb8(b, (u8)((v >> 8) & 0xFF));
-    xb8(b, (u8)((v >> 16) & 0xFF));
-    xb8(b, (u8)((v >> 24) & 0xFF));
+    xb8(b, (char)(v & 0xFF));
+    xb8(b, (char)((v >> 8) & 0xFF));
+    xb8(b, (char)((v >> 16) & 0xFF));
+    xb8(b, (char)((v >> 24) & 0xFF));
 }
 
 fn void xb64(XBuf* b, ulong v)
@@ -150,10 +147,10 @@ fn void xbuf_fixup(XBuf* b, usz at, char* symbol, int kind)
 fn void xbuf_patch32(XBuf* b, usz at, uint value)
 {
     if (b == null || at + 4 > b.len) { return; }
-    b.data[at] = (u8)(value & 0xFF);
-    b.data[at + 1] = (u8)((value >> 8) & 0xFF);
-    b.data[at + 2] = (u8)((value >> 16) & 0xFF);
-    b.data[at + 3] = (u8)((value >> 24) & 0xFF);
+    b.data[at] = (char)(value & 0xFF);
+    b.data[at + 1] = (char)((value >> 8) & 0xFF);
+    b.data[at + 2] = (char)((value >> 16) & 0xFF);
+    b.data[at + 3] = (char)((value >> 24) & 0xFF);
 }
 
 // ── registers ──────────────────────────────────────────────────────────────
@@ -217,7 +214,7 @@ fn void x_rex(XBuf* b, bool w, int reg, int index, int base, bool force, bool* e
     bool need = w || r || x || bb || force;
     if (emitted != null) { *emitted = need; }
     if (!need) { return; }
-    u8 v = 0x40;
+    char v = 0x40;
     if (w) { v = v | 0x08; }
     if (r) { v = v | 0x04; }
     if (x) { v = v | 0x02; }
@@ -237,20 +234,20 @@ fn void x_modrm_mem(XBuf* b, int reg, XMem m)
     if (m.disp == 0 && !force_disp32) { mod = 0; }
     else if (need_disp8 && !force_disp32) { mod = 1; }
     else { mod = 2; }
-    xb8(b, (u8)((mod << 6) | ((reg & 7) << 3) | base));
+    xb8(b, (char)((mod << 6) | ((reg & 7) << 3) | base));
     // SIB: RSP/R12 as a base has no direct encoding; a SIB with index=100 (none)
     // and scale=0 is the canonical form.
     if (base == 4)
     {
         xb8(b, 0x24);
     }
-    if (mod == 1) { xb8(b, (u8)(m.disp & 0xFF)); }
+    if (mod == 1) { xb8(b, (char)(m.disp & 0xFF)); }
     else if (mod == 2) { xb32(b, (uint)m.disp); }
 }
 
 fn void x_modrm_reg(XBuf* b, int reg, int rm)
 {
-    xb8(b, (u8)(0xC0 | ((reg & 7) << 3) | (rm & 7)));
+    xb8(b, (char)(0xC0 | ((reg & 7) << 3) | (rm & 7)));
 }
 
 // ── moves ──────────────────────────────────────────────────────────────────
@@ -268,7 +265,7 @@ fn void x_mov_ri(XBuf* b, int reg, long value)
         return;
     }
     x_rex(b, true, 0, 0, reg, false, null);
-    xb8(b, (u8)(0xB8 + (reg & 7)));
+    xb8(b, (char)(0xB8 + (reg & 7)));
     xb64(b, (ulong)value);
 }
 
@@ -346,7 +343,7 @@ fn void x_lea(XBuf* b, int dst, XMem m)
 
 // The 64-bit register-register forms: 01 /r (add), 29 /r (sub), 21 /r (and),
 // 09 /r (or), 31 /r (xor), 39 /r (cmp), 85 /r (test).
-fn void x_alu_rr(XBuf* b, u8 opcode, int dst, int src)
+fn void x_alu_rr(XBuf* b, char opcode, int dst, int src)
 {
     x_rex(b, true, src, 0, dst, false, null);
     xb8(b, opcode);
@@ -364,7 +361,7 @@ fn void x_test_rr(XBuf* b, int dst, int src) { x_alu_rr(b, 0x85, dst, src); }
 // The 81 /digit immediate forms. The immediate is sign-extended to 64 bits by
 // the processor, so a caller that wants an unsigned 32-bit constant must not
 // route it through here.
-fn void x_alu_ri(XBuf* b, u8 digit, int dst, long value)
+fn void x_alu_ri(XBuf* b, char digit, int dst, long value)
 {
     x_rex(b, true, 0, 0, dst, false, null);
     xb8(b, 0x81);
@@ -460,7 +457,7 @@ fn void x_shift_imm(XBuf* b, int digit, int reg, int amount)
     x_rex(b, true, 0, 0, reg, false, null);
     xb8(b, 0xC1);
     x_modrm_reg(b, digit & 7, reg);
-    xb8(b, (u8)(amount & 0xFF));
+    xb8(b, (char)(amount & 0xFF));
 }
 
 fn void x_shift_cl(XBuf* b, int digit, int reg)
@@ -474,7 +471,7 @@ fn void x_shift_cl(XBuf* b, int digit, int reg)
 
 // movzx/movsx from 8, 16, and 32 bits. A 32-bit destination write already zeroes
 // the upper half on x86-64, so an unsigned 32->64 widening is a plain mov.
-fn x_movzx8(XBuf* b, int dst, int src)
+fn void x_movzx8(XBuf* b, int dst, int src)
 {
     x_rex(b, true, dst, 0, src, false, null);
     xb8(b, 0x0F);
@@ -482,7 +479,7 @@ fn x_movzx8(XBuf* b, int dst, int src)
     x_modrm_reg(b, dst, src);
 }
 
-fn x_movsx8(XBuf* b, int dst, int src)
+fn void x_movsx8(XBuf* b, int dst, int src)
 {
     x_rex(b, true, dst, 0, src, false, null);
     xb8(b, 0x0F);
@@ -490,7 +487,7 @@ fn x_movsx8(XBuf* b, int dst, int src)
     x_modrm_reg(b, dst, src);
 }
 
-fn x_movzx16(XBuf* b, int dst, int src)
+fn void x_movzx16(XBuf* b, int dst, int src)
 {
     x_rex(b, true, dst, 0, src, false, null);
     xb8(b, 0x0F);
@@ -498,7 +495,7 @@ fn x_movzx16(XBuf* b, int dst, int src)
     x_modrm_reg(b, dst, src);
 }
 
-fn x_movsx16(XBuf* b, int dst, int src)
+fn void x_movsx16(XBuf* b, int dst, int src)
 {
     x_rex(b, true, dst, 0, src, false, null);
     xb8(b, 0x0F);
@@ -523,7 +520,7 @@ fn void x_setcc(XBuf* b, int cc, int reg)
     bool emitted = false;
     x_rex(b, false, 0, 0, reg, true, &emitted);
     xb8(b, 0x0F);
-    xb8(b, (u8)(0x90 + (cc & 0x0F)));
+    xb8(b, (char)(0x90 + (cc & 0x0F)));
     x_modrm_reg(b, 0, reg);
 }
 
@@ -536,13 +533,13 @@ fn void x_ud2(XBuf* b) { xb8(b, 0x0F); xb8(b, 0x0B); }
 fn void x_push(XBuf* b, int reg)
 {
     x_rex(b, false, 0, 0, reg, false, null);
-    xb8(b, (u8)(0x50 + (reg & 7)));
+    xb8(b, (char)(0x50 + (reg & 7)));
 }
 
 fn void x_pop(XBuf* b, int reg)
 {
     x_rex(b, false, 0, 0, reg, false, null);
-    xb8(b, (u8)(0x58 + (reg & 7)));
+    xb8(b, (char)(0x58 + (reg & 7)));
 }
 
 // A near jump with a 32-bit displacement. When `symbol` is null the caller is
@@ -559,7 +556,7 @@ fn void x_jmp(XBuf* b, char* symbol)
 fn void x_jcc(XBuf* b, int cc, char* symbol)
 {
     xb8(b, 0x0F);
-    xb8(b, (u8)(0x80 + (cc & 0x0F)));
+    xb8(b, (char)(0x80 + (cc & 0x0F)));
     usz at = b.len;
     xb32(b, 0);
     if (symbol != null) { xbuf_fixup(b, at, symbol, XF_REL32); }

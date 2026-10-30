@@ -242,6 +242,28 @@ set -e
 [ "$rc" = 42 ] || { echo "FAIL: AIR+bitcode program returned $rc, expected 42"; exit 1; }
 echo "PASS: a .bc input is linked into the compiled module"
 
+# A declaration after a module record used to be dropped from the emitted module,
+# which turned an imported function into an undefined symbol at link time. The
+# whole file is the program now.
+cat > "$W/twomod.air" <<'AIR'
+air 2.2 Main "twomod.pie";
+
+def main() : i64 =
+  mu~ %ret_2.
+    <helper | call · 21 : i64 · comu _x1.
+      <_x1 : i64 | %ret_2>>;
+
+module Lib;
+
+def helper(x : i64) : i64 =
+  mu~ %ret.
+    <(add x 21 : i64) | %ret>;
+AIR
+"$PEAR2_BIN" "$W/twomod.air" --emit-ll --quiet || { echo "FAIL: a file with a second module record was rejected"; exit 1; }
+grep -q 'define .*@helper(' "$W/twomod.ll" || { echo "FAIL: the imported module body was dropped from the emitted module"; cat "$W/twomod.ll"; exit 1; }
+grep -q '@helper' "$W/twomod.ll" || { echo "FAIL: the call to the imported symbol disappeared"; exit 1; }
+echo "PASS: declarations after a module record are part of the emitted program"
+
 # ── verify-bc over several artifacts ──────────────────────────────────────
 cp "$W/unit_a.air" "$W/unit_a2.air"
 "$PEAR2_BIN" "$W/unit_a2.air" --emit-bc --quiet || { echo "FAIL: could not build the second library"; exit 1; }
@@ -308,6 +330,35 @@ set +e
 set -e
 [ "$rc" = 2 ] && [ "$rc2" = 2 ] || { echo "FAIL: --check conflicts returned $rc/$rc2, expected 2/2"; exit 1; }
 echo "PASS: --check validates AIR and writes nothing"
+
+# --probe answers the next question after --check: not "is this AIR valid" but
+# "can this backend lower it". It runs the real emitter over every function and
+# needs no LLVM, so it is the one capability gate that works on a machine without
+# a toolchain.
+"$PEAR2_BIN" "$W/unit_a.air" "$W/unit_b.air" --probe >"$W/probe_ok.log" 2>&1 \
+    || { echo "FAIL: --probe rejected a program the backend can compile"; cat "$W/probe_ok.log"; exit 1; }
+grep -q '2 function(s), 2 lower, 0 refuse' "$W/probe_ok.log" \
+    || { echo "FAIL: --probe did not report both functions lowered"; cat "$W/probe_ok.log"; exit 1; }
+grep -q 'cannot lower' "$W/probe_ok.log" && { echo "FAIL: --probe reported a refusal for a supported program"; exit 1; }
+[ -f "$W/unit_a.bc" ] && [ -f "$W/unit_b.bc" ] && { echo "FAIL: --probe wrote an artifact"; exit 1; }
+set +e
+"$PEAR2_BIN" tests/pear2/unsupported_main.air --probe >"$W/probe_bad.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 3 ] || { echo "FAIL: --probe on an unsupported function returned $rc, expected 3"; cat "$W/probe_bad.log"; exit 1; }
+grep -q 'unsupported function body' "$W/probe_bad.log" || { echo "FAIL: --probe did not name the refused form"; cat "$W/probe_bad.log"; exit 1; }
+grep -q '1 refuse' "$W/probe_bad.log" || { echo "FAIL: --probe did not count the refusal"; cat "$W/probe_bad.log"; exit 1; }
+set +e
+"$PEAR2_BIN" "$W/unit_a.air" --probe --emit-bc >"$W/probe_mode.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: --probe with an emit mode returned $rc, expected 2"; exit 1; }
+# A .bc input is never opened in probe mode, so accepting one would make the
+# answer describe a smaller program than the one on the command line.
+: > "$W/probe_ignored.bc"
+set +e
+"$PEAR2_BIN" "$W/unit_a.air" "$W/probe_ignored.bc" --probe >"$W/probe_bc.log" 2>&1; rc=$?
+set -e
+[ "$rc" = 2 ] || { echo "FAIL: --probe with a .bc input returned $rc, expected 2"; cat "$W/probe_bc.log"; exit 1; }
+echo "PASS: --probe reports which functions the backend can lower"
 
 # Tuning travels with the module, not with the command line: a published .bc that
 # is linked somewhere else must still say which CPU it was built for.
@@ -469,6 +520,24 @@ set -e
 [ "$rc" = 42 ] || { echo "FAIL: AIR 3 pointer-cell fixture returned $rc, expected 42"; exit 1; }
 echo "PASS: AIR 3 pointer-cell provenance survives store/load and free (42)"
 
+cp tests/pear2/dynamic_index_main.air "$W/dynamic_index_main.air"
+"$PEAR2" "$W/dynamic_index_main.air" --emit-ll --quiet || { echo "FAIL: dynamic-indexed array read rejected"; exit 1; }
+# The check is the feature: an address the compiler cannot bound statically must
+# carry a comparison against the tracked allocation and a trap edge, or the
+# access is unchecked and the whole memory-safety claim is gone.
+grep -q 'getelementptr i8, ptr' "$W/dynamic_index_main.ll" || { echo "FAIL: the dynamic access computed no allocation end"; cat "$W/dynamic_index_main.ll"; exit 1; }
+grep -q 'icmp uge ptr' "$W/dynamic_index_main.ll" || { echo "FAIL: the dynamic access emitted no lower bounds check"; exit 1; }
+grep -q 'icmp ule ptr' "$W/dynamic_index_main.ll" || { echo "FAIL: the dynamic access emitted no upper bounds check"; exit 1; }
+grep -q 'call void @llvm.trap()' "$W/dynamic_index_main.ll" || { echo "FAIL: the bounds check has no trap edge"; exit 1; }
+"$PEAR2" "$W/dynamic_index_main.air" --quiet || { echo "FAIL: dynamic-index fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/dynamic_index_main.bc" -o "$W/dynamic_index_main" || { echo "FAIL: dynamic-index fixture failed to link"; exit 1; }
+set +e
+"$W/dynamic_index_main"
+rc=$?
+set -e
+[ "$rc" = 10 ] || { echo "FAIL: dynamic-index fixture returned $rc, expected 10"; exit 1; }
+echo "PASS: AIR 3 dynamic array reads are bounds-checked at the access (10)"
+
 for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_free_main reject_misaligned_load_main reject_const_global_store_main reject_use_after_free_main reject_interior_free_main reject_double_free_main; do
     cp "tests/pear2/$fixture.air" "$W/$fixture.air"
     printf 'stale bitcode' > "$W/$fixture.bc"
@@ -479,7 +548,7 @@ for fixture in reject_dynamic_gep_main reject_dynamic_malloc_main reject_bad_fre
     [ "$rc" = 3 ] && [ ! -e "$W/$fixture.bc" ] || { echo "FAIL: $fixture did not fail closed with exit 3 and clean output"; cat "$W/$fixture.log"; exit 1; }
     grep -Eq "$W/$fixture.air:[0-9]+:[0-9]+: pear2c:" "$W/$fixture.log" || { echo "FAIL: $fixture lacked a file:line:col diagnostic"; cat "$W/$fixture.log"; exit 1; }
 done
-grep -q 'dynamic pointer offsets are unsupported' "$W/reject_dynamic_gep_main.log" || { echo "FAIL: dynamic GEP rejection was not specific"; cat "$W/reject_dynamic_gep_main.log"; exit 1; }
+grep -q 'at most one dynamic pointer offset' "$W/reject_dynamic_gep_main.log" || { echo "FAIL: dynamic GEP rejection was not specific"; cat "$W/reject_dynamic_gep_main.log"; exit 1; }
 grep -q 'heap allocation requires a positive constant size' "$W/reject_dynamic_malloc_main.log" || { echo "FAIL: dynamic malloc rejection was not specific"; cat "$W/reject_dynamic_malloc_main.log"; exit 1; }
 grep -q 'memory access with unknown/out-of-bounds/misaligned provenance' "$W/reject_use_after_free_main.log" || { echo "FAIL: pointer-cell use-after-free was not rejected"; cat "$W/reject_use_after_free_main.log"; exit 1; }
 grep -q 'free requires the live base pointer' "$W/reject_interior_free_main.log" || { echo "FAIL: interior-pointer free was not rejected"; cat "$W/reject_interior_free_main.log"; exit 1; }

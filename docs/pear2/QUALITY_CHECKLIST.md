@@ -527,13 +527,73 @@ bitcode-determinism fix committed with this checklist revision).
       alone) have not been executed: no C3 compiler and no LLVM in this workspace.
       Structurally verified only.
 
+## 15. The build gate, whole-file emission, and `--probe` (6)
+
+- [x] 15.1 The backend **compiles**. It did not before this round: ~80 errors
+      (`fn` as an identifier, `u8` as a type where C3 has `char`, C-style array
+      declarations, `->`, body-less `fn` prototypes, an enum cast, an
+      `AirCmd*`/`AirCns*` mix-up, `cobranch_count` read off `AirCmd`). Evidence:
+      `c3c compile -C --no-entry --stdlib <c3lib> --max-stack-object-size 262144
+      <AIR_CORE> pear2/*.c3` exits 0 with a `c3c` built from source at the pinned
+      tag. `-C` is check-only, so this proves the tree type-checks; it executes
+      nothing.
+- [x] 15.2 libc externs are declared once for the `pear2c` module, in
+      `pear2_types.c3`. Four files each repeating `extern fn void* malloc(usz)` is
+      a redeclaration in C3, not four declarations.
+- [x] 15.3 The **whole file is the program**: declarations after a `module` record
+      are emitted. The old `root_decl_count` truncation dropped every imported
+      body, turning an imported call into an undefined symbol at link time.
+- [x] 15.4 Merging a whole file refuses the two things one module cannot contain,
+      with both positions: two bodies for one symbol (`def`/`defco`/`global`) and
+      two `data`/`codata`/`effect` types with one name (one identified struct
+      each; LLVM does not unique same-named structs).
+- [x] 15.5 `--probe` is the capability gate: it runs the real emitter over every
+      function without an LLVM context, prints one positioned line per refusal and
+      a `N function(s), M lower, K refuse` summary, writes nothing, and exits 0/3.
+      Its point is that it works with no libLLVM at all.
+- [ ] 15.6 The new `run.sh` assertions for 15.3/15.5 (`--probe` clean on a
+      two-unit program, one refusal counted for a rejected function, mode conflict
+      exit 2, and `helper` present in `.ll` for a file with a second module
+      record) have not been executed: no executable compiler in this workspace.
+
+## 16. Dynamic indexing under a bounds model (7)
+
+- [x] 16.1 A GEP index that is not a literal is lowered instead of refused, for
+      the two shapes that have a length: the element step of a tracked pointer
+      (count from the allocation extent) and an array step (count from the array
+      type). A dynamic record-field selector is still refused — there is no
+      layout for it.
+- [x] 16.2 `M1Provenance` carries `offset_known` plus a `[lo, hi]` span. Exact =
+      a constant offset; bounded = an interval that a compile-time proof covers;
+      open (`hi < 0`) = only "at or after `lo`".
+- [x] 16.3 An access through an inexact address emits
+      `addr >= base && addr + size <= base + extent` and an `llvm.trap` edge.
+      Neither GEP in the check is `inbounds`, so computing an out-of-range
+      address is not UB before the check exists.
+- [x] 16.4 A checked access claims **`align 1`**, not the type's natural
+      alignment: a dynamic index cannot promise it, and claiming it would be a
+      lie the optimizer is allowed to rely on.
+- [x] 16.5 Atomics are refused through an inexact address (before the access
+      check, so no dead trap block is emitted into a function that the
+      diagnostic discards): an unaligned atomic is not atomic, and no runtime
+      check can add alignment without changing the operation.
+- [x] 16.6 The pointer-cell bookkeeping degrades safely: a store through an
+      inexact address cannot name an exact cell, so it is refused rather than
+      recorded at the wrong offset; a cell that holds an interval pointer keeps
+      `value_lo`/`value_hi` so a reload does not narrow it.
+- [ ] 16.7 `tests/pear2/dynamic_index_main.air` (a while loop summing four
+      elements through a dynamic index; expects 10, plus `icmp uge ptr`,
+      `icmp ule ptr` and `llvm.trap` in the `.ll`), and the re-pointed
+      `reject_dynamic_gep_main.air` (two dynamic steps in one GEP) have not been
+      executed: no LLVM and no executable compiler in this workspace.
+
 ## Score
 
-**162 items: 157 complete with evidence, 5 open** (the count is the file's own
+**175 items: 168 complete with evidence, 7 open** (the count is the file's own
 inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.5
 (token rotation), 11.6
 (the native end-to-end script has not been run here: no C3 compiler, no linker),
-12.6, 13.5 and 14.7 (the new bitcode assertions have not been run for the same
+12.6, 13.5, 14.7, 15.6 and 16.7 (the new bitcode assertions have not been run for the same
 reason).
 Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All five are an
 unrun test or an owner action, not a known defect: none lowers the safety floor.

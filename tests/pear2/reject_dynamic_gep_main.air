@@ -1,9 +1,15 @@
-// Dynamic pointer arithmetic is outside AIR 3's bounded memory slice.
+// AIR 3 dynamic pointer offsets: what is still refused.
+//
+// One dynamic step is checked at the point of use. Two of them are not: the
+// second index would need a bound that depends on the value of the first, and a
+// single check cannot establish it. Refusing is the honest answer, and it is
+// reported at the GEP with a source position rather than becoming an unchecked
+// access later.
 air 3.0 Main "reject_dynamic_gep_main.pie";
 
-def bad_offset(ix : i64) : ptr(i32) =
+def bad_offset(row : i64, col : i64) : ptr(i64) =
   mu~ %ret.
-    <alloca(array#2(i32)) : ptr(array#2(i32)) | comu base.
-      <gep[array#2(i32)](base, 0 : i64, ix) : ptr(i32) | %ret>>;
+    <alloca(array#2(array#2(i64))) : ptr(array#2(array#2(i64))) | comu base.
+      <gep[array#2(array#2(i64))](base, 0 : i64, row, col) : ptr(i64) | %ret>>;
 
 def main() : i64 = mu~ %ret. <0 : i64 | %ret>;

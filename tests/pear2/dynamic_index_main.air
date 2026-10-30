@@ -1,0 +1,37 @@
+// AIR 3 dynamic pointer offsets.
+//
+// `i` is only known at run time, so the array element the loop reads cannot be
+// proven at compile time. It is not refused any more: the GEP computes
+// `base + i*8`, and the load that uses the result carries a check that traps
+// unless the whole 8-byte access is inside the tracked 32-byte alloca. The four
+// elements are 1, 2, 3, 4, so a correct run exits with 10.
+air 3.0 Main "dynamic_index_main.pie";
+
+def sum4() : i64 =
+  mu~ %ret.
+    <alloca(array#4(i64)) : ptr(array#4(i64)) | comu base.
+      seq {
+        store(gep[array#4(i64)](base, 0 : i64, 0 : i64) : ptr(i64), 1 : i64);
+        store(gep[array#4(i64)](base, 0 : i64, 1 : i64) : ptr(i64), 2 : i64);
+        store(gep[array#4(i64)](base, 0 : i64, 2 : i64) : ptr(i64), 3 : i64);
+        store(gep[array#4(i64)](base, 0 : i64, 3 : i64) : ptr(i64), 4 : i64);
+        let i = 0 : i64 in
+          let acc = 0 : i64 in
+            seq {
+              label done().
+                <acc | %ret>;
+              seq {
+                while (lt i 4 : i64) do {
+                  let element = load(gep[array#4(i64)](base, 0 : i64, i) : ptr(i64)) : i64 in
+                    let acc = (add acc element : i64) in
+                      let i = (add i 1 : i64) in
+                        nop
+                };
+                jump done()
+              }
+            }
+      };
+
+def main() : i64 =
+  mu~ %ret.
+    <sum4 | call · %ret>;

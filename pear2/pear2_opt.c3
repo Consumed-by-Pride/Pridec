@@ -1306,7 +1306,7 @@ fn int OptStats.substitute_all_cns(OptStats* s, AirCns* k, char* name, AirPrd* v
     for (usz i = 0; i < k.branch_count; i++)
     {
         if (k.branches[i] == null) { continue; }
-        replaced = replaced + s.substitute_all_cns(k.branches[i].guard, name, value, boolean, depth + 1);
+        replaced = replaced + s.substitute_all_cmd(k.branches[i].guard, name, value, boolean, depth + 1);
         replaced = replaced + s.substitute_all_cmd(k.branches[i].body, name, value, boolean, depth + 1);
     }
     for (usz i = 0; i < k.cobranch_count; i++)
@@ -1521,7 +1521,9 @@ fn bool opt_terminates(AirCmd* c, int depth)
 fn AirCmd* OptStats.match_literal_arm(OptStats* s, AirCmd* c)
 {
     if (c == null || c.tag != ACMD_MATCH || c.prd == null || c.branch_count == 0) { return null; }
-    if (c.cobranch_count != 0) { return null; }
+    // A match *command* has no cobranches of its own: they belong to the
+    // continuation (a cocase), and folding the command would drop them.
+    if (c.cns != null && c.cns.tag == ACNS_COCASE && c.cns.cobranch_count != 0) { return null; }
     AirPrd* subject = c.prd;
     bool is_int = subject.tag == APRD_INT;
     bool is_bool = subject.tag == APRD_BOOL;
@@ -1564,7 +1566,8 @@ fn AirCmd* OptStats.match_literal_arm(OptStats* s, AirCmd* c)
 fn AirCmd* OptStats.match_single_arm(OptStats* s, AirCmd* c)
 {
     if (s == null || s.arena == null || c == null || c.tag != ACMD_MATCH) { return null; }
-    if (c.branch_count != 1 || c.cobranch_count != 0 || c.branches[0] == null) { return null; }
+    if (c.branch_count != 1 || c.branches[0] == null) { return null; }
+    if (c.cns != null && c.cns.tag == ACNS_COCASE && c.cns.cobranch_count != 0) { return null; }
     AirBranch* arm = c.branches[0];
     if (arm.guard != null || arm.pat == null || arm.body == null) { return null; }
     AirCmd* body = arm.body;

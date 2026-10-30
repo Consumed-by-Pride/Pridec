@@ -16,8 +16,7 @@ extern fn void* fopen(char* path, char* mode);
 extern fn int fclose(void* f);
 extern fn void* open_memstream(char** buf, usz* size) @cname("open_memstream");
 extern fn usz fwrite(void* ptr, usz size, usz count, void* f) @cname("fwrite");
-extern fn void* malloc(usz bytes) @cname("malloc");
-extern fn void free(void* p) @cname("free");
+// free is declared once, in pear2_types.c3, for the whole module.
 extern fn int remove(char* path);
 extern fn int rename(char* old_path, char* new_path);
 extern fn int snprintf(char* buf, usz cap, char* fmt, ...);
@@ -523,8 +522,16 @@ const int M1PROV_GLOBAL = 3;
 const int M1PROV_STRING = 4;
 const int M1PROV_PARAM = 5;
 struct M1String { char* data; usz len; char* name; char* symbol; bool terminate; }
-struct M1Provenance { char* value; char* allocation; AirTyp* pointee; int kind; int alignment; long extent; long offset; bool offset_known; bool freed; bool writable; }
-struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; }// M10 target profile: pointer width, triple and datalayout follow --target.
+// A tracked pointer. `offset_known` means the byte offset within the
+// allocation is a single constant, and `offset` is it. When the offset is not
+// known -- it came from a bounds-checked dynamic index -- `lo` and `hi` bound
+// every offset the pointer can hold, and the access rules reason about the whole
+// interval instead of one address. An interval is not a weaker promise than a
+// constant: after the runtime check that produced it, every address in
+// [lo, hi] is inside the allocation, which is exactly what a memory-safety
+// claim needs.
+struct M1Provenance { char* value; char* allocation; AirTyp* pointee; int kind; int alignment; long extent; long offset; bool offset_known; bool freed; bool writable; long lo; long hi; }
+struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; long value_lo; long value_hi; }// M10 target profile: pointer width, triple and datalayout follow --target.
 // wasm32-freestanding narrows isz/usz and the pointer representation to 32
 // bits; the default x86_64 profile keeps the historical 64-bit layout so
 // emitted IR is byte-identical to earlier slices.
@@ -1558,9 +1565,9 @@ fn int M1Gen.string_index(M1Gen* g, char* data, usz len, bool terminate)
     char[96] symbol; int sn = snprintf(&symbol[0], 96, (char*)"@%s", s.name);
     if (sn < 0 || sn >= 96) { g.failed = true; return -1; }
     s.symbol = g.arena.dup(&symbol[0], (usz)sn);
-    AirTyp* u8 = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
+    AirTyp* byte_ty = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
     long extent = (long)(len + (terminate ? (usz)1 : (usz)0));
-    if (u8 == null || !g.prov_set(s.symbol, u8, M1PROV_STRING, 1, extent, 0, true, false)) { g.failed = true; return -1; }
+    if (byte_ty == null || !g.prov_set(s.symbol, byte_ty, M1PROV_STRING, 1, extent, 0, true, false)) { g.failed = true; return -1; }
     return i;
 }
 fn char* M1Gen.string_pointer(M1Gen* g, AirPrd* p)
@@ -1576,8 +1583,8 @@ fn char* M1Gen.string_pointer(M1Gen* g, AirPrd* p)
     char* first = g.tmp();
     if (first == null) { return null; }
     fprintf(g.out, "  %s = getelementptr inbounds [%d x i8], ptr %s, i64 0, i64 0\n", first, total, symbol);
-    AirTyp* u8 = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
-    if (!g.prov_set(first, u8, M1PROV_STRING, 1, total, 0, true, false)) { g.failed = true; return null; }
+    AirTyp* byte_ty = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
+    if (!g.prov_set(first, byte_ty, M1PROV_STRING, 1, total, 0, true, false)) { g.failed = true; return null; }
     g.prov(first).allocation = symbol;
     return first;
 }
@@ -2665,7 +2672,7 @@ fn char* M1Gen.load_prd(M1Gen* g, AirPrd* p)
     }
     char* address = g.pointer_value(p.subs[0]);
     if (g.failed || address == null || !g.check_access(address, t, p.source_line, p.source_col, false)) { return null; }
-    char* ir = g.llvm_type_text(t); char* dst = g.tmp(); int align = g.type_alignment(t, 0);
+    char* ir = g.llvm_type_text(t); char* dst = g.tmp(); int align = g.access_alignment(address, t);
     if (g.failed || ir == null || dst == null || align <= 0) { return null; }
     fprintf(g.out, "  %s = load %s%s, ptr %s, align %d\n", dst, p.bval ? (char*)"volatile " : (char*)"", ir, address, align);
     if (m1_pointer_type(t) && !g.cell_restore(address, dst)) { g.failed = true; return null; }
@@ -2686,34 +2693,99 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
     }
     char* base = g.pointer_value(p.subs[0]);
     M1Provenance* base_prov = g.prov(base);
-    if (base == null || base_prov == null || base_prov.freed || !base_prov.offset_known)
+    if (base == null || base_prov == null || base_prov.freed)
     {
         g.note_failure(p.source_line, p.source_col, (char*)"GEP requires known live pointer provenance"); return null;
     }
+    // The base may already be an interval (a previous dynamic step). A constant
+    // step shifts the whole interval; that keeps `&p[i].field` working without
+    // pretending the address is known.
+    long base_lo = base_prov.offset_known ? base_prov.offset : base_prov.lo;
+    long base_hi = base_prov.offset_known ? base_prov.offset : base_prov.hi;
     long[16] indices;
     bool[16] is_field;
+    long lo_delta = 0;
+    long hi_delta = 0;
+    int dyn_at = -1;
+    long dyn_stride = 0;
+    bool open_span = false;
+    char* dyn_value = null;
     AirTyp* current = source_type;
-    long delta = 0;
     for (usz i = 1; i < p.sub_count; i++)
     {
         AirPrd* ix = p.subs[i];
-        if (ix == null || ix.tag != APRD_INT || !m1_integer_type(g.expr_type(ix)))
+        bool constant = ix != null && ix.tag == APRD_INT && m1_integer_type(g.expr_type(ix));
+        if (!constant)
         {
-            g.note_failure(p.source_line, p.source_col, (char*)"dynamic pointer offsets are unsupported without a static provenance bound"); return null;
+            // A dynamic index is only meaningful where the AIR says how many
+            // elements there are: the element step of the pointer itself (whose
+            // count comes from the tracked allocation extent) or an array step
+            // (whose count is the array length). Choosing a record field by a
+            // dynamic value has no layout at all, and a second dynamic step has
+            // no bound that a single check could establish, so both stay
+            // refused. A dynamic step followed by *constant* steps is fine: the
+            // constant part just moves the interval's floor.
+            if (ix == null || !m1_integer_type(g.expr_type(ix)))
+            {
+                g.note_failure(p.source_line, p.source_col, (char*)"dynamic pointer offsets are unsupported without a static provenance bound"); return null;
+            }
+            if (dyn_at >= 0)
+            {
+                g.note_failure(p.source_line, p.source_col, (char*)"at most one dynamic pointer offset is supported per GEP"); return null;
+            }
+            if (!base_prov.offset_known || base_prov.extent <= 0)
+            {
+                g.note_failure(p.source_line, p.source_col, (char*)"a dynamic pointer offset needs an exact base offset and a known object extent"); return null;
+            }
+            long stride = 0;
+            if (i == 1)
+            {
+                stride = g.type_size(current, 0);
+                if (stride <= 0)
+                {
+                    g.note_failure(p.source_line, p.source_col, (char*)"dynamic pointer offset over an unsized type"); return null;
+                }
+            }
+            else if (current.tag == ATYP_ARRAY && current.arg_count == 1)
+            {
+                long element_size = g.type_size(current.args[0], 0);
+                int element_align = g.type_alignment(current.args[0], 0);
+                if (element_size <= 0 || element_align <= 0)
+                {
+                    g.note_failure(p.source_line, p.source_col, (char*)"dynamic array index over an unsized element"); return null;
+                }
+                stride = m1_align_up(element_size, element_align);
+            }
+            else
+            {
+                g.note_failure(p.source_line, p.source_col, (char*)"a dynamic pointer offset is only supported on the element step or an array element"); return null;
+            }
+            // The index itself is not clamped: computing an out-of-range address
+            // is legal (the pointer is just a value), and every dereference
+            // through it is checked at the point of use. What the GEP cannot say
+            // is how far the result may be from the base, so the span becomes
+            // open and the static proof stops applying to it.
+            dyn_at = (int)i; dyn_stride = stride; indices[i] = 0; is_field[i] = false;
+            dyn_value = g.index_as_i64(ix, g.expr_type(ix));
+            if (g.failed || dyn_value == null) { return null; }
+            if (i != 1) { current = current.args[0]; }
+            open_span = true;
+            continue;
         }
         long value = ix.ival; indices[i] = value; is_field[i] = false;
         if (i == 1)
         {
             long size = g.type_size(current, 0);
             if (size < 0 || value > 1048576 || value < -1048576) { g.note_failure(p.source_line, p.source_col, (char*)"GEP offset exceeds supported bounds"); return null; }
-            delta += value * size;
+            lo_delta += value * size; hi_delta += value * size;
         }
         else if (current.tag == ATYP_ARRAY && current.arg_count == 1)
         {
             if (value < 0 || value >= current.ival) { g.note_failure(p.source_line, p.source_col, (char*)"array GEP index is out of bounds"); return null; }
             long size = g.type_size(current.args[0], 0);
             if (size < 0) { g.note_failure(p.source_line, p.source_col, (char*)"unsized array GEP"); return null; }
-            delta += value * m1_align_up(size, g.type_alignment(current.args[0], 0));
+            long step = value * m1_align_up(size, g.type_alignment(current.args[0], 0));
+            lo_delta += step; hi_delta += step;
             current = current.args[0];
         }
         else if (current.tag == ATYP_TUPLE || current.tag == ATYP_NOMINAL)
@@ -2728,14 +2800,20 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
             if (value < 0 || value >= field_count) { g.note_failure(p.source_line, p.source_col, (char*)"record GEP field index is out of bounds"); return null; }
             long field_offset = g.field_offset(current, value);
             if (field_offset < 0) { g.note_failure(p.source_line, p.source_col, (char*)"unsupported GEP field layout"); return null; }
-            delta += field_offset; is_field[i] = true;
+            lo_delta += field_offset; hi_delta += field_offset; is_field[i] = true;
             if (current.tag == ATYP_TUPLE) { current = current.args[(usz)value]; }
             else { current = m1_record_field_ty(m1_find_record_decl(g.decls, g.decl_count, current.name), (usz)value); }
         }
         else { g.note_failure(p.source_line, p.source_col, (char*)"GEP index steps into a scalar type"); return null; }
     }
-    long new_offset = base_prov.offset + delta;
-    if (new_offset < 0 || new_offset > base_prov.extent) { g.note_failure(p.source_line, p.source_col, (char*)"GEP escapes the known object bounds"); return null; }
+    long new_lo = base_lo + lo_delta;
+    // `hi < 0` means the span is open: the pointer is somewhere at or after
+    // `lo`, and every access through it must be checked when it runs.
+    long new_hi = (open_span || base_hi < 0) ? -1 : base_hi + hi_delta;
+    if (new_lo < 0 || (new_hi >= 0 && (new_hi < new_lo || new_hi > base_prov.extent)))
+    {
+        g.note_failure(p.source_line, p.source_col, (char*)"GEP escapes the known object bounds"); return null;
+    }
     AirTyp* result_type = g.expr_type(p);
     if (m1_pointee_type(result_type) == null || !m1_value_type_compatible(m1_pointee_type(result_type), current, 0))
     {
@@ -2746,14 +2824,35 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
     fprintf(g.out, "  %s = getelementptr %s, ptr %s", out, source_ir, base);
     for (usz i = 1; i < p.sub_count; i++)
     {
-        if (is_field[i]) { fprintf(g.out, ", i32 %ld", indices[i]); }
+        if ((int)i == dyn_at) { fprintf(g.out, ", i64 %s", dyn_value); }
+        else if (is_field[i]) { fprintf(g.out, ", i32 %ld", indices[i]); }
         else { fprintf(g.out, ", i64 %ld", indices[i]); }
     }
     fprintf(g.out, "\n");
-    int align = m1_gcd(base_prov.alignment, (int)(new_offset == 0 ? base_prov.alignment : new_offset));
+    // Alignment of the result is the alignment the two stepping rules share: the
+    // allocation's own alignment and the element stride. A dynamic index cannot
+    // improve alignment, and must not be assumed to preserve anything finer.
+    // A dynamic step moves the address by a multiple of the element stride, so
+    // the alignment it can promise is the gcd of the base alignment, the stride,
+    // and every constant step taken along the way. Over-claiming here would let
+    // the static proof accept a misaligned access later, so anything the gcd
+    // helper cannot represent falls back to 1, which is always true.
+    int align = 1;
+    if (dyn_at >= 0)
+    {
+        if (lo_delta >= -1048576 && lo_delta <= 1048576) { align = m1_gcd(base_prov.alignment, m1_gcd((int)dyn_stride, (int)lo_delta)); }
+    }
+    else if (new_lo >= -1048576 && new_lo <= 1048576)
+    {
+        align = m1_gcd(base_prov.alignment, new_lo == 0 ? base_prov.alignment : (int)new_lo);
+    }
     char* allocation = base_prov.allocation; int kind = base_prov.kind;
     long extent = base_prov.extent; bool writable = base_prov.writable;
-    if (!g.prov_set(out, current, kind, align, extent, new_offset, true, writable)) { g.failed = true; return null; }
+    if (new_hi >= 0 && new_lo == new_hi)
+    {
+        if (!g.prov_set(out, current, kind, align, extent, new_lo, true, writable)) { g.failed = true; return null; }
+    }
+    else if (!g.prov_set_span(out, current, kind, align, extent, new_lo, new_hi, writable)) { g.failed = true; return null; }
     g.prov(out).allocation = allocation;
     return out;
 }
@@ -3072,16 +3171,16 @@ fn AirTyp* M1Gen.lambda_closure_type(M1Gen* g, AirPrd* p)
     char*[16] cn; char*[16] cv; AirTyp*[16] ct; bool[16] cb; bool[16] cp; int cc = 0;
     AirTyp*[16] pd; usz pc = 0; AirTyp* ret = null;
     if (!g.lambda_scan(p, false, cn[..], cv[..], ct[..], cb[..], cp[..], &cc, pd[..], &pc, &ret)) { return null; }
-    AirTyp* u8 = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
-    AirTyp* u8p = air_ir::air_mk_typ_ptr(g.arena, u8);
+    AirTyp* byte_ty = air_ir::air_mk_typ_simple(g.arena, ATYP_U8);
+    AirTyp* byte_ptr_ty = air_ir::air_mk_typ_ptr(g.arena, byte_ty);
     AirTyp* argt = air_ir::air_mk_typ_simple(g.arena, ATYP_TUPLE);
     AirTyp* arrow = air_ir::air_mk_typ(g.arena, ATYP_ARROW);
     AirTyp* closure = air_ir::air_mk_typ_simple(g.arena, ATYP_TUPLE);
-    if (u8 == null || u8p == null || argt == null || arrow == null || closure == null) { return null; }
-    argt.args[0] = u8p; argt.arg_count = 1;
+    if (byte_ty == null || byte_ptr_ty == null || argt == null || arrow == null || closure == null) { return null; }
+    argt.args[0] = byte_ptr_ty; argt.arg_count = 1;
     for (usz i = 0; i < pc; i++) { argt.args[i + 1] = pd[i]; argt.arg_count++; }
     arrow.args[0] = argt; arrow.args[1] = ret; arrow.arg_count = 2;
-    closure.args[0] = arrow; closure.args[1] = u8p; closure.arg_count = 2;
+    closure.args[0] = arrow; closure.args[1] = byte_ptr_ty; closure.arg_count = 2;
     return closure;
 }
 // plan_lambda -- validate one `lam` against the live environment, resolve its
@@ -5201,6 +5300,11 @@ fn bool M1Gen.atomic_cmd(M1Gen* g, AirCmd* c, char* ret_name)
     { g.note_failure(c.source_line, c.source_col, (char*)"atomic pointee must be an 8/16/32/64-bit integer (pointer, bool, float, and 128-bit atomics are unsupported)"); return false; }
     char* address = g.pointer_value(c.prd);
     if (g.failed || address == null) { return false; }
+    // Exactness is decided before the access check: an atomic must be naturally
+    // aligned, which no runtime check can establish, and asking the access check
+    // first would emit a bounds check into a function that is about to be thrown
+    // away by this diagnostic.
+    if (!g.address_is_exact(address, c.source_line, c.source_col)) { return false; }
     if (!g.check_access(address, element, c.source_line, c.source_col, !is_load)) { return false; }
     char* ety = g.llvm_type_text(element);
     int align = g.type_alignment(element, 0);
@@ -5472,7 +5576,7 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         bool stored_ptr = m1_pointer_type(element);
         bool stored_bool = m1_bool_type(element);
         char* value = stored_bool ? g.condition(c.prds[1]) : (stored_ptr ? g.pointer_value(c.prds[1]) : g.prd(c.prds[1]));
-        char* ty = g.llvm_type_text(element); int align = g.type_alignment(element, 0);        if (g.failed || value == null || ty == null || align <= 0) {
+        char* ty = g.llvm_type_text(element); int align = g.access_alignment(address, element);        if (g.failed || value == null || ty == null || align <= 0) {
  return false; }
         if (stored_ptr && c.prds[1].tag != APRD_NULL)
         {
@@ -6441,6 +6545,14 @@ fn int main(String[] args)
     // --check stops after the AIR verifier: it answers "is this program valid"
     // without writing an artifact, which is what a CI gate wants.
     bool check_only = false;
+    // --probe goes one gate further: it runs the whole IR emitter over every
+    // function and reports which ones the backend can lower, without needing
+    // LLVM at all. That is the difference between "the AIR is valid" and "this
+    // backend can compile it", and only the second answers the question a
+    // program actually asks.
+    bool probe_only = false;
+    int probe_ok = 0;
+    int probe_bad = 0;
     int opt_level = 2;
     bool opt_size = false;
     bool opt_tiny = false;
@@ -6556,6 +6668,7 @@ fn int main(String[] args)
         // writes no artifact, so a build can record it and a human can diff it.
         else if (same(a, "--print-pipeline")) { print_pipeline = true; }
         else if (same(a, "--check")) { check_only = true; }
+        else if (same(a, "--probe")) { probe_only = true; }
         else if (m1_has_prefix(a, "--target="))
         {
             char* tname = a + 9;
@@ -6654,7 +6767,7 @@ fn int main(String[] args)
         printf("usage: pear2c FILE.air [FILE.air...] [FILE.bc...] [--emit-exe|--emit-bc|--emit-obj|--emit-asm|--emit-ll|--emit-native]\n");
         printf("              [-O0|-O1|-O2|-O3|-Os|-Oz] [--target=x86_64|wasm32-freestanding] [--cpu=NAME|native]\n");
         printf("              [--features=LIST|native] [--reloc=static|pic|dynamic-no-pic|default] [-fPIC]\n");
-        printf("              [--passes=PIPELINE] [--inline-threshold=N] [--print-pipeline] [--check]\n");
+        printf("              [--passes=PIPELINE] [--inline-threshold=N] [--print-pipeline] [--check] [--probe]\n");
         printf("              [--internalize|--no-internalize] [--native-entry] [--stats] [--quiet]\n");
         printf("       pear2c FILE.bc [FILE.bc...] --verify-bc [--target=...] [--quiet]\n");
         return 2;
@@ -6729,9 +6842,22 @@ fn int main(String[] args)
         printf("pear2c: --check writes no artifact and cannot be combined with an --emit-* mode\n");
         return 2;
     }
+    if (probe_only && mode_seen)
+    {
+        printf("pear2c: --probe writes no artifact and cannot be combined with an --emit-* mode\n");
+        return 2;
+    }
+    // --probe answers a question about this backend and the AIR it reads. A .bc
+    // input it never opens would quietly make the answer narrower than the
+    // program, so it is refused for the same reason --check refuses one.
+    if (probe_only && bc_links > 0)
+    {
+        printf("pear2c: --probe lowers AIR only; a .bc input is never read in this mode\n");
+        return 2;
+    }
     // Clear artifacts from either output mode before any validation can fail.
     // --check is the exception: it must not delete what it is not replacing.
-    if (!check_only) { clear_stale_outputs(input); }
+    if (!check_only && !probe_only) { clear_stale_outputs(input); }
     char[4096] out_path;
     char[4096] ll_path;
     char[4096] bc_tmp;
@@ -6973,18 +7099,49 @@ fn int main(String[] args)
             m1_infer_record_params_walk(d, d.def_body, &mod.decls[0], mod.decl_count, &arena, 0);
         }
     }
-    // The program entry module is the declarations before the first module
-    // record. PEAR2 M1 lowers this module's functions; imported/prelude modules
-    // remain available in parsed AIR but are not emitted as unrelated bodies.
-    usz root_decl_count = mod.decl_count;
+    // Every declaration in the parsed file is part of the program. The root
+    // module's declarations come first; an imported or prelude module follows a
+    // module record. This used to stop at the first module record, which meant a
+    // program that called into an imported module emitted a *call* to every one
+    // of its functions and no body for any of them -- the link failed with an
+    // undefined symbol far from the compile that caused it, and a program that
+    // merely imported something got a module smaller than its source. Emitting
+    // the whole file is what makes "compile a program that uses a library" mean
+    // what it says.
+    // Two bodies for one name is not valid IR, and refusing is better than
+    // letting LLVM report a redefinition with no position attached. The same is
+    // true of types: `%point = type {...}` twice is a parse error, and the
+    // parser reports the type name and neither definition.
     for (usz i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
-        if (d != null && d.tag == ADECL_MODULE) { root_decl_count = i; break; }
+        if (d == null || d.name == null) { continue; }
+        bool d_is_value = d.tag == ADECL_DEF || d.tag == ADECL_DEFCO || d.tag == ADECL_GLOBAL;
+        bool d_is_type = d.tag == ADECL_DATA || d.tag == ADECL_CODATA || d.tag == ADECL_EFFECT;
+        if (!d_is_value && !d_is_type) { continue; }
+        for (usz j = i + 1; j < mod.decl_count; j++)
+        {
+            AirDecl* e = mod.decls[j];
+            if (e == null || e.name == null || !same(e.name, d.name)) { continue; }
+            bool e_is_value = e.tag == ADECL_DEF || e.tag == ADECL_DEFCO || e.tag == ADECL_GLOBAL;
+            bool e_is_type = e.tag == ADECL_DATA || e.tag == ADECL_CODATA || e.tag == ADECL_EFFECT;
+            if (d_is_value && e_is_value)
+            {
+                printf("%s:%d:%d: pear2c: `%s` is defined twice in this file (again at %d:%d); one module may define a symbol once\n",
+                       input, e.source_line, e.source_col, d.name, d.source_line, d.source_col);
+                arena.destroy(); return 3;
+            }
+            if (d_is_type && e_is_type)
+            {
+                printf("%s:%d:%d: pear2c: type `%s` is declared twice in this file (again at %d:%d); two identified types cannot share a name\n",
+                       input, e.source_line, e.source_col, d.name, d.source_line, d.source_col);
+                arena.destroy(); return 3;
+            }
+        }
     }
     AirDecl* main_decl = null;
     int main_count = 0;
-    for (usz i = 0; i < root_decl_count; i++)
+    for (usz i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
         if (d == null || d.tag == ADECL_MODULE) { continue; }
@@ -6996,7 +7153,7 @@ fn int main(String[] args)
             {
                 AirEffectOp* eo = d.ops[oi];
                 if (eo == null || eo.name == null || eo.op_ty == null) { effect_ok = false; break; }
-                if (eo.op_ty.tag != ATYP_INFER && !m1_backend_type(eo.op_ty, &mod.decls[0], root_decl_count, 0)) { effect_ok = false; break; }
+                if (eo.op_ty.tag != ATYP_INFER && !m1_backend_type(eo.op_ty, &mod.decls[0], mod.decl_count, 0)) { effect_ok = false; break; }
             }
             if (!effect_ok)
             {
@@ -7008,7 +7165,7 @@ fn int main(String[] args)
         if (d.tag == ADECL_GLOBAL)
         {
             if (!mod.low || !m1_safe_name(d.name) || !m1_safe_name(m1_link_name(d)) || d.typaram_count != 0 ||
-                !m1_backend_type(d.ret_ty, &mod.decls[0], root_decl_count, 0))
+                !m1_backend_type(d.ret_ty, &mod.decls[0], mod.decl_count, 0))
             {
                 printf("%s:%d:%d: pear2c: unsupported AIR global declaration `%s`\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
                 arena.destroy(); return 3;
@@ -7029,7 +7186,7 @@ fn int main(String[] args)
                 printf("%s:%d:%d: pear2c: unsupported global attribute (only power-of-two align up to 4096 is supported)\n", input, d.source_line, d.source_col);
                 arena.destroy(); return 3;
             }
-            for (usz j = 0; j < root_decl_count; j++)
+            for (usz j = 0; j < mod.decl_count; j++)
             {
                 if (j == i) { continue; }
                 AirDecl* prior = mod.decls[j];
@@ -7045,7 +7202,7 @@ fn int main(String[] args)
         if (d.tag == ADECL_DATA)
         {
             AirTyp nominal; nominal.tag = ATYP_NOMINAL; nominal.name = d.name; nominal.arg_count = 0;
-            if (!m1_backend_type(&nominal, &mod.decls[0], root_decl_count, 0))
+            if (!m1_backend_type(&nominal, &mod.decls[0], mod.decl_count, 0))
             {                printf("%s:%d:%d: pear2c: unsupported data form in declaration `%s`: PEAR2 supports plain product records and nullary tagged enums; payload-bearing, generic, attributed, or otherwise complex variants are unsupported\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
                 arena.destroy(); return 3;
             }
@@ -7059,7 +7216,7 @@ fn int main(String[] args)
                 arena.destroy(); return 3;
             }
             AirTyp nominal; nominal.tag = ATYP_NOMINAL; nominal.name = d.name; nominal.arg_count = 0;
-            if (!m1_backend_type(&nominal, &mod.decls[0], root_decl_count, 0))
+            if (!m1_backend_type(&nominal, &mod.decls[0], mod.decl_count, 0))
             {
                 printf("%s:%d:%d: pear2c: unsupported codata record field types in declaration `%s`\n", input, d.source_line, d.source_col, d.name == null ? (char*)"?" : d.name);
                 arena.destroy(); return 3;
@@ -7076,10 +7233,10 @@ fn int main(String[] args)
             printf("pear2c: function name `%s` is reserved by a required LLVM intrinsic\n", d.name);
             arena.destroy(); return 3;
         }
-        bool signature_types_ok = d.ret_ty == null || d.ret_ty.tag == ATYP_INFER || m1_backend_type(d.ret_ty, &mod.decls[0], root_decl_count, 0);
+        bool signature_types_ok = d.ret_ty == null || d.ret_ty.tag == ATYP_INFER || m1_backend_type(d.ret_ty, &mod.decls[0], mod.decl_count, 0);
         for (usz p = 0; p < d.param_count; p++)
         {
-            if (d.params[p] == null || (d.params[p].ty != null && d.params[p].ty.tag != ATYP_INFER && !m1_backend_type(d.params[p].ty, &mod.decls[0], root_decl_count, 0))) { signature_types_ok = false; }
+            if (d.params[p] == null || (d.params[p].ty != null && d.params[p].ty.tag != ATYP_INFER && !m1_backend_type(d.params[p].ty, &mod.decls[0], mod.decl_count, 0))) { signature_types_ok = false; }
         }
         if (!m1_safe_name(d.name) || !m1_function_signature(d) || d.typaram_count != 0 || !signature_types_ok)
         {
@@ -7151,13 +7308,13 @@ fn int main(String[] args)
     // writes it once.
     if (emit_native)
     {
-        u8* native_data = null;
+        char* native_data = null;
         usz native_size = 0;
         char* fail_name = null;
         char* fail_message = null;
         int fail_line = 0;
         int fail_col = 0;
-        if (!nat_emit_module(&mod.decls[0], root_decl_count, emit_native_entry, &native_data, &native_size,
+        if (!nat_emit_module(&mod.decls[0], mod.decl_count, emit_native_entry, &native_data, &native_size,
                              &fail_name, &fail_line, &fail_col, &fail_message))
         {
             if (fail_name != null && fail_message != null)
@@ -7200,7 +7357,7 @@ fn int main(String[] args)
         }
         if (!quiet)
         {
-            printf("%s -> %s (native x86-64 object, %d bytes)\n", input, &out_path[0], (int)native_size);
+            printf("%s . %s (native x86-64 object, %d bytes)\n", input, &out_path[0], (int)native_size);
         }
         arena.destroy();
         return 0;
@@ -7220,7 +7377,7 @@ fn int main(String[] args)
     fprintf(f, "target datalayout = \"%s\"\ntarget triple = \"%s\"\n", g_m1_target_datalayout, g_m1_target_triple);
     fprintf(f, "declare void @llvm.trap()\ndeclare void @llvm.assume(i1 noundef)\ndeclare ptr @llvm.stacksave()\ndeclare void @llvm.stackrestore(ptr)\n");
     M1Gen g;
-    g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = root_decl_count;
+    g.arena = &arena; g.out = f; g.decls = &mod.decls[0]; g.decl_count = mod.decl_count;
     g.env_count = 0; g.label_count = 0; g.next_tmp = 0; g.next_label = 0; g.next_slot = 0; g.default_unsigned = false; g.default_bits = 64; g.return_type = null; g.return_bool = false; g.return_ptr = false; g.return_unit = false; g.terminated = false; g.failed = false;    g.low_profile = mod.low; g.input_path = input; g.current_function = null; g.string_count = 0;
     g.rec_count = 0; g.relax_recursive_inference = false; g.lam_count = 0; g.lam_serial = 0; g.provenance_count = 0; g.fx_depth = 0; g.fail_line = 0; g.fail_col = 0; g.last_line = 0; g.last_col = 0; g.fail_form = null; g.error = null;
     if (!g.emit_data_types())
@@ -7242,10 +7399,12 @@ fn int main(String[] args)
         arena.destroy(); return 3;
     }
     bool emitted = true;
-    for (usz i = 0; i < root_decl_count; i++)
+    for (usz i = 0; i < mod.decl_count; i++)
     {
         AirDecl* d = mod.decls[i];
-        if (d != null && d.tag == ADECL_DEF && !g.emit_function(d))
+        if (d == null || d.tag != ADECL_DEF) { continue; }
+        if (g.emit_function(d)) { probe_ok++; continue; }
+        if (!probe_only)
         {
             if (g.fail_form == null)
             {
@@ -7254,6 +7413,43 @@ fn int main(String[] args)
             emitted = false;
             break;
         }
+        // Probe: record the refusal and keep going, so one message per function
+        // instead of only the first. The IR written so far for this function is
+        // half a function and is thrown away with the stream.
+        probe_bad++;
+        // A declaration does not record which input it came from, so a position
+        // is only claimed when there is exactly one input to attribute it to.
+        if (units_read > 1)
+        {
+            printf("pear2c: cannot lower `%s`%s%s\n",
+                   d.name == null ? (char*)"?" : d.name,
+                   g.fail_form == null ? (char*)" (outside the supported PEAR2 subset)" : (char*)": ",
+                   g.fail_form == null ? (char*)"" : g.fail_form);
+        }
+        else
+        {
+            printf("%s:%d:%d: pear2c: cannot lower `%s`%s%s\n", input,
+                   g.fail_line == 0 ? d.source_line : g.fail_line,
+                   g.fail_col == 0 ? d.source_col : g.fail_col,
+                   d.name == null ? (char*)"?" : d.name,
+                   g.fail_form == null ? (char*)" (outside the supported PEAR2 subset)" : (char*)": ",
+                   g.fail_form == null ? (char*)"" : g.fail_form);
+        }
+        g.failed = false; g.fail_form = null; g.fail_line = 0; g.fail_col = 0;
+    }
+    if (probe_only)
+    {
+        fclose(f);
+        free(mod_text);
+        printf("pear2c: %s: %d function(s), %d lower, %d refuse\n", input, probe_ok + probe_bad, probe_ok, probe_bad);
+        if (unit_arenas != null)
+        {
+            for (int i = 0; i < units_read; i++) { unit_arenas[i].destroy(); }
+            free(unit_arenas);
+        }
+        if (unit_mods != null) { free(unit_mods); }
+        arena.destroy();
+        return probe_bad == 0 ? 0 : 3;
     }
     if (emitted && !g.emit_string_constants()) { emitted = false; }
     if (!emitted)

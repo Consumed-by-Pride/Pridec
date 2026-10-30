@@ -26,10 +26,6 @@
 module pear2c;
 import air_ir;
 
-extern fn void* malloc(usz size_);
-extern fn void  free(void* ptr);
-extern fn void* memset(void* dst, int value, usz n);
-extern fn void* memcpy(void* dst, void* src, usz n);
 
 // A branch whose displacement is patched once every block has an offset. The
 // encoder cannot know a forward target's position while it is still emitting the
@@ -41,7 +37,7 @@ struct NatPatch {
 
 struct NatGen {
     XBuf* text;
-    PFunc* fn;
+    PFunc* func;
     int[64] block_offset;   // text offset of each block, -1 until emitted
     NatPatch[2048] patches;
     int patch_count;
@@ -66,17 +62,17 @@ const int[6] NAT_POOL = { R8, R9, R10, R11, RSI, RDI };
 // parameter: it is marked as defined in the entry block.
 fn void nat_scan_uses(NatGen* g)
 {
-    if (g == null || g.fn == null) { return; }
-    for (int v = 0; v < g.fn.vreg_count && v < 2048; v++)
+    if (g == null || g.func == null) { return; }
+    for (int v = 0; v < g.func.vreg_count && v < 2048; v++)
     {
         g.vreg_def_block[(usz)v] = -1;
         g.vreg_last_block[(usz)v] = -1;
         g.vreg_uses[(usz)v] = 0;
         g.vreg_reg[(usz)v] = -1;
     }
-    for (int b = 0; b < g.fn.block_count; b++)
+    for (int b = 0; b < g.func.block_count; b++)
     {
-        PBlock* block = &g.fn.blocks[(usz)b];
+        PBlock* block = &g.func.blocks[(usz)b];
         for (int i = 0; i < block.count; i++)
         {
             PInst* ins = &block.code[(usz)i];
@@ -128,7 +124,7 @@ fn int nat_reg_holding(NatGen* g, int vreg)
 
 fn int nat_reg_in_use(NatGen* g, int reg)
 {
-    for (int v = 0; v < g.fn.vreg_count && v < 2048; v++)
+    for (int v = 0; v < g.func.vreg_count && v < 2048; v++)
     {
         if (g.vreg_reg[(usz)v] == reg) { return v; }
     }
@@ -169,9 +165,9 @@ fn void nat_release(NatGen* g, int vreg)
 // these registers for anything.
 fn void nat_spill_live(NatGen* g, int current_block, int from_index)
 {
-    if (g == null || g.fn == null) { return; }
-    PBlock* block = &g.fn.blocks[(usz)current_block];
-    for (int v = 0; v < g.fn.vreg_count && v < 2048; v++)
+    if (g == null || g.func == null) { return; }
+    PBlock* block = &g.func.blocks[(usz)current_block];
+    for (int v = 0; v < g.func.vreg_count && v < 2048; v++)
     {
         int reg = g.vreg_reg[(usz)v];
         if (reg < 0) { continue; }
@@ -274,7 +270,7 @@ fn void nat_jcc_to(NatGen* g, int cc, int block)
 {
     if (g == null || g.text == null) { return; }
     xb8(g.text, 0x0F);
-    xb8(g.text, (u8)(0x80 + (cc & 0x0F)));
+    xb8(g.text, (char)(0x80 + (cc & 0x0F)));
     usz at = g.text.len;
     xb32(g.text, 0);
     nat_patch_new(g, at, block);
@@ -322,8 +318,8 @@ fn bool nat_cmp(NatGen* g, int dst, int a, int b, long imm, bool immediate, int 
 
 fn bool nat_emit_inst(NatGen* g, int block, int index)
 {
-    if (g == null || g.fn == null) { return false; }
-    PBlock* blk = &g.fn.blocks[(usz)block];
+    if (g == null || g.func == null) { return false; }
+    PBlock* blk = &g.func.blocks[(usz)block];
     PInst* ins = &blk.code[(usz)index];
     switch (ins.op)
     {
@@ -488,10 +484,10 @@ fn bool nat_emit_inst(NatGen* g, int block, int index)
 // to AIR bindings; vreg i lives at slot_count + i.
 fn bool nat_layout(NatGen* g)
 {
-    if (g == null || g.fn == null) { return false; }
-    int base = g.fn.slot_count;
-    for (int v = 0; v < g.fn.vreg_count && v < 2048; v++) { g.vreg_slot[(usz)v] = base + v; }
-    int slots = base + g.fn.vreg_count;
+    if (g == null || g.func == null) { return false; }
+    int base = g.func.slot_count;
+    for (int v = 0; v < g.func.vreg_count && v < 2048; v++) { g.vreg_slot[(usz)v] = base + v; }
+    int slots = base + g.func.vreg_count;
     g.frame_bytes = slots * 8;
     // Keep the frame 16-byte aligned: the ABI requires RSP to be aligned at a
     // call, and a misaligned frame is the classic source of a crash inside
@@ -503,12 +499,12 @@ fn bool nat_layout(NatGen* g)
 // nat_emit_function -- one function's prologue, blocks, and patch-up.
 fn bool nat_emit_function(NatGen* g, ElfObject* elf, bool is_public)
 {
-    if (g == null || g.fn == null || g.text == null) { return false; }
+    if (g == null || g.func == null || g.text == null) { return false; }
     if (!nat_layout(g)) { return false; }
     nat_scan_uses(g);
     for (int b = 0; b < 64; b++) { g.block_offset[(usz)b] = -1; }
     g.patch_count = 0;
-    usz start = g.text->len;
+    usz start = g.text.len;
     // Prologue.
     x_push(g.text, RBP);
     x_mov_rr(g.text, RBP, RSP);
@@ -517,17 +513,17 @@ fn bool nat_emit_function(NatGen* g, ElfObject* elf, bool is_public)
     // another function at any point, and a caller-saved register cannot be
     // trusted after that.
     int[6] arg_regs = { RDI, RSI, RDX, RCX, R8, R9 };
-    for (int i = 0; i < g.fn->param_count && i < 6; i++)
+    for (int i = 0; i < g.func.param_count && i < 6; i++)
     {
-        int slot = g.fn->params[(usz)i].slot;
+        int slot = g.func.params[(usz)i].slot;
         x_mov_mr(g.text, nat_slot_mem(g, slot), arg_regs[(usz)i]);
     }
-    for (int b = 0; b < g.fn->block_count; b++)
+    for (int b = 0; b < g.func.block_count; b++)
     {
         if (b >= 64) { g.failed = true; g.fail_message = (char*)"more than 64 basic blocks in one function"; return false; }
-        g.block_offset[(usz)b] = (int)g.text->len;
-        PBlock* block = &g.fn->blocks[(usz)b];
-        for (int i = 0; i < block->count; i++)
+        g.block_offset[(usz)b] = (int)g.text.len;
+        PBlock* block = &g.func.blocks[(usz)b];
+        for (int i = 0; i < block.count; i++)
         {
             if (!nat_emit_inst(g, b, i)) { return false; }
         }
@@ -535,26 +531,26 @@ fn bool nat_emit_function(NatGen* g, ElfObject* elf, bool is_public)
         // one, which is correct only because PIR emits blocks in layout order and
         // the builder always appends a jump when it means one.
     }
-    usz end = g.text->len;
+    usz end = g.text.len;
     for (int p = 0; p < g.patch_count; p++)
     {
         NatPatch* patch = &g.patches[(usz)p];
-        int target_offset = patch->block >= 0 && patch->block < 64 ? g.block_offset[(usz)patch->block] : -1;
+        int target_offset = patch.block >= 0 && patch.block < 64 ? g.block_offset[(usz)patch.block] : -1;
         if (target_offset < 0)
         {
             g.failed = true;
             g.fail_message = (char*)"branch to a block that was never emitted";
             return false;
         }
-        long rel = (long)target_offset - (long)(patch->at + 4);
-        xbuf_patch32(g.text, patch->at, (uint)(rel & 0xFFFFFFFF));
+        long rel = (long)target_offset - (long)(patch.at + 4);
+        xbuf_patch32(g.text, patch.at, (uint)(rel & 0xFFFFFFFF));
     }
-    if (g.text->failed) { g.failed = true; g.fail_message = (char*)"instruction buffer overflow"; return false; }
+    if (g.text.failed) { g.failed = true; g.fail_message = (char*)"instruction buffer overflow"; return false; }
     (void)end;
     // Symbol for the function.
     if (elf != null)
     {
-        elf_add_symbol(elf, g.fn->name, 1, (ulong)start, (ulong)(g.text->len - start),
+        elf_add_symbol(elf, g.func.name, 1, (ulong)start, (ulong)(g.text.len - start),
                        is_public ? STB_GLOBAL : STB_LOCAL, STT_FUNC);
     }
     return true;
@@ -593,7 +589,7 @@ fn void nat_emit_start(ElfObject* elf, XBuf* text)
 // `decls` is the root declaration list the caller already resolved; functions
 // outside the native subset are reported by index so the caller can name them in
 // a diagnostic instead of failing with a generic message.
-fn bool nat_emit_module(AirDecl** decls, usz decl_count, bool emit_start, u8** out_data, usz* out_size,
+fn bool nat_emit_module(AirDecl** decls, usz decl_count, bool emit_start, char** out_data, usz* out_size,
                         char** fail_name, int* fail_line, int* fail_col, char** fail_message)
 {
     if (decls == null || out_data == null || out_size == null) { return false; }
@@ -607,20 +603,20 @@ fn bool nat_emit_module(AirDecl** decls, usz decl_count, bool emit_start, u8** o
     {
         AirDecl* d = decls[di];
         if (d == null || d.tag != ADECL_DEF || d.def_body == null) { continue; }
-        PFunc* fn = (PFunc*)malloc(PFunc::size);
-        if (fn == null) { elf_free(&elf); xbuf_free(&text); return false; }
-        memset(fn, 0, PFunc::size);
-        fn.name = d.name;
-        fn.is_public = d.is_pub;
+        PFunc* func = (PFunc*)malloc(PFunc::size);
+        if (func == null) { elf_free(&elf); xbuf_free(&text); return false; }
+        memset(func, 0, PFunc::size);
+        func.name = d.name;
+        func.is_public = d.is_pub;
         PBuilder pb;
         memset(&pb, 0, PBuilder::size);
-        if (!pfunc_build(d, fn, &pb))
+        if (!pfunc_build(d, func, &pb))
         {
             if (fail_name != null) { *fail_name = d.name; }
             if (fail_line != null) { *fail_line = pb.fail_line; }
             if (fail_col != null) { *fail_col = pb.fail_col; }
             if (fail_message != null) { *fail_message = pb.fail_message; }
-            free(fn);
+            free(func);
             elf_free(&elf);
             xbuf_free(&text);
             return false;
@@ -628,30 +624,30 @@ fn bool nat_emit_module(AirDecl** decls, usz decl_count, bool emit_start, u8** o
         NatGen g;
         memset(&g, 0, NatGen::size);
         g.text = &text;
-        g.fn = fn;
+        g.func = func;
         if (!nat_emit_function(&g, &elf, d.is_pub))
         {
             if (fail_name != null) { *fail_name = d.name; }
             if (fail_line != null) { *fail_line = 0; }
             if (fail_col != null) { *fail_col = 0; }
             if (fail_message != null) { *fail_message = g.fail_message; }
-            free(fn);
+            free(func);
             elf_free(&elf);
             xbuf_free(&text);
             return false;
         }
-        free(fn);
+        free(func);
     }
     if (emit_start) { nat_emit_start(&elf, &text); }
     // External calls become undefined symbols plus PLT32 relocations.
     for (int i = 0; i < text.fixup_count; i++)
     {
         XFixup* f = &text.fixups[(usz)i];
-        int sym = elf_find_symbol(&elf, f->symbol);
-        if (sym < 0) { sym = elf_ensure_undefined(&elf, f->symbol); }
+        int sym = elf_find_symbol(&elf, f.symbol);
+        if (sym < 0) { sym = elf_ensure_undefined(&elf, f.symbol); }
         if (sym < 0) { elf_free(&elf); xbuf_free(&text); return false; }
-        int type = f->kind == XF_REL32 ? R_X86_64_PLT32 : R_X86_64_PC32;
-        if (!elf_add_rela(&elf, f->at, sym, type, -4)) { elf_free(&elf); xbuf_free(&text); return false; }
+        int type = f.kind == XF_REL32 ? R_X86_64_PLT32 : R_X86_64_PC32;
+        if (!elf_add_rela(&elf, f.at, sym, type, -4)) { elf_free(&elf); xbuf_free(&text); return false; }
     }
     if (!elf_set_bytes(&elf, 1, text.data, text.len)) { elf_free(&elf); xbuf_free(&text); return false; }
     bool ok = elf_write(&elf, out_data, out_size);

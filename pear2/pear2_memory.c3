@@ -19,6 +19,26 @@ fn bool M1Gen.prov_set(M1Gen* g, char* value, AirTyp* pointee, int kind, int ali
     if (fresh) { p.allocation = value; }
     p.value = value; p.pointee = pointee; p.kind = kind; p.alignment = alignment;
     p.extent = extent; p.offset = offset; p.offset_known = offset_known; p.freed = false; p.writable = writable;
+    p.lo = offset; p.hi = offset;
+    return true;
+}
+// Record a pointer whose offset is a range rather than a constant. The caller
+// has already emitted whatever runtime check proves every address in the range
+// lies inside the allocation, so this is a strictly stronger fact than "offset
+// unknown", and strictly weaker than "offset == k". `lo` doubles as `offset` so
+// the offset-keyed pointer-cell bookkeeping degrades to "no exact cell", which
+// is the safe answer: a store through a dynamically indexed address is refused
+// as a pointer cell until the address is a constant again.
+fn bool M1Gen.prov_set_span(M1Gen* g, char* value, AirTyp* pointee, int kind, int alignment, long extent, long lo, long hi, bool writable)
+{
+    // `hi < 0` records an open span: the pointer is at or after `lo`, and no
+    // static claim is made about the top. A tight span must sit inside the
+    // object, because a tight span is used as a compile-time proof.
+    if (lo < 0 || hi > extent || (hi >= 0 && hi < lo)) { return false; }
+    if (!g.prov_set(value, pointee, kind, alignment, extent, lo, false, writable)) { return false; }
+    M1Provenance* p = g.prov(value);
+    if (p == null) { return false; }
+    p.lo = lo; p.hi = hi;
     return true;
 }
 fn M1Provenance* M1Gen.prov(M1Gen* g, char* value)
@@ -33,8 +53,10 @@ fn bool M1Gen.prov_copy(M1Gen* g, char* from, char* to)
     AirTyp* pointee = p.pointee; int kind = p.kind;
     int alignment = p.alignment; long extent = p.extent; long offset = p.offset;
     bool known = p.offset_known; bool was_freed = p.freed; bool writable = p.writable; char* allocation = p.allocation;
+    long lo = p.lo; long hi = p.hi;
     if (!g.prov_set(to, pointee, kind, alignment, extent, offset, known, writable)) { return false; }
     M1Provenance* copy = g.prov(to); copy.freed = was_freed; copy.allocation = allocation;
+    copy.lo = lo; copy.hi = hi;
     return true;
 }
 fn bool M1Gen.retype_pointer(M1Gen* g, char* value, AirTyp* pointee)
@@ -43,8 +65,9 @@ fn bool M1Gen.retype_pointer(M1Gen* g, char* value, AirTyp* pointee)
     if (p == null) { return true; }
     int kind = p.kind; int alignment = p.alignment; long extent = p.extent;
     long offset = p.offset; bool known = p.offset_known; bool writable = p.writable; bool was_freed = p.freed;
+    long lo = p.lo; long hi = p.hi;
     if (!g.prov_set(value, pointee, kind, alignment, extent, offset, known, writable)) { return false; }
-    g.prov(value).freed = was_freed;
+    M1Provenance* q = g.prov(value); q.freed = was_freed; q.lo = lo; q.hi = hi;
     return true;
 }
 fn int M1Gen.cell_index(M1Gen* g, char* allocation, long offset)
@@ -67,13 +90,18 @@ fn bool M1Gen.cell_set_at(M1Gen* g, char* allocation, long offset, char* value, 
     M1PointerCell* c = &g.pointer_cells[ix];
     c.allocation = allocation; c.offset = offset; c.is_null = is_null;
     c.value_allocation = null; c.pointee = null; c.kind = M1PROV_UNKNOWN; c.alignment = 1; c.extent = 0; c.value_offset = 0;
-    c.offset_known = false; c.freed = false; c.writable = false;
+    c.offset_known = false; c.freed = false; c.writable = false; c.value_lo = 0; c.value_hi = 0;
     if (!is_null)
     {
         M1Provenance* p = g.prov(value);
         if (p == null || p.freed) { return false; }
         c.value_allocation = p.allocation; c.pointee = p.pointee; c.kind = p.kind; c.alignment = p.alignment;
         c.extent = p.extent; c.value_offset = p.offset; c.offset_known = p.offset_known; c.freed = p.freed; c.writable = p.writable;
+        // A cell can hold a pointer whose offset is an interval (it came from a
+        // bounds-checked dynamic index). Restoring only the point would widen the
+        // pointer's apparent bounds when it is loaded again, so the interval
+        // travels with the cell.
+        c.value_lo = p.offset_known ? p.offset : p.lo; c.value_hi = p.offset_known ? p.offset : p.hi;
     }
     return true;
 }
@@ -86,23 +114,108 @@ fn bool M1Gen.cell_set(M1Gen* g, char* address, char* value, bool is_null)
 fn bool M1Gen.cell_restore(M1Gen* g, char* address, char* result)
 {
     M1Provenance* ap = g.prov(address);
-    if (ap == null || result == null) { return true; }
+    if (ap == null || result == null || !ap.offset_known) { return true; }   // no exact cell for an interval address
     int ix = g.cell_index(ap.allocation, ap.offset);
     if (ix < 0 || g.pointer_cells[ix].is_null) { return true; }
     M1PointerCell* c = &g.pointer_cells[ix];
     if (!g.prov_set(result, c.pointee, c.kind, c.alignment, c.extent, c.value_offset, c.offset_known, c.writable)) { return false; }
     M1Provenance* p = g.prov(result); p.allocation = c.value_allocation; p.freed = c.freed;
+    p.lo = c.value_lo; p.hi = c.value_hi;
     return true;
 }
 
+// The address a load or store is about to use, and the reason it is allowed to.
+//
+// Three answers, in order of strength:
+//
+//   1. exact   -- the byte offset is a constant, so bounds and alignment are
+//                 proved here, at compile time, and the access costs nothing.
+//   2. interval-- the offset came from a bounds-checked dynamic index and the
+//                 whole interval is still inside the object, so compile time
+//                 proves it for every index the runtime check admitted.
+//   3. runtime -- the offset is only known to be `base + something`. A check is
+//                 emitted: the access traps unless `[addr, addr+size)` is inside
+//                 the tracked allocation.
+//
+// There is no fourth answer. A pointer with no provenance at all -- a function
+// argument, an address produced by an external call -- is refused, exactly as
+// before. The runtime check does not widen what the compiler will touch; it only
+// replaces "I cannot prove this index" with "the index is checked when it runs".
 fn bool M1Gen.check_access(M1Gen* g, char* address, AirTyp* ty, int line, int col, bool write_access)
 {
     M1Provenance* p = g.prov(address);
     long size = g.type_size(ty, 0); int need_align = g.type_alignment(ty, 0);
-    if (p == null || p.kind == M1PROV_UNKNOWN || p.freed || !p.offset_known || size < 0 || need_align == 0 ||
-        !m1_value_type_compatible(p.pointee, ty, 0) || p.offset < 0 || p.offset + size > p.extent || p.alignment < need_align || (write_access && !p.writable))
+    if (p == null || p.kind == M1PROV_UNKNOWN || p.freed || size < 0 || need_align == 0 ||
+        !m1_value_type_compatible(p.pointee, ty, 0) || (write_access && !p.writable))
     {
         return g.note_failure(line, col, (char*)"memory access with unknown/out-of-bounds/misaligned provenance");
+    }
+    if (p.offset_known)
+    {
+        if (p.offset < 0 || p.offset + size > p.extent || p.alignment < need_align)
+        {
+            return g.note_failure(line, col, (char*)"memory access with unknown/out-of-bounds/misaligned provenance");
+        }
+        return true;
+    }
+    if (p.hi >= 0 && p.lo >= 0 && p.hi + size <= p.extent && p.alignment >= need_align) { return true; }
+    return g.check_access_runtime(p, address, size, line, col);
+}
+
+// `p` describes an address whose offset is not a constant. Emit the check that
+// makes the access safe for whatever the address turned out to be.
+fn bool M1Gen.check_access_runtime(M1Gen* g, M1Provenance* p, char* address, long size, int line, int col)
+{
+    if (p == null || address == null || p.allocation == null || p.extent <= 0)
+    {
+        return g.note_failure(line, col, (char*)"memory access with unknown/out-of-bounds/misaligned provenance");
+    }
+    char* end = g.tmp();
+    char* last = g.tmp();
+    char* above_base = g.tmp();
+    char* below_end = g.tmp();
+    char* inside = g.tmp();
+    char* ok_label = g.label((char*)"access.ok.");
+    char* bad_label = g.label((char*)"access.bounds.");
+    if (g.failed || end == null || last == null || above_base == null || below_end == null || inside == null ||
+        ok_label == null || bad_label == null) { return false; }
+    // Neither GEP may be `inbounds`: the whole point of the check is that the
+    // address might be outside the object, and `inbounds` would make computing
+    // it undefined behaviour before the check ever ran.
+    fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %ld\n", end, p.allocation, p.extent);
+    fprintf(g.out, "  %s = getelementptr i8, ptr %s, i64 %ld\n", last, address, size);
+    fprintf(g.out, "  %s = icmp uge ptr %s, ptr %s\n", above_base, address, p.allocation);
+    fprintf(g.out, "  %s = icmp ule ptr %s, ptr %s\n", below_end, last, end);
+    fprintf(g.out, "  %s = and i1 %s, %s\n", inside, above_base, below_end);
+    fprintf(g.out, "  br i1 %s, label %%%s, label %%%s\n", inside, ok_label, bad_label);
+    g.terminated = true;
+    g.begin_block(bad_label);
+    fprintf(g.out, "  call void @llvm.trap()\n  unreachable\n");
+    g.begin_block(ok_label);
+    g.terminated = false;
+    return true;
+}
+
+// Alignment to claim for an access through `address`. A constant offset keeps
+// the type's natural alignment, which is what lets the backend use one wide
+// load. A dynamically indexed address only shares the allocation's alignment
+// with the element stride, so it claims 1: always true, never a lie.
+fn int M1Gen.access_alignment(M1Gen* g, char* address, AirTyp* ty)
+{
+    M1Provenance* p = g.prov(address);
+    if (p != null && !p.offset_known) { return 1; }
+    return g.type_alignment(ty, 0);
+}
+
+// Atomics additionally require the address to be naturally aligned for the
+// operation width, and no runtime check can establish that on x86 without
+// changing the operation. So they stay restricted to constant offsets.
+fn bool M1Gen.address_is_exact(M1Gen* g, char* address, int line, int col)
+{
+    M1Provenance* p = g.prov(address);
+    if (p == null || !p.offset_known)
+    {
+        return g.note_failure(line, col, (char*)"an atomic operation needs a constant address (a dynamic index has no provable alignment)");
     }
     return true;
 }

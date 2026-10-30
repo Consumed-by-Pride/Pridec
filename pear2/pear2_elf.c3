@@ -27,10 +27,6 @@
 module pear2c;
 import air_ir;
 
-extern fn void* malloc(usz size_);
-extern fn void  free(void* ptr);
-extern fn void* memset(void* dst, int value, usz n);
-extern fn void* memcpy(void* dst, void* src, usz n);
 
 const int ELFCLASS64 = 2;
 const int ELFDATA2LSB = 1;
@@ -68,7 +64,7 @@ struct ElfSection {
     char* name;
     int type;
     long flags;
-    u8* data;
+    char* data;
     usz size;
     usz capacity;
     usz align;
@@ -110,10 +106,10 @@ struct ElfObject {
     // String tables are built as one growing buffer each; symbol names and
     // section names never share storage because the ELF spec requires the two
     // tables to be independent.
-    u8* strtab;
+    char* strtab;
     usz strtab_len;
     usz strtab_cap;
-    u8* shstrtab;
+    char* shstrtab;
     usz shstrtab_len;
     usz shstrtab_cap;
     bool failed;
@@ -128,8 +124,8 @@ fn bool elf_init(ElfObject* o)
     o.sections[0].type = SHT_NULL;
     o.sections[0].align = 0;
     o.section_count = 1;
-    o.strtab = (u8*)malloc(256);
-    o.shstrtab = (u8*)malloc(256);
+    o.strtab = (char*)malloc(256);
+    o.shstrtab = (char*)malloc(256);
     if (o.strtab == null || o.shstrtab == null) { o.failed = true; return false; }
     memset(o.strtab, 0, 256);
     memset(o.shstrtab, 0, 256);
@@ -167,7 +163,7 @@ fn usz elf_strtab_add(ElfObject* o, char* text)
     {
         usz next = o.strtab_cap;
         while (next < o.strtab_len + need) { next = next * 2; }
-        u8* grown = (u8*)malloc(next);
+        char* grown = (char*)malloc(next);
         if (grown == null) { o.failed = true; return 0; }
         memset(grown, 0, next);
         memcpy(grown, o.strtab, o.strtab_len);
@@ -176,7 +172,7 @@ fn usz elf_strtab_add(ElfObject* o, char* text)
         o.strtab_cap = next;
     }
     usz at = o.strtab_len;
-    for (usz i = 0; i < need; i++) { o.strtab[at + i] = (u8)text[i]; }
+    for (usz i = 0; i < need; i++) { o.strtab[at + i] = (char)text[i]; }
     o.strtab_len += need;
     return at;
 }
@@ -191,7 +187,7 @@ fn usz elf_shstr_add(ElfObject* o, char* text)
     {
         usz next = o.shstrtab_cap;
         while (next < o.shstrtab_len + need) { next = next * 2; }
-        u8* grown = (u8*)malloc(next);
+        char* grown = (char*)malloc(next);
         if (grown == null) { o.failed = true; return 0; }
         memset(grown, 0, next);
         memcpy(grown, o.shstrtab, o.shstrtab_len);
@@ -200,14 +196,14 @@ fn usz elf_shstr_add(ElfObject* o, char* text)
         o.shstrtab_cap = next;
     }
     usz at = o.shstrtab_len;
-    for (usz i = 0; i < need; i++) { o.shstrtab[at + i] = (u8)text[i]; }
+    for (usz i = 0; i < need; i++) { o.shstrtab[at + i] = (char)text[i]; }
     o.shstrtab_len += need;
     return at;
 }
 
 // ── sections ───────────────────────────────────────────────────────────────
 
-fn bool elf_section_append(ElfObject* o, int index, u8* data, usz size)
+fn bool elf_section_append(ElfObject* o, int index, char* data, usz size)
 {
     if (o == null || index <= 0 || index >= o.section_count) { return false; }
     ElfSection* s = &o.sections[(usz)index];
@@ -215,7 +211,7 @@ fn bool elf_section_append(ElfObject* o, int index, u8* data, usz size)
     {
         usz next = s.capacity == 0 ? 4096 : s.capacity;
         while (next < s.size + size) { next = next * 2; }
-        u8* grown = (u8*)malloc(next);
+        char* grown = (char*)malloc(next);
         if (grown == null) { o.failed = true; return false; }
         memset(grown, 0, next);
         if (s.data != null && s.size > 0) { memcpy(grown, s.data, s.size); }
@@ -229,7 +225,7 @@ fn bool elf_section_append(ElfObject* o, int index, u8* data, usz size)
     return true;
 }
 
-fn bool elf_section_append_byte(ElfObject* o, int index, u8 value)
+fn bool elf_section_append_byte(ElfObject* o, int index, char value)
 {
     return elf_section_append(o, index, &value, 1);
 }
@@ -242,7 +238,7 @@ fn bool elf_align_section(ElfObject* o, int index)
     if (o == null || index <= 0 || index >= o.section_count) { return false; }
     ElfSection* s = &o.sections[(usz)index];
     if (s.align == 0) { return true; }
-    u8 pad = s.type == SHT_PROGBITS && (s.flags & SHF_EXECINSTR) != 0 ? 0x90 : 0x00;
+    char pad = s.type == SHT_PROGBITS && (s.flags & SHF_EXECINSTR) != 0 ? 0x90 : 0x00;
     while (s.size % s.align != 0) { if (!elf_section_append_byte(o, index, pad)) { return false; } }
     return true;
 }
@@ -308,23 +304,23 @@ fn bool elf_add_rela(ElfObject* o, usz offset, int symbol, int type, long addend
 
 // ── serialisation ──────────────────────────────────────────────────────────
 
-fn void elf_put8(u8* out, usz at, u8 v) { out[at] = v; }
+fn void elf_put8(char* out, usz at, char v) { out[at] = v; }
 
-fn void elf_put16(u8* out, usz at, uint v)
+fn void elf_put16(char* out, usz at, uint v)
 {
-    out[at] = (u8)(v & 0xFF);
-    out[at + 1] = (u8)((v >> 8) & 0xFF);
+    out[at] = (char)(v & 0xFF);
+    out[at + 1] = (char)((v >> 8) & 0xFF);
 }
 
-fn void elf_put32(u8* out, usz at, uint v)
+fn void elf_put32(char* out, usz at, uint v)
 {
-    out[at] = (u8)(v & 0xFF);
-    out[at + 1] = (u8)((v >> 8) & 0xFF);
-    out[at + 2] = (u8)((v >> 16) & 0xFF);
-    out[at + 3] = (u8)((v >> 24) & 0xFF);
+    out[at] = (char)(v & 0xFF);
+    out[at + 1] = (char)((v >> 8) & 0xFF);
+    out[at + 2] = (char)((v >> 16) & 0xFF);
+    out[at + 3] = (char)((v >> 24) & 0xFF);
 }
 
-fn void elf_put64(u8* out, usz at, ulong v)
+fn void elf_put64(char* out, usz at, ulong v)
 {
     elf_put32(out, at, (uint)(v & 0xFFFFFFFF));
     elf_put32(out, at + 4, (uint)((v >> 32) & 0xFFFFFFFF));
@@ -349,7 +345,7 @@ fn bool elf_build_symtab(ElfObject* o)
     if (o == null || o.section_count <= 4) { return false; }
     ElfSection* symtab = &o.sections[4];
     // Entry 0 is reserved: an all-zero symbol, the "no symbol" index.
-    u8 zeros[24];
+    char[24] zeros;
     memset(&zeros[0], 0, 24);
     if (!elf_section_append(o, 4, &zeros[0], 24)) { return false; }
     int first_global = 1;
@@ -365,10 +361,10 @@ fn bool elf_build_symtab(ElfObject* o)
             if (pass == 1 && first_global == 1) { first_global = (int)(symtab.size / 24); }
             o.order[(usz)i] = (int)(symtab.size / 24);
             usz name_offset = elf_strtab_add(o, s.name);
-            u8 entry[24];
+            char[24] entry;
             memset(&entry[0], 0, 24);
             elf_put32(&entry[0], 0, (uint)name_offset);
-            elf_put8(&entry[0], 4, (u8)((s.bind << 4) | (s.type & 0xF)));
+            elf_put8(&entry[0], 4, (char)((s.bind << 4) | (s.type & 0xF)));
             elf_put16(&entry[0], 6, (uint)(s.section & 0xFFFF));
             elf_put64(&entry[0], 8, s.value);
             elf_put64(&entry[0], 16, s.size);
@@ -388,14 +384,14 @@ fn bool elf_build_rela(ElfObject* o)
     for (int i = 0; i < o.rela_count; i++)
     {
         ElfRela* r = &o.relas[(usz)i];
-        u8 entry[24];
+        char[24] entry;
         memset(&entry[0], 0, 24);
         elf_put64(&entry[0], 0, (ulong)r.offset);
         // r_info packs the symbol index in the high 32 bits and the type in the
         // low 32, which is the ELF64 layout (ELF32 packed them the other way
         // round, which is why this is worth stating).
         int serial = (r.symbol >= 0 && r.symbol < 1024) ? o.order[(usz)r.symbol] : 0;
-        ulong info = ((ulong)serial << 32) | (ulong)(r.type & 0xFFFFFFFF);
+        ulong info = ((ulong)serial << 32) | (ulong)((uint)r.type & 0xFFFFFFFF);
         elf_put64(&entry[0], 8, info);
         elf_put64(&entry[0], 16, (ulong)r.addend);
         if (!elf_section_append(o, 6, &entry[0], 24)) { return false; }
@@ -409,14 +405,14 @@ fn bool elf_build_rela(ElfObject* o)
 // elf_set_bytes -- assign a table section's contents outright. Used for the
 // string and relocation tables, whose bytes are produced elsewhere and then
 // handed over once they are final.
-fn bool elf_set_bytes(ElfObject* o, int index, u8* data, usz size)
+fn bool elf_set_bytes(ElfObject* o, int index, char* data, usz size)
 {
     if (o == null || index <= 0 || index >= o.section_count) { return false; }
     ElfSection* s = &o.sections[(usz)index];
     if (size > s.capacity)
     {
         usz next = size < 1024 ? 1024 : size * 2;
-        u8* grown = (u8*)malloc(next);
+        char* grown = (char*)malloc(next);
         if (grown == null) { o.failed = true; return false; }
         memset(grown, 0, next);
         if (s.owns_data && s.data != null) { free(s.data); }
@@ -439,7 +435,7 @@ fn bool elf_set_bytes(ElfObject* o, int index, u8* data, usz size)
 //      their sections;
 //   3. only then are offsets assigned, because a section whose size changed
 //      after it was placed would shift every section after it.
-fn bool elf_write(ElfObject* o, u8** out_data, usz* out_size)
+fn bool elf_write(ElfObject* o, char** out_data, usz* out_size)
 {
     if (o == null || out_data == null || out_size == null || o.failed) { return false; }
     if (o.section_count != 8) { return false; }
@@ -465,7 +461,7 @@ fn bool elf_write(ElfObject* o, u8** out_data, usz* out_size)
     }
     usz shoff = elf_align_up(offset, 8);
     usz total = shoff + (usz)o.section_count * section_header_size;
-    u8* image = (u8*)malloc(total);
+    char* image = (char*)malloc(total);
     if (image == null) { return false; }
     memset(image, 0, total);
     // ── ELF header ──
