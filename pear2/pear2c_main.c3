@@ -1524,6 +1524,30 @@ fn int M1Gen.global_alignment(M1Gen* g, AirDecl* d)
     }
     return alignment;
 }
+// A function named as a *value*: a vtable slot, a callback table entry, or a
+// first-class function held in a global. Returns its symbol, or null when the
+// name is not a function this backend may take the address of. A function with a
+// non-default calling convention is excluded: the address would be called with
+// the wrong one, and nothing at the use site could notice.
+fn char* M1Gen.function_symbol_value(M1Gen* g, char* name, AirTyp* expected, int depth)
+{
+    if (name == null || depth >= 8) { return null; }
+    AirDecl* target = g.find_function(name);
+    if (target == null || target.tag == ADECL_MODULE || target.tag == ADECL_IMPORT) { return null; }
+    if (!m1_safe_name(m1_link_name(target)) || m1_decl_callconv(target) != 0) { return null; }
+    AirTyp* actual = g.function_type(target);
+    if (actual == null) { return null; }
+    // An annotated arrow type is checked against the declaration, so a vtable
+    // built from a mismatched signature is refused here rather than becoming a
+    // call through a pointer of the wrong type. An opaque byte pointer (the
+    // shape a vtable slot has in lowered AIR) carries no signature to check.
+    if (m1_function_pointer_type(expected) && !m1_value_type_compatible(expected, actual, 0)) { return null; }
+    char[512] buf;
+    int n = snprintf(&buf[0], 512, (char*)"@%s", m1_link_name(target));
+    if (n < 0 || n >= 512) { return null; }
+    return g.arena.dup(&buf[0], (usz)n);
+}
+
 fn char* M1Gen.global_symbol(M1Gen* g, AirDecl* d)
 {
     if (d == null || !m1_safe_name(m1_link_name(d))) { return null; }
@@ -4497,12 +4521,16 @@ fn bool M1Gen.emit_constant(M1Gen* g, AirPrd* p, AirTyp* t, int depth)
         fprintf(g.out, "getelementptr inbounds ([%d x i8], ptr @%s, i64 0, i64 0)", count, s.name);
         return true;
     }
-    if (p.tag == APRD_VAR && m1_pointer_type(t))
+    if (p.tag == APRD_VAR && m1_pointer_repr_type(t))
     {
         AirDecl* global = g.find_global(p.name);
-        if (global == null || !m1_value_type_compatible(m1_pointee_type(t), global.ret_ty, 0)) {
- return false; }
-        fprintf(g.out, "%s", g.global_symbol(global)); return true;
+        if (global != null && m1_pointer_type(t) && m1_value_type_compatible(m1_pointee_type(t), global.ret_ty, 0))
+        {
+            fprintf(g.out, "%s", g.global_symbol(global)); return true;
+        }
+        char* symbol = g.function_symbol_value(p.name, t, depth);
+        if (symbol != null) { fprintf(g.out, "%s", symbol); return true; }
+        return false;
     }
     if (p.tag == APRD_ARRAY || p.tag == APRD_TUPLE)
     {
@@ -4568,7 +4596,13 @@ fn bool M1Gen.record_global_cells(M1Gen* g, AirTyp* t, AirPrd* init, char* alloc
         {
             AirDecl* target = g.find_global(init.name);
             char* target_pointer = target == null ? null : g.global_pointer(target);
-            return target_pointer != null && g.cell_set_at(allocation, base_offset, target_pointer, false);
+            if (target_pointer != null) { return g.cell_set_at(allocation, base_offset, target_pointer, false); }
+            // A function symbol has an address but no allocation: the cell says
+            // "a live non-null pointer lives here, with nothing known behind it".
+            // A load of it therefore yields a value that can be called and cannot
+            // be dereferenced, which is what a function pointer is.
+            char* symbol = g.function_symbol_value(init.name, t, depth);
+            return symbol != null && g.cell_set_symbol(allocation, base_offset, symbol);
         }
  return false;
     }
@@ -5578,14 +5612,30 @@ fn bool M1Gen.command(M1Gen* g, AirCmd* c, char* ret_name)
         char* value = stored_bool ? g.condition(c.prds[1]) : (stored_ptr ? g.pointer_value(c.prds[1]) : g.prd(c.prds[1]));
         char* ty = g.llvm_type_text(element); int align = g.access_alignment(address, element);        if (g.failed || value == null || ty == null || align <= 0) {
  return false; }
+        // A stored pointer must be one the model can still describe afterwards:
+        // either a tracked pointer, a null, or a function symbol (whose address is
+        // known and whose contents are not data). Anything else would leave the
+        // cell claiming a provenance that does not exist.
+        char* stored_symbol = null;
         if (stored_ptr && c.prds[1].tag != APRD_NULL)
         {
             M1Provenance* vp = g.prov(value);
-            if (vp == null || vp.freed) { g.note_failure(c.source_line, c.source_col, (char*)"storing a pointer without live provenance"); return false; }
+            if (vp == null || vp.freed)
+            {
+                if (c.prds[1].tag == APRD_VAR) { stored_symbol = g.function_symbol_value(c.prds[1].name, element, 0); }
+                if (stored_symbol == null) { g.note_failure(c.source_line, c.source_col, (char*)"storing a pointer without live provenance"); return false; }
+            }
         }
         fprintf(g.out, "  store %s%s %s, ptr %s, align %d\n", c.vol ? (char*)"volatile " : (char*)"", ty, value, address, align);
-        if (stored_ptr && !g.cell_set(address, value, c.prds[1].tag == APRD_NULL))
-        { g.note_failure(c.source_line, c.source_col, (char*)"pointer store could not preserve value provenance"); return false; }
+        if (stored_ptr)
+        {
+            M1Provenance* address_prov = g.prov(address);
+            bool recorded = stored_symbol != null && address_prov != null && address_prov.offset_known
+                ? g.cell_set_symbol(address_prov.allocation, address_prov.offset, stored_symbol)
+                : g.cell_set(address, value, c.prds[1].tag == APRD_NULL);
+            if (!recorded)
+            { g.note_failure(c.source_line, c.source_col, (char*)"pointer store could not preserve value provenance"); return false; }
+        }
         return true;
     }
     if (c.tag == ACMD_SEQ)

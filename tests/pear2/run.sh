@@ -500,6 +500,22 @@ set -e
 [ "$rc" = 42 ] || { echo "FAIL: AIR 3 global/string fixture returned $rc, expected 42"; exit 1; }
 echo "PASS: AIR 3 typed globals, linked external symbol, pooled string and GEP execute (42)"
 
+# A global can hold a function address. That is the shape every vtable, callback
+# table and dispatch array has, and it is a third kind of constant address: not
+# data, not a tracked allocation, but still a live non-null pointer.
+cp tests/pear2/global_fnptr_main.air "$W/global_fnptr_main.air"
+"$PEAR2" "$W/global_fnptr_main.air" --emit-ll --quiet || { echo "FAIL: a global holding a function address was rejected"; exit 1; }
+grep -q 'ptr @twice' "$W/global_fnptr_main.ll" || { echo "FAIL: the function address did not reach the global initializer"; grep '@ops' "$W/global_fnptr_main.ll"; exit 1; }
+grep -q '@ops = .*constant \[2 x ptr\]' "$W/global_fnptr_main.ll" || { echo "FAIL: the function-pointer global is not a constant array of pointers"; grep '@ops' "$W/global_fnptr_main.ll"; exit 1; }
+"$PEAR2" "$W/global_fnptr_main.air" --quiet || { echo "FAIL: function-pointer global fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/global_fnptr_main.bc" -o "$W/global_fnptr_main" || { echo "FAIL: function-pointer global fixture failed to link"; exit 1; }
+set +e
+"$W/global_fnptr_main"
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: function-pointer global fixture returned $rc, expected 42"; exit 1; }
+echo "PASS: AIR 3 globals can hold function addresses (42)"
+
 cp tests/pear2/typed_memory_main.air "$W/typed_memory_main.air"
 "$PEAR2" "$W/typed_memory_main.air" --quiet || { echo "FAIL: AIR 3 typed-memory fixture rejected"; exit 1; }
 "$PEAR2_CLANG" -Wno-override-module "$W/typed_memory_main.bc" -o "$W/typed_memory_main" || { echo "FAIL: AIR 3 typed-memory fixture failed to link"; exit 1; }

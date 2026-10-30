@@ -587,13 +587,34 @@ bitcode-determinism fix committed with this checklist revision).
       `reject_dynamic_gep_main.air` (two dynamic steps in one GEP) have not been
       executed: no LLVM and no executable compiler in this workspace.
 
+## 17. Function addresses as constants (5)
+
+- [x] 17.1 A global initializer may be a function symbol: `global ops :
+      array#2(ptr(u8)) = array(twice, null)` emits `[ptr @twice, ptr null]`. This
+      is the shape of every vtable, callback table and dispatch array.
+- [x] 17.2 A function with a non-default calling convention is not a valid
+      constant address: the value would be called with the wrong convention and
+      nothing at the call site could notice.
+- [x] 17.3 An annotated arrow type is checked against the declaration's own
+      signature, so a table built from a mismatched signature is refused at the
+      initializer rather than becoming a call through a pointer of the wrong
+      type. An opaque byte pointer (the shape a lowered vtable slot has) carries
+      no signature to check.
+- [x] 17.4 A cell holding a function address records "live, non-null, nothing
+      behind it": `kind = UNKNOWN`, `extent = 0`. A value loaded from it can be
+      called and cannot be dereferenced — the fail-closed answer that is also the
+      true one.
+- [ ] 17.5 `tests/pear2/global_fnptr_main.air` (the vtable-shaped global, plus
+      `@ops = ... constant [2 x ptr]` and `ptr @twice` assertions in run.sh) has
+      not been executed: no LLVM and no executable compiler here.
+
 ## Score
 
-**175 items: 168 complete with evidence, 7 open** (the count is the file's own
+**180 items: 172 complete with evidence, 8 open** (the count is the file's own
 inventory: `grep -c '^- \[x\]'` and `grep -c '^- \[ \]'` over this file) — 10.5
 (token rotation), 11.6
 (the native end-to-end script has not been run here: no C3 compiler, no linker),
-12.6, 13.5, 14.7, 15.6 and 16.7 (the new bitcode assertions have not been run for the same
+12.6, 13.5, 14.7, 15.6, 16.7 and 17.5 (the new bitcode assertions have not been run for the same
 reason).
-Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All five are an
+Each open item carries a Linear issue (AYO-5/8/9/11 as noted). All eight are an
 unrun test or an owner action, not a known defect: none lowers the safety floor.

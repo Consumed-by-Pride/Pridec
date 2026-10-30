@@ -105,6 +105,27 @@ fn bool M1Gen.cell_set_at(M1Gen* g, char* allocation, long offset, char* value, 
     }
     return true;
 }
+// A cell holding a constant address with no allocation behind it: a function
+// symbol in a vtable or a callback slot. `kind` is UNKNOWN and `extent` is zero,
+// so a value loaded from this cell may be called but never dereferenced. That is
+// the fail-closed answer, and it is also the true one.
+fn bool M1Gen.cell_set_symbol(M1Gen* g, char* allocation, long offset, char* symbol)
+{
+    if (allocation == null || offset < 0 || symbol == null) { return false; }
+    int ix = g.cell_index(allocation, offset);
+    if (ix < 0)
+    {
+        if (g.pointer_cell_count >= 512) { return false; }
+        ix = g.pointer_cell_count++;
+    }
+    M1PointerCell* c = &g.pointer_cells[ix];
+    c.allocation = allocation; c.offset = offset; c.is_null = false;
+    c.value_allocation = symbol; c.pointee = null; c.kind = M1PROV_UNKNOWN;
+    c.alignment = 1; c.extent = 0; c.value_offset = 0; c.offset_known = false;
+    c.freed = false; c.writable = false; c.value_lo = 0; c.value_hi = 0;
+    return true;
+}
+
 fn bool M1Gen.cell_set(M1Gen* g, char* address, char* value, bool is_null)
 {
     M1Provenance* p = g.prov(address);

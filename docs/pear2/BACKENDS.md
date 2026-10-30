@@ -241,7 +241,7 @@ against the tree, not estimated:
 
 | need | state | why it blocks a real program |
 |---|---|---|
-| generics / parametric types | **absent** (unstarted) | every container, `Result<T,E>`, any reusable library API |
+| generics / parametric types | the lowering pass monomorphises, so this backend only ever sees a concrete `data` record named for its arguments (`Vec.i64`); its type rules do not exclude one. A declaration that *keeps* `typaram_count != 0` is still refused | what a container library needs next is the library, not the lowering — and that is unverified end to end |
 | slices | the AIR `slice` type was desugared by `air_low` into a `{ptr, len}` record, which the record path already lowers; the blocker was the **dynamic index** that reading `s[i]` needs, and that is now bounds-checked (`§1.1` of GAPS) rather than refused | `tests/exec/XFAIL.tsv` pins `p127`/`p128`, which also depend on front-end fixes |
 | strings | literal arrays only, no growable string | any program that builds text |
 | heap data structures | `malloc`/`free` via the C ABI, indexed through checked addresses | no `Vec`/`HashMap`/`String` equivalents exist in the language yet |
