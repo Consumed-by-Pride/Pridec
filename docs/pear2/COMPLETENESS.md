@@ -119,6 +119,23 @@ make probe-pear2-corpus     # the same, stopping at "did pear2c lower it"
 Until that prints a `PASS` count next to `airll`'s 84, any claim that this
 backend can compile a real program is a claim about fixtures.
 
+### The ladder to "a real program"
+
+Order matters, because each rung makes the next one cheap to diagnose. Writing a
+5,000-line program first would mean discovering backend gaps through a program
+nobody can bisect.
+
+| rung | command | passing looks like | why this order |
+|---|---|---|---|
+| 1. fixtures | `make test-pear2` | behaviour of the 140 hand-written `.air` files | smallest possible failing case for every rule |
+| 2. corpus | `make test-pear2-corpus` | `PASS` comparable to air_ll's 84, `WRONG=0`, `LLVM=0` | real programs, small enough to bisect; a `PEAR2` row here *is* the work list |
+| 3. scale | `make test-pear2-stdlib` | `OK ≈ 260`, `VERIFY=0`, `LLVM=0` | 33k lines through one module at a time: proves the backend at size, with no linking to confound it |
+| 4. linked program | `make test-pear2-corpus CORPUS_ARGS=...` | `PASS` on something that uses the stdlib | multi-module link + stdlib semantics + the backend at once |
+| 5. the real thing | — | 5,000 lines that does something useful | only worth writing once 1–4 are green |
+
+Rungs 2 and 3 exist as scripts now (`tests/pear2/corpus.sh`), because without
+them there is no number to move.
+
 ## 3. What is *not* complete
 
 | gap | state | why it is not this backend's next step |

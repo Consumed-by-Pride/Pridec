@@ -68,7 +68,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c probe-pear2 test-pear2-corpus probe-pear2-corpus test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
+.PHONY: all c3c probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -277,6 +277,13 @@ test-pear2-corpus: $(PEAR2_BIN) $(BINARY) $(AIRTOOL)
 probe-pear2-corpus: $(PEAR2_BIN) $(BINARY) $(AIRTOOL)
 	@echo "==> PEAR 2 corpus (lowering only)"
 	bash tests/pear2/corpus.sh --probe $(CORPUS_ARGS)
+
+# The scale half: all 260 stdlib modules as libraries (33,192 lines). The
+# reference consumer already does every one of them; this says how many pear2c
+# can, which is the number that decides whether a large program is possible.
+test-pear2-stdlib: $(PEAR2_BIN) $(BINARY) $(AIRTOOL)
+	@echo "==> PEAR 2 stdlib sweep (260 modules)"
+	bash tests/pear2/corpus.sh --lib
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)
