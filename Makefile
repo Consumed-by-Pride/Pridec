@@ -68,7 +68,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c probe-pear2 test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
+.PHONY: all c3c probe-pear2 test-pear2-corpus probe-pear2-corpus test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -261,6 +261,22 @@ test-air3: $(BINARY) $(AIRTOOL)
 test-lowering: $(BINARY) $(AIRTOOL) $(PEAR1)
 	@echo "==> AIR lowering table (audit, verify, native exit code)"
 	bash tests/lowering/run.sh ./$(BINARY)
+
+# PEAR 2 against the *real* corpus: every .pie program through pfrontc ->
+# pear2c -> LLVM -> run, with the same headers and the same status vocabulary as
+# tests/air3/low_corpus.sh. That script drives the same programs through
+# `airtool emit-ll` (the reference consumer); this one drives them through the
+# backend this repository is actually shipping. A program that passes there and
+# not here is a pear2c gap, and the run prints the list.
+test-pear2-corpus: $(PEAR2_BIN) $(BINARY) $(AIRTOOL)
+	@echo "==> PEAR 2 corpus (pfrontc -> pear2c -> LLVM -> run)"
+	bash tests/pear2/corpus.sh $(CORPUS_ARGS)
+
+# The same measurement without LLVM in the loop: does pear2c lower what the front
+# end produced? Needs only the binaries.
+probe-pear2-corpus: $(PEAR2_BIN) $(BINARY) $(AIRTOOL)
+	@echo "==> PEAR 2 corpus (lowering only)"
+	bash tests/pear2/corpus.sh --probe $(CORPUS_ARGS)
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)

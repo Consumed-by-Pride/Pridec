@@ -87,6 +87,38 @@ can prove, and what it refuses, is the honest measure of completeness:
 That is the whole of the model: **an access is allowed only when it can be proved
 or checked, and a program that cannot be lowered is refused with a position.**
 
+## 2.5 The corpus this backend has never been measured on
+
+Everything above is measured against the 140 hand-written `.air` fixtures. The
+real corpus is elsewhere, and it is large:
+
+| corpus | size | what has been measured |
+|---|---|---|
+| `tests/exec/*.pie`, `tests/exec/pear/*.pie` | 84 programs, largest 211 lines | passes end to end **through `airtool emit-ll`**, not through `pear2c` |
+| `stdlib/*.pie` | 260 modules, 33,192 lines | every module lowers and produces a verified, optimised LLVM object (`STDLIB_OK_FLOOR`) |
+| all `.pie` in the tree | 1,168 files, 70,457 lines | — |
+
+`pear2c` appears in **none** of that. The proven pipeline is
+`pfrontc --emit-air-low → airtool verify-low → airtool emit-ll → LLVM`, and
+`airtool emit-ll` is `air_ll`, a different consumer of the same AIR. So the honest
+statement is: the *language* has been carried to 33k lines and the *reference
+consumer* to 84 running programs, while the backend this repository ships has
+compiled 140 small hand-written files and executed none of them.
+
+`tests/pear2/corpus.sh` (and `make test-pear2-corpus`) closes that measurement
+gap. It drives the same `.pie` corpus through `pear2c` instead of `airtool`, with
+the same program headers and the same status vocabulary
+(`PASS`/`PEAR2`/`WRONG`/`LLVM`/`FRONT`/`NOLOWER`), so the two runs are directly
+comparable:
+
+```sh
+make test-pear2-corpus      # pfrontc -> pear2c -> LLVM -> run, compared to the header
+make probe-pear2-corpus     # the same, stopping at "did pear2c lower it"
+```
+
+Until that prints a `PASS` count next to `airll`'s 84, any claim that this
+backend can compile a real program is a claim about fixtures.
+
 ## 3. What is *not* complete
 
 | gap | state | why it is not this backend's next step |
