@@ -79,6 +79,7 @@ elsewhere, which is what `tests/air3/low_corpus.sh` does.
 python3 scripts/pride-lint.py prog.pie            # checks + pfrontc, if ./pfrontc exists
 python3 scripts/pride-lint.py --no-compile prog.pie
 python3 scripts/pride-lint.py --docs docs/pride   # every code block in the docs
+make lint-pride                                    # both of the above, no compiler needed
 ```
 
 It catches the mistakes that cost the most turns — a tab in indentation (the lexer

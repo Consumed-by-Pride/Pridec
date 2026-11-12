@@ -68,7 +68,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
+.PHONY: all c3c lint-pride probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -242,6 +242,12 @@ check-pear2: | c3c
 	bash -n tests/pear2/run.sh
 	bash -n tests/pear2/native.sh
 	python3 tests/pear2/signed_division_model_test.py
+
+# The documents a program is written from, checked by the rules they teach.
+# Static only: no compiler, no LLVM, so this runs anywhere.
+lint-pride:
+	python3 scripts/pride-lint.py --docs docs/pride
+	python3 scripts/pride-lint.py --no-compile examples/pride/template.pie
 
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
 # (canonical re-print, validity ledger) and the write->read round trip.
