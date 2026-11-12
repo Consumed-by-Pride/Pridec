@@ -1,6 +1,6 @@
 # Pride language documentation
 
-Four files, in the order you should read them.
+Five files, in the order you should read them.
 
 | file | what it is | when to read it |
 |---|---|---|
@@ -8,6 +8,7 @@ Four files, in the order you should read them.
 | [`SYNTAX.md`](SYNTAX.md) | the syntax book: lexical structure, types, declarations, statements, expressions, operators and precedence, patterns, builtins, modules, grammar | when you need to know what the language *is* |
 | [`EXECUTABLE_SUBSET.md`](EXECUTABLE_SUBSET.md) | what actually compiles and runs, with the test that proves each feature, and an explicit do-not-use list | before writing anything meant to run |
 | [`COOKBOOK.md`](COOKBOOK.md) | recipes: printing, collections, sorting, hashing, strings, error codes | while writing the body of a program |
+| [`RUNNING.md`](RUNNING.md) | how to build the toolchain and actually execute a program, both consumers, the gates, and the failure modes | when you want to run what was written |
 
 Start with `EXECUTABLE_SUBSET.md`. `SYNTAX.md` describes the whole language;
 the subset describes the part of it a program can currently be built from, and

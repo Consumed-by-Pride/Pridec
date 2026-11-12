@@ -230,3 +230,6 @@ make test-pear2-corpus
 
 Step 1 is enough to know a program is within the language. Step 3 is enough to
 know it runs. Step 4 is the one that says whether the `.bc` backend can do it.
+
+Building the toolchain those steps need — and what each failure means — is in
+`docs/pride/RUNNING.md`.
