@@ -48,3 +48,6 @@ the workspace it was written in, so it has never run a program;
 * `docs/pear2/COMPLETENESS.md` — what "the backend is complete" means, measured.
 * `docs/pear2/AIR3_PLAN.md` — the AIR 3.0 low profile the backend consumes.
 * `examples/pride/template.pie` — a starter program built from the proven subset.
+* `scripts/pride-lint.py` — static checks for a `.pie` file (tabs, forbidden
+  constructs, syscall byte counts, reserved names) plus a `pfrontc` run when the
+  compiler is present. Zero errors on all 35 must-pass programs.

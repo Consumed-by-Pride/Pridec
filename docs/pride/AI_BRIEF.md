@@ -156,10 +156,14 @@ Use these, and only these:
 | storing a whole struct into an element (`xs[0] = Item { … }`) | assign fields: `xs[0].key = 1i64` |
 | `&x` where a `*T` parameter is expected, without the cast used in the corpus | `&xs[0] as *Item` |
 
-Reserved words that cannot be used as names include `macro quote splice stage
-reify pattern pgen rewrite rule dialect graph effect handle region freeze
-generate eval lower meta node edge opcode constexpr fixpoint tail with by
-newtype poison runtime irdl unquote unchecked`. Avoid them as identifiers.
+Do not use any keyword as a name. A binder must be a plain identifier, so
+`let tail = 0`, `| tail ->` and a parameter called `handle` do not parse. The
+words most likely to tempt you are `macro quote splice stage reify pattern pgen
+rewrite rule dialect graph region freeze generate eval lower meta node edge
+opcode constexpr fixpoint tail with by newtype poison runtime irdl unquote
+unchecked` — all reserved. Declaration names and struct field names are more
+forgiving than binders (`fn tail` parses), which is exactly why relying on it is a
+trap: the name works in one position and fails in the next.
 
 ---
 

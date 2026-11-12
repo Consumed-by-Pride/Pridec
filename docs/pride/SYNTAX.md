@@ -901,14 +901,24 @@ unreachable use      volatile     where      while      with       alloc
 align     alignof    and          not        or         packed     offsetof
 ```
 
-Keywords reserved for features outside the executable subset (metaprogramming,
-IRDL, tensor algebra) still **cannot be used as identifiers**: `macro`, `quote`,
-`splice`, `stage`, `reify`, `pattern`, `pgen`, `rewrite`, `rule`, `dialect`,
-`graph`, `hyperedge`, `invariant`, `region`, `freeze`, `generate`, `eval`,
-`lower`, `meta`, `node`, `edge`, `opcode`, `constexpr`, `fixpoint`, `tail`,
-`with`, `by`, `newtype`, `poison`, `runtime`, `irdl`, `unquote`, `unchecked`.
+Most of these are keywords for features outside the executable subset
+(metaprogramming, IRDL, tensor algebra): `macro`, `quote`, `splice`, `stage`,
+`reify`, `pattern`, `pgen`, `rewrite`, `rule`, `dialect`, `graph`, `hyperedge`,
+`invariant`, `region`, `freeze`, `generate`, `eval`, `lower`, `meta`, `node`,
+`edge`, `opcode`, `constexpr`, `fixpoint`, `tail`, `with`, `by`, `newtype`,
+`poison`, `runtime`, `irdl`, `unquote`, `unchecked`.
 
-Avoid all of them as variable or function names.
+**A keyword is not a variable name.** A binder is parsed as a pattern atom, and a
+pattern atom accepts only `TOKEN_IDENT` (`pfront_parse.c3`, `parse_pattern_atom`),
+so `let tail = …`, `| tail ->`, `(a, pattern)` and a parameter called `handle` do
+not parse.
+
+Two positions are more lenient, and the leniency is easy to trip over: **declaration
+names and struct field names** go through `tok_is_member_name`, which admits the
+whole keyword range. `fn tail : [i64] -> [i64]` parses, and
+`tests/air3/prog/sl03_open_ended_slices.pie` contains exactly that; `struct S { tail : i64 }`
+parses for the same reason. A name is therefore usable in one position and not in
+another. Avoid every word above everywhere.
 
 ---
 

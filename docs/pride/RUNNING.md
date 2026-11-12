@@ -73,6 +73,22 @@ elsewhere, which is what `tests/air3/low_corpus.sh` does.
 
 ---
 
+### 2b. Before that: the static checks
+
+```sh
+python3 scripts/pride-lint.py prog.pie            # checks + pfrontc, if ./pfrontc exists
+python3 scripts/pride-lint.py --no-compile prog.pie
+```
+
+It catches the mistakes that cost the most turns — a tab in indentation (the lexer
+rejects it outright), `func` instead of `fn`, `print`/`println`/`format`, `::`,
+a `syscall` string whose byte count disagrees with the literal next to it, a
+keyword used as a variable, a missing `main`, no `-- EXIT:` header. Over the 35
+must-pass programs in `tests/air3/prog/` it reports zero errors; that is the
+false-positive budget it was written to.
+
+---
+
 ## 3. The same AIR through the `.bc` backend (`pear2c`)
 
 ```sh
