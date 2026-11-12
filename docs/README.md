@@ -15,7 +15,8 @@ targets **LLVM 22**.
 
 | If you want to… | Read |
 |---|---|
-| Learn the language | [`reference/v.md`](reference/v.md) — the language spec |
+| Write a program that runs | [`pride/EXECUTABLE_SUBSET.md`](pride/EXECUTABLE_SUBSET.md), then [`pride/AI_BRIEF.md`](pride/AI_BRIEF.md) |
+| Learn the language | [`reference/v.md`](reference/v.md) — the language spec; [`pride/SYNTAX.md`](pride/SYNTAX.md) — the syntax as implemented |
 | Know what actually works today | [`status/HONEST_STATUS.md`](status/HONEST_STATUS.md) |
 | Work on the new front end | [`pfront/README.md`](pfront/README.md) |
 | Understand the analyses | [`pfront/THEORY.md`](pfront/THEORY.md) |
@@ -28,6 +29,12 @@ targets **LLVM 22**.
 ```
 docs/
 ├── README.md            ← you are here
+├── pride/               writing and running a Pride program today
+│   ├── SYNTAX.md        the syntax as parsed
+│   ├── EXECUTABLE_SUBSET.md  what is proven to run, with the test for each feature
+│   ├── AI_BRIEF.md      self-contained brief for a model writing a large program
+│   ├── COOKBOOK.md      recipes: printing, collections, hashing, strings
+│   └── RUNNING.md       build the toolchain, execute, and debug the failures
 ├── pfront/              the from-scratch front end (current work)
 │   ├── README.md        architecture, module map, how to build
 │   ├── THEORY.md        every analysis pass, what it proves, what it costs
