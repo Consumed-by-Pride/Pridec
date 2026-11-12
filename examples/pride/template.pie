@@ -1,0 +1,163 @@
+-- EXIT: 0
+-- EXPECT: template ok\n200
+-- template.pie — a starter program assembled only from shapes exercised by tests
+-- in this repository. Copy it and grow the pieces you need.
+--
+-- Grounding for each part (file: test):
+--   fn : T -> R with | pat -> body ............ tests/exec/02_fibonacci.pie
+--   sequential `if` + assignment .............. tests/exec/02_fibonacci.pie
+--   fn : (*T, i64) -> i64, p[i] loop .......... tests/air3/prog/ar01_repeat.pie
+--   struct + struct literal ................... tests/air3/prog/ag01_wide_struct.pie
+--   field store through an index .............. ag02_nested_wide_aggregates.pie
+--   array of structs, [v; n] fill ............. ag02_nested_wide_aggregates.pie
+--   array returned by value ................... tests/air3/prog/ar02_array_by_value_200.pie
+--   enum with payloads + match ................ tests/lowering/c10_enum_match.pie
+--   if … then … else as an expression ......... tests/air3/prog/gl01_const_globals.pie
+--   `else if` chain ........................... tests/air3/prog/sl03_open_ended_slices.pie
+--   heap alloc / free ......................... tests/exec/02_fibonacci.pie
+--   address of an element, &a[0] .............. tests/exec/40_vec_algorithms.pie
+--   syscall write ............................. tests/exec/01_hello.pie
+--
+-- Two shapes are deliberately absent because no passing test covers them:
+--   * storing a whole struct literal into an array element (`xs[0] = Item { … }`);
+--     assign fields instead, as `build` does below.
+--   * comparing string literals by content; there is no string type here.
+--
+-- Not executed in the workspace it was written in (no LLVM there). Verify with
+-- `./pfrontc template.pie --emit-air-low`, then the pipeline in
+-- docs/pride/EXECUTABLE_SUBSET.md §4.
+
+-- ── data ────────────────────────────────────────────────────────────────────
+
+struct Item
+  key : i64
+  val : i64
+
+enum Kind
+  Int(i64)
+  Add
+  End
+
+-- ── output ──────────────────────────────────────────────────────────────────
+-- There is no print builtin. This writes decimal digits through syscall(1, ...),
+-- which is the idiom every printing program in tests/exec uses. The `! [IO,
+-- Alloc]` row is documentation: no pass ever rejects code on effects.
+
+fn print_i64_nl : i64 -> () ! [IO, Alloc]
+  | n ->
+      let buf : *u8 = alloc [u8; 25]
+      let mut pos : i64 = 0
+      let mut x : i64 = n
+      if x < 0
+        buf[pos] = 45u8
+        pos = pos + 1
+        x = 0 - x
+      if x == 0
+        buf[pos] = 48u8
+        pos = pos + 1
+      else
+        let tmp : *u8 = alloc [u8; 21]
+        let mut tlen : i64 = 0
+        while x > 0
+          tmp[tlen] = (x % 10 + 48) as u8
+          x = x / 10
+          tlen = tlen + 1
+        let mut k : i64 = tlen - 1
+        while k >= 0
+          buf[pos] = tmp[k]
+          pos = pos + 1
+          k = k - 1
+        free tmp
+      buf[pos] = 10u8
+      syscall(1, 1, buf as i64, pos + 1)
+      free buf
+
+-- ── logic ───────────────────────────────────────────────────────────────────
+
+fn classify : i64 -> Kind
+  | k ->
+      if k == 0 then Kind.End
+      else if k == 1 then Kind.Add
+      else Kind.Int(k)
+
+fn label : Kind -> i64
+  | k ->
+      match k
+        | Int(v) -> v
+        | Add -> 1
+        | End -> 0
+
+-- Read a struct array through a pointer. The caller passes `&xs[0] as *Item`,
+-- the spelling tests/exec/40_vec_algorithms.pie uses for `&arr[0] as *i64`.
+fn score : (*Item, i64) -> i64
+  | (xs, n) ->
+      let mut s : i64 = 0
+      let mut i : i64 = 0
+      while i < n
+        s = s + xs[i].key * xs[i].val
+        i = i + 1
+      s
+
+-- Build a struct array by value: literal fill first, then field stores.
+fn build : () -> [Item; 3]
+  | () ->
+      let mut xs : [Item; 3] = [Item { key: 0i64, val: 0i64 }; 3]
+      xs[0].key = 2i64
+      xs[0].val = 10i64
+      xs[1].key = 3i64
+      xs[1].val = 20i64
+      xs[2].key = 4i64
+      xs[2].val = 30i64
+      xs
+
+-- Heap path: scalar elements only, because a scalar store through `*T` is the
+-- proven shape (`h[0] = 2i64`), while an aggregate store through `*T` is not.
+fn sum_heap : () -> i64
+  | () ->
+      let h : *i64 = alloc [i64; 3]
+      h[0] = 2i64
+      h[1] = 20i64
+      h[2] = 60i64
+      let mut s : i64 = 0
+      let mut i : i64 = 0
+      while i < 3
+        s = s + h[i]
+        i = i + 1
+      free h
+      s
+
+-- ── tests ───────────────────────────────────────────────────────────────────
+-- The exit status is the only test harness. Return 0 when everything passes.
+-- Sequential `if` + assignment keeps this inside the best-tested shape: each
+-- failing check adds a distinct power of ten, so the exit status names the
+-- failing test.
+
+fn self_test : () -> i64
+  | () ->
+      let mut fails : i64 = 0
+      if label(classify(7)) != 7
+        fails = fails + 1
+      if label(classify(0)) != 0
+        fails = fails + 10
+      if label(classify(1)) != 1
+        fails = fails + 100
+      let xs = build()
+      if score(&xs[0] as *Item, 3) != 200
+        fails = fails + 1000
+      if sum_heap() != 82
+        fails = fails + 10000
+      fails
+
+-- ── entry ───────────────────────────────────────────────────────────────────
+
+fn main : () -> i64 ! [IO, Alloc]
+  | () ->
+      let t = self_test()
+      let mut rc : i64 = 0
+      if t != 0
+        syscall(1, 1, "self test failed\n" as i64, 17)
+        rc = t
+      else
+        syscall(1, 1, "template ok\n" as i64, 12)
+        print_i64_nl(200)
+      rc
