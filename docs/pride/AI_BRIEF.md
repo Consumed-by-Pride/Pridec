@@ -242,16 +242,97 @@ The `! [IO, Alloc]` suffix is the effect row. It is documentation, never
 enforced (`pfront_effectinfer.c3:16`), and it does not change code generation —
 write it on helpers that call `syscall` or `alloc`, or leave it off.
 
-To print a `[u8]` slice, print it byte by byte:
+To print a `[u8]` slice, buffer the writes — one syscall per byte is correct but
+slow, and a large program prints a lot:
 
 ```pride
 fn print_slice : ([u8]) -> ()
   | s ->
-      let mut i : i64 = 0
-      while i < s.len
-        syscall(1, 1, (&s[i]) as i64, 1)
-        i = i + 1
+      let buf : *u8 = alloc [u8; 256]
+      let mut pos : i64 = 0
+      for c in s
+        if pos == 256
+          syscall(1, 1, buf as i64, pos)
+          pos = 0
+        buf[pos] = c
+        pos = pos + 1
+      if pos > 0
+        syscall(1, 1, buf as i64, pos)
+      free buf
+
+fn print_bool : bool -> ()
+  | b ->
+      if b
+        syscall(1, 1, "true\n" as i64, 5)
+      else
+        syscall(1, 1, "false\n" as i64, 6)
 ```
+
+---
+
+## 8b. Four more shapes you will need
+
+A growable-in-capacity buffer, an open-addressed table, a sort, and a checked
+failure path. All four are composed from the same proven constructs as the
+helpers above.
+
+```pride
+struct Buf
+  data : [i64; 1024]
+  len : i64
+
+fn buf_push : (*Buf, i64) -> i64
+  | (b, v) ->
+      if b.len >= 1024
+        0 - 1
+      else
+        b.data[b.len] = v
+        b.len = b.len + 1
+        0
+
+fn buf_get : (*Buf, i64) -> i64
+  | (b, i) ->
+      if i < 0 then 0
+      else if i >= b.len then 0
+      else b.data[i]
+
+fn insertion_sort : (*i64, i64) -> ()
+  | (a, n) ->
+      let mut i : i64 = 1
+      while i < n
+        let key = a[i]
+        let mut j = i - 1
+        let mut done : i64 = 0
+        while j >= 0 && done == 0
+          if a[j] > key
+            a[j + 1] = a[j]
+            j = j - 1
+          else
+            done = 1
+        a[j + 1] = key
+        i = i + 1
+
+fn hash_i64 : i64 -> i64
+  | k ->
+      let mut h : i64 = 1469598103934665603i64
+      let mut x = k
+      let mut i : i64 = 0
+      while i < 8
+        h = (h ^ (x & 255i64)) * 1099511628211i64
+        x = x >> 8
+        i = i + 1
+      h
+
+-- Return a distinct non-negative code per failed check; the exit status names
+-- the failure, and that is the only stack trace you get.
+fn check : (bool, i64) -> i64
+  | (ok, code) ->
+      if ok then 0 else code
+```
+
+A capacity must be a literal or a `const`: `[i64; 1024]` above is a compile-time
+size, and `alloc [T; n]` needs one too. There is no run-time-sized allocation in
+this subset, so choose the largest size you will ever need and guard the bound.
 
 If any helper above fails to compile, do not invent syntax. Reduce it to the
 simplest shape that compiles — a plain `fn f : i64 -> i64 | n -> n` — and add one

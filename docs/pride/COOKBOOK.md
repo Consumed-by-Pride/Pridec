@@ -38,11 +38,22 @@ A `[u8]` slice carries its length, so a printer can walk it.
 ```pride
 fn print_slice : ([u8]) -> ()
   | s ->
-      let mut i : i64 = 0
-      while i < s.len
-        syscall(1, 1, (&s[i]) as i64, 1)
-        i = i + 1
+      let buf : *u8 = alloc [u8; 256]
+      let mut pos : i64 = 0
+      for c in s
+        if pos == 256
+          syscall(1, 1, buf as i64, pos)
+          pos = 0
+        buf[pos] = c
+        pos = pos + 1
+      if pos > 0
+        syscall(1, 1, buf as i64, pos)
+      free buf
 ```
+
+One syscall per byte is correct but slow; the buffered form above is what a
+program that prints a lot should use. `for c in s` over a slice and `s[i]` reads
+are both exercised by `tests/air3/prog/sl01_subslices.pie`.
 
 ### 1.4 Boolean and hex
 

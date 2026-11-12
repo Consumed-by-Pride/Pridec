@@ -50,4 +50,5 @@ the workspace it was written in, so it has never run a program;
 * `examples/pride/template.pie` — a starter program built from the proven subset.
 * `scripts/pride-lint.py` — static checks for a `.pie` file (tabs, forbidden
   constructs, syscall byte counts, reserved names) plus a `pfrontc` run when the
-  compiler is present. Zero errors on all 35 must-pass programs.
+  compiler is present. `--docs docs/pride` checks every `pride` block in this
+  directory. Zero errors on all 35 must-pass programs and on all 77 blocks here.

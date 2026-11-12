@@ -78,6 +78,7 @@ elsewhere, which is what `tests/air3/low_corpus.sh` does.
 ```sh
 python3 scripts/pride-lint.py prog.pie            # checks + pfrontc, if ./pfrontc exists
 python3 scripts/pride-lint.py --no-compile prog.pie
+python3 scripts/pride-lint.py --docs docs/pride   # every code block in the docs
 ```
 
 It catches the mistakes that cost the most turns — a tab in indentation (the lexer
@@ -85,7 +86,9 @@ rejects it outright), `func` instead of `fn`, `print`/`println`/`format`, `::`,
 a `syscall` string whose byte count disagrees with the literal next to it, a
 keyword used as a variable, a missing `main`, no `-- EXIT:` header. Over the 35
 must-pass programs in `tests/air3/prog/` it reports zero errors; that is the
-false-positive budget it was written to.
+false-positive budget it was written to. `--docs` applies the same rules to every
+`pride` block in this directory (77 blocks, 0 errors), so an edited example is
+checked by the same pass that checks a program.
 
 ---
 

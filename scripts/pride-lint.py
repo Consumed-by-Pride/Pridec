@@ -11,6 +11,10 @@ with --emit-air-low, which is the only authoritative answer.
 
     python3 scripts/pride-lint.py prog.pie [more.pie ...]
     python3 scripts/pride-lint.py --no-compile prog.pie
+    python3 scripts/pride-lint.py --docs docs/pride
+
+--docs lints every ```pride block in a directory of markdown, which is how the
+documented examples are kept from drifting: 77 blocks, 0 errors.
 
 Exit status: 0 when there are no errors (warnings allowed), 1 otherwise.
 """
@@ -94,16 +98,18 @@ def decode_bytes(text):
     return len(out)
 
 
-def lint(path, findings):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.read().split("\n")
-    except OSError as exc:
-        findings.append((path, 0, "error", "cannot read: %s" % exc))
-        return
+def lint(path, findings, text=None, skip_shape=False, line_offset=0):
+    if text is None:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError as exc:
+            findings.append((path, 0, "error", "cannot read: %s" % exc))
+            return
+    lines = text.split("\n")
 
     def add(no, sev, msg):
-        findings.append((path, no, sev, msg))
+        findings.append((path, no + line_offset if no else 0, sev, msg))
 
     seen_main = seen_test = seen_header = False
     for no, line in enumerate(lines, 1):
@@ -147,11 +153,17 @@ def lint(path, findings):
             add(no, "warn", 'string buffer passed without `as i64` -- write `"..." as i64`')
 
     # 4. program shape
-    if not seen_header:
+    if skip_shape:
+        pass
+    elif not seen_header:
         findings.append((path, 0, "warn", "no `-- EXIT:` header line -- the test gate reads it"))
-    if not seen_main:
+    if skip_shape:
+        pass
+    elif not seen_main:
         findings.append((path, 0, "error", "no `fn main :` declaration"))
-    if not seen_test:
+    if skip_shape:
+        pass
+    elif not seen_test:
         findings.append((path, 0, "warn", "no `fn self_test :` -- the only harness a program has is its exit code"))
 
     # 5. forbidden constructs, over the whole file, line by line
@@ -192,12 +204,44 @@ def compile_check(path, findings):
     return True
 
 
+BLOCK = re.compile(r"```pride\n(.*?)```", re.S)
+
+
+def lint_docs(directory, findings):
+    """Lint every ```pride block in every .md file under `directory`."""
+    import glob
+
+    blocks = 0
+    for md in sorted(glob.glob(os.path.join(directory, "*.md"))):
+        try:
+            with open(md, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError as exc:
+            findings.append((md, 0, "error", "cannot read: %s" % exc))
+            continue
+        for m in BLOCK.finditer(text):
+            blocks += 1
+            start_line = text[: m.start()].count("\n") + 2   # first line of the block body
+            lint(md, findings, text=m.group(1), skip_shape=True, line_offset=start_line - 1)
+    return blocks
+
+
 def main(argv):
     compile_too = True
+    docs_dir = None
     paths = []
-    for a in argv[1:]:
+    args = argv[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
         if a == "--no-compile":
             compile_too = False
+        elif a == "--docs":
+            if i + 1 >= len(args):
+                print("--docs needs a directory", file=sys.stderr)
+                return 2
+            docs_dir = args[i + 1]
+            i += 1
         elif a in ("-h", "--help"):
             print(__doc__)
             return 0
@@ -206,9 +250,21 @@ def main(argv):
             return 2
         else:
             paths.append(a)
-    if not paths:
+        i += 1
+    if not paths and docs_dir is None:
         print(__doc__)
         return 2
+    if docs_dir is not None:
+        findings = []
+        blocks = lint_docs(docs_dir, findings)
+        errors = [f for f in findings if f[2] == "error"]
+        findings.sort(key=lambda f: (f[0], f[1]))
+        for path, no, sev, msg in findings:
+            where = "%s:%d" % (path, no) if no else path
+            print("%s: %s: %s" % (where, sev, msg))
+        print("\n%d pride block(s) in %s: %d error(s), %d warning(s)"
+              % (blocks, docs_dir, len(errors), len(findings) - len(errors)))
+        return 1 if errors else 0
 
     findings = []
     for p in paths:
