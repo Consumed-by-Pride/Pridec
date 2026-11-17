@@ -104,7 +104,9 @@ that handles them.
 | Slices `[T]`, `.len`, sub-slicing | ✓ | `tests/air3/prog/sl01_subslices.pie` |
 | Open-ended slices `x[2..]` | ✓ | `sl03_open_ended_slices.pie` |
 | Writing through a sub-slice | ✓ | `sl01_subslices.pie` (`bump(a[4..6])`) |
-| Pointers `*T`, `&x`, `*p`, `p as *T` | ✓ | `tests/lowering/c19_ptr_store.pie`, `dy01_static_vtable.pie` |
+| Pointers `*T`, `*p`, `p as *T`, `p[i]`, `p.f` | ✓ | `tests/lowering/c19_ptr_store.pie`, `dy01_static_vtable.pie` |
+| `&x` (address of a local) | ✗ | no address-of: `&` is only the bitwise operator, and the unary form is not lowered (`air_low.c3` `Low.unary`) — heap-allocate the object instead |
+| Indexing through a pointer *parameter* (`fn f(a: *i64, n: i64)`, then `a[i]`) | ✓ | `tests/pear2/param_pointer_main.air` — a parameter is a trusted base of unknown extent: constant and runtime offsets both lower, unchecked (see `PROGRAMMING.md` §9.2) |
 | `alloc [T; n]` / `free p` | ✓ | `c19_ptr_store.pie`, `02_fibonacci.pie` |
 | Globals with constant initialisers | ✓ | `gl01_const_globals.pie`, `gl02_const_table_256.pie` |
 | `let mut` globals | ✓ | `gl01_const_globals.pie` (`COUNTER`) |

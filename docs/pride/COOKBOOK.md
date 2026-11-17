@@ -90,17 +90,31 @@ heap block that you replace with a bigger one. The second form is the one that
 scales, and it is the reason `malloc`-with-a-computed-size and `realloc` were
 added to the backend.
 
-### 2.1 Fixed capacity (simplest)
+### 2.0 Two rules that shape every container
+
+The backend knows where a pointer came from, or it refuses the access. Two
+consequences decide every recipe in this section (the reasoning is in
+`PROGRAMMING.md` §2 and §5):
+
+* **A pointer is usable where it was allocated.** `alloc` records an extent; a
+  pointer *returned* from a function records nothing, so `vec_new() -> Vec` cannot
+  hand back a buffer, and a struct returned with a pointer field in it is not
+  indexable by the caller.
+* **There is no `&x`.** `&` is only the bitwise operator; `&x` parses and does not
+  lower. To pass a `*T` to a helper, allocate the object on the heap
+  (`let b : *Buf = alloc Buf`), or pass the fields separately.
+
+So: flat buffers, `i64` lengths, `(ptr, n)` arguments, and allocation at the point
+of use.
+
+### 2.1 A fixed-capacity buffer, heap-allocated
 
 ```pride
-struct Buf
+type Buf = struct
   data : [i64; 1024]
   len : i64
 
-fn buf_new : () -> Buf
-  | () -> Buf { data: [0; 1024], len: 0 }
-
-fn buf_push : (*Buf, i64) -> i64
+fn buf_push : (*Buf, i64) -> i64            -- 0 ok, -1 full
   | (b, v) ->
       if b.len >= 1024
         0 - 1
@@ -117,114 +131,118 @@ fn buf_get : (*Buf, i64) -> i64
         0
       else
         b.data[i]
-```
 
-Every access is guarded: `a[i]` out of range is undefined behaviour, not a
-trapped error.
-
-`*Buf` is a pointer, so the caller writes `buf_push(&b, 42)`. Taking the address
-of a local with `&` is used in `tests/exec/40_vec_algorithms.pie`
-(`sort_array(&arr[0] as *i64, 5i64)`); returning the struct by value instead of
-passing a pointer is the more heavily exercised direction (`ag02`), and is the
-safer choice when a function only reads.
-
-### 2.2 Heap-backed, with a compile-time capacity
-
-```pride
-const MAXV : i64 = 4096
-
-struct Vec8
-  ptr : *u8
-  len : i64
-
-fn vec8_new : () -> Vec8
+fn main : () -> i64
   | () ->
-      let p : *u8 = alloc [u8; 4096]
-      Vec8 { ptr: p, len: 0 }
-
-fn vec8_push : (*Vec8, u8) -> i64
-  | (v, b) ->
-      if v.len >= MAXV
-        0 - 1
-      else
-        v.ptr[v.len] = b
-        v.len = v.len + 1
-        0
-
-fn vec8_free : (*Vec8) -> ()
-  | v ->
-      free v.ptr
+      let b : *Buf = alloc Buf            -- one object; the extent is known here
+      b.len = 0
+      buf_push(b, 42)
+      let v : i64 = buf_get(b, 0)
+      free b
+      v
 ```
 
-The capacity is a **compile-time** constant: `alloc [T; n]` needs a literal or a
-`const`. `MAXV` is `i64` and the buffer is 4096 bytes because the two numbers are
-written twice; keep them in step or derive the block from `MAXV` in one place.
+`alloc Buf` allocates exactly one `Buf`, so `b.len` and `b.data[i]` are field
+accesses through a tracked base. **Do not** write `buf_push(&b, 42)`: `&b` does
+not lower, and the fixture that appears to use it
+(`tests/exec/40_vec_algorithms.pie`) does not get past the lowering either.
 
-Growing past a fixed capacity means allocating a second, larger block, copying,
-and freeing the first — the backend models `realloc` and computed heap extents,
-but this subset has no source-level declaration for them. Size the largest block
-you will ever need.
-
-### 2.3 Linked list
+The struct-free form is the other option, and it is what the algorithms in §3
+take — an array and a length as separate parameters:
 
 ```pride
-struct Node
-  value : i64
-  next : *Node
-
-fn cons : (*Node, i64) -> *Node
-  | (tail, v) ->
-      let n : *Node = alloc [Node; 1]
-      n.value = v
-      n.next = tail
-      n
-
-fn list_sum : (*Node) -> i64
-  | head ->
-      let mut s : i64 = 0
-      let mut p = head
-      while p as i64 != 0
-        s = s + p.value
-        p = p.next
-      s
+fn arr_push : (*i64, i64, i64, i64) -> i64  -- (a, len, cap, v) -> new len
+  | (a, len, cap, v) ->
+      if len >= cap
+        len
+      else
+        a[len] = v
+        len + 1
 ```
 
-`p as i64 != 0` is the null test. A null pointer is the integer 0; there is no
-`Option` at the pointer level.
+### 2.2 Growth: size it up front, in two passes
+
+`alloc [T; n]` takes a *runtime* `n`, so there is no need to grow: count first,
+allocate once, fill.
+
+```pride
+fn count_lines : (*u8, i64) -> i64
+  | (text, n) ->
+      let mut count : i64 = 0
+      let mut i : i64 = 0
+      while i < n
+        if text[i] == 10u8
+          count = count + 1
+        i = i + 1
+      count
+
+fn line_starts : (*u8, i64, *i64, i64) -> i64
+  | (text, n, out, outcap) ->
+      let mut count : i64 = 0
+      if outcap > 0
+        out[0] = 0
+        count = 1
+        let mut i : i64 = 0
+        while i < n
+          if text[i] == 10u8 and count < outcap
+            out[count] = i + 1
+            count = count + 1
+          i = i + 1
+      count
+```
+
+Growing in place (`realloc`) is modelled by the backend, but this subset has no
+source-level declaration for it; a second allocation plus an element-by-element
+copy does the same job and is checked the same way. Prefer the two passes.
+
+### 2.3 Arrays of records
+
+```pride
+type Item = struct
+  key : i64
+  val : i64
+
+let items : *Item = alloc [Item; n]         -- n may be a runtime i64
+items[3].key = 7
+let k : i64 = items[3].key
+```
+
+Scalars in the fields, allocated where it is used. If a dynamic index into an
+array of records is ever refused, switch to parallel arrays (`keys : *i64`,
+`vals : *i64`): same shape, no field GEP, always accepted.
 
 ### 2.4 Hash table
 
-Open addressing over a fixed table. `fnv1a` is a proven shape
-(`tests/exec/10_fnv1a.pie`).
+Two flat arrays, power-of-two capacity, `-1` for an empty slot (so keys must be
+non-negative; add a `used : *u8` array if they are not).
 
 ```pride
-const TSIZE : i64 = 256
+fn hash_i64 : (i64, i64) -> i64
+  | (k, cap) ->
+      let mut h : i64 = k * 2654435761
+      h = h ^ (h >> 13)
+      h & (cap - 1)                         -- cap is a power of two
 
-struct Entry
-  key : i64
-  val : i64
-  used : bool
-
-struct Table
-  slots : [Entry; 256]
-  count : i64
-
-fn hash_i64 : i64 -> i64
-  | k ->
-      let mut h : i64 = 1469598103934665603i64
-      let mut x = k
-      let mut i : i64 = 0
-      while i < 8
-        h = (h ^ (x & 255i64)) * 1099511628211i64
-        x = x >> 8
-        i = i + 1
-      h
+fn map_slot : (*i64, i64, i64) -> i64       -- slot for k, creating it; -1 if full
+  | (keys, cap, k) ->
+      let mut i : i64 = hash_i64(k, cap)
+      let mut probes : i64 = 0
+      let mut found : i64 = 0 - 1
+      while probes < cap
+        if keys[i] == k
+          found = i
+          break
+        if keys[i] == 0 - 1
+          keys[i] = k
+          found = i
+          break
+        i = (i + 1) & (cap - 1)
+        probes = probes + 1
+      found
 ```
 
-`^` is xor, `&` is and, `>>` is shift — all in the operator table
-(`docs/pride/SYNTAX.md` §6). Index with `h % TSIZE` after making it non-negative.
-
----
+`^` is xor, `&` is and, `>>` is shift — the operator table is `SYNTAX.md` §6.
+Caller allocates both arrays, clears `keys` to `-1`, and frees both.
 
 ## 3. Algorithms
 

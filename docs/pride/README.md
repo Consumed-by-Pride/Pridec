@@ -1,6 +1,6 @@
 # Pride language documentation
 
-Five files, in the order you should read them.
+Eight files, in the order you should read them.
 
 | file | what it is | when to read it |
 |---|---|---|
@@ -9,6 +9,9 @@ Five files, in the order you should read them.
 | [`EXECUTABLE_SUBSET.md`](EXECUTABLE_SUBSET.md) | what actually compiles and runs, with the test that proves each feature, and an explicit do-not-use list | before writing anything meant to run |
 | [`COOKBOOK.md`](COOKBOOK.md) | recipes: printing, collections, sorting, hashing, strings, error codes | while writing the body of a program |
 | [`RUNNING.md`](RUNNING.md) | how to build the toolchain and actually execute a program, both consumers, the gates, and the failure modes | when you want to run what was written |
+| [`PROGRAMMING.md`](PROGRAMMING.md) | the practice in depth: twelve rules, the checked memory model, collection recipes, data modelling, parsing, program architecture, build loop, error→fix catalogue, and a complete worked example | before designing anything bigger than a page |
+| [`QUICKREF.md`](QUICKREF.md) | one page: operators, types, statements, memory, builtins, limits, top refusals and their fixes | while writing |
+| [`skeleton/main.pie`](skeleton/main.pie) | a complete program to copy: prelude, stdin reader, counter, sort, dedup, selftest, exit codes | as the starting file |
 
 Start with `EXECUTABLE_SUBSET.md`. `SYNTAX.md` describes the whole language;
 the subset describes the part of it a program can currently be built from, and
@@ -26,8 +29,14 @@ These apply to every file here.
    in this repository builds and runs it. Where a construct parses but is not on
    the execution path, it is marked as such.
 3. **The gap is named.** Missing capability is listed rather than glossed over —
-   the standard library, growable strings, run-time allocation sizes from source,
-   and the `.bc` backend's unexecuted state are all stated where they matter.
+   the standard library, growable strings, slice/`str` projections in the `.bc`
+   backend, and that backend's unexecuted state are all stated where they matter.
+
+`PROGRAMMING.md` is the one to read before a program grows past a page: it is
+organised around what the checked memory model can *track* (an allocation is
+known from the instruction that made it, a pointer parameter is trusted, a
+pointer returned from a call is not), which is the constraint that decides the
+shape of every collection and every helper that crosses a call.
 
 ## What is proven, in one paragraph
 

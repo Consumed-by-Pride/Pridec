@@ -48,7 +48,7 @@ i8 i16 i32 i64      u8 u16 u32 u64      usz isz      f32 f64      bool
 fn(A) -> B          struct              enum         ptr
 ```
 
-* `*T` is a pointer; `&x` takes an address; `*p` reads through it.
+* `*T` is a pointer; `*p` reads through it; a pointer comes from `alloc` or from a parameter (there is no `&x`).
 * `[T; N]` is a fixed array; `[T]` is a slice `{ptr, len}` with `.len`.
 * `(A, B)` is a tuple; fields are `.0`, `.1`.
 * `ptr` is untyped — cast with `as`.
@@ -129,7 +129,7 @@ Use these, and only these:
 * `enum` with payloads
 * fixed arrays, array literals `[1, 2, 3]`, fills `[0; 100]`
 * slices and slicing `a[lo..hi]`, `a[lo..=hi]`, `.len`
-* pointers, `alloc [T; n]`, `free p`, `&x`, `*p`, `p as *T`, `p as ptr`
+* pointers, `alloc [T; n]`, `free p`, `*p`, `p[i]`, `p as *T`, `p as ptr`
 * tuples and tuple destructuring
 * generics `<T>` and `interface`/`impl` method calls
 * closures `fn (x: i64) -> i64 { … }` and function-typed values
@@ -154,7 +154,7 @@ Use these, and only these:
 | string methods, `+` on strings, `.len` on a literal | carry `(ptr, len)` pairs or `[u8]` slices |
 | implicit integer widening | `as i64` |
 | storing a whole struct into an element (`xs[0] = Item { … }`) | assign fields: `xs[0].key = 1i64` |
-| `&x` where a `*T` parameter is expected, without the cast used in the corpus | `&xs[0] as *Item` |
+| `&x`, `&xs[0] as *T` — there is no address-of and it does not lower | heap-allocate the object and pass the pointer: `let b : *Buf = alloc Buf`, then `f(b, …)` |
 
 Do not use any keyword as a name. A binder must be a plain identifier, so
 `let tail = 0`, `| tail ->` and a parameter called `handle` do not parse. The
@@ -281,6 +281,8 @@ struct Buf
   data : [i64; 1024]
   len : i64
 
+-- A `*Buf` can only come from `alloc Buf` (or from a parameter): `&b` does not
+-- lower, so a stack `Buf` cannot be passed to these.
 fn buf_push : (*Buf, i64) -> i64
   | (b, v) ->
       if b.len >= 1024
@@ -330,9 +332,11 @@ fn check : (bool, i64) -> i64
       if ok then 0 else code
 ```
 
-A capacity must be a literal or a `const`: `[i64; 1024]` above is a compile-time
-size, and `alloc [T; n]` needs one too. There is no run-time-sized allocation in
-this subset, so choose the largest size you will ever need and guard the bound.
+A **stack** array's length must be a literal or a `const` (`[i64; 1024]` above).
+A **heap** array does not: `alloc [i64; n]` takes a runtime `n`, so count first and
+allocate once (`alloc [u8; limit + 1]` is `tests/exec/03_primes_sieve.pie`). The
+struct in this section is only ever passed as a pointer, so allocate it:
+`let b : *Buf = alloc Buf` — `&b` has no lowering.
 
 If any helper above fails to compile, do not invent syntax. Reduce it to the
 simplest shape that compiles — a plain `fn f : i64 -> i64 | n -> n` — and add one
@@ -414,25 +418,29 @@ fn score : (*Item, i64) -> i64
         i = i + 1
       s
 
-fn build : () -> [Item; 3]
-  | () ->
-      let mut xs : [Item; 3] = [Item { key: 0i64, val: 0i64 }; 3]
-      xs[0].key = 2i64
-      xs[0].val = 10i64
-      xs[1].key = 3i64
-      xs[1].val = 20i64
-      xs[2].key = 4i64
-      xs[2].val = 30i64
-      xs
+-- Fill a buffer the caller owns. A function cannot hand back a heap pointer:
+-- `alloc` records an extent at the allocation site, so allocation stays with the
+-- caller and helpers take `(*T, n)`.
+fn fill_items : (*Item, i64) -> ()
+  | (xs, n) ->
+      if n >= 3
+        xs[0].key = 2i64
+        xs[0].val = 10i64
+        xs[1].key = 3i64
+        xs[1].val = 20i64
+        xs[2].key = 4i64
+        xs[2].val = 30i64
 
 fn self_test : () -> i64
   | () ->
       let mut fails : i64 = 0
       if label(classify(7)) != 7
         fails = fails + 1
-      let xs = build()
-      if score(&xs[0] as *Item, 3) != 200
+      let xs : *Item = alloc [Item; 3]
+      fill_items(xs, 3)
+      if score(xs, 3) != 200
         fails = fails + 1000
+      free xs
       fails
 
 fn main : () -> i64 ! [IO, Alloc]

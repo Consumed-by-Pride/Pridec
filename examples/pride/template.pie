@@ -87,8 +87,9 @@ fn label : Kind -> i64
         | Add -> 1
         | End -> 0
 
--- Read a struct array through a pointer. The caller passes `&xs[0] as *Item`,
--- the spelling tests/exec/40_vec_algorithms.pie uses for `&arr[0] as *i64`.
+-- Read a struct array through a pointer. The caller allocates the array and
+-- passes the base pointer: there is no `&x`, because the address-of operator is
+-- parse-only and has no lowering.
 fn score : (*Item, i64) -> i64
   | (xs, n) ->
       let mut s : i64 = 0
@@ -98,17 +99,17 @@ fn score : (*Item, i64) -> i64
         i = i + 1
       s
 
--- Build a struct array by value: literal fill first, then field stores.
-fn build : () -> [Item; 3]
-  | () ->
-      let mut xs : [Item; 3] = [Item { key: 0i64, val: 0i64 }; 3]
-      xs[0].key = 2i64
-      xs[0].val = 10i64
-      xs[1].key = 3i64
-      xs[1].val = 20i64
-      xs[2].key = 4i64
-      xs[2].val = 30i64
-      xs
+-- Fill a struct array the caller owns. Writing one field at a time is the
+-- proven shape; storing a whole `Item { … }` into an element is not.
+fn fill : (*Item, i64) -> ()
+  | (xs, n) ->
+      if n >= 3
+        xs[0].key = 2i64
+        xs[0].val = 10i64
+        xs[1].key = 3i64
+        xs[1].val = 20i64
+        xs[2].key = 4i64
+        xs[2].val = 30i64
 
 -- Heap path: scalar elements only, because a scalar store through `*T` is the
 -- proven shape (`h[0] = 2i64`), while an aggregate store through `*T` is not.
@@ -141,9 +142,11 @@ fn self_test : () -> i64
         fails = fails + 10
       if label(classify(1)) != 1
         fails = fails + 100
-      let xs = build()
-      if score(&xs[0] as *Item, 3) != 200
+      let xs : *Item = alloc [Item; 3]
+      fill(xs, 3)
+      if score(xs, 3) != 200
         fails = fails + 1000
+      free xs
       if sum_heap() != 82
         fails = fails + 10000
       fails

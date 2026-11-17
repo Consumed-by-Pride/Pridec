@@ -165,8 +165,14 @@ fn(i64, i64) -> i64     -- multi-parameter function type
 
 Pointer types are written prefix: `*T`. `ptr` is the untyped/void pointer and is
 the type used to store a function address (`f as ptr`) and to erase a concrete
-pointer (`&x as ptr`), recovering it with `p as *T`
-(`dy01_static_vtable.pie`).
+pointer, recovering it with `p as *T` (`dy01_static_vtable.pie`).
+
+**[parse-only] the address-of operator.** `&x` parses — the `&` prefix is in the
+unary operator set — but the lowering has no case for it (`Low.unary` in
+`pfront/pear_ir/air_low.c3` handles `-`, `!`/`not`, `~` and then refuses "unary
+operator"). A program that needs a `*T` must get it from `alloc` (or receive it as
+a parameter); there is no operator that produces one from a local. `*p` deref is a
+separate node and does lower.
 
 ### 2.3 Named types
 
@@ -630,7 +636,7 @@ Highest binds tightest (the implementation's table, `infix_prec` in
 | 1 | `++` | rewrite-rule composition |
 
 Prefix (unary) operators bind tighter than all of the above:
-`-` `!` `not` `~` `&` (address-of) `*` (deref).
+`-` `!` `not` `~` `&` (address-of, **parse-only**) `*` (deref).
 
 Suffix operations — call `(…)`, index `[…]`, field `.f`, method `.f(…)` — bind
 tightest of all and associate left.

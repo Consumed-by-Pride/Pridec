@@ -2774,7 +2774,8 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
             // The object may be a `malloc(n)` whose size is a register: the
             // count is not a literal, but it is still a bound, and the access
             // check compares against it.
-            if (base_prov.extent == 0 || (base_prov.extent < 0 && base_prov.extent_value == null))
+            if (base_prov.kind != M1PROV_PARAM &&
+                (base_prov.extent == 0 || (base_prov.extent < 0 && base_prov.extent_value == null)))
             {
                 g.note_failure(p.source_line, p.source_col, (char*)"a dynamic pointer offset needs a known object extent"); return null;
             }
@@ -2862,7 +2863,7 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
     // for the check at the access, not for the GEP. The offset stays exact --
     // only the top of the object moves to run time -- so pointer-cell tracking
     // keeps working on dynamically sized objects.
-    bool measurable_extent = base_prov.extent >= 0;
+    bool measurable_extent = base_prov.extent >= 0 && base_prov.kind != M1PROV_PARAM;
     if (measurable_extent && new_hi >= 0 && (new_lo < 0 || new_hi < new_lo || new_hi > base_prov.extent))
     {
         g.note_failure(p.source_line, p.source_col, (char*)"GEP escapes the known object bounds"); return null;
@@ -2901,6 +2902,16 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
     }
     char* allocation = base_prov.allocation; int kind = base_prov.kind;
     long extent = base_prov.extent; char* extent_value = base_prov.extent_value; bool writable = base_prov.writable;
+    if (kind == M1PROV_PARAM)
+    {
+        // The base is the caller's object and this function cannot bound it, so
+        // the result is the same trusted base plus an offset the model does not
+        // claim to know. An open span says exactly that.
+        if (!g.prov_set(out, current, kind, 1, 0, 0, false, writable)) { g.failed = true; return null; }
+        M1Provenance* rp = g.prov(out);
+        rp.allocation = allocation; rp.lo = 0; rp.hi = -1;
+        return out;
+    }
     if (new_hi >= 0 && new_lo == new_hi)
     {
         if (!g.prov_set(out, current, kind, align, extent, new_lo, true, writable)) { g.failed = true; return null; }
@@ -6252,6 +6263,9 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
         if (n < 0 || n >= 32) { return false; }
         char* arg_name = g.arena.dup(&arg[0], (usz)n);
         if (p.name != null && !same(p.name, "_") && !g.bind_typed(p.name, arg_name, m1_bool_type(parameter_types[i]), m1_pointer_repr_type(parameter_types[i]), parameter_types[i])) { return false; }
+        // A pointer parameter is an object this function was handed. Recording it
+        // is what makes `p[0]` and `p.field` lowerable at all; see prov_param.
+        if (p.name != null && !same(p.name, "_") && m1_pointer_type(parameter_types[i]) && !g.prov_param(arg_name, m1_pointee_type(parameter_types[i]))) { return false; }
     }
     bool body_lowered = g.command(body, ret_name);
     if (!body_lowered || !g.terminated)

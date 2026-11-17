@@ -41,6 +41,27 @@ fn bool M1Gen.prov_set_span(M1Gen* g, char* value, AirTyp* pointee, int kind, in
     p.lo = lo; p.hi = hi;
     return true;
 }
+// A pointer the caller handed in.
+//
+// Its extent is not expressible here: the callee knows the pointee type and
+// nothing about how many of them there are, and there is no length in the AIR to
+// recover it from. So this is the one provenance kind the model *trusts* rather
+// than proves -- exactly the contract every systems language makes when it hands
+// a callee a pointer. Everything else stays checked: a `free` still wants a heap
+// base, an atomic still wants a constant address, and a dereference of a
+// *pointer loaded out of* caller memory is still refused until the program
+// stores a tracked pointer there again.
+fn bool M1Gen.prov_param(M1Gen* g, char* value, AirTyp* pointee)
+{
+    // extent 0 marks "unknown size"; offset 0 because the caller's pointer is the
+    // base of whatever it is the caller means.
+    if (!g.prov_set(value, pointee, M1PROV_PARAM, 1, 0, 0, true, true)) { return false; }
+    M1Provenance* p = g.prov(value);
+    if (p == null) { return false; }
+    p.allocation = value;
+    return true;
+}
+
 // A heap object whose byte count is a register, not a literal. `extent` becomes
 // M1EXTENT_RUNTIME and `extent_value` carries the i64 count; every later proof
 // that would have compared against `extent` turns into a runtime comparison
@@ -204,6 +225,11 @@ fn bool M1Gen.check_access(M1Gen* g, char* address, AirTyp* ty, int line, int co
     {
         return g.note_failure(line, col, (char*)"memory access with unknown/out-of-bounds/misaligned provenance");
     }
+    // A caller-supplied pointer: the access is written as the pointee type says,
+    // and the model makes no claim about it because it has nothing to check it
+    // against. Claiming the natural alignment would be a lie (the caller may have
+    // passed anything), so `access_alignment` asks for 1 here.
+    if (p.kind == M1PROV_PARAM) { return true; }
     if (p.offset_known)
     {
         if (p.offset < 0 || p.alignment < need_align)
@@ -283,6 +309,10 @@ fn bool M1Gen.check_range(M1Gen* g, char* address, long size, char* size_value, 
     M1Provenance* p = g.prov(address);
     if (p == null || p.kind == M1PROV_UNKNOWN || p.freed || (write_access && !p.writable))
     { return g.note_failure(line, col, (char*)"a bulk memory operation needs a tracked address with the right permission"); }
+    // A copy through a caller-supplied pointer is the same trust as a typed
+    // access through one, and for the same reason: the callee is given a
+    // pointer, not a length, so there is no bound to check the run against.
+    if (p.kind == M1PROV_PARAM) { return true; }
     if (size_value == null && size >= 0 && p.extent >= 0)
     {
         // Both ends constant: the answer is a proof or a refusal, never a check.
@@ -304,7 +334,7 @@ fn bool M1Gen.check_range(M1Gen* g, char* address, long size, char* size_value, 
 fn int M1Gen.access_alignment(M1Gen* g, char* address, AirTyp* ty)
 {
     M1Provenance* p = g.prov(address);
-    if (p != null && !p.offset_known) { return 1; }
+    if (p != null && (p.kind == M1PROV_PARAM || !p.offset_known)) { return 1; }
     return g.type_alignment(ty, 0);
 }
 
@@ -314,7 +344,7 @@ fn int M1Gen.access_alignment(M1Gen* g, char* address, AirTyp* ty)
 fn bool M1Gen.address_is_exact(M1Gen* g, char* address, int line, int col)
 {
     M1Provenance* p = g.prov(address);
-    if (p == null || !p.offset_known)
+    if (p == null || !p.offset_known || p.kind == M1PROV_PARAM)
     {
         return g.note_failure(line, col, (char*)"an atomic operation needs a constant address (a dynamic index has no provable alignment)");
     }

@@ -596,6 +596,21 @@ set -e
 [ "$rc" = 12 ] || { echo "FAIL: pointer-cell scope fixture returned $rc, expected 12"; exit 1; }
 echo "PASS: AIR 3 pointer cells are scoped to their function (12)"
 
+# A pointer parameter is an object the callee was handed. Without this every
+# helper that touches a caller's buffer is refused, which makes real programs
+# uncompilable however small they are.
+cp tests/pear2/param_pointer_main.air "$W/param_pointer_main.air"
+"$PEAR2" "$W/param_pointer_main.air" --emit-ll --quiet || { echo "FAIL: a pointer parameter could not be indexed"; exit 1; }
+grep -q 'ptr %a0, i64 0, i64 1' "$W/param_pointer_main.ll" || { echo "FAIL: the parameter's element step is not a plain GEP"; grep -n 'getelementptr' "$W/param_pointer_main.ll" | head -4; exit 1; }
+"$PEAR2" "$W/param_pointer_main.air" --quiet || { echo "FAIL: pointer-parameter fixture failed to build"; exit 1; }
+"$PEAR2_CLANG" -Wno-override-module "$W/param_pointer_main.bc" -o "$W/param_pointer_main" || { echo "FAIL: pointer-parameter fixture failed to link"; exit 1; }
+set +e
+"$W/param_pointer_main"
+rc=$?
+set -e
+[ "$rc" = 42 ] || { echo "FAIL: pointer-parameter fixture returned $rc, expected 42"; exit 1; }
+echo "PASS: AIR 3 a pointer parameter can be read and written (42)"
+
 # `realloc` is how a container grows: the old pointer is gone and the new one
 # carries the requested size, so an index the old object could not hold is in
 # bounds afterwards.
