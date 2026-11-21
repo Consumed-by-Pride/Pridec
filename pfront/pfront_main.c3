@@ -631,7 +631,16 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
             }
             else
             {
-                printf("air: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count);
+                // Say WHY. A bare count leaves the reader with "2 error(s)" and no
+                // way to find them: the diagnostic lines were printed above only
+                // in verbose mode, so --quiet produced a refusal with no cause.
+                printf("air: %d error(s) -- refusing to emit a .air; first error:\n", (int)diags.error_count);
+                for (usz di = 0; di < diags.count; di++)
+                {
+                    if (diags.items[di].sev != pfront_core::Severity.SEV_ERROR) { continue; }
+                    printf("  %s:%d:%d: %s\n", path, diags.items[di].line, diags.items[di].col, diags.items[di].msg != null ? diags.items[di].msg : "(no message)");
+                    break;
+                }
             }
         }
         if (g_air_low)
@@ -658,7 +667,17 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 int lerrs = air_low::emit_low_program(&low_roots[0], ln, entry.ast, it, path, &lowp[0]);
                 if (lerrs != 0) { g_low_failed = true; g_low_errors = g_low_errors + (lerrs > 0 ? lerrs : 0); }
             }
-            else { printf("air-low: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count); g_low_failed = true; }
+            else
+            {
+                printf("air-low: %d error(s) -- refusing to emit a .air; first error:\n", (int)diags.error_count);
+                for (usz di = 0; di < diags.count; di++)
+                {
+                    if (diags.items[di].sev != pfront_core::Severity.SEV_ERROR) { continue; }
+                    printf("  %s:%d:%d: %s\n", path, diags.items[di].line, diags.items[di].col, diags.items[di].msg != null ? diags.items[di].msg : "(no message)");
+                    break;
+                }
+                g_low_failed = true;
+            }
         }
         if (g_air_roundtrip && emit_ok)
         {
