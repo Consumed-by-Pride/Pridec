@@ -22,6 +22,7 @@ import pfront_lex;
 import air_ir;
 import air_util;
 import air_text;
+import air_audit;
 import air_lower;
 import air_types;
 import air_write;
@@ -116,6 +117,7 @@ struct Low
     char** names; usz nnames; usz tmpn; usz lbln;
     AirTyp* ret_ty; char* cur_fn; Node* cur_node;
     int errors; int fn_errors; int fns_ok; int fail_fn; Node* entry_decl;
+    bool audit;   // --air-audit: mark source nodes as the live lowerer consumes them
     bool uses_alloc;
     Fat[48] fats; usz nfat;
     DynI[24] dyns; usz ndyn;
@@ -485,27 +487,57 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
 // `A -> R ! [fx]`: parameters are the domain (a tuple = several), the result is the constraint child
 fn bool Low.sig_of(Low* lw, Node* tf, AirTyp** ps, usz* np, AirTyp** rt)
 {
+    // The parser produces ty-fn in exactly two shapes:
+    //
+    //   <dom>   <result>                      arrow form:  a -> b,  (a, b) -> c
+    //   <t..>   <result>   [<effect-row>]     fn(..) -> r: fn(a, b) -> c
+    //
+    // In BOTH, the last non-effect child is the result and everything before it is
+    // the domain. The domain is one slot when it is a single type or a tuple, and
+    // one slot per child when it is the flattened `fn(a, b)` form.
+    //
+    // Reading "more than two children" as "the parameters are the leading
+    // children" treated the RESULT as a parameter whenever the domain was a single
+    // type: `extern fn f : i64 -> ()` got a parameter of type `()` instead of
+    // `i64`, and `(i64, i64) -> ()` got one parameter instead of two. The call
+    // site then saw the wrong arity and either dropped the argument or reported
+    // "unit given, i64 wanted".
     usz cc = tf.child_count;
     if (cc > 0 && tf.children[cc - 1] != null && tf.children[cc - 1].kind == Nk.N_TY_EFFECT_ROW) { cc--; }
     if (cc < 2) { lw.unsup(tf, "function type shape"); return false; }
-    Node* dom = tf.children[0];
     *np = 0;
-    if (cc > 2)   // `fn(a, b) -> r`: the parameters are the leading children
+    usz ndom = cc - 1;                       // children 0 .. ndom-1 are the domain
+    if (ndom == 1)
     {
-        for (usz i = 0; i + 1 < cc; i++) { if (*np >= MAXA) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; } AirTyp* e = lw.ty(tf.children[i]); if (e == null) { return false; } ps[*np] = e; *np = *np + 1; }
-    }
-    else if (dom.kind == Nk.N_TY_UNIT) { }
-    else if (dom.kind == Nk.N_TY_TUPLE)
-    {
-        for (usz i = 0; i < dom.child_count; i++)
+        Node* dom = tf.children[0];
+        if (dom == null) { return false; }
+        if (dom.kind == Nk.N_TY_UNIT) { }                       // `() -> r`: no parameters
+        else if (dom.kind == Nk.N_TY_TUPLE)
         {
-            if (*np >= MAXA && !(dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count)) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; }
-            if (dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count) { continue; }   // the trailing `...` of a variadic extern
-            AirTyp* e = lw.ty(dom.children[i]); if (e == null) { return false; }
+            for (usz i = 0; i < dom.child_count; i++)
+            {
+                if (dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count) { continue; }   // trailing `...` of a variadic extern
+                if (*np >= MAXA) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; }
+                AirTyp* e = lw.ty(dom.children[i]); if (e == null) { return false; }
+                ps[*np] = e; *np = *np + 1;
+            }
+        }
+        else
+        {
+            AirTyp* e = lw.ty(dom); if (e == null) { return false; }
+            ps[0] = e; *np = 1;
+        }
+    }
+    else
+    {
+        // the flattened `fn(a, b) -> r` form: one parameter per domain child
+        for (usz i = 0; i < ndom; i++)
+        {
+            if (*np >= MAXA) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; }
+            AirTyp* e = lw.ty(tf.children[i]); if (e == null) { return false; }
             ps[*np] = e; *np = *np + 1;
         }
     }
-    else { AirTyp* e = lw.ty(dom); if (e == null) { return false; } ps[0] = e; *np = 1; }
     AirTyp* r = lw.ty(tf.children[cc - 1]);
     if (r == null) { return false; }
     *rt = r;
@@ -515,12 +547,15 @@ fn bool Low.sig_of(Low* lw, Node* tf, AirTyp** ps, usz* np, AirTyp** rt)
 // ── function registry ──────────────────────────────────────────────────────
 fn FnInfo* Low.fn_for(Low* lw, Node* d)
 {
+    // every function the lowerer will emit passes through here
+    if (lw.audit && d != null) { air_audit::mark(d); }
     Node*[MAXTP] tps;
     if (lw.typarams(d, &tps[0]) > 0) { lw.unsup(d, "generic function used without type arguments"); return null; }
     return lw.fn_inst(d, null, 0);
 }
 fn FnInfo* Low.fn_inst(Low* lw, Node* d, AirTyp** targs, usz nt)
 {
+    if (lw.audit && d != null) { air_audit::mark(d); }
     for (usz i = 0; i < lw.nfn; i++)
     {
         if (lw.fns[i].decl != d || lw.fns[i].is_lam || lw.fns[i].is_adapt || lw.fns[i].nts != nt) { continue; }
@@ -544,6 +579,10 @@ fn FnInfo* Low.callee_fn(Low* lw, Node* call, Node* cr)
 }
 fn FnInfo* Low.callee_fn_a(Low* lw, Node* call, Node* cr, Node** args, usz nargs)
 {
+    // The callee expression -- an ident, or a module-qualified path like
+    // `modsys.lib.add` -- is resolved by name here and is never dispatched
+    // through expr(), so its nodes are consumed at this point.
+    if (lw.audit && cr != null) { air_audit::mark_tree(cr); }
     Node*[MAXTP] tps; usz ntp = lw.typarams(cr, &tps[0]);
     if (ntp == 0) { return lw.fn_for(cr); }
     usz mark = lw.ntsub;
@@ -620,7 +659,15 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
     }
     f.name = nm;
     lw.nfn++;
-    if (d.kind == Nk.N_DECL_FN && d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN)
+    // An extern declaration carries its signature as a function TYPE
+    // (`extern fn f : i64 -> ()`), exactly like a `fn` with an arrow signature.
+    // This used to test only N_DECL_FN, so every extern skipped this branch and
+    // fell into the "parameters are N_DECL_PARAM children" one below -- where an
+    // `extern fn` has none. Result: every extern was registered with zero
+    // parameters, its declaration emitted as `extern declare f() : unit`, and its
+    // call sites silently lost their arguments (or reported "unit given, i64
+    // wanted" when the return type differed).
+    if ((d.kind == Nk.N_DECL_FN || d.kind == Nk.N_DECL_EXTERN_FN) && d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN)
     {
         if (!lw.sig_of(d.type_ann, &f.pty[0], &f.np, &f.ret)) { lw.nfn--; return null; }
         if (d.type_ann.child_count > 0 && d.type_ann.children[0] != null && (d.type_ann.children[0].flags & pfront_core::NF_VARIADIC) != 0) { f.variadic = true; }
@@ -1408,6 +1455,7 @@ fn usz Low.words(Low* lw, AirTyp* t)
 }
 fn Enm* Low.enum_for(Low* lw, Node* decl)
 {
+    if (lw.audit && decl != null) { air_audit::mark_tree(decl); }
     for (usz i = 0; i < lw.nen; i++) { if (lw.ens[i].decl == decl) { return &lw.ens[i]; } }
     if (lw.nen >= 64) { lw.unsup(decl, "more than 64 enum types"); return null; }
     Enm* e = &lw.ens[lw.nen]; lw.nen++;
@@ -1694,6 +1742,19 @@ fn Node* Low.lit_global_init(Low* lw, Node* r)
 fn Vx Low.read_var(Low* lw, Node* id, AirTyp* want)
 {
     Node* r = id.resolved;
+    // A bare variant name is a nullary constructor: `None` is a value of its
+    // enum, not a variable. The resolver labels it `variant 'None'`, but only the
+    // call form (`Some(1)`) was routed to construction, so `None` fell through to
+    // "name does not resolve to a local, function or global".
+    if (r != null && r.kind == Nk.N_DECL_VARIANT && r.parent != null)
+    {
+        Enm* ve = lw.enum_for(r.parent);
+        if (ve != null)
+        {
+            long vi = lw.variant_index(ve, null, r);
+            if (vi >= 0) { return lw.variant_value(ve, (usz)vi, null, 0, id); }
+        }
+    }
     VarB* v = lw.find_var(r);
     if (v == null && r == null) { v = lw.find_var_named(id); }   // names inside type positions (`[u8; n + 1]`) are not resolved by the front end
     if (v != null)
@@ -1850,6 +1911,10 @@ fn void Low.queue(Low* lw, FnInfo* f) { if (!f.seen) { f.seen = true; f.queued =
 // places: an address plus the type stored there
 fn bool Low.place(Low* lw, Node* n, Pl* out)
 {
+    // A place is resolved structurally (ident / field-access / index / deref) by
+    // this function, not dispatched through expr(), so its nodes are consumed
+    // here even though nothing calls expr() on them.
+    if (lw.audit && n != null) { air_audit::mark(n); }
     switch (n.kind)
     {
         case Nk.N_EXPR_VOLATILE: return n.child_count > 0 && lw.place(n.children[0], out);
@@ -2427,8 +2492,25 @@ fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
 {
     if (n.child_count == 0) { return lw.unit(); }
     Node* cal = n.children[0];
+    // the callee is resolved by NAME (callee_fn_a), never dispatched through expr(),
+    // so mark it here or it reads as an unlowered node on every call.
+    if (lw.audit && cal != null) { air_audit::mark_tree(cal); }
     if (lw.arm.on && lw.arm.kdecl != null && lw.is_resume(n, lw.arm.kdecl)) { return lw.resume_do(n.child_count > 1 ? n.children[1] : null, n); }
     Node* cr = cal.resolved;
+    // An enum variant used as a callee is a CONSTRUCTOR, not a function:
+    // `Some(1)` / `Cons(x, t)` build a value. variant_value() has always been
+    // here (matching uses it), but nothing routed construction to it, so the
+    // callee fell through to "not a function or a function value" and the whole
+    // expression was refused -- enum construction was unimplemented for any
+    // program, while enum *matching* worked.
+    if (cr != null && cr.kind == Nk.N_DECL_VARIANT && cr.parent != null)
+    {
+        Enm* ve = lw.enum_for(cr.parent);
+        if (ve == null) { lw.err(n, "variant whose enum type could not be built", lw.text(cr)); return lw.unit(); }
+        long vi = lw.variant_index(ve, null, cr);
+        if (vi < 0) { lw.err(n, "variant not found in its enum", lw.text(cr)); return lw.unit(); }
+        return lw.variant_value(ve, (usz)vi, &n.children[1], n.child_count - 1, n);
+    }
     if (cr == null && cal.kind == Nk.N_EXPR_IDENT) { cr = lw.fn_by_name(lw.text(cal)); }
     if (cr != null && cr.kind == Nk.N_DECL_FN && lw.is_iface_fn(cr))
     {
@@ -2537,6 +2619,9 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
 {
     if (n == null) { return lw.unit(); }
     if (lw.fn_errors > 0) { return lw.unit(); }
+    // audit: this node reached the live lowerer. Reporting compares marks against
+    // a walk of the source tree, so anything the .air never mentions shows up.
+    if (lw.audit) { air_audit::mark(n); }
     lw.cur_node = n;
     bool dsc = lw.discard; lw.discard = false;
     switch (n.kind)
@@ -3678,6 +3763,10 @@ fn Vx Low.for_(Low* lw, Node* n)
 // Tests `v` against pattern `p`; on mismatch control goes to `fail`. Binds names. Returns false if unsupported.
 fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
 {
+    // A pattern is consumed as a whole -- its sub-patterns, literals and field
+    // names are read by pat_node/pat_variant rather than dispatched one by one --
+    // so mark the whole subtree here or every sub-pattern reads as unlowered.
+    if (lw.audit && p != null) { air_audit::mark_tree(p); }
     if (p == null) { return true; }
     switch (p.kind)
     {
@@ -3801,6 +3890,7 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
     for (usz ai = 0; ai < narms; ai++)
     {
         Node* arm = arms[ai];
+        if (lw.audit && arm != null) { air_audit::mark(arm); }
         if (arm == null || arm.child_count == 0) { continue; }
         usz next = lw.blk("arm.next");
         usz nv0 = lw.nvars;
@@ -4628,6 +4718,7 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     for (usz i = 1; i < n.child_count; i++)
     {
         Node* arm = n.children[i]; if (arm == null) { continue; }
+        if (lw.audit) { air_audit::mark(arm); }   // consumed here as a handler arm, not via expr()
         Node* op = arm.resolved;
         if ((op == null || op.kind != Nk.N_DECL_EFFECT_OP) && lw.is_ret_arm(arm))   // `| return(x) -> e`: applied to the value of the handled computation
         {
@@ -5571,6 +5662,7 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
     lw.ens = (Enm*)calloc(64, Enm::size); lw.nen = 0;
     lw.clos = (CloI*)calloc(128, CloI::size); lw.nclo = 0; lw.nlam = 0;
     lw.errors = 0; lw.fn_errors = 0; lw.fns_ok = 0; lw.fail_fn = 0; lw.cur = NOBLK;
+    lw.audit = air_audit::enabled();
     Node* mn = null;
     for (usz i = 0; i < root_count && mn == null; i++) { mn = find_main(roots[i], it); }
     if (mn != null)
@@ -5646,6 +5738,17 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
         else { printf("air-low: %d function(s) lowered -> %s\n", lw.fns_ok, out_path); }
     }
     else { printf("air-low: %d error(s) in %d function(s); no .air written\n", errs, lw.fail_fn); }
+    // The audit answers "did every source construct reach AIR?". It walks the same
+    // roots the lowerer was given and reports the outermost node of any subtree the
+    // live lowerer never marked -- the silent-drop class, measured rather than argued.
+    if (lw.audit)
+    {
+        // Only the roots handed to the lowerer are candidates: a library module is
+        // not lowered unless something in it is reachable, so reporting its contents
+        // as "unlowered" would be noise. The entry file is the one being compiled.
+        Node* are = entry_root != null ? entry_root : roots[0];
+        air_audit::report_low(are, src_path, 0);
+    }
     if (arena.oom) { printf("air-low: AIR arena exhausted (out of memory): %d slabs, %zu bytes; no .air written\n", (int)arena.slab_count, arena.bytes_used); }
     arena.destroy();
     return errs;

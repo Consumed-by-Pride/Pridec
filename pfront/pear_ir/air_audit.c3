@@ -28,6 +28,7 @@ usz     g_cap_words = 0;       // capacity of g_bits in 64-bit words
 
 char*[256] g_paths;
 fn void enable(bool on) { g_on = on; }
+fn bool enabled() { return g_on; }
 fn void set_path(usz idx, char* p) { if (idx < 256) { g_paths[idx] = p; } }
 
 fn void grow_for(uint id)
@@ -151,5 +152,19 @@ fn void report(Node* root, usz idx, char* fallback_name, bool is_entry)
     usz before_r = g_reported; usz before_e = g_examined;
     walk(root, mod_name, 0);
     printf("air-audit: MODULE %s %s examined=%d unlowered=%d\n", is_entry ? "entry" : "library", mod_name,
+           (int)(g_examined - before_e), (int)(g_reported - before_r));
+}
+
+// report_low — the same check for the LIVE lowerer (air_low.c3), which marks the
+// nodes it dispatches. Kept separate from report() because the two lowerers make
+// different decisions about what they consume: the high-level one walks
+// declarations itself, the low one is driven function by function, so a node
+// unmarked here means something else than it does there.
+fn void report_low(Node* root, char* mod_name, usz idx)
+{
+    if (!g_on || root == null) { return; }
+    usz before_r = g_reported; usz before_e = g_examined;
+    walk(root, mod_name != null ? mod_name : "-", 0);
+    printf("air-audit: MODULE-LOW %s examined=%d unlowered=%d\n", mod_name != null ? mod_name : "-",
            (int)(g_examined - before_e), (int)(g_reported - before_r));
 }

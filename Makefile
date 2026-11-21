@@ -153,6 +153,8 @@ test-pfront: $(BINARY)
 	bash tests/pfront/selftest.sh
 	@echo "==> tests/pfront hardening"
 	bash tests/pfront/hardening.sh
+	@echo "==> tests/pfront lowering audit"
+	bash tests/pfront/audit.sh
 	@echo "==> tests/pfront regression"
 	bash tests/pfront/run.sh
 
