@@ -124,6 +124,22 @@ fn int main()
           && !deep.memory_readonly && !deep.params[0].no_capture,
           "depth budget exhaustion is fail-closed", &pass, &fail);
 
+    // A failed slab growth is a checked allocation failure, not a null-backed
+    // AIR node. Exhaust the slab table without allocating the 256 MiB payload.
+    // The arena hands out inert scratch memory on exhaustion (so call sites
+    // that store into a fresh node cannot segfault) and latches `oom`; the
+    // lowering/facts layers treat the latch as fatal, so no .air is published.
+    air_ir::AirArena exhausted; exhausted.init();
+    exhausted.cursor = exhausted.cur_cap;
+    exhausted.slab_count = air_ir::AIR_MAX_SLABS;
+    void* failed_alloc = exhausted.alloc(1, 8);
+    check(failed_alloc != null && exhausted.oom,
+          "arena exhaustion is recorded and returns inert scratch (never null)", &pass, &fail);
+    air_ir::AirModule no_memory;
+    check(!no_memory.init(&exhausted, (char*)"oom", null) && exhausted.oom,
+          "module setup stops safely when the arena is exhausted", &pass, &fail);
+    exhausted.destroy();
+
     printf("AIR contract regressions: pass=%d fail=%d\n", pass, fail);
     a.destroy();
     return fail;

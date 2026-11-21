@@ -98,10 +98,11 @@
 //      m.pat_wild, m.nop are preallocated in AirModule.init() so we never
 //      allocate a fresh `unit` or `_` or `%ret` node per use site.
 //
-//  12. Error recovery: if allocation fails mid-lowering, the AirArena.oom
-//      flag is set, and all air_new_* functions return null. The lowering
-//      pass null-checks every allocation and substitutes nop / unit /
-//      wild as needed so we don't crash even if OOM strikes.
+//  12. Allocation failure is fail-closed, not recovered: AirArena.oom is
+//      checked before facts or text emission, and direct node allocations in
+//      this lowerer are null-checked. The compiler refuses to publish partial
+//      AIR and returns a non-zero status; keep adding local checks alongside
+//      any new direct allocation site.
 //
 //  13. All strings emitted into AIR are duplicated into the AirArena via
 //      AirArena.dup(), so freeing the arena at the end frees everything.
@@ -277,6 +278,8 @@ struct AirLower
     usz          total_cmd;  // # of AirCmd allocated (debug)
     usz          total_decl; // # of AirDecl allocated (debug)
     usz          errors;     // # of lowered nodes that fell to poison/default
+    usz          fatal_errors; // malformed IR that must not be published (e.g. truncated operands)
+    char*        fatal_message;
     long         cop;        // pending compound-assignment token (0 = plain `=`); consumed by assign_expr
 
     // ── Nested function hoisting ──────────────────────────────────────────
@@ -303,9 +306,20 @@ fn void AirLower.init(AirLower* lr, AirModule* m, AirScope* sc, pfront_core::Int
     lr.labels = 0; lr.lets = 0;
     lr.total_prd = 0; lr.total_cns = 0; lr.total_cmd = 0; lr.total_decl = 0;
     lr.errors = 0;
+    lr.fatal_errors = 0;
+    lr.fatal_message = null;
     lr.cop = 0;
     lr.hoist_count = 0;
     lr.qualifier_module_final = false;
+}
+
+fn void AirLower.note_oom(AirLower* lr)
+{
+    if (lr.fatal_errors == 0)
+    {
+        lr.fatal_errors = 1;
+        lr.fatal_message = (char*)"AIR arena allocation failed";
+    }
 }
 
 // ── Small helpers ──────────────────────────────────────────────────────────
@@ -440,7 +454,9 @@ fn char* AirLower.dup(AirLower* lr, char* s)
     if (s == null) return null;
     int n = 0;
     while (s[n] != 0) { n = n + 1; }
-    return lr.arena.dup(s, (usz)n);
+    char* copy = lr.arena.dup(s, (usz)n);
+    if (copy == null) { lr.note_oom(); }
+    return copy;
 }
 
 // fmt — format a single long integer into tmp, then dup into arena.
@@ -458,14 +474,18 @@ fn AirCmd* AirLower.cut(AirLower* lr, AirPrd* p, AirCns* k)
 {
     lr.cuts++;
     lr.total_cmd++;
-    return air_ir::air_mk_cut(lr.arena, p, k);
+    AirCmd* c = air_ir::air_mk_cut(lr.arena, p, k);
+    if (c == null) { lr.note_oom(); }
+    return c;
 }
 
 // cns_k — wrap a covariable name into a ACNS_COVAR consumer.
 fn AirCns* AirLower.cns_k(AirLower* lr, char* k)
 {
     lr.total_cns++;
-    return air_ir::air_mk_covar(lr.arena, k);
+    AirCns* c = air_ir::air_mk_covar(lr.arena, k);
+    if (c == null) { lr.note_oom(); }
+    return c;
 }
 
 // nop — <unit | fresh-covar>; used as "hole" filler for sequences where we
@@ -788,6 +808,7 @@ fn AirPrd* AirLower.struct_lit_prd(AirLower* lr, Node* n)
         if (c == null) continue;
         air_audit::mark(c);
         AirFieldInit* fi = air_ir::air_new_AirFieldInit(lr.arena);
+        if (fi == null) { lr.note_oom(); return null; }
         if (c.kind == Nk.N_EXPR_FIELD_INIT)
         {
             char* fnm = node_text(c, lr.it);
@@ -805,6 +826,7 @@ fn AirPrd* AirLower.struct_lit_prd(AirLower* lr, Node* n)
         ic = ic + 1;
     }
     AirPrd* rec = air_ir::air_new_AirPrd(lr.arena);
+    if (rec == null) { lr.note_oom(); return null; }
     rec.tag = APRD_RECORD;
     rec.rec_init_count = 0;
     // Emit field inits in DECLARATION order (source order is free — `P { y = 2,
@@ -1945,6 +1967,7 @@ fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
         if (c == null) continue;
         air_audit::mark(c);
         AirFieldInit* fi = air_ir::air_new_AirFieldInit(lr.arena);
+        if (fi == null) { lr.note_oom(); lr.scope.leave(); return null; }
         if (c.kind == Nk.N_EXPR_FIELD_INIT)
         {
             char* fnm = node_text(c, lr.it);
@@ -1991,6 +2014,7 @@ fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
         inits[ic] = fi; ic = ic + 1;
     }
     AirPrd* rec = air_ir::air_new_AirPrd(lr.arena);
+    if (rec == null) { lr.note_oom(); lr.scope.leave(); return null; }
     rec.tag = APRD_RECORD;
     rec.rec_init_count = 0;
     for (usz i = 0; i < ic && i < 64; i++)
@@ -2456,6 +2480,7 @@ fn AirCmd* AirLower.unop(AirLower* lr, Node* n, AirCns* k)
         if (is_value_node(n.children[0]))
         {
             AirCns* dk = air_ir::air_new_AirCns(lr.arena);
+            if (dk == null) { lr.note_oom(); lr.scope.leave(); return null; }
             dk.tag = ACNS_DEREF; dk.tail = k;
             lr.total_cns++;
             out = lr.cut(lr.prd(n.children[0]), dk);
@@ -2465,6 +2490,7 @@ fn AirCmd* AirLower.unop(AirLower* lr, Node* n, AirCns* k)
             char* vx = lr.fresh_x();
             AirPrd* vp = air_ir::air_mk_var(lr.arena, vx);
             AirCns* dk = air_ir::air_new_AirCns(lr.arena);
+            if (dk == null) { lr.note_oom(); lr.scope.leave(); return null; }
             dk.tag = ACNS_DEREF; dk.tail = k;
             lr.total_cns++;
             AirCmd* fin = lr.cut(vp, dk);
@@ -2849,6 +2875,7 @@ fn AirCmd* AirLower.marker_block(AirLower* lr, Node* n, AirCns* k, AirCmdTag tag
     }
     lr.scope.leave();
     AirCmd* m = air_ir::air_new_AirCmd(lr.arena);
+    if (m == null) { lr.note_oom(); return null; }
     m.tag = tag; m.body = body;
     m.prd = null; m.cns = null; m.next = null;
     lr.total_cmd++;
@@ -2931,6 +2958,7 @@ fn AirCmd* AirLower.control_expr(AirLower* lr, Node* n, AirCns* k)
         case Nk.N_EXPR_FENCE:
         {
             AirCmd* c = air_ir::air_new_AirCmd(lr.arena);
+            if (c == null) { lr.note_oom(); return null; }
             c.tag = ACMD_FENCE; c.atomic_order = (int)n.p.ival; c.next = null; lr.total_cmd++;
             return air_ir::air_mk_seq(lr.arena, c, lr.cut(lr.mod.p_unit, k));
         }
@@ -2973,6 +3001,7 @@ fn AirCmd* AirLower.control_expr(AirLower* lr, Node* n, AirCns* k)
 fn AirCmd* AirLower.prim_cmd(AirLower* lr, Node* n, AirCmdTag tag, AirCns* k)
 {
     AirCmd* c = air_ir::air_new_AirCmd(lr.arena);
+    if (c == null) { lr.fatal_errors++; lr.fatal_message = (char*)"AIR arena allocation failed"; return null; }
     c.tag = tag; c.next = null; c.cns = k; lr.total_cmd++;
     usz first = 0;
     if (tag == ACMD_ASM)
@@ -2988,10 +3017,19 @@ fn AirCmd* AirLower.prim_cmd(AirLower* lr, Node* n, AirCmdTag tag, AirCns* k)
     }
     else if (tag == ACMD_ATOMIC) { c.atomic_op = n.p.op; c.atomic_order = (int)n.p.ival; }
     // Operands: value nodes are used directly; anything else is bound first, left to right.
+    // AIR's fixed command operand storage carries one primary operand plus 64
+    // trailing operands. Reject larger source forms rather than silently
+    // truncating their tail and changing the program.
     Node*[65] ops; AirPrd*[65] ps; char*[65] names; usz oc = 0;
-    for (usz i = first; i < n.child_count && oc < 65; i++)
+    for (usz i = first; i < n.child_count; i++)
     {
         if (n.children[i] == null) { continue; }
+        if (oc >= 65)
+        {
+            lr.fatal_errors++;
+            lr.fatal_message = (char*)"too many syscall/atomic operands (maximum 65)";
+            return lr.poison_cmd(lr, lr.fatal_message);
+        }
         ops[oc] = n.children[i]; oc++;
     }
     lr.scope.enter();
@@ -3234,6 +3272,7 @@ fn AirCmd* AirLower.assign_place(AirLower* lr, Node* lhs, Node* rhs, long cop, A
     char* nv_v = cop != 0 ? lr.fresh_x() : v_v;
     AirPrd* sp = air_ir::air_mk_var(lr.arena, nv_v);
     AirCns* st = air_ir::air_new_AirCns(lr.arena);
+    if (st == null) { lr.note_oom(); lr.scope.leave(); return null; }
     lr.total_cns++;
     st.tag = ACNS_STORE; st.prd = sp; st.tail = after; st.idx = esz;
     AirCns* wr_place = st;                         // write side: place consumer ending in the store
@@ -3520,6 +3559,7 @@ fn AirCmd* AirLower.assign_mem(AirLower* lr, Node* n, AirCns* k)
 
     // Build ACNS_STORE tail: receives addr, stores v_v to it, continues to after.
     AirCns* store_c = air_ir::air_new_AirCns(lr.arena);
+    if (store_c == null) { lr.note_oom(); lr.scope.leave(); return null; }
     lr.total_cns++;
     store_c.tag = ACNS_STORE; store_c.prd = vp; store_c.tail = after;
     long store_esz = 1;

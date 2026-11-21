@@ -7,10 +7,11 @@
 # so a silent regression to "no diagnostics" fails the suite.
 set -u
 cd "$(dirname "$0")/../.." || exit 1
-# PF_BIN lets a caller point the suite at a stub (see the self-test in
-# tests/pfront/selftest.sh). It defaults to the tree's compiler so `make
-# test-pfront` is unchanged.
-BIN=${PF_BIN:-./pfrontc}
+source tests/harness/pfront_case.sh
+# PFRONT_BIN lets a caller point the suite at a stub (see the self-test in
+# tests/pfront/selftest.sh); PF_BIN is honored for backwards compatibility.
+# It defaults to the tree's compiler so `make test-pfront` is unchanged.
+BIN=${PFRONT_BIN:-${PF_BIN:-./pfrontc}}
 [ -x "$BIN" ] || { echo "build ./pfront first"; exit 2; }
 
 declare -A EXPECT=(
@@ -162,27 +163,16 @@ for f in tests/pfront/*.pie; do
   # A compiler that dies produces no diagnostics at all, so counting matching
   # lines alone would score a crashed run as "expected 0 errors, got 0" -- every
   # CLEAN case would pass and the suite would report health while the compiler
-  # was broken. Capture the status separately and treat a signal or an
-  # unexpected non-zero exit as a failure of the case, not of its expectation.
+  # was broken. tests/harness/pfront_case.sh enforces the compiler's contract
+  # (exit 0 clean, 1 or 2 for reported diagnostics, a well-formed summary whose
+  # counts match the diagnostics actually printed) and refuses to score a run
+  # that did not finish.
   pf_out=$("$BIN" "$f" -I tests/pfront -I stdlib -I . 2>&1); rc=$?
-  got=$(printf '%s\n' "$pf_out" | grep -c "$f:.*error")
-  # The compiler's own contract is: exit 0 clean, 1 or 2 for reported
-  # diagnostics, 3 when lowering refused, and a `FILE: errors=N warnings=M
-  # modules=K` summary on every run that reached the end of compilation. A
-  # signal (128+N), a panic, or a missing summary means it did not finish, so
-  # its diagnostic count is meaningless and must not be compared to the
-  # expectation -- otherwise "expected 0, counted 0" scores a crash as a pass.
-  case "$rc" in
-    0|1|2|3) ;;
-    *) fail=$((fail+1)); printf '  FAIL  %-26s compiler exited %s (crashed?)\n' "$name" "$rc"; continue ;;
-  esac
-  # Both summary shapes count as "finished": the one-line form used by --quiet
-  # (`FILE: errors=N ...`) and the block form printed otherwise
-  # (`  errors    : N`). What must never happen is a run with neither.
-  if ! printf '%s\n' "$pf_out" | grep -qE "errors=[0-9]+ warnings=[0-9]+ modules=[0-9]+|errors +: +[0-9]+"; then
-    fail=$((fail+1)); printf '  FAIL  %-26s exited %s with no summary line (did not finish)\n' "$name" "$rc"
+  if ! pfront_check_case_result "$pf_out" "$rc" "$f"; then
+    fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "$name" "$PFRONT_CASE_FAILURE"
     continue
   fi
+  got=$PFRONT_CASE_ERRORS
   if [ "$got" = "$want" ]; then
     pass=$((pass+1)); printf '  PASS  %-26s (%s errors)\n' "$name" "$got"
   else

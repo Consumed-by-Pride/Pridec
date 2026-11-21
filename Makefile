@@ -15,7 +15,7 @@
 #   make              build ./pfrontc
 #   make c3c          fetch c3c if missing (idempotent)
 #   make test         build + run all test suites
-#   make clean        remove build outputs + generated .air files
+#   make clean        remove build outputs + temporary AIR files in tmp/
 #   make legacy       build the legacy pride1 compiler under legacy/pride1/
 # ============================================================================
 
@@ -126,10 +126,11 @@ $(BINARY): $(PFRONT_SRC) | c3c
 
 # ── Bootstrap c3c if missing ────────────────────────────────────────────
 c3c:
-	@if [ ! -x "$(C3C)" ] || [ ! -d "$(C3C_LIB)/std" ]; then \
+	@set -eu; \
+	if [ ! -x "$(C3C)" ] || [ ! -d "$(C3C_LIB)/std" ]; then \
 	  echo "==> fetching c3c $(C3C_VER)"; \
 	  mkdir -p $$(dirname $(C3C)) $(C3C_LIB) /tmp/c3i; \
-	  cd /tmp/c3i && curl -sL $(C3C_URL) -o c3.tgz && tar -xzf c3.tgz; \
+	  (cd /tmp/c3i && curl -fsSL $(C3C_URL) -o c3.tgz && tar -xzf c3.tgz) || { echo "failed to download/extract c3c $(C3C_VER)" >&2; exit 1; }; \
 	  cp /tmp/c3i/c3/c3c $$(dirname $(C3C))/c3c; \
 	  cp /tmp/c3i/c3/c3fmt $$(dirname $(C3C))/cfmt 2>/dev/null || true; \
 	  chmod +x $$(dirname $(C3C))/c3c; \
@@ -138,7 +139,7 @@ c3c:
 	  rm -f $(C3C_LIB)/std/std; \
 	  rm -rf /tmp/c3i; \
 	fi
-	@$(C3C) --version | head -1
+	@$(C3C) --version >/dev/null && echo "c3c available: $(C3C)"
 
 # ── Tests ───────────────────────────────────────────────────────────────
 test: test-pfront test-conform test-pear test-pear2 test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering
@@ -379,7 +380,7 @@ clean:
 	# `make test-air` and `make test-air3` could not run until the files were
 	# restored with git. Clean removes what the build produced, never a source:
 	# the check below refuses to finish if any tracked file is missing.
-	rm -f tmp/*.air
+	rm -f tmp/*.air tmp/*.low.air
 	find tmp -name "*.air" -delete 2>/dev/null || true
 	@missing=$$(git ls-files -d '*.air' 2>/dev/null); \
 	 if [ -n "$$missing" ]; then \
@@ -388,3 +389,9 @@ clean:
 	   echo "restore with: git checkout -- ."; exit 1; \
 	 fi
 	@echo "clean: tracked sources untouched"
+
+# A large multi-module Pride application and language-fixture stress workload.
+.PHONY: test-tokei
+test-tokei: pfrontc
+	python3 tests/tokei/test_fixtures.py
+	./tests/tokei/run.sh

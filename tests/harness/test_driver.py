@@ -70,6 +70,18 @@ class DriverTests(unittest.TestCase):
                               "fn main(_) -> i64 { return 0; }\n")
             self.assertNotIn("W4020", self.run_compiler(source, "--dead-code").stdout)
 
+    def test_air_lowering_rejects_oversized_syscall_instead_of_truncating(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "wide_syscall.pie"
+            args = ", ".join(["1"] * 66)
+            source.write_text(f"fn main(_) -> i64 {{ syscall({args}); return 0; }}\n")
+            artifact = source.with_suffix(".air")
+            artifact.unlink(missing_ok=True)
+            result = self.run_compiler(source, "--emit-air", "--quiet")
+            self.assertEqual(3, result.returncode, result.stdout + result.stderr)
+            self.assertIn("too many syscall/atomic operands", result.stdout)
+            self.assertFalse(artifact.exists(), "must not publish truncated AIR")
+
     def test_modules_resolve_by_filename_with_directory_root(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

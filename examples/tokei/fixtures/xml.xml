@@ -1,0 +1,32 @@
+<!-- TODO fixture block for XML -->
+fixture_022_declaration = 22
+
+string_marker_probe = "// # -- /* not comments inside a string"
+fixture_022_inline = 1 <!-- inline note -->
+
+fixture_022_continued = (
+    22 + 3
+)
+<!-- TODO block begins
+block continuation remains a comment
+block closes here -->
+
+array_probe = [1, 2, 3, 5, 8, 13]
+operator_probe = left + right * factor
+quoted_hash_probe = "# is data here"
+unicode_probe = "λ bar μ mu tilde"
+empty_record_probe = {}
+
+generated_call_0(generated_value_-1)
+
+generated_value_2 = 46
+generated_call_3(generated_value_2)
+generated_call_4(generated_value_3)
+
+generated_value_6 = 138
+generated_call_7(generated_value_6)
+stable_order_022 = 22
+branch_probe_022 = if left < right then left else right
+format_probe_022 = "line 22: value={value}"
+padding_probe_022_30 = 30
+final_probe_022 = true

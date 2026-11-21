@@ -4,7 +4,7 @@
 | File | Purpose |
 |---|---|
 | `air.c3` | Public driver (module `air`). `emit_air_program` lowers every loaded module into one `AirModule` and writes the canonical `.air`; `emit_air` is the old pretty dump; `roundtrip_program` is the write/read fingerprint test. |
-| `air_text.c3` | Shared vocabulary of the AIR 2.0 text (keywords, operator and type spellings, quoting). One copy, used by writer and reader. |
+| `air_text.c3` | Shared vocabulary of the AIR 2.x text (keywords, operator and type spellings, quoting). One copy, used by writer and reader. |
 | `air_write.c3` | The canonical `.air` printer (+ `digest_module`, the structural fingerprint the round-trip test uses). |
 | `air_read.c3` | Strict `.air` parser → `AirModule`. Claims (`facts`/`readonly`/`nocapture`) come back as candidates. |
 | `air_verify.c3` | Validity rules V1–V4 and the counted conventions (`airtool verify`). |
@@ -13,7 +13,7 @@
 | `air_scope.c3` | Name supply (`fresh_k_covar`, `fresh_x_var`, `fresh_label`), lexical scope stack with shadow-suffixing, return-covar stack (`push_ret`/`pop_ret`/`current_ret`) so `return` cuts to the innermost fn, loop-label stack. |
 | `air_types.c3` | `PNode` → `AirTyp` translation; primitives (i8..i128/u8..u128/isz/usz/f16/f32/f64/f128/bool/char/str/bytes/unit/bottom/infer/ptr/ref/slice/array/tuple/sum/union/arrow/forall/exists/effrow); name resolution via interner. |
 | `air_lower.c3` | PNode AST → AIR lowering. ~2.7k lines. Walks the post-theory PNode tree, builds an `AirModule` of λ̄μμ̃ terms. Key entry: `lr.module_body(root)`. |
-| `air_emit.c3` | OLD lossy pretty-printer (`--emit-air-pretty`, diagnostic only; not the contract). `air_emit::emit_module(mod, lr, path)` prints clean, stubless AIR 1.0. Applies nop-elimination: `<()|μ̃x.c> → c`, dead-command elision after terminals, redundant unit-let suppression, and `<e|μ̃x.()>` detection for future `let x = e;` sugar. |
+| `air_emit.c3` | OLD lossy pretty-printer (`--emit-air-pretty`, diagnostic only; not the contract). `air_emit::emit_module(mod, lr, path)` prints a legacy, lossy AIR 1.0-style diagnostic form. Applies nop-elimination: `<()|μ̃x.c> → c`, dead-command elision after terminals, redundant unit-let suppression, and `<e|μ̃x.()>` detection for future `let x = e;` sugar. |
 
 ## Calculus recap (λ̄μμ̃, Curien & Herbelin 2000)
 Three syntactic sorts:
@@ -49,7 +49,7 @@ enum E {C(x)}     ≡  data E { C(x) }
   pfront/theory/effects/*.c3 pfront/theory/rewrite/*.c3 \
   pfront/theory/lower/*.c3 pfront/theory/analysis/*.c3 -o pfrontc     # or: make   (no LLVM link any more)
 
-./pfrontc path/to/prog.pie --emit-air       # writes path/to/prog.air (AIR 2.0, see docs/specs/AIR.md)
+./pfrontc path/to/prog.pie --emit-air       # writes path/to/prog.air (AIR 2.2, see docs/specs/AIR.md)
 make airtool && tmp/airtool verify path/to/prog.air
 ```
 

@@ -301,6 +301,11 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
     m.pat_wild=air_mk_pat_wild(a); m.p_true=air_mk_prd_bool(a,true);
     m.p_false=air_mk_prd_bool(a,false); m.p_null=air_mk_prd_null(a);
     m.nop=air_mk_cmd_nop(a,m.p_unit,air_mk_cns_covar(a,a.dup("·",3)));
+    if (a.oom || m.name == null || m.t_unit == null || m.t_i64 == null
+        || m.t_usz == null || m.t_bool == null || m.t_infer == null
+        || m.p_unit == null || m.c_ret == null || m.p_true == null
+        || m.p_false == null || m.p_null == null || m.pat_wild == null
+        || m.nop == null) { return false; }
     // Pre-register libc intrinsics (malloc/free/write) as ADECL_DECLARE so
     // calls from `alloc [...]` / `write` / `free` resolve to external
     // declarations rather than letting the lowerer synthesize zero-return
@@ -309,29 +314,46 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
     {
         // malloc(i64) -> ptr (i8*)
         AirDecl* mal = air_mk_decl(a, ADECL_DECLARE, a.dup("malloc",6));
+        if (mal == null || a.oom) { return false; }
         mal.is_extern = true;
         mal.ret_ty = air_mk_typ_ptr(a, m.t_u8);
+        if (a.oom || mal.ret_ty == null) { return false; }
         AirBinder* mal_p0 = air_mk_binder(a, a.dup("_",1), m.t_i64, AMULT_UNR);
+        if (mal_p0 == null || a.oom) { return false; }
         mal.add_param(mal_p0);
         m.add_decl(mal);
         // free(ptr) -> void
         AirDecl* fr = air_mk_decl(a, ADECL_DECLARE, a.dup("free",4));
+        if (fr == null || a.oom) { return false; }
         fr.is_extern = true;
         fr.ret_ty = m.t_unit;
-        AirBinder* fr_p0 = air_mk_binder(a, a.dup("_",1), air_mk_typ_ptr(a, m.t_u8), AMULT_UNR);
+        AirTyp* free_ptr = air_mk_typ_ptr(a, m.t_u8);
+        if (a.oom || free_ptr == null) { return false; }
+        AirBinder* fr_p0 = air_mk_binder(a, a.dup("_",1), free_ptr, AMULT_UNR);
+        if (fr_p0 == null || a.oom) { return false; }
         fr.add_param(fr_p0);
         m.add_decl(fr);
         // write(i32, ptr, i64) -> i64
         AirDecl* wr = air_mk_decl(a, ADECL_DECLARE, a.dup("write",5));
+        if (wr == null || a.oom) { return false; }
         wr.is_extern = true;
         wr.ret_ty = m.t_i64;
+        AirTyp* write_ptr = air_mk_typ_ptr(a, m.t_u8);
+        if (a.oom || write_ptr == null) { return false; }
         AirBinder* wr_p0 = air_mk_binder(a, a.dup("_",1), m.t_i32, AMULT_UNR);
-        AirBinder* wr_p1 = air_mk_binder(a, a.dup("_",1), air_mk_typ_ptr(a, m.t_u8), AMULT_UNR);
+        AirBinder* wr_p1 = air_mk_binder(a, a.dup("_",1), write_ptr, AMULT_UNR);
         AirBinder* wr_p2 = air_mk_binder(a, a.dup("_",1), m.t_i64, AMULT_UNR);
+        if (a.oom || wr_p0 == null || wr_p1 == null || wr_p2 == null) { return false; }
         wr.add_param(wr_p0); wr.add_param(wr_p1); wr.add_param(wr_p2);
         m.add_decl(wr);
     }
-    return (m.t_unit!=null)&&(m.p_unit!=null)&&(m.c_ret!=null);
+    return !a.oom && (m.t_unit!=null)&&(m.p_unit!=null)&&(m.c_ret!=null)
+        && (m.t_i8!=null)&&(m.t_i16!=null)&&(m.t_i32!=null)&&(m.t_i64!=null)
+        && (m.t_u8!=null)&&(m.t_u16!=null)&&(m.t_u32!=null)&&(m.t_u64!=null)
+        && (m.t_isz!=null)&&(m.t_usz!=null)&&(m.t_f32!=null)&&(m.t_f64!=null)
+        && (m.t_bool!=null)&&(m.t_char!=null)&&(m.t_str!=null)&&(m.t_bytes!=null)
+        && (m.t_bottom!=null)&&(m.t_infer!=null)&&(m.p_true!=null)
+        && (m.p_false!=null)&&(m.p_null!=null)&&(m.pat_wild!=null)&&(m.nop!=null);
 }
 
 // ── Append helpers ───────────────────────────────────────────────────────
