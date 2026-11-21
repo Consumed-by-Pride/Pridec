@@ -71,6 +71,9 @@ struct FnInfo
 {
     Node* decl; char* name; AirTyp* ret; AirTyp*[MAXA] pty; usz np; AirTyp* fnty; bool ext; bool queued; bool seen; bool variadic;
     bool is_arm; long hnd; usz arm_j; bool is_thk; bool is_yld; bool is_drv; bool is_ret; bool is_lam; bool is_ind; bool is_adapt; bool is_dyn; AirTyp* dself; FnInfo* adapt; Cap[MAXC] caps; usz ncaps; AirTyp* envty;
+    bool is_const;          // `fn K : T = v`: a named constant, not a function
+    Node* const_value;      // the value expression of such a constant
+    bool lowering_const;    // set while a const's own value is being lowered
     TSub[MAXTP] ts; usz nts;
 }
 // a function VALUE is the record { fn: ptr, env: ptr(u8) }; `fn` takes the environment as its first argument
@@ -667,6 +670,23 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
     // parameters, its declaration emitted as `extern declare f() : unit`, and its
     // call sites silently lost their arguments (or reported "unit given, i64
     // wanted" when the return type differed).
+    // `fn K : u64 = 7u64` is a named CONSTANT, not a function: the parser gives it
+    // a ty-fn with a single child (the type) and a clause holding the value, so it
+    // is a zero-argument definition whose body is that value. Without this it fell
+    // into sig_of and was refused as "function type shape".
+    if ((d.kind == Nk.N_DECL_FN) && d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN && d.type_ann.child_count == 1)
+    {
+        AirTyp* ct = lw.ty(d.type_ann.children[0]);
+        if (ct == null) { lw.nfn--; return null; }
+        f.np = 0; f.ret = ct;
+        f.is_const = true;
+        // the last child is a `clause` wrapping the value; take the value itself
+        Node* cv = (d.child_count > 0) ? d.children[d.child_count - 1] : null;
+        if (cv != null && cv.kind == Nk.N_CLAUSE && cv.child_count > 0) { cv = cv.children[cv.child_count - 1]; }
+        f.const_value = cv;
+        f.fnty = lw.arrow(&f.pty[0], f.np, f.ret);
+        return f;
+    }
     if ((d.kind == Nk.N_DECL_FN || d.kind == Nk.N_DECL_EXTERN_FN) && d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN)
     {
         if (!lw.sig_of(d.type_ann, &f.pty[0], &f.np, &f.ret)) { lw.nfn--; return null; }
@@ -1767,6 +1787,25 @@ fn Vx Low.read_var(Low* lw, Node* id, AirTyp* want)
         FnInfo* f = lw.fn_for(r);
         if (f == null) { return lw.unit(); }
         lw.queue(f);
+        // A named constant is a zero-argument DEFINITION in the emitted AIR
+        // (`pub def K() : u64 = ret(7 : u64)`), not a variable, so a use of it has
+        // to become a call. Referring to it by bare name leaves the name unbound
+        // for the backend ("jump argument is unbound: K").
+        if (f.is_const && f.lowering_const)
+        {
+            // The const's value refers to the const itself (`fn K : u64 = K` is a
+            // cycle, and a duplicate name in the AST resolves here). Emitting a
+            // call would make K call itself; report the cycle instead.
+            lw.err(id, "a constant's value refers to the constant itself", f.name);
+            return lw.unit();
+        }
+        if (f.is_const)
+        {
+            Ins* ci = lw.push(I_CALL); if (ci == null) { return lw.unit(); }
+            ci.name = lw.fresh("_k"); ci.a = air_ir::air_mk_var(lw.a, f.name); ci.nargs = 0;
+            Vx cr2; cr2.p = air_ir::air_mk_var(lw.a, ci.name); cr2.t = f.ret;
+            return cr2;
+        }
         Vx x; x.p = air_ir::air_mk_var(lw.a, f.name); x.t = f.fnty; return x;
     }
     if (r != null && r.kind == Nk.N_DECL_CONST)
@@ -5445,8 +5484,33 @@ fn void Low.lower_arm(Low* lw, FnInfo* f)
     lw.m.add_decl(ad); lw.fns_ok++;
 }
 
+fn void Low.lower_const(Low* lw, FnInfo* f)
+{
+    // Per-function state must be reset exactly as lower_fn does it. Without the
+    // block list reset, a const lowered after another function reused that
+    // function's blocks and emitted a body calling itself.
+    lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nhx = 0; lw.arm.on = false; lw.nnames = 0; lw.tmpn = 0; lw.unchecked = 0;
+    usz b = lw.blk("entry");
+    lw.cur = b; lw.cur_fn = f.name;
+    lw.fn_errors = 0; lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
+    f.lowering_const = true;
+    Vx v = f.const_value != null ? lw.expr(f.const_value, f.ret) : lw.unit();
+    f.lowering_const = false;
+    if (lw.fn_errors > 0) { lw.fail_fn++; return; }
+    v = lw.coerce_arg(f.const_value, v, f.ret);
+    lw.t_ret(v);
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
+    ad.is_pub = true; ad.ret_ty = f.ret; ad.def_body = lw.assemble();
+    lw.m.add_decl(ad);
+    lw.fns_ok++;
+}
+
 fn void Low.lower_fn(Low* lw, FnInfo* f)
 {
+    // A named constant lowers like a zero-argument definition whose body is the
+    // value: `fn K : u64 = 7u64` becomes `def K() : u64 = ret 7`. Callers refer to
+    // it by name through fn_by_name, so no special call-site handling is needed.
+    if (f.is_const) { lw.lower_const(f); return; }
     lw.nlit = 0; lw.lit_final = false;
     for (int att = 0; att < 6; att++)
     {
