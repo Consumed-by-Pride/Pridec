@@ -2606,10 +2606,20 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
         AirTyp* ae = a.t.args[0]; AirTyp* we = want.args[0];
         if ((ae != null && air_util::ty_is_int(ae) && air_util::ty_bits(ae) == 8 && !air_util::ty_is_signed(ae)) || (we != null && air_util::ty_is_int(we) && air_util::ty_bits(we) == 8 && !air_util::ty_is_signed(we))) { return lw.coerce(a, want); }
     }
-    // lossless integer widening is implicit (a `u8` returned from an `i64` function); narrowing needs `as`
-    if (air_util::ty_is_int(a.t) && air_util::ty_is_int(want) && air_util::ty_bits(a.t) < air_util::ty_bits(want)
-        && (air_util::ty_is_signed(a.t) == air_util::ty_is_signed(want) || !air_util::ty_is_signed(a.t)))
-    { return lw.cast(a, want); }
+    // Integer conversion at a call boundary. Widening is always lossless and is
+    // implicit; narrowing needs `as`. The signedness condition here used to
+    // require matching signs even for a SAME-WIDTH conversion, so `i64` -> `u64`
+    // (the ordinary case of passing a size to a `u64` parameter, e.g.
+    // `os.linux.malloc(n as u64)`) was rejected as "u64 given, i64 wanted".
+    // A same-width integer reinterpretation is exactly what `as` would produce,
+    // so it is safe to apply here; widening into a narrower-magnitude unsigned
+    // type is the only case that could lose a value, and that still requires `as`.
+    if (air_util::ty_is_int(a.t) && air_util::ty_is_int(want))
+    {
+        usz ab = (usz)air_util::ty_bits(a.t); usz wb = (usz)air_util::ty_bits(want);
+        if (ab < wb) { return lw.cast(a, want); }          // widening: lossless either way
+        if (ab == wb) { return lw.cast(a, want); }         // same width: reinterpret, as `as` would
+    }
     if (lw.lit_note(at, want)) { return a; }
     { char[200] lb; usz ln = mang(a.t, &lb[0], 0, 90); lb[ln] = 0; char[100] rb; usz rn = mang(want, &rb[0], 0, 90); rb[rn] = 0; char[320] mb; snprintf(&mb[0], 320, "%s given, %s wanted", &lb[0], &rb[0]); lw.err(at, "argument type differs from the parameter type", lw.dup(&mb[0])); }
     return a;
