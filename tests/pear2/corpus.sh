@@ -66,7 +66,13 @@ fi
 
 W=tmp/pear2-corpus; rm -rf "$W"; mkdir -p "$W"
 declare -A cnt; : > "$W/rows.tsv"
-expect_of() { grep -m1 '^-- EXPECT:' "$1" | sed 's/^-- EXPECT: //'; }
+# Decode \n and \t in an EXPECT line, exactly as tests/exec/run.sh does. The
+# sed-based version this replaces dropped the escape *and* the trailing newline,
+# so `-- EXPECT: HI\n` asked for `HI` and a correct program was reported WRONG.
+# `$(...)` strips every trailing newline, so `printf '%b'` alone turns
+# `-- EXPECT: HI\n` into `HI` and a correct program is reported WRONG. The
+# sentinel keeps whatever trailing newlines the header asked for.
+expect_of() { v=$(grep -m1 '^-- EXPECT:' "$1" | sed 's/^-- EXPECT: //' || true); [ -z "$v" ] && return 0; d=$(printf '%b' "$v"; printf X); printf '%s' "${d%X}"; }
 exit_of() {
     v=$(grep -m1 '^-- LOW-EXIT:' "$1" | sed 's/^-- LOW-EXIT: *//')
     [ -z "$v" ] && v=$(grep -m1 '^-- EXIT:' "$1" | sed 's/^-- EXIT: *//')
@@ -125,11 +131,16 @@ for f in "${files[@]}"; do
         elif ! python3 scripts/ll-exe.py "$ll" -o "$W/$id.exe" -O2 $(rt_args "$ll") >"$W/$id.b" 2>&1; then
             st=LLVM; why=$(grep -m1 -i 'error\|invalid\|verifier\|undefined' "$W/$id.b" | cut -c1-110)
         else
-            want=$(expect_of "$f"); wx=$(exit_of "$f")
-            got=$(timeout 5 "$W/$id.exe" 2>/dev/null; echo "rc=$?")
-            grc=${got##*rc=}; got=${got%rc=*}
-            wantd=$(printf '%b' "$want")
-            if [ "$grc" = "$wx" ] && { [ -z "$want" ] || [ "$got" = "$wantd" ]; }; then
+            # The sentinel has to be applied *here*: expect_of preserves a trailing
+            # newline in its output, but this command substitution would strip it
+            # straight back off.
+            wantd=$(expect_of "$f"; printf X); wantd=${wantd%X}; wx=$(exit_of "$f")
+            # The sentinel matters here too: `$(...)` strips trailing newlines, so
+            # a program that prints `HI\n` and one that prints `HI` would look
+            # identical, and a program that prints an extra blank line would pass.
+            got=$(timeout 5 "$W/$id.exe" 2>/dev/null; x=$?; printf X; echo "rc=$x")
+            grc=${got##*rc=}; got=${got%rc=*}; got=${got%X}
+            if [ "$grc" = "$wx" ] && { [ -z "$wantd" ] || [ "$got" = "$wantd" ]; }; then
                 st=PASS
             else
                 st=WRONG; why="exit $grc (want $wx), stdout '$(printf '%s' "$got" | head -c 40)' (want '$(printf '%s' "$wantd" | head -c 40)')"

@@ -4,7 +4,16 @@
 # QEMU is looked up on PATH, then in ~/.local/qemu (scripts/get-qemu.sh installs it without root); without it the run is SKIPPED, not passed.
 set -u
 cd "$(dirname "$0")/../.."
-export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
+# libLLVM lives wherever the toolchain bootstrap put it (apt layout in
+# ~/.cache/llvm23, npm layout under node_modules); a wrong guess reads as "every
+# program failed to link" and looks like a compiler bug.
+_llvm_ld=""
+for _d in "$HOME/.cache/llvm23" \
+          "$HOME/.cache/llvm23/node_modules/llvm-runtime-clang-linux-x64/lib" \
+          "/usr/lib/x86_64-linux-gnu"; do
+    if [ -e "$_d/libLLVM-23.so" ] || [ -e "$_d/libLLVM.so.23.1" ]; then _llvm_ld="$_d"; break; fi
+done
+export LD_LIBRARY_PATH="${_llvm_ld:-$HOME/.cache/llvm23}:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 W=tmp/boot; rm -rf "$W"; mkdir -p "$W"
 fail=0; bad() { echo "FAIL: $*"; fail=1; }
 PFRONT_LOW_OUT=$W/os.low.air ./pfrontc tests/air3/prog_os/mini_os.pie --emit-air-low --quiet >$W/f.log 2>&1; [ -f $W/os.low.air ] || { bad "pfrontc: no .air: $(grep -m2 'error' $W/f.log | tr '\n' ' ')"; exit 1; }

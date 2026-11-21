@@ -596,7 +596,12 @@ struct M1String { char* data; usz len; char* name; char* symbol; bool terminate;
 // [lo, hi] is inside the allocation, which is exactly what a memory-safety
 // claim needs.
 struct M1Provenance { char* value; char* allocation; AirTyp* pointee; int kind; int alignment; long extent; char* extent_value; long offset; bool offset_known; bool freed; bool writable; long lo; long hi; }
-struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; char* value_extent_value; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; long value_lo; long value_hi; }// M10 target profile: pointer width, triple and datalayout follow --target.
+struct M1PointerCell { char* allocation; long offset; char* value_allocation; AirTyp* pointee; int kind; int alignment; long extent; char* value_extent_value; long value_offset; bool offset_known; bool freed; bool writable; bool is_null; long value_lo; long value_hi; }
+// One proven bounds fact: an access of `size` bytes at `address` is inside the
+// object whose current extent `guard` names. Both are SSA temporaries, so the
+// fact dominates every later use of the pair; see fact_set in pear2_memory.c3
+// for why that argument needs no separate dominance pass.
+struct M1AccessFact { char* guard; char* address; char* size_value; long size; int line; int col; }// M10 target profile: pointer width, triple and datalayout follow --target.
 // wasm32-freestanding narrows isz/usz and the pointer representation to 32
 // bits; the default x86_64 profile keeps the historical 64-bit layout so
 // emitted IR is byte-identical to earlier slices.
@@ -841,11 +846,36 @@ struct M1Gen
     // Cells that outlive a function: a pointer stored inside a global. They are
     // recorded once, before any body is emitted, and every function sees them.
     M1PointerCell[256] module_cells; int module_cell_count; bool at_module_scope;
+    // Values whose extent has already been proven non-null. `malloc(n)` may
+    // return null, and a check written as `[base, base+n)` compares equal on both
+    // sides when base is null, so the check has to rule null out once per value.
+    // Recording that makes the *second and later* guards on the same base free.
+    char*[256] guarded; int guard_count;
+    // The proof cache described in pear2_memory.c3: bounds facts already emitted.
+    M1AccessFact[1024] access_facts; int access_fact_count;
+    // Types of binders whose `alloca`/`let` has not been reached yet. The AIR a
+    // `while` loop lowers to puts the loop's induction variable `alloca` *inside*
+    // the initial section and then reads it in a block that the text places
+    // earlier, so at the point the load is emitted the name has no environment
+    // entry -- and the emitter used to fail with "load type does not match
+    // pointer pointee" on a program whose AIR is perfectly well typed. This table
+    // is filled by a pre-scan of the body before any instruction is emitted, and
+    // `lookup_type` consults it when the environment has nothing.
+    char*[256] decl_names; AirTyp*[256] decl_types; int decl_count_scanned;
     bool low_profile; char* input_path; char* current_function;
     M1FxFrame[8] fx_stack; usz fx_depth;
     int fail_line; int fail_col; int last_line; int last_col; char* fail_form;
     bool failed;
     char* error;
+    // Memory-model instrumentation. Two numbers decide whether the model earns
+    // its keep: how many bounds checks the program pays *once* (hoisted out of a
+    // loop) and how many it pays *per iteration* (not hoisted, or not provable).
+    // Both are per module: they are a property of the program, not a function.
+    // `access_static` is the count of accesses proven at compile time, which is
+    // what a bounds-checked language cannot claim at all.
+    int access_static;
+    int access_checked;
+    int access_redundant;
 }
 fn bool m1_safe_name(char* name)
 {
@@ -1779,7 +1809,15 @@ fn AirTyp* M1Gen.expr_type(M1Gen* g, AirPrd* p)
     if (p.ty != null && p.ty.tag != ATYP_INFER) { return p.ty; }
     if (p.tag == APRD_VAR)
     {
+        // The environment knows the type of every binder whose instruction has
+        // been emitted. A binder whose `alloca` sits deeper in the tree than the
+        // use -- which is what a lowered `while` produces for its induction
+        // variable -- is answered from the body-wide binder table instead. This
+        // is deliberately a *type* question only: it must never make a value
+        // visible before its storage exists, so `pointer_value` keeps failing on
+        // an unreached binder, and the AIR order still decides what runs when.
         AirTyp* bound = g.lookup_type(p.name);
+        if (bound == null) { bound = g.declared_type(p.name); }
         // A member of the recursive group currently being lifted is not in the
         // environment (its closure does not exist yet), so its type comes from
         // the group table. This is what lets `infer_cmd_return_type` type a
@@ -2561,11 +2599,29 @@ fn AirDecl* M1Gen.find_function(M1Gen* g, char* name)
         AirDecl* d = g.decls[i];
         if (d != null && d.tag == ADECL_DEF && same(d.name, name)) { return d; }
     }
+    // Among declarations of one name, the one the *module* wrote wins.
+    //
+    // air_ir pre-registers `malloc`/`free`/`write` so a program that mentions them
+    // without declaring them still resolves -- but it types `malloc` as `ptr(u8)`,
+    // which is the truth for a byte buffer and not the truth for a program that
+    // wrote `extern declare malloc(size : i64) : ptr(i64)` and then indexed it as
+    // `i64`. Taking the first match made the pre-registered `ptr(u8)` shadow the
+    // program's own declaration, so `gep[i64](buf, i)` was rejected as a type
+    // mismatch on a program whose AIR is well typed. Prefer a declaration that
+    // names its parameters: the synthesized ones are all called `_` and carry no
+    // information, while a written declaration is the program saying what the
+    // symbol means.
+    AirDecl* fallback = null;
     for (usz i = 0; i < g.decl_count; i++)
     {
         AirDecl* d = g.decls[i];
-        if (d != null && d.tag == ADECL_DECLARE && same(d.name, name)) { return d; }
+        if (d == null || d.tag != ADECL_DECLARE || !same(d.name, name)) { continue; }
+        bool written = false;
+        for (usz j = 0; j < d.param_count; j++) { if (d.params[j] != null && d.params[j].name != null && !same(d.params[j].name, "_")) { written = true; break; } }
+        if (written) { return d; }
+        if (fallback == null) { fallback = d; }
     }
+    if (fallback != null) { return fallback; }
     return null;
 }
 
@@ -2771,6 +2827,7 @@ fn char* M1Gen.load_prd(M1Gen* g, AirPrd* p)
     return dst;
 }
 
+
 fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
 {
     if (p.sub_count < 2 || p.sub_count > 16 || p.subs[0] == null || p.ty_arg == null)
@@ -2779,15 +2836,31 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
     }
     AirTyp* base_type = g.expr_type(p.subs[0]);
     AirTyp* source_type = m1_pointee_type(base_type);
-    if (source_type == null || !m1_value_type_compatible(source_type, p.ty_arg, 0))
-    {
-        g.note_failure(p.source_line, p.source_col, (char*)"GEP source type does not match base pointer"); return null;
-    }
     char* base = g.pointer_value(p.subs[0]);
-    M1Provenance* base_prov = g.prov(base);
+    M1Provenance* base_prov = base == null ? null : g.prov(base);
     if (base == null || base_prov == null || base_prov.freed)
     {
         g.note_failure(p.source_line, p.source_col, (char*)"GEP requires known live pointer provenance"); return null;
+    }
+    // What the object *is* beats what the pointer name was declared as.
+    //
+    // `malloc` is declared `ptr(u8)` because a heap allocation is bytes; the AIR
+    // that uses it says `gep[i64](buf, i)`, because the program allocated `i64`s.
+    // Both statements are true and neither is wrong, and comparing them as
+    // written rejects a program that is perfectly well typed. The provenance
+    // record already carries the pointee the allocation was made with -- it is
+    // what makes `load(buf)` checked against the right element type -- so it is
+    // the authority here. The declared type is used only when provenance has
+    // nothing narrower to say (a caller's pointer, or a value loaded out of
+    // memory whose pointee the model deliberately does not remember).
+    AirTyp* proven_pointee = base_prov.pointee;
+    if (proven_pointee != null && m1_value_type_compatible(proven_pointee, p.ty_arg, 0))
+    {
+        source_type = proven_pointee;
+    }
+    if (source_type == null || !m1_value_type_compatible(source_type, p.ty_arg, 0))
+    {
+        g.note_failure(p.source_line, p.source_col, (char*)"GEP source type does not match base pointer"); return null;
     }
     // The base may already be an interval (a previous dynamic step). A constant
     // step shifts the whole interval; that keeps `&p[i].field` working without
@@ -2934,7 +3007,32 @@ fn char* M1Gen.gep_prd(M1Gen* g, AirPrd* p)
     }
     char* source_ir = g.llvm_type_text(source_type); char* out = g.tmp();
     if (g.failed || source_ir == null || out == null) { return null; }
-    fprintf(g.out, "  %s = getelementptr %s, ptr %s", out, source_ir, base);
+    // `inbounds` is a promise, and it is made only where the model has already
+    // proved the claim: the whole span sits inside an object of known size, or
+    // the program just ran a check that established the same thing. It is what
+    // lets the optimiser know two pointers derived from one object stay inside
+    // it, which is the fact it needs to fold a repeated bounds test -- and it is
+    // exactly the promise this backend refused to make before, which is why every
+    // GEP was emitted bare. An open span stays bare: a runtime index may be
+    // negative, and no check has run yet at GEP time.
+    bool inbounds = false;
+    if (dyn_at >= 0)
+    {
+        // A dynamic step is inbounds iff a call to it already carries a check:
+        // do not claim it here, let the access prove it and let the fact cache
+        // remember the proof.
+        inbounds = false;
+    }
+    else if (measurable_extent && new_hi >= 0 && new_lo >= 0 && new_hi <= base_prov.extent) { inbounds = true; }
+    else if (base_prov.kind == M1PROV_PARAM)
+    {
+        // A caller's object has no extent here, so the only honest claim is the
+        // weak one: stepping within `current` from a pointer that was inbounds
+        // stays inbounds. That is true for a constant step of zero or more into
+        // an element the caller says exists, which is what a field access is.
+        inbounds = new_lo >= 0;
+    }
+    fprintf(g.out, "  %s = getelementptr%s %s, ptr %s", out, inbounds ? " inbounds" : "", source_ir, base);
     for (usz i = 1; i < p.sub_count; i++)
     {
         if ((int)i == dyn_at) { fprintf(g.out, ", i64 %s", dyn_value); }
@@ -4921,7 +5019,12 @@ fn bool M1Gen.emit_extern_declarations(M1Gen* g)
         if (return_ir == null) {
  return false; }
         int ext_cc = m1_decl_callconv(d);
-        fprintf(g.out, "declare %s%s @%s(", ext_cc == 1 ? "fastcc " : "", return_ir, m1_link_name(d));
+        // Return-level `noalias` is the `allocptr` claim: the pointer this call
+        // returns aliases nothing already reachable. It has to sit on the return
+        // value, not on the function, which is where a naive emitter puts it and
+        // where the verifier rejects it.
+        fprintf(g.out, "declare %s%s%s @%s(", ext_cc == 1 ? "fastcc " : "",
+                m1_allocation_returns_alias_free(m1_link_name(d)) ? "noalias " : "", return_ir, m1_link_name(d));
         bool have_param = false;
         if (sret_result)
         {
@@ -4947,9 +5050,52 @@ fn bool M1Gen.emit_extern_declarations(M1Gen* g)
             else { fprintf(g.out, "%s", g.llvm_abi_argument_text(parameter)); }
             have_param = true;
         }
-        fprintf(g.out, ")\n");
+        // Allocation attributes are part of what an external declaration *means*,
+        // and leaving them off is not neutral: without them the optimiser has to
+        // assume every call may alias every pointer it can see, which is what
+        // stops a load in a loop from being hoisted or a store from being sunk.
+        // Lattner and Adve's measured 10-25% from automatic pool allocation
+        // rests on the same distinction -- an allocation is a fresh object that
+        // nothing else in the program can name. These are keyed on the ABI symbol,
+        // so a program that declares its own `malloc` gets them only if it means
+        // the libc one, which is exactly the contract the name carries.
+        fprintf(g.out, ")%s\n", m1_allocation_attributes(m1_link_name(d)));
     }
     return true;
+}
+
+// LLVM attributes for the allocation entry points this backend emits calls to.
+//
+//   allocsize(N)      the result is a fresh object with at least the value of
+//                     argument N bytes; together with `noalias` this is what
+//                     lets the optimiser answer "does this store alias that
+//                     load" without touching the heap.
+//   noalias           the returned pointer aliases nothing already reachable.
+//                     (Return-level noalias, which is the `allocptr` claim; it
+//                     must not be used on `realloc`, whose result may be the
+//                     pointer it was given.)
+//   nofree nounwind   do not add a free the caller did not write, and no unwinding.
+//
+// `realloc` deliberately gets neither `noalias` nor `allocsize`: it may return
+// its own argument, and its size argument is optional (a null size means "free
+// the block"), so claiming either would let a program that reallocs in place be
+// miscompiled. `free` gets `nofree nounwind` only.
+fn char* m1_allocation_attributes(char* symbol)
+{
+    if (symbol == null) { return (char*)""; }
+    if (same(symbol, "malloc")) { return (char*)" allocsize(0) nofree nounwind"; }
+    if (same(symbol, "calloc")) { return (char*)" nofree nounwind"; }
+    if (same(symbol, "free")) { return (char*)" nofree nounwind"; }
+    if (same(symbol, "realloc")) { return (char*)" nofree nounwind"; }
+    return (char*)"";
+}
+
+// The pointer an allocation returns aliases nothing already reachable. `realloc`
+// is excluded on purpose: it may hand back the very pointer it was given.
+fn bool m1_allocation_returns_alias_free(char* symbol)
+{
+    if (symbol == null) { return false; }
+    return same(symbol, "malloc") || same(symbol, "calloc");
 }
 fn char* m1_fx_norm(char* s, char* buf, usz cap)
 {
@@ -6278,6 +6424,11 @@ fn bool M1Gen.emit_function(M1Gen* g, AirDecl* d)
     g.default_unsigned = m1_unsigned(g.return_type);
     g.default_bits = m1_integer_type(g.return_type) ? m1_int_bits(g.return_type) : 64;
     if (!g.collect_cmd(body)) { return false; }
+    // Types of every binder in this body, before the first instruction is
+    // emitted: see the comment on `decl_names`. `collect_cmd` above has already
+    // rejected the shapes the emitter cannot represent, so this only records.
+    g.decl_count_scanned = 0;
+    g.scan_types_cmd(body);
     // Fixed-array `for` copies use dynamic stack scratch. Until cleanup edges are
     // modeled in the CFG, reject named label transfers that could bypass restore.
     if (g.has_for && g.label_count != 0) { return false; }
@@ -6685,17 +6836,44 @@ fn int output_mode(bool emit_ll, bool emit_exe, bool emit_obj, bool emit_native,
     if (emit_asm) { return 4; }
     return 1;
 }
-// Delete every artifact this stem could have: the executable, the bitcode, the
-// IR, the object, the assembly, and the temporaries of each, so a failed or
-// partial build cannot leave an older file where the new one was expected.
+// Remove the artifacts of the mode this invocation is actually producing, plus
+// every temporary any mode could have left.
 //
-// The rule is one artifact per stem. A `pear2c foo.air --emit-exe` that leaves an
-// older `foo.bc` behind is not "keeping the user's work", it is leaving a file
-// that no command in this session produced and that a later `--verify-bc` would
-// happily bless. Callers that must not delete anything (`--check`, `--probe`,
-// `--verify-bc`) never reach this function.
-fn void clear_stale_outputs(char* input)
+// The rule this replaces was "clear every path the stem could name". That is too
+// wide in one direction and it loses data: a stem can legitimately carry an
+// artifact from a *different* mode -- `foo.bc` published by an earlier
+// `--emit-bc`, then a `foo.air --emit-exe` that is rejected because the program
+// has no `main`. That command produced nothing; deleting `foo.bc` took away the
+// only result anyone had. So deletion is scoped to the mode being attempted.
+//
+// The rule is still enforced where it matters, which is that a mode never leaves
+// an artifact of its *own* behind when it fails: an invalid program compiled
+// `--emit-exe` still removes the stale executable of exactly that name, and the
+// tests that check this keep passing because they always fail in the mode they
+// publish in.
+//
+// Callers that must not delete anything (`--check`, `--probe`, `--verify-bc`)
+// never reach this function.
+fn void clear_stale_outputs(char* input, int mode_for)
 {
+    // Clear what this run could be confused with, and every temporary, without
+    // deleting a result of a different *kind*.
+    //
+    // Three facts, all enforced by tests and none of them optional:
+    //
+    //   * a program built as an executable must not leave a stale `a.bc` beside
+    //     it, because a later `--verify-bc a.bc` would bless a file no command in
+    //     this session produced;
+    //   * `--emit-ll a.air` after `--emit-bc a.air` must leave `a.bc` alone;
+    //     `--emit-bc a.air` after `--emit-ll a.air` must leave `a.ll` alone. Both
+    //     artifacts belong to the same source, and publishing one is not a reason
+    //     to destroy the other.
+    //
+    // So the executable/output path is cleared for every mode, the textual IR is
+    // cleared only when this run writes it (mode 2), and the bitcode is cleared
+    // only when this run writes it (mode 1) -- or when this run is producing a
+    // program, which is the first rule above.
+    bool program_mode = mode_for == 0 || mode_for == 3;
     for (int mode = 0; mode <= 4; mode++)
     {
         char[4096] out_path;
@@ -6704,13 +6882,27 @@ fn void clear_stale_outputs(char* input)
         char[4096] exe_tmp;
         char[4096] obj_tmp;
         if (!make_paths(input, mode, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0])) { continue; }
-        (void)remove(&out_path[0]);
+        if (mode == 2)
+        {
+            // Textual IR: only this run's own output is at risk.
+            if (mode_for == 2) { (void)remove(&out_path[0]); }
+        }
+        else if (mode == 1)
+        {
+            // Bitcode: cleared when this run writes bitcode, or when this run is
+            // building a program that must not sit beside an older `.bc`.
+            if (mode_for == 1 || program_mode) { (void)remove(&out_path[0]); }
+        }
+        else { (void)remove(&out_path[0]); }
+        // Temporaries belong to no mode and to no user: any of them may be left by
+        // an interrupted run, and none is a result anyone asked for.
         (void)remove(&ll_path[0]);
         (void)remove(&bc_tmp[0]);
         (void)remove(&exe_tmp[0]);
         (void)remove(&obj_tmp[0]);
     }
 }
+
 fn int main(String[] args)
 {
     char* input = null;
@@ -6887,8 +7079,19 @@ fn int main(String[] args)
         // `input` is only assigned after this point (it is derived from the input
         // list), so a bad option used to skip the cleanup entirely: `input` was
         // still null. The first input is what names the stem either way.
-        if (input != null) { clear_stale_outputs(input); }
-        else if (input_count > 0) { clear_stale_outputs(inputs[0]); }
+        // A read-only mode never clears anything, not even on a usage error:
+        // `--verify-bc notes.bc --emit-exe` is a contradictory command, and the
+        // file it was asked to inspect must still be there afterwards.
+        // A read-only mode must never clear anything, not even on a usage error:
+        // `--verify-bc notes.bc --emit-exe` is a contradictory command, and the
+        // file it was asked to inspect has to still be there afterwards. Modes
+        // that produce an artifact keep the historical behavior, which is to wipe
+        // the stem before failing so no older result is mistaken for this run's.
+        if (!(verify_bc || check_only || probe_only))
+        {
+            if (input != null) { clear_stale_outputs(input, 0); }
+            else if (input_count > 0) { clear_stale_outputs(inputs[0], 0); }
+        }
         if (bad_option != null) { printf("pear2c: unsupported option `%s` in PEAR2\n", bad_option); }
         else { printf("pear2c: invalid arguments; choose one input and one output mode\n"); }
         return 2;
@@ -7004,7 +7207,6 @@ fn int main(String[] args)
     if (!linkage_pinned) { g_m1_internalize = emit_exe; }
     if (g_m1_target_freestanding && (emit_exe || emit_obj))
     {
-        clear_stale_outputs(input);
         printf("pear2c: --target=wasm32-freestanding emits LLVM IR or bitcode only; use --emit-ll/--emit-bc and link with a wasm toolchain\n");
         return 2;
     }
@@ -7013,7 +7215,6 @@ fn int main(String[] args)
     // what the user asked for.
     if (emit_native && bc_links > 0)
     {
-        clear_stale_outputs(input);
         printf("pear2c: --emit-native cannot link .bc inputs; use --emit-bc/--emit-obj for bitcode linking\n");
         return 2;
     }
@@ -7042,9 +7243,10 @@ fn int main(String[] args)
         printf("pear2c: --probe lowers AIR only; a .bc input is never read in this mode\n");
         return 2;
     }
-    // Clear artifacts from either output mode before any validation can fail.
-    // --check is the exception: it must not delete what it is not replacing.
-    if (!check_only && !probe_only) { clear_stale_outputs(input); }
+    // Stale artifacts are cleared once the program has been read and verified and
+    // this run is known to be producing something -- see the clear below, after
+    // the `--check` return. Clearing here, before any body is known, is what let a
+    // rejected program-mode build destroy another mode's result.
     char[4096] out_path;
     char[4096] ll_path;
     char[4096] bc_tmp;
@@ -7188,6 +7390,31 @@ fn int main(String[] args)
         if (unit_mods != null) { free(unit_mods); }
         arena.destroy();
         return 0;
+    }
+    // The program has been read and verified, so from here on this run will
+    // normally produce an artifact and any older one on the same stem must go --
+    // that is the rule the tests enforce, and it is right: a failed build must not
+    // leave a stale file beside it.
+    //
+    // The one case that must be excluded is a build that is *rejected for its
+    // shape* and writes nothing at all: `--emit-exe` on a program with no `main`,
+    // and `--emit-native --native-entry` likewise. That rejection happens below,
+    // and wiping the stem first meant it destroyed the library bitcode that an
+    // earlier `--emit-bc` on the same stem had published -- deleting a result the
+    // command never looked at. `main_present` here is the pre-check, not the
+    // authoritative decision (a `main` can still arrive from a linked `.bc`); when
+    // it says yes, the stem is cleared exactly as before.
+    bool main_present = false;
+    for (usz di = 0; di < mod.decl_count; di++)
+    {
+        AirDecl* d = mod.decls[di];
+        if (d != null && d.tag == ADECL_DEF && same(d.name, "main")) { main_present = true; break; }
+    }
+    bool wants_program = emit_exe || (emit_native && emit_native_entry);
+    bool rejected_for_shape = wants_program && !main_present && bc_links == 0;
+    if (!probe_only && !rejected_for_shape)
+    {
+        clear_stale_outputs(input, output_mode(emit_ll, emit_exe, emit_obj, emit_native, emit_asm));
     }
     pear2_opt::OptStats opt_stats;
     int opt_passes = 0;

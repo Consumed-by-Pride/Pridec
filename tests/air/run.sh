@@ -83,8 +83,17 @@ rt_list="tests/exec/01_hello.pie tests/exec/12_struct_ops.pie tests/exec/pear/p0
 [ "${AIR_RT_FULL:-0}" = 1 ] && rt_list=$(cat "$W/sources.txt")
 for src in $rt_list; do
     d=$(dirname "$src"); b=$(basename "$src")
-    out=$( cd "$d" && timeout 300 "$OLDPWD/$PF" "$b" --air-roundtrip -O2 --quiet 2>&1 )
-    if echo "$out" | grep -q "errors=[1-9]"; then continue; fi          # does not compile: nothing to round-trip
+    # Round-tripping needs the AIR *reader*, which pfrontc no longer links: the
+    # front end writes AIR and stops at that boundary. So the loop goes through
+    # the front end twice -- .pie -> .air by pfrontc, .air -> .air by airtool --
+    # which is also the shape a real round trip takes.
+    staged="$W/rt.air"
+    emit=$( cd "$d" && timeout 300 "$OLDPWD/$PF" "$b" --emit-air-low --quiet 2>&1 )
+    if echo "$emit" | grep -q "errors=[1-9]"; then continue; fi         # does not compile: nothing to round-trip
+    cp "$d/${b%.*}.low.air" "$staged" 2>/dev/null || cp "$d/${b%.*}.air" "$staged" 2>/dev/null || true
+    [ -f "$staged" ] || { bad "roundtrip/$src: no .air was produced by the front end"; continue; }
+    out=$(timeout 300 "$AT" roundtrip "$staged" 2>&1)
+    if echo "$out" | grep -q "errors=[1-9]"; then continue; fi
     echo "$out" | grep -q "roundtrip: structure identical" || { bad "roundtrip/$src: structure: $(echo "$out" | grep roundtrip | head -1)"; continue; }
     # a few shapes crash the legacy PEAR itself (tracked in the exec ledger); the structural result still counts
     if echo "$out" | grep -q "roundtrip: bitcode identical"; then ok

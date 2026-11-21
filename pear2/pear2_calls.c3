@@ -397,13 +397,13 @@ fn bool M1Gen.call(M1Gen* g, AirPrd* callee, AirCns* k, char* ret_name)
     // keeps the signature identical on both sides of a self call, which is
     // exactly the case the marker is for.
     char* tail_text = m1_cns_delivers_to_return(k.tail, ret_name, 0) ? (char*)"tail " : (char*)"";
-    if (result_unit || sret_result) { fprintf(g.out, "  call %s%svoid ", tail_text, call_cc_text); }
+    if (result_unit || sret_result) { fprintf(g.out, "  %scall %svoid ", tail_text, call_cc_text); }
     else
     {
         dst = g.tmp();
         if (dst == null) {
  return false; }
-        fprintf(g.out, "  %s = call %s%s%s ", dst, tail_text, call_cc_text, call_result_type);
+        fprintf(g.out, "  %s = %scall %s%s ", dst, tail_text, call_cc_text, call_result_type);
     }
     if (direct) { fprintf(g.out, "@%s(", m1_link_name(target)); }
     else { fprintf(g.out, "%s(", indirect_value); }

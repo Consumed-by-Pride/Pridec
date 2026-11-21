@@ -230,7 +230,11 @@ $(AIRTOOL): $(CONSUMER_SRC) | c3c
 PEAR2_BIN := pear2/pear2c
 PEAR2_SRC := pfront/pfront_core.c3 $(AIR_CORE) $(AIR_USE) pfront/pear_ir/air_facts.c3 pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3
 PEAR2_LDFLAGS ?= -L $(LLVM23_LIBDIR) -l LLVM-23
-LLVM23_BIN ?= $(LLVM23_DIR)/bin
+# The npm runtime layout and the apt layout differ: one puts the binaries in
+# `bin/` beside `lib/`, the other has `bin/` at the top. Resolving the directory
+# that actually contains clang is what makes `make test-pear2` runnable instead of
+# passing `PEAR2_CLANG=/clang` and failing with "LLVM clang not found".
+LLVM23_BIN ?= $(if $(wildcard $(LLVM23_DIR)/bin/clang),$(LLVM23_DIR)/bin,$(if $(wildcard $(LLVM23_DIR)/llvm-runtime-clang-linux-x64/bin/clang),$(LLVM23_DIR)/llvm-runtime-clang-linux-x64/bin,$(LLVM23_DIR)/bin))
 PEAR2_CLANG ?= $(LLVM23_BIN)/clang
 pear2c: $(PEAR2_BIN)
 	ln -sf $(PEAR2_BIN) pear2c
@@ -290,7 +294,7 @@ probe-pear2: $(PEAR2_BIN)
 # LLVM, then run LLVM-independent arithmetic model tests. This does not replace
 # executing the optimizer or backend fixtures.
 check-pear2: | c3c
-	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) pfront/pfront_core.c3 $(AIR_CORE) $(AIR_USE) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) pfront/pfront_core.c3 $(AIR_CORE) $(AIR_USE) pfront/pear_ir/air_facts.c3 pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
 	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
 	bash -n tests/pear2/run.sh
 	bash -n tests/pear2/native.sh
