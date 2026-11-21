@@ -2839,6 +2839,9 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_EXPR_ASM: return lw.asm_(n);
         case Nk.N_EXPR_METHOD:
         {
+            // `a.b.c(x)` / `module.fn(x)`: the path is resolved by name to a declaration
+            // or a module, never evaluated as an expression, so mark it here.
+            if (lw.audit && n.child_count > 0 && n.children[0] != null) { air_audit::mark_tree(n.children[0]); }
             if (n.child_count > 0 && n.children[0] != null && n.children[0].resolved != null && n.children[0].resolved.kind == Nk.N_DECL_EFFECT)
             {
                 Node* eff = n.children[0].resolved; Node* op = lw.effect_op(eff, lw.dname(n));
@@ -2980,6 +2983,10 @@ fn Vx Low.struct_lit(Low* lw, Node* n, AirTyp* want)
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* fi = n.children[i];
+        // A field initialiser is consumed by name: `AstArena { nodes: x }` reads
+        // the identifier `nodes` to pick the field, never through expr(). Mark it
+        // or every struct literal reports its field names as unlowered.
+        if (lw.audit && fi != null) { air_audit::mark_tree(fi); }
         if (fi == null || fi.kind != Nk.N_EXPR_FIELD_INIT) { continue; }
         char* fnm = lw.text(fi); long k = -1;
         AirTyp* ft = fnm == null ? null : lw.field_ty(st, fnm, &k);
