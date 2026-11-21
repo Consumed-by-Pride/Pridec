@@ -62,6 +62,19 @@ enum AirFactState : int { AFACT_UNKNOWN, AFACT_AST_FINAL, AFACT_AIR_CHECKED }
 // ── Arena ─────────────────────────────────────────────────────────────────
 const usz AIR_SLAB_SIZE = 1024 * 1024;
 const usz AIR_MAX_SLABS = 256;
+// Exhaustion is a real failure mode (256 slabs of 1 MiB) but it needs a
+// quarter-gigabyte source to happen by accident, so the recovery path was
+// unreachable in every test. AIR_TEST_SLABS lowers the ceiling so a test can
+// drive the path in milliseconds; when it is unset the compiled limit is used.
+extern fn char* getenv(char* name);
+fn usz air_max_slabs() {
+    char* e = getenv((char*)"AIR_TEST_SLABS");
+    if (e == null || e[0] == 0) { return AIR_MAX_SLABS; }
+    usz v = 0; usz i = 0;
+    while (e[i] >= '0' && e[i] <= '9') { v = v * 10 + (usz)(e[i] - '0'); i++; }
+    if (v == 0) { return AIR_MAX_SLABS; }
+    return v < AIR_MAX_SLABS ? v : AIR_MAX_SLABS;
+}
 struct AirArena {
     char*[AIR_MAX_SLABS] slabs;
     usz slab_count, cursor, cur_cap;
@@ -74,7 +87,7 @@ fn bool AirArena.init(AirArena* a) {
     return a.grow(AIR_SLAB_SIZE);
 }
 fn bool AirArena.grow(AirArena* a, usz want) {
-    if (a.slab_count >= AIR_MAX_SLABS) { a.oom=true; return false; }
+    if (a.slab_count >= air_max_slabs()) { a.oom=true; return false; }
     usz cap = AIR_SLAB_SIZE; while (cap < want) cap = cap*2;
     char* s = (char*)malloc(cap); if (s == null) { a.oom=true; return false; }
     memset((void*)s, 0, cap);
@@ -83,8 +96,15 @@ fn bool AirArena.grow(AirArena* a, usz want) {
 }
 fn void* AirArena.alloc(AirArena* a, usz size_, usz align) {
     if (size_ == 0) size_ = 1;
+    // Exhaustion is latched here, at the one choke point every allocation goes
+    // through (air_new_raw and dup both land here), and the caller gets the
+    // static scratch block instead of null. Returning null let a caller store
+    // into it and segfault; a writable zeroed block lets construction finish
+    // into scratch, which is inert but harmless, and emit_low_program turns the
+    // latched flag into a diagnostic and refuses to write a .air.
+    if (a.oom) { return air_scratch(size_); }
     usz mask = align - 1; usz cur = (a.cursor + mask) & ~mask;
-    if (cur + size_ > a.cur_cap) { if (!a.grow(size_ + align)) return null; cur = 0; }
+    if (cur + size_ > a.cur_cap) { if (!a.grow(size_ + align)) { return air_scratch(size_); } cur = 0; }
     char* slab = a.slabs[a.slab_count - 1];
     a.cursor = cur + size_; a.bytes_used = a.bytes_used + size_;
     return (void*)(slab + cur);
@@ -98,8 +118,30 @@ fn char* AirArena.dup(AirArena* a, char* src, usz len) {
     for (usz i = 0; i < len; i++) d[i] = src[i];
     d[len] = 0; return d;
 }
+// Once the arena is exhausted every allocation fails, and the constructors
+// return null -- but most call sites write fields into the result immediately
+// (`AirCmd* c = air_new_AirCmd(a); c.tag = ...`), so a null propagates into a
+// store and the compiler segfaults. Recovering the flag after the fact is not
+// possible from a crash, so exhaustion is made non-fatal at the source: the
+// first failed allocation latches `oom`, and every allocation after it hands
+// back one static, zeroed, writable node. Construction then completes into
+// scratch memory, the tree is inert rather than null-dereferencing, and
+// emit_low_program turns `oom` into a diagnostic and refuses to write a .air.
+// The scratch block is sized for the largest node (AirCmd) with room to spare;
+// it is never freed and never escapes, because a .air is not written when oom
+// is set.
+const usz AIR_SCRATCH = 4096;
+char[AIR_SCRATCH] g_air_scratch;
+bool g_air_scratch_used = false;
+
+fn void* air_scratch(usz size_) {
+    g_air_scratch_used = true;
+    memset((void*)&g_air_scratch[0], 0, size_ < AIR_SCRATCH ? size_ : AIR_SCRATCH);
+    return (void*)&g_air_scratch[0];
+}
+
 fn void* air_new_raw(AirArena* a, usz size_) {
-    void* p = a.alloc(size_, 8); if (p == null) return null;
+    void* p = a.alloc(size_, 8); if (p == null) { a.oom = true; return air_scratch(size_); }
     memset(p, 0, size_);
     uint* idp = (uint*)p; *idp = a.next_id; a.next_id++; a.node_count++;
     return p;

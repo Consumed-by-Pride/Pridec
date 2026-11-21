@@ -7,7 +7,10 @@
 # so a silent regression to "no diagnostics" fails the suite.
 set -u
 cd "$(dirname "$0")/../.." || exit 1
-BIN=./pfrontc
+# PF_BIN lets a caller point the suite at a stub (see the self-test in
+# tests/pfront/selftest.sh). It defaults to the tree's compiler so `make
+# test-pfront` is unchanged.
+BIN=${PF_BIN:-./pfrontc}
 [ -x "$BIN" ] || { echo "build ./pfront first"; exit 2; }
 
 declare -A EXPECT=(
@@ -156,7 +159,30 @@ pass=0; fail=0
 for f in tests/pfront/*.pie; do
   name=$(basename "$f" .pie)
   want=${EXPECT[$name]:-0}
-  got=$("$BIN" "$f" -I tests/pfront -I stdlib -I . 2>&1 | grep -c "$f:.*error")
+  # A compiler that dies produces no diagnostics at all, so counting matching
+  # lines alone would score a crashed run as "expected 0 errors, got 0" -- every
+  # CLEAN case would pass and the suite would report health while the compiler
+  # was broken. Capture the status separately and treat a signal or an
+  # unexpected non-zero exit as a failure of the case, not of its expectation.
+  pf_out=$("$BIN" "$f" -I tests/pfront -I stdlib -I . 2>&1); rc=$?
+  got=$(printf '%s\n' "$pf_out" | grep -c "$f:.*error")
+  # The compiler's own contract is: exit 0 clean, 1 or 2 for reported
+  # diagnostics, 3 when lowering refused, and a `FILE: errors=N warnings=M
+  # modules=K` summary on every run that reached the end of compilation. A
+  # signal (128+N), a panic, or a missing summary means it did not finish, so
+  # its diagnostic count is meaningless and must not be compared to the
+  # expectation -- otherwise "expected 0, counted 0" scores a crash as a pass.
+  case "$rc" in
+    0|1|2|3) ;;
+    *) fail=$((fail+1)); printf '  FAIL  %-26s compiler exited %s (crashed?)\n' "$name" "$rc"; continue ;;
+  esac
+  # Both summary shapes count as "finished": the one-line form used by --quiet
+  # (`FILE: errors=N ...`) and the block form printed otherwise
+  # (`  errors    : N`). What must never happen is a run with neither.
+  if ! printf '%s\n' "$pf_out" | grep -qE "errors=[0-9]+ warnings=[0-9]+ modules=[0-9]+|errors +: +[0-9]+"; then
+    fail=$((fail+1)); printf '  FAIL  %-26s exited %s with no summary line (did not finish)\n' "$name" "$rc"
+    continue
+  fi
   if [ "$got" = "$want" ]; then
     pass=$((pass+1)); printf '  PASS  %-26s (%s errors)\n' "$name" "$got"
   else
@@ -1560,9 +1586,16 @@ fi
 # of each function's normal form, including the reductions that must NOT
 # happen (capture, mut) and the ones that must be done carefully (effects).
 nb=$("$BIN" tests/pfront/83_nbe_normalise.pie -I stdlib -I . --emit-ast --quiet 2>&1)
-sect() { echo "$nb" | sed -n "/^  fn '$1'/,/^  fn '$2'/p"; }
+# `sed -n "/start/,/end/p"` needs BOTH ends: called with one argument the range
+# never closes and `$2` under `set -u` aborts the whole script. A missing end
+# means "to the end of the dump", which is what the one-argument callers want.
+sect() { local _end="${2:-}"; if [ -n "$_end" ]; then echo "$nb" | sed -n "/^  fn '$1'/,/^  fn '$_end'/p"; else echo "$nb" | sed -n "/^  fn '$1'/,\$p"; fi; }
 nb_ok=1; nb_why=""
-chk() { [ "$1" = "1" ] || { nb_ok=0; nb_why="$nb_why $2"; }; }
+# Called as `chk $(cond && echo 1) "label"`. When cond is false the substitution
+# yields nothing, so $1 is empty and $2 is the LABEL -- but the label then lands
+# in $1 and $2 is unbound, which under `set -u` aborts the run instead of
+# reporting the failed check. `:-` on both keeps the failure a failure.
+chk() { [ "${1:-}" = "1" ] || { nb_ok=0; nb_why="$nb_why ${2:-}"; }; }
 pc=$(sect pure_chain once)
 chk $([ "$(echo "$pc" | grep -c "lambda")" = 0 ] && [ "$(echo "$pc" | grep -c "int 7i64")" = 1 ] && [ "$(echo "$pc" | grep -c "int 10i64")" = 1 ] && echo 1) "pure_chain->7+k(10),no lambdas"
 on=$(sect once ordered)

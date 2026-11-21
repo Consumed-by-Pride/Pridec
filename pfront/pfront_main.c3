@@ -46,6 +46,12 @@ bool g_air_pretty = false;
 bool g_air_roundtrip = false;
 bool g_air_low = false;
 bool g_low_failed = false;       // --emit-air-low: the typed AIR 3.0 low-profile lowering (air_low.c3)
+// Lowering errors are counted by the lowerer, not by the DiagBag: `lw.err` prints a
+// line and bumps `lw.errors`. Without this the summary reported "errors: 0" for a
+// file the lowerer had just refused, because `rr.errors` only ever read the
+// DiagBag -- a failed lowering looked like a clean compile in the summary, and a
+// harness that reads the summary (rather than the exit code) would call it a pass.
+int g_low_errors = 0;
 bool g_air_audit = false;      // --air-audit: report source constructs the lowering never consumed
 
 extern fn void* malloc(usz size);
@@ -650,7 +656,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 char* suf = ".low.air";
                 for (usz i = 0; i < 9; i++) { lowp[stem + i] = suf[i]; }
                 int lerrs = air_low::emit_low_program(&low_roots[0], ln, entry.ast, it, path, &lowp[0]);
-                if (lerrs != 0) { g_low_failed = true; }
+                if (lerrs != 0) { g_low_failed = true; g_low_errors = g_low_errors + (lerrs > 0 ? lerrs : 0); }
             }
             else { printf("air-low: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count); g_low_failed = true; }
         }
@@ -714,10 +720,15 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
         if (mg != null) { free((void*)mg); }
     }
 
-    rr.errors = diags.error_count;
+    // A lowering failure is an error even though no Diag was created for it: the
+    // lowerer reports by printing and counting. Folding its count in here keeps the
+    // summary honest -- `ok`, `errors` and the exit status now agree with each other
+    // and with the lines already on stderr.
+    usz low_errs = g_low_errors > 0 ? (usz)g_low_errors : (usz)0;
+    rr.errors = diags.error_count + low_errs;
     rr.warnings = diags.warning_count;
     rr.modules = ld.module_count;
-    rr.ok = diags.error_count == 0;
+    rr.ok = (diags.error_count + low_errs) == (usz)0;
 
     if (!quiet && diags.count > 0)
     {

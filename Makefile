@@ -149,6 +149,10 @@ test-harness: $(BINARY) $(PEAR1)
 	python3 -m unittest discover -s tests/harness -p 'test_*.py'
 
 test-pfront: $(BINARY)
+	@echo "==> tests/pfront harness self-test"
+	bash tests/pfront/selftest.sh
+	@echo "==> tests/pfront hardening"
+	bash tests/pfront/hardening.sh
 	@echo "==> tests/pfront regression"
 	bash tests/pfront/run.sh
 
@@ -368,5 +372,17 @@ legacy:
 # ── Clean ───────────────────────────────────────────────────────────────
 clean:
 	rm -f $(BINARY) $(PEAR2_BIN) pear2c
+	# Generated AIR only. `find . -name "*.air" -delete` used to reach
+	# tests/air/ and tests/air3/, destroying 41 tracked fixtures -- after which
+	# `make test-air` and `make test-air3` could not run until the files were
+	# restored with git. Clean removes what the build produced, never a source:
+	# the check below refuses to finish if any tracked file is missing.
 	rm -f tmp/*.air
-	find . -name "*.air" -not -path "./docs/*" -not -path "./legacy/*" -not -path "./tests/pear2/*" -delete
+	find tmp -name "*.air" -delete 2>/dev/null || true
+	@missing=$$(git ls-files -d '*.air' 2>/dev/null); \
+	 if [ -n "$$missing" ]; then \
+	   echo "clean: refusing to report success -- tracked files are missing:"; \
+	   echo "$$missing" | sed 's/^/  /'; \
+	   echo "restore with: git checkout -- ."; exit 1; \
+	 fi
+	@echo "clean: tracked sources untouched"

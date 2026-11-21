@@ -681,13 +681,20 @@ fn Ins* Low.push(Low* lw, InsK k)
     return r;
 }
 fn Vx Low.unit(Low* lw) { Vx v; v.p = lw.m.p_unit; v.t = lw.m.t_unit; return v; }
-fn Vx Low.vref(Low* lw, char* nm, AirTyp* t) { Vx v; v.p = air_ir::air_mk_var(lw.a, nm); v.t = t; return v; }
+fn Vx Low.vref(Low* lw, char* nm, AirTyp* t) { Vx v; v.p = air_ir::air_mk_var(lw.a, nm); v.t = t; if (v.p == null) { lw.errors++; return lw.unit(); } return v; }
 
 fn Vx Low.let_(Low* lw, AirPrd* p, AirTyp* t, char* stem)
 {
+    // `p.ty = t` used to run before any null check, so an arena that had just
+    // run out (every air_mk_* returns null once oom is set) segfaulted the
+    // compiler here instead of reporting the failure. A null value cannot be
+    // bound at all, so hand back unit and let the caller continue; the arena
+    // flag is re-checked at the end of emit_low_program, which refuses to write
+    // a .air and turns it into an error.
+    if (p == null) { lw.errors++; return lw.unit(); }
     p.ty = t;
     Ins* i = lw.push(I_LET);
-    if (i == null) { return lw.unit(); }
+    if (i == null) { lw.errors++; return lw.unit(); }
     i.name = lw.fresh(stem); i.a = p;
     return lw.vref(i.name, t);
 }
@@ -5625,6 +5632,12 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
             lw.lower_fn(f);
         }
     }
+    // An exhausted arena means nodes were never built. The flag was set and
+    // nobody looked at it: the write below could then either emit a tree with
+    // holes or report an incidental "null declaration" that says nothing about
+    // the cause. Check it first so the diagnostic names the real failure, and
+    // never write a .air built from a truncated tree.
+    if (arena.oom && lw.errors == 0) { lw.errors = lw.errors + 1; }
     int errs = lw.errors;
     if (errs == 0)
     {
@@ -5633,6 +5646,7 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
         else { printf("air-low: %d function(s) lowered -> %s\n", lw.fns_ok, out_path); }
     }
     else { printf("air-low: %d error(s) in %d function(s); no .air written\n", errs, lw.fail_fn); }
+    if (arena.oom) { printf("air-low: AIR arena exhausted (out of memory): %d slabs, %zu bytes; no .air written\n", (int)arena.slab_count, arena.bytes_used); }
     arena.destroy();
     return errs;
 }
