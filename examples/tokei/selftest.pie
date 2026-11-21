@@ -1,0 +1,160 @@
+mod tokei.selftest
+
+use os.linux
+use str.string
+use tokei.model
+use tokei.languages
+use tokei.scanner
+
+fn printf : (ptr, ...) -> i32 #extern("printf") #cc(c)
+
+fn selftest_check : (bool, ptr, *i64, *i64) -> ()
+  | (ok, name, passed, failed) ->
+      if ok
+        passed[0i64] = passed[0i64] + 1i64
+      else
+        failed[0i64] = failed[0i64] + 1i64
+        printf("FAIL %s\n" as ptr, name)
+
+fn selftest_count : (i64, ptr) -> FileCount
+  | (lang, source) -> scanner_count_buffer(lang, source, os.linux.strlen(source) as i64)
+
+fn selftest_lexer_matrix : (*i64, *i64) -> ()
+  | (passed, failed) ->
+      let empty = selftest_count(1i64, "" as ptr)
+      selftest_check(empty.lines == 0i64 && empty.code == 0i64,
+                     "empty source", passed, failed)
+      let one = selftest_count(1i64, "x" as ptr)
+      selftest_check(one.lines == 1i64 && one.code == 1i64,
+                     "unterminated final line", passed, failed)
+      let two = selftest_count(1i64, "x\ny\n" as ptr)
+      selftest_check(two.lines == 2i64 && two.code == 2i64,
+                     "terminal newline does not create phantom row", passed, failed)
+      let blank = selftest_count(1i64, "\n  \n\t\n" as ptr)
+      selftest_check(blank.lines == 3i64 && blank.blanks == 3i64,
+                     "spaces and tabs are blank lines", passed, failed)
+      let crlf = selftest_count(1i64, "alpha\r\nbeta\r\n" as ptr)
+      selftest_check(crlf.lines == 2i64 && crlf.code == 2i64,
+                     "CRLF physical line counting", passed, failed)
+      let mixed = selftest_count(1i64, "x(); // trailing\n/* alone */\n" as ptr)
+      selftest_check(mixed.lines == 2i64 && mixed.code == 1i64 && mixed.comments == 1i64,
+                     "mixed code/comment line belongs to code", passed, failed)
+      let quote = selftest_count(1i64, "char *s = \"// not a comment\";\n" as ptr)
+      selftest_check(quote.code == 1i64 && quote.comments == 0i64,
+                     "line marker inside double quote", passed, failed)
+      let single_quote = selftest_count(1i64, "char slash = '/';\n" as ptr)
+      selftest_check(single_quote.code == 1i64 && single_quote.comments == 0i64,
+                     "comment marker character literal", passed, failed)
+      let escaped = selftest_count(1i64, "char *s = \"escaped \\\" // data\";\n" as ptr)
+      selftest_check(escaped.code == 1i64 && escaped.comments == 0i64,
+                     "escaped quote does not exit string", passed, failed)
+      let block = selftest_count(1i64, "/* start\n * middle\n */\n" as ptr)
+      selftest_check(block.lines == 3i64 && block.comments == 3i64,
+                     "multiline block comments", passed, failed)
+      let inline_block = selftest_count(1i64, "left /* note */ right\n" as ptr)
+      selftest_check(inline_block.code == 1i64 && inline_block.comments == 0i64,
+                     "inline block comment on code line", passed, failed)
+      let trailing = selftest_count(1i64, "/* no close\nstill comment" as ptr)
+      selftest_check(trailing.lines == 2i64 && trailing.comments == 2i64,
+                     "unterminated block comment remains a comment", passed, failed)
+      let todos = selftest_count(1i64, "// TODO first FIXME second\n// HACK next\n" as ptr)
+      selftest_check(todos.todos == 2i64,
+                     "one todo marker per physical line", passed, failed)
+      let code_todo = selftest_count(1i64, "let TODO = 1;\n" as ptr)
+      selftest_check(code_todo.todos == 0i64,
+                     "todo token in code is ignored", passed, failed)
+      let py = selftest_count(9i64, "x = '# literal'\n# TODO real\n" as ptr)
+      selftest_check(py.code == 1i64 && py.comments == 1i64 && py.todos == 1i64,
+                     "hash language with quoted marker", passed, failed)
+      let nested = selftest_count(8i64, "/* outer /* inner */ tail */\n" as ptr)
+      selftest_check(nested.comments == 1i64 && nested.code == 0i64,
+                     "nested Rust block comments", passed, failed)
+      let haskell = selftest_count(18i64, "-- comment\nvalue = 1\n" as ptr)
+      selftest_check(haskell.comments == 1i64 && haskell.code == 1i64,
+                     "dash comment family", passed, failed)
+      let html = selftest_count(21i64, "<!-- TODO markup -->\n<div />\n" as ptr)
+      selftest_check(html.comments == 1i64 && html.code == 1i64 && html.todos == 1i64,
+                     "HTML comment delimiter", passed, failed)
+      let sql = selftest_count(20i64, "select '-- data'; -- note\n" as ptr)
+      selftest_check(sql.code == 1i64 && sql.comments == 0i64,
+                     "SQL line comment inside quoted literal", passed, failed)
+      let python_doc = selftest_count(9i64, "\"\"\"TODO doc\"\"\"\n" as ptr)
+      selftest_check(python_doc.code == 1i64 && python_doc.comments == 0i64 && python_doc.todos == 0i64,
+                     "Python docstrings remain lexical code", passed, failed)
+      let slashslash = selftest_count(11i64, "#!/bin/sh\necho ok\n" as ptr)
+      selftest_check(slashslash.comments == 1i64 && slashslash.code == 1i64,
+                     "shell shebang", passed, failed)
+      let eof_todo = selftest_count(1i64, "// FIXME at eof" as ptr)
+      selftest_check(eof_todo.lines == 1i64 && eof_todo.todos == 1i64,
+                     "unterminated comment line at eof", passed, failed)
+      let extension = language_id("sample.rs" as ptr)
+      selftest_check(extension == 8i64,
+                     "Rust extension registry", passed, failed)
+      let unknown = language_id("README.unknown" as ptr)
+      selftest_check(unknown == 0i64,
+                     "unknown extension is not counted", passed, failed)
+
+fn selftest_all_language_comment_markers : (*i64, *i64) -> ()
+  | (passed, failed) ->
+      let mut id : i64 = 1i64
+      while id <= LANGUAGE_COUNT
+        let line = language_line_marker(id)
+        let block = language_block_open(id)
+        let close = language_block_close(id)
+        let mut source = string.string_new()
+        if os.linux.strlen(line) > 0u64
+          string.string_push_cstr(&source, line)
+          string.string_push_cstr(&source, " TODO catalogue probe\n" as ptr)
+          let cstr = string.string_as_cstr(&source) as ptr
+          let c = scanner_count_buffer(id, cstr, string.string_len(&source))
+          selftest_check(c.comments == 1i64 && c.todos == 1i64,
+                         language_name(id), passed, failed)
+        else if os.linux.strlen(block) > 0u64
+          string.string_push_cstr(&source, block)
+          string.string_push_cstr(&source, " TODO catalogue probe " as ptr)
+          string.string_push_cstr(&source, close)
+          string.string_push_byte(&source, 10u8)
+          let cstr = string.string_as_cstr(&source) as ptr
+          let c = scanner_count_buffer(id, cstr, string.string_len(&source))
+          selftest_check(c.comments == 1i64 && c.todos == 1i64,
+                         language_name(id), passed, failed)
+        else
+          string.string_push_cstr(&source, "ordinary code\n" as ptr)
+          let cstr = string.string_as_cstr(&source) as ptr
+          let c = scanner_count_buffer(id, cstr, string.string_len(&source))
+          selftest_check(c.code == 1i64,
+                         language_name(id), passed, failed)
+        string.string_destroy(&source)
+        id = id + 1i64
+
+fn selftest_extension_aliases : (*i64, *i64) -> ()
+  | (passed, failed) ->
+      selftest_check(language_id_from_extension("c" as ptr) == 1i64,
+                     "C extension", passed, failed)
+      selftest_check(language_id_from_extension("cpp" as ptr) == 2i64,
+                     "C++ extension", passed, failed)
+      selftest_check(language_id_from_extension("tsx" as ptr) == 6i64,
+                     "TSX extension", passed, failed)
+      selftest_check(language_id_from_extension("rs" as ptr) == 8i64,
+                     "Rust extension", passed, failed)
+      selftest_check(language_id_from_extension("pyi" as ptr) == 9i64,
+                     "Python interface extension", passed, failed)
+      selftest_check(language_id_from_extension("sql" as ptr) == 20i64,
+                     "SQL extension", passed, failed)
+      selftest_check(language_id_from_extension("mdx" as ptr) == 25i64,
+                     "MDX extension", passed, failed)
+      selftest_check(language_id_from_extension("tfvars" as ptr) == 50i64,
+                     "Terraform variable extension", passed, failed)
+      selftest_check(language_id_from_extension("pie" as ptr) == LANGUAGE_COUNT,
+                     "Pride extension", passed, failed)
+      selftest_check(language_id_from_extension("not-a-language" as ptr) == 0i64,
+                     "unknown extension", passed, failed)
+
+fn run_selftests : () -> (i64, i64)
+  | () ->
+      let mut passed : i64 = 0i64
+      let mut failed : i64 = 0i64
+      selftest_lexer_matrix(&passed, &failed)
+      selftest_all_language_comment_markers(&passed, &failed)
+      selftest_extension_aliases(&passed, &failed)
+      (passed, failed)

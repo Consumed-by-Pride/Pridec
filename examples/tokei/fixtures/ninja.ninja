@@ -1,0 +1,32 @@
+# Tokei-Pride fixture: Ninja; TODO marker exercises comment metadata
+fixture_090_declaration = 90
+
+string_marker_probe = "// # -- /* not comments inside a string"
+fixture_090_inline = 1 # trailing comment is part of a code line
+
+fixture_090_continued = (
+    90 + 3
+)
+# second comment style sample
+# FIXME marker is counted once on this line
+
+array_probe = [1, 2, 3, 5, 8, 13]
+operator_probe = left + right * factor
+quoted_hash_probe = "# is data here" # this is a comment
+unicode_probe = "λ bar μ mu tilde"
+empty_record_probe = {}
+
+# generated comment row 0
+
+generated_value_2 = 182
+generated_call_3(generated_value_2)
+# generated comment row 4
+
+generated_value_6 = 546
+generated_call_7(generated_value_6)
+stable_order_090 = 90
+branch_probe_090 = if left < right then left else right
+format_probe_090 = "line 90: value={value}"
+padding_probe_090_29 = 29
+padding_probe_090_30 = 30
+final_probe_090 = true

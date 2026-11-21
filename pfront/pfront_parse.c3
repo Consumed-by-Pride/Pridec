@@ -1881,7 +1881,29 @@ fn Node* Parser.parse_expr_prec(Parser* p, int min_prec)
                 if (p.peek(look).col - 1 <= p.stmt_indent) { continues = false; }
             }
             if (!continues) { break; }
-            for (usz k = 0; k < look; k++) { p.advance(); }
+            /*
+             An INDENT absorbed here belongs to the continuation line and MUST
+             be balanced by end_stmt. It was assumed "the block parser tolerates
+             an extra" DEDENT, and that was wrong: the block parser reads a
+             DEDENT as the end of the block. So
+
+                 let dot = 1i64
+                   || 2i64           <- deeper continuation, INDENT absorbed
+                 name_cstr as i64     <- DEDENT lands, block ends HERE
+
+             ejected every statement after the continuation out of the clause
+             body. The s-expression for a three-line function showed the final
+             expression as a TOP-LEVEL `(ident dot)` beside `(fn f ...)`, so the
+             name was reported unresolved at its use site while the binding sat
+             inside the function. That is the shape of the tokei walker errors.
+
+             Count them so end_stmt closes exactly as many as were opened.
+            */
+            for (usz k = 0; k < look; k++)
+            {
+                if (p.ct() == Tk.TOKEN_INDENT) { p.cont_indents = p.cont_indents + 1; }
+                p.advance();
+            }
             t = p.ct();
         }
 
@@ -3196,6 +3218,15 @@ fn Node* Parser.parse_primary(Parser* p)
         case TOKEN_KW_REIFY:
         case TOKEN_KW_EVAL:
         {
+            if (pfront_meta_is_name(p))
+            {
+                p.advance();
+                Node* id = p.mk_at(Nk.N_EXPR_IDENT, t);
+                id.name_id = p.intern_tok(t);
+                id.p.sptr = t.start;
+                id.p.slen = t.len;
+                return id;
+            }
             /*
              `reify e` and `eval e` — MSP operators (spec §20's keyword
              list) with no parse rule at all. They fell through to the
@@ -3222,6 +3253,16 @@ fn Node* Parser.parse_primary(Parser* p)
         case TOKEN_SIGIL_DATA:
         case TOKEN_SIGIL_BYTES:
         {
+            // `quote` alone is far more often a variable than an operator.
+            if (t.type == Tk.TOKEN_KW_QUOTE && pfront_meta_is_name(p))
+            {
+                p.advance();
+                Node* id = p.mk_at(Nk.N_EXPR_IDENT, t);
+                id.name_id = p.intern_tok(t);
+                id.p.sptr = t.start;
+                id.p.slen = t.len;
+                return id;
+            }
             p.advance();
             Node* n = p.mk_at(Nk.N_EXPR_QUOTE, t);
             n.p.op = (int)t.type;
@@ -3257,6 +3298,15 @@ fn Node* Parser.parse_primary(Parser* p)
         case TOKEN_KW_SPLICE:
         case TOKEN_KW_UNQUOTE:
         {
+            if (pfront_meta_is_name(p))
+            {
+                p.advance();
+                Node* id = p.mk_at(Nk.N_EXPR_IDENT, t);
+                id.name_id = p.intern_tok(t);
+                id.p.sptr = t.start;
+                id.p.slen = t.len;
+                return id;
+            }
             p.advance();
             Node* n = p.mk_at(Nk.N_EXPR_SPLICE, t);
             p.add(n, p.parse_unary());
@@ -3592,6 +3642,37 @@ fn bool tok_is_then(Tok c)
     if (c.len != 4) { return false; }
     return c.start[0] == 't' && c.start[1] == 'h'
         && c.start[2] == 'e' && c.start[3] == 'n';
+}
+
+/*
+ Is a metaprogramming keyword being used as an ORDINARY NAME here?
+
+ `quote`, `splice`, `unquote`, `reify` and `eval` are real operators, but they
+ are also natural variable names -- and `quote` in particular shows up in every
+ lexer and scanner (`let quote = count(...)`, then `quote.code`).
+
+ The four cases in parse_primary below were UNCONDITIONAL prefix operators: the
+ parser consumed the keyword, then demanded an operand. So
+
+     let quote = selftest_count(...)     -- binds fine, keyword is in the
+                                            contextual-name range
+     quote.code == 1i64                  -- `quote` starts an operator, the
+                                            parser eats `.` as its operand and
+                                            reports "expected an expression"
+
+ at 43:27 -- the `.`, not the `let`. The binding and its use were parsed by two
+ different rules, and only the diagnostic at the use site was visible.
+
+ An operator form needs an operand to follow. If the next token cannot start an
+ expression -- an operator, a closing bracket, a comma, a line break, or the end
+ of the statement -- the keyword is a name. This mirrors the `tail` rule below,
+ and for the same reason.
+*/
+fn bool pfront_meta_is_name(Parser* p)
+{
+    Tok nx = p.peek(1);
+    if (nx.line != p.cur().line) { return true; }
+    return !tok_starts_expr(nx.type);
 }
 
 fn Node* Parser.parse_while(Parser* p)

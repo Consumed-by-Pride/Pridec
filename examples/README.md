@@ -27,3 +27,10 @@ To inspect one example's actual diagnostics:
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 ./pfrontc examples/effect_demo.pie --plain
 ```
+
+## Tokei-Pride compiler workload
+
+[`tokei/`](tokei/README.md) is a new, separate 5,000+ line Pride application
+with a 97-language lexer fixture corpus. It was added after the status sweep
+above and is not represented in `STATUS.tsv`; run `make test-tokei` once the
+compiler bootstrap is available to validate it on this checkout.

@@ -1,0 +1,150 @@
+mod tokei.model
+
+-- Shared data model for Tokei-Pride. Counts are per-language and per-file;
+-- fixed-size metric vectors avoid allocator noise in the scanner stress path.
+
+const MAX_LANGUAGES : i64 = 128i64
+const MAX_DEPTH      : i64 = 64i64
+
+struct Options
+  show_files : bool
+  show_hidden : bool
+  include_ignored : bool
+  json : bool
+  summary_only : bool
+  sort_by : i64
+  roots_seen : i64
+
+struct Totals
+  files : [i64; 128]
+  lines : [i64; 128]
+  code : [i64; 128]
+  comments : [i64; 128]
+  blanks : [i64; 128]
+  bytes : [i64; 128]
+  todos : [i64; 128]
+  failed : [i64; 128]
+  total_files : i64
+  total_lines : i64
+  total_code : i64
+  total_comments : i64
+  total_blanks : i64
+  total_bytes : i64
+  total_todos : i64
+  total_failed : i64
+  visited_dirs : i64
+  skipped_dirs : i64
+  skipped_files : i64
+  max_depth_seen : i64
+
+struct FileCount
+  language : i64
+  lines : i64
+  code : i64
+  comments : i64
+  blanks : i64
+  bytes : i64
+  todos : i64
+  status : i64
+
+struct LexerState
+  quote : i64
+  escaped : bool
+  in_line_comment : bool
+  block_depth : i64
+  line_code : bool
+  line_comment : bool
+  pending_todo : bool
+  line_touched : bool
+  line_number : i64
+  lines : i64
+  code : i64
+  comments : i64
+  blanks : i64
+  todos : i64
+
+fn options_default : () -> Options
+  | () -> Options {
+      show_files: false,
+      show_hidden: false,
+      include_ignored: false,
+      json: false,
+      summary_only: false,
+      sort_by: 1i64,
+      roots_seen: 0i64
+    }
+
+fn totals_new : () -> Totals
+  | () -> Totals {
+      files: [0i64; 128],
+      lines: [0i64; 128],
+      code: [0i64; 128],
+      comments: [0i64; 128],
+      blanks: [0i64; 128],
+      bytes: [0i64; 128],
+      todos: [0i64; 128],
+      failed: [0i64; 128],
+      total_files: 0i64,
+      total_lines: 0i64,
+      total_code: 0i64,
+      total_comments: 0i64,
+      total_blanks: 0i64,
+      total_bytes: 0i64,
+      total_todos: 0i64,
+      total_failed: 0i64,
+      visited_dirs: 0i64,
+      skipped_dirs: 0i64,
+      skipped_files: 0i64,
+      max_depth_seen: 0i64
+    }
+
+fn lexer_state_new : () -> LexerState
+  | () -> LexerState {
+      quote: 0i64,
+      escaped: false,
+      in_line_comment: false,
+      block_depth: 0i64,
+      line_code: false,
+      line_comment: false,
+      pending_todo: false,
+      line_touched: false,
+      line_number: 1i64,
+      lines: 0i64,
+      code: 0i64,
+      comments: 0i64,
+      blanks: 0i64,
+      todos: 0i64
+    }
+
+fn totals_add_file : (*Totals, *FileCount) -> ()
+  | (t, f) ->
+      if f.status != 0i64
+        t.total_failed = t.total_failed + 1i64
+        t.failed[f.language] = t.failed[f.language] + 1i64
+      else
+        t.total_files = t.total_files + 1i64
+        t.total_lines = t.total_lines + f.lines
+        t.total_code = t.total_code + f.code
+        t.total_comments = t.total_comments + f.comments
+        t.total_blanks = t.total_blanks + f.blanks
+        t.total_bytes = t.total_bytes + f.bytes
+        t.total_todos = t.total_todos + f.todos
+        t.files[f.language] = t.files[f.language] + 1i64
+        t.lines[f.language] = t.lines[f.language] + f.lines
+        t.code[f.language] = t.code[f.language] + f.code
+        t.comments[f.language] = t.comments[f.language] + f.comments
+        t.blanks[f.language] = t.blanks[f.language] + f.blanks
+        t.bytes[f.language] = t.bytes[f.language] + f.bytes
+        t.todos[f.language] = t.todos[f.language] + f.todos
+
+fn file_count_empty : i64 -> FileCount
+  | lang -> FileCount {
+      language: lang,
+      lines: 0i64,
+      code: 0i64,
+      comments: 0i64,
+      blanks: 0i64,
+      bytes: 0i64,
+      todos: 0i64,
+      status: 0i64
+    }

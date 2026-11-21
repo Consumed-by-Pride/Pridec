@@ -1,4 +1,4 @@
-# AIR 2.1 — the `.air` text format
+# AIR 2.2 — the `.air` text format
 
 **Status: normative and implemented.** `pfrontc FILE.pie --emit-air` writes it, `airtool` and the legacy
 backend `pear1c` read it, and `tests/air/run.sh` checks it. Where this document and the code disagree the
@@ -21,7 +21,7 @@ gets wrong today · 12 Path to a strict calculus · 13 Tools and tests
 
 AIR 1.0 (`AIR-1.0-vision.md`) was a design. The emitter printed a different, lossy notation (`μ̃%ret_2. <p|[0]·%ret_2>`,
 `; air facts:` comments, only the entry module) that no parser could read back, and PEAR consumed the in-memory
-graph, never the text. AIR 2.0 changes that contract:
+graph, never the text. AIR 2.x changed that contract:
 
 * The text is **the** interface. A backend reads the file; it has no other access to the front end.
 * The text is **lossless**: every field of the in-memory IR that any backend could read is printed, and

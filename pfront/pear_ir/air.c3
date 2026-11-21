@@ -65,7 +65,7 @@ fn char* module_name_of(PNode* root)
     return (char*)"Main";
 }
 
-fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
+fn int emit_air(PNode* root, pfront_core::Interner* it, char* path)
 {
     char[AIR_PATH_MAX] buf;
     char* out_path = null;
@@ -77,19 +77,25 @@ fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
 
     // ── Build IR ────────────────────────────────────────────────────────
     AirArena arena;
-    if (!arena.init()) return;
+    if (!arena.init()) return -2;
     AirModule mod;
     char* mod_nm = module_name_of(root);
     if (!mod.init(&arena, mod_nm, path))
     {
         arena.destroy();
-        return;
+        return -2;
     }
     AirScope sc;
     sc.init(&arena);
+    if (arena.oom) { printf("air-lower: AIR arena allocation failed\n"); sc.destroy(); arena.destroy(); return -3; }
     AirLower lr;
     lr.init(&mod, &sc, it);
     lr.module_body(root);
+    if (arena.oom || lr.fatal_errors != 0)
+    {
+        printf("air-lower: %s\n", lr.fatal_message != null ? lr.fatal_message : (char*)"AIR arena allocation failed");
+        sc.destroy(); arena.destroy(); return -3;
+    }
 
     air_facts::validate_module(&mod);
 
@@ -99,6 +105,7 @@ fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
     // ── Teardown ───────────────────────────────────────────────────────
     sc.destroy();
     arena.destroy();
+    return 0;
 }
 
 
@@ -108,7 +115,8 @@ fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
 // module's definitions lowered into ONE AirModule, in load order, then screened
 // by air_facts and serialised by air_write. The file is written only when the
 // writer reports zero errors — a lossy `.air` is never published. Returns the
-// writer error count (0 = ok, -1 = could not open the file, -2 = setup failed).
+// writer error count (0 = ok, -1 = could not open the file, -2 = setup failed,
+// -3 = arena exhaustion or a fatal lowering limit; no AIR is published).
 fn int emit_air_program(PNode** roots, usz root_count, pfront_core::Interner* it, char* path)
 {
     if (roots == null || root_count == 0) { return -2; }
@@ -126,15 +134,23 @@ fn int emit_air_program(PNode** roots, usz root_count, pfront_core::Interner* it
     if (!mod.init(&arena, mod_nm, path)) { arena.destroy(); return -2; }
     AirScope sc;
     sc.init(&arena);
+    if (arena.oom) { printf("air-lower: AIR arena allocation failed\n"); sc.destroy(); arena.destroy(); return -3; }
     AirLower lr;
     lr.init(&mod, &sc, it);
     for (usz i = 0; i < root_count; i++)
     {
         if (roots[i] == null) continue;
         lr.module_body(roots[i]);
+        if (arena.oom || lr.fatal_errors != 0)
+        {
+            printf("air-lower: %s\n", lr.fatal_message != null ? lr.fatal_message : (char*)"AIR arena allocation failed");
+            sc.destroy(); arena.destroy(); return -3;
+        }
         air_audit::report(roots[i], i, module_name_of(roots[i]), i == 0);
+        if (arena.oom) { sc.destroy(); arena.destroy(); return -3; }
     }
     air_facts::validate_module(&mod);
+    if (arena.oom) { sc.destroy(); arena.destroy(); return -3; }
     int errs = air_write::write_module(&mod, out_path);
     sc.destroy();
     arena.destroy();

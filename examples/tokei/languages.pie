@@ -1,0 +1,1166 @@
+mod tokei.languages
+
+use os.linux
+use str.string
+use fs.path
+
+-- Tokei extension and comment-style catalogue. The IDs are stable and are
+-- shared by Totals metric vectors. Aliases are data, not special cases in the lexer.
+
+const LANGUAGE_COUNT : i64 = 97i64
+
+fn language_id_from_extension : ptr -> i64
+  | extension ->
+      if extension_matches_0(extension) then extension_id_0(extension)
+      else if extension_matches_1(extension) then extension_id_1(extension)
+      else if extension_matches_2(extension) then extension_id_2(extension)
+      else if extension_matches_3(extension) then extension_id_3(extension)
+      else if extension_matches_4(extension) then extension_id_4(extension)
+      else if extension_matches_5(extension) then extension_id_5(extension)
+      else if extension_matches_6(extension) then extension_id_6(extension)
+      else if extension_matches_7(extension) then extension_id_7(extension)
+      else if extension_matches_8(extension) then extension_id_8(extension)
+      else if extension_matches_9(extension) then extension_id_9(extension)
+      else if extension_matches_10(extension) then extension_id_10(extension)
+      else 0i64
+
+fn extension_matches_0 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "c" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "h" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "i" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "m" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cc" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cpp" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cxx" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "hpp" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "hxx" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "hh" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "java" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "js" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "jsx" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "mjs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cjs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ts" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "tsx" as ptr) == 0i32
+
+fn extension_id_0 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "c" as ptr) == 0i32 then 1i64
+      else if os.linux.strcmp(extension, "h" as ptr) == 0i32 then 1i64
+      else if os.linux.strcmp(extension, "i" as ptr) == 0i32 then 1i64
+      else if os.linux.strcmp(extension, "m" as ptr) == 0i32 then 1i64
+      else if os.linux.strcmp(extension, "cc" as ptr) == 0i32 then 2i64
+      else if os.linux.strcmp(extension, "cpp" as ptr) == 0i32 then 2i64
+      else if os.linux.strcmp(extension, "cxx" as ptr) == 0i32 then 2i64
+      else if os.linux.strcmp(extension, "hpp" as ptr) == 0i32 then 2i64
+      else if os.linux.strcmp(extension, "hxx" as ptr) == 0i32 then 2i64
+      else if os.linux.strcmp(extension, "hh" as ptr) == 0i32 then 2i64
+      else if os.linux.strcmp(extension, "cs" as ptr) == 0i32 then 3i64
+      else if os.linux.strcmp(extension, "java" as ptr) == 0i32 then 4i64
+      else if os.linux.strcmp(extension, "js" as ptr) == 0i32 then 5i64
+      else if os.linux.strcmp(extension, "jsx" as ptr) == 0i32 then 5i64
+      else if os.linux.strcmp(extension, "mjs" as ptr) == 0i32 then 5i64
+      else if os.linux.strcmp(extension, "cjs" as ptr) == 0i32 then 5i64
+      else if os.linux.strcmp(extension, "ts" as ptr) == 0i32 then 6i64
+      else 6i64
+
+fn extension_matches_1 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "mts" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cts" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "go" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "rs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "py" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pyw" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pyi" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "rb" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "rake" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "gemspec" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "sh" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "bash" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "zsh" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "fish" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ksh" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ps1" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "psm1" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "psd1" as ptr) == 0i32
+
+fn extension_id_1 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "mts" as ptr) == 0i32 then 6i64
+      else if os.linux.strcmp(extension, "cts" as ptr) == 0i32 then 6i64
+      else if os.linux.strcmp(extension, "go" as ptr) == 0i32 then 7i64
+      else if os.linux.strcmp(extension, "rs" as ptr) == 0i32 then 8i64
+      else if os.linux.strcmp(extension, "py" as ptr) == 0i32 then 9i64
+      else if os.linux.strcmp(extension, "pyw" as ptr) == 0i32 then 9i64
+      else if os.linux.strcmp(extension, "pyi" as ptr) == 0i32 then 9i64
+      else if os.linux.strcmp(extension, "rb" as ptr) == 0i32 then 10i64
+      else if os.linux.strcmp(extension, "rake" as ptr) == 0i32 then 10i64
+      else if os.linux.strcmp(extension, "gemspec" as ptr) == 0i32 then 10i64
+      else if os.linux.strcmp(extension, "sh" as ptr) == 0i32 then 11i64
+      else if os.linux.strcmp(extension, "bash" as ptr) == 0i32 then 11i64
+      else if os.linux.strcmp(extension, "zsh" as ptr) == 0i32 then 11i64
+      else if os.linux.strcmp(extension, "fish" as ptr) == 0i32 then 11i64
+      else if os.linux.strcmp(extension, "ksh" as ptr) == 0i32 then 11i64
+      else if os.linux.strcmp(extension, "ps1" as ptr) == 0i32 then 12i64
+      else if os.linux.strcmp(extension, "psm1" as ptr) == 0i32 then 12i64
+      else 12i64
+
+fn extension_matches_2 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "pl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pm" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "t" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "php" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "phtml" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "swift" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "kt" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "kts" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "scala" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "sc" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "hs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "lhs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "lua" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "sql" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ddl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "dml" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "html" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "htm" as ptr) == 0i32
+
+fn extension_id_2 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "pl" as ptr) == 0i32 then 13i64
+      else if os.linux.strcmp(extension, "pm" as ptr) == 0i32 then 13i64
+      else if os.linux.strcmp(extension, "t" as ptr) == 0i32 then 13i64
+      else if os.linux.strcmp(extension, "php" as ptr) == 0i32 then 14i64
+      else if os.linux.strcmp(extension, "phtml" as ptr) == 0i32 then 14i64
+      else if os.linux.strcmp(extension, "swift" as ptr) == 0i32 then 15i64
+      else if os.linux.strcmp(extension, "kt" as ptr) == 0i32 then 16i64
+      else if os.linux.strcmp(extension, "kts" as ptr) == 0i32 then 16i64
+      else if os.linux.strcmp(extension, "scala" as ptr) == 0i32 then 17i64
+      else if os.linux.strcmp(extension, "sc" as ptr) == 0i32 then 17i64
+      else if os.linux.strcmp(extension, "hs" as ptr) == 0i32 then 18i64
+      else if os.linux.strcmp(extension, "lhs" as ptr) == 0i32 then 18i64
+      else if os.linux.strcmp(extension, "lua" as ptr) == 0i32 then 19i64
+      else if os.linux.strcmp(extension, "sql" as ptr) == 0i32 then 20i64
+      else if os.linux.strcmp(extension, "ddl" as ptr) == 0i32 then 20i64
+      else if os.linux.strcmp(extension, "dml" as ptr) == 0i32 then 20i64
+      else if os.linux.strcmp(extension, "html" as ptr) == 0i32 then 21i64
+      else 21i64
+
+fn extension_matches_3 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "xml" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "xsd" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "xsl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "xslt" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "css" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "scss" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "sass" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "less" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "md" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "markdown" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "mdx" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "yaml" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "yml" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "toml" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "json" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "jsonc" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "json5" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "dart" as ptr) == 0i32
+
+fn extension_id_3 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "xml" as ptr) == 0i32 then 22i64
+      else if os.linux.strcmp(extension, "xsd" as ptr) == 0i32 then 22i64
+      else if os.linux.strcmp(extension, "xsl" as ptr) == 0i32 then 22i64
+      else if os.linux.strcmp(extension, "xslt" as ptr) == 0i32 then 22i64
+      else if os.linux.strcmp(extension, "css" as ptr) == 0i32 then 23i64
+      else if os.linux.strcmp(extension, "scss" as ptr) == 0i32 then 24i64
+      else if os.linux.strcmp(extension, "sass" as ptr) == 0i32 then 24i64
+      else if os.linux.strcmp(extension, "less" as ptr) == 0i32 then 24i64
+      else if os.linux.strcmp(extension, "md" as ptr) == 0i32 then 25i64
+      else if os.linux.strcmp(extension, "markdown" as ptr) == 0i32 then 25i64
+      else if os.linux.strcmp(extension, "mdx" as ptr) == 0i32 then 25i64
+      else if os.linux.strcmp(extension, "yaml" as ptr) == 0i32 then 26i64
+      else if os.linux.strcmp(extension, "yml" as ptr) == 0i32 then 26i64
+      else if os.linux.strcmp(extension, "toml" as ptr) == 0i32 then 27i64
+      else if os.linux.strcmp(extension, "json" as ptr) == 0i32 then 28i64
+      else if os.linux.strcmp(extension, "jsonc" as ptr) == 0i32 then 28i64
+      else if os.linux.strcmp(extension, "json5" as ptr) == 0i32 then 28i64
+      else 29i64
+
+fn extension_matches_4 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "ex" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "exs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "erl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "hrl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ml" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "mli" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "fs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "fsx" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "fsi" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "clj" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cljs" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cljc" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "edn" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "lisp" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "lsp" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "f" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "f90" as ptr) == 0i32
+
+fn extension_id_4 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "ex" as ptr) == 0i32 then 30i64
+      else if os.linux.strcmp(extension, "exs" as ptr) == 0i32 then 30i64
+      else if os.linux.strcmp(extension, "erl" as ptr) == 0i32 then 31i64
+      else if os.linux.strcmp(extension, "hrl" as ptr) == 0i32 then 31i64
+      else if os.linux.strcmp(extension, "ml" as ptr) == 0i32 then 32i64
+      else if os.linux.strcmp(extension, "mli" as ptr) == 0i32 then 32i64
+      else if os.linux.strcmp(extension, "fs" as ptr) == 0i32 then 33i64
+      else if os.linux.strcmp(extension, "fsx" as ptr) == 0i32 then 33i64
+      else if os.linux.strcmp(extension, "fsi" as ptr) == 0i32 then 33i64
+      else if os.linux.strcmp(extension, "clj" as ptr) == 0i32 then 34i64
+      else if os.linux.strcmp(extension, "cljs" as ptr) == 0i32 then 34i64
+      else if os.linux.strcmp(extension, "cljc" as ptr) == 0i32 then 34i64
+      else if os.linux.strcmp(extension, "edn" as ptr) == 0i32 then 34i64
+      else if os.linux.strcmp(extension, "lisp" as ptr) == 0i32 then 35i64
+      else if os.linux.strcmp(extension, "lsp" as ptr) == 0i32 then 35i64
+      else if os.linux.strcmp(extension, "cl" as ptr) == 0i32 then 35i64
+      else if os.linux.strcmp(extension, "f" as ptr) == 0i32 then 36i64
+      else 36i64
+
+fn extension_matches_5 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "f95" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "f03" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "f08" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "for" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cob" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cobol" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cbl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "asm" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "s" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "mk" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "make" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "dockerfile" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "proto" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "graphql" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "gql" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "zig" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "nim" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "nims" as ptr) == 0i32
+
+fn extension_id_5 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "f95" as ptr) == 0i32 then 36i64
+      else if os.linux.strcmp(extension, "f03" as ptr) == 0i32 then 36i64
+      else if os.linux.strcmp(extension, "f08" as ptr) == 0i32 then 36i64
+      else if os.linux.strcmp(extension, "for" as ptr) == 0i32 then 36i64
+      else if os.linux.strcmp(extension, "cob" as ptr) == 0i32 then 37i64
+      else if os.linux.strcmp(extension, "cobol" as ptr) == 0i32 then 37i64
+      else if os.linux.strcmp(extension, "cbl" as ptr) == 0i32 then 37i64
+      else if os.linux.strcmp(extension, "asm" as ptr) == 0i32 then 38i64
+      else if os.linux.strcmp(extension, "s" as ptr) == 0i32 then 38i64
+      else if os.linux.strcmp(extension, "mk" as ptr) == 0i32 then 39i64
+      else if os.linux.strcmp(extension, "make" as ptr) == 0i32 then 39i64
+      else if os.linux.strcmp(extension, "dockerfile" as ptr) == 0i32 then 40i64
+      else if os.linux.strcmp(extension, "proto" as ptr) == 0i32 then 41i64
+      else if os.linux.strcmp(extension, "graphql" as ptr) == 0i32 then 42i64
+      else if os.linux.strcmp(extension, "gql" as ptr) == 0i32 then 42i64
+      else if os.linux.strcmp(extension, "zig" as ptr) == 0i32 then 43i64
+      else if os.linux.strcmp(extension, "nim" as ptr) == 0i32 then 44i64
+      else 44i64
+
+fn extension_matches_6 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "cr" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "jl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "sol" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "v" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "vh" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "sv" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "svh" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "vhd" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "vhdl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "tf" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "tfvars" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "hcl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "nix" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cmake" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "bat" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cmd" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "bas" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "vb" as ptr) == 0i32
+
+fn extension_id_6 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "cr" as ptr) == 0i32 then 45i64
+      else if os.linux.strcmp(extension, "jl" as ptr) == 0i32 then 46i64
+      else if os.linux.strcmp(extension, "sol" as ptr) == 0i32 then 47i64
+      else if os.linux.strcmp(extension, "v" as ptr) == 0i32 then 48i64
+      else if os.linux.strcmp(extension, "vh" as ptr) == 0i32 then 48i64
+      else if os.linux.strcmp(extension, "sv" as ptr) == 0i32 then 48i64
+      else if os.linux.strcmp(extension, "svh" as ptr) == 0i32 then 48i64
+      else if os.linux.strcmp(extension, "vhd" as ptr) == 0i32 then 49i64
+      else if os.linux.strcmp(extension, "vhdl" as ptr) == 0i32 then 49i64
+      else if os.linux.strcmp(extension, "tf" as ptr) == 0i32 then 50i64
+      else if os.linux.strcmp(extension, "tfvars" as ptr) == 0i32 then 50i64
+      else if os.linux.strcmp(extension, "hcl" as ptr) == 0i32 then 50i64
+      else if os.linux.strcmp(extension, "nix" as ptr) == 0i32 then 51i64
+      else if os.linux.strcmp(extension, "cmake" as ptr) == 0i32 then 52i64
+      else if os.linux.strcmp(extension, "bat" as ptr) == 0i32 then 53i64
+      else if os.linux.strcmp(extension, "cmd" as ptr) == 0i32 then 53i64
+      else if os.linux.strcmp(extension, "bas" as ptr) == 0i32 then 54i64
+      else 54i64
+
+fn extension_matches_7 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "vba" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "adb" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ads" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ada" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pas" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pp" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "d" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "mm" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "groovy" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "gradle" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "r" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "mex" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "oct" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "forth" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "tcl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "tk" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "awk" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "gp" as ptr) == 0i32
+
+fn extension_id_7 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "vba" as ptr) == 0i32 then 54i64
+      else if os.linux.strcmp(extension, "adb" as ptr) == 0i32 then 55i64
+      else if os.linux.strcmp(extension, "ads" as ptr) == 0i32 then 55i64
+      else if os.linux.strcmp(extension, "ada" as ptr) == 0i32 then 55i64
+      else if os.linux.strcmp(extension, "pas" as ptr) == 0i32 then 56i64
+      else if os.linux.strcmp(extension, "pp" as ptr) == 0i32 then 56i64
+      else if os.linux.strcmp(extension, "d" as ptr) == 0i32 then 57i64
+      else if os.linux.strcmp(extension, "mm" as ptr) == 0i32 then 58i64
+      else if os.linux.strcmp(extension, "groovy" as ptr) == 0i32 then 59i64
+      else if os.linux.strcmp(extension, "gradle" as ptr) == 0i32 then 59i64
+      else if os.linux.strcmp(extension, "r" as ptr) == 0i32 then 60i64
+      else if os.linux.strcmp(extension, "mex" as ptr) == 0i32 then 61i64
+      else if os.linux.strcmp(extension, "oct" as ptr) == 0i32 then 62i64
+      else if os.linux.strcmp(extension, "forth" as ptr) == 0i32 then 63i64
+      else if os.linux.strcmp(extension, "tcl" as ptr) == 0i32 then 64i64
+      else if os.linux.strcmp(extension, "tk" as ptr) == 0i32 then 64i64
+      else if os.linux.strcmp(extension, "awk" as ptr) == 0i32 then 65i64
+      else 66i64
+
+fn extension_matches_8 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "gnuplot" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "diff" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "patch" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "txt" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "log" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "svelte" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "vue" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "astro" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "yul" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "tex" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "sty" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cls" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "rkt" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "scm" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ss" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pyx" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pxd" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pxi" as ptr) == 0i32
+
+fn extension_id_8 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "gnuplot" as ptr) == 0i32 then 66i64
+      else if os.linux.strcmp(extension, "diff" as ptr) == 0i32 then 67i64
+      else if os.linux.strcmp(extension, "patch" as ptr) == 0i32 then 67i64
+      else if os.linux.strcmp(extension, "txt" as ptr) == 0i32 then 68i64
+      else if os.linux.strcmp(extension, "log" as ptr) == 0i32 then 68i64
+      else if os.linux.strcmp(extension, "svelte" as ptr) == 0i32 then 69i64
+      else if os.linux.strcmp(extension, "vue" as ptr) == 0i32 then 70i64
+      else if os.linux.strcmp(extension, "astro" as ptr) == 0i32 then 71i64
+      else if os.linux.strcmp(extension, "yul" as ptr) == 0i32 then 72i64
+      else if os.linux.strcmp(extension, "tex" as ptr) == 0i32 then 73i64
+      else if os.linux.strcmp(extension, "sty" as ptr) == 0i32 then 73i64
+      else if os.linux.strcmp(extension, "cls" as ptr) == 0i32 then 73i64
+      else if os.linux.strcmp(extension, "rkt" as ptr) == 0i32 then 74i64
+      else if os.linux.strcmp(extension, "scm" as ptr) == 0i32 then 75i64
+      else if os.linux.strcmp(extension, "ss" as ptr) == 0i32 then 75i64
+      else if os.linux.strcmp(extension, "pyx" as ptr) == 0i32 then 76i64
+      else if os.linux.strcmp(extension, "pxd" as ptr) == 0i32 then 76i64
+      else 76i64
+
+fn extension_matches_9 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "coffee" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "gd" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "vala" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "objective-cpp" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "re" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "rei" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "dhall" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "jsonnet" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "libsonnet" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cue" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "puppet" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "chef" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ansible" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "properties" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "ini" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "cfg" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "conf" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "meson" as ptr) == 0i32
+
+fn extension_id_9 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "coffee" as ptr) == 0i32 then 77i64
+      else if os.linux.strcmp(extension, "gd" as ptr) == 0i32 then 78i64
+      else if os.linux.strcmp(extension, "vala" as ptr) == 0i32 then 79i64
+      else if os.linux.strcmp(extension, "objective-cpp" as ptr) == 0i32 then 80i64
+      else if os.linux.strcmp(extension, "re" as ptr) == 0i32 then 81i64
+      else if os.linux.strcmp(extension, "rei" as ptr) == 0i32 then 81i64
+      else if os.linux.strcmp(extension, "dhall" as ptr) == 0i32 then 82i64
+      else if os.linux.strcmp(extension, "jsonnet" as ptr) == 0i32 then 83i64
+      else if os.linux.strcmp(extension, "libsonnet" as ptr) == 0i32 then 83i64
+      else if os.linux.strcmp(extension, "cue" as ptr) == 0i32 then 84i64
+      else if os.linux.strcmp(extension, "puppet" as ptr) == 0i32 then 85i64
+      else if os.linux.strcmp(extension, "chef" as ptr) == 0i32 then 86i64
+      else if os.linux.strcmp(extension, "ansible" as ptr) == 0i32 then 87i64
+      else if os.linux.strcmp(extension, "properties" as ptr) == 0i32 then 88i64
+      else if os.linux.strcmp(extension, "ini" as ptr) == 0i32 then 88i64
+      else if os.linux.strcmp(extension, "cfg" as ptr) == 0i32 then 88i64
+      else if os.linux.strcmp(extension, "conf" as ptr) == 0i32 then 88i64
+      else 89i64
+
+fn extension_matches_10 : ptr -> bool
+  | extension ->
+      os.linux.strcmp(extension, "ninja" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "rdl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "vlang" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "odin" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "carbon" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "bzl" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "bazel" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "star" as ptr) == 0i32 ||
+      os.linux.strcmp(extension, "pie" as ptr) == 0i32
+
+fn extension_id_10 : ptr -> i64
+  | extension ->
+      if os.linux.strcmp(extension, "ninja" as ptr) == 0i32 then 90i64
+      else if os.linux.strcmp(extension, "rdl" as ptr) == 0i32 then 91i64
+      else if os.linux.strcmp(extension, "vlang" as ptr) == 0i32 then 92i64
+      else if os.linux.strcmp(extension, "odin" as ptr) == 0i32 then 93i64
+      else if os.linux.strcmp(extension, "carbon" as ptr) == 0i32 then 94i64
+      else if os.linux.strcmp(extension, "bzl" as ptr) == 0i32 then 95i64
+      else if os.linux.strcmp(extension, "bazel" as ptr) == 0i32 then 95i64
+      else if os.linux.strcmp(extension, "star" as ptr) == 0i32 then 96i64
+      else 97i64
+
+fn language_id : ptr -> i64
+  | path ->
+      let ext = fs.path.path_extension(path)
+      let cext = string.string_as_cstr(&ext) as ptr
+      let id = language_id_from_extension(cext)
+      string.string_destroy(&ext)
+      id
+
+fn language_name_1 : () -> ptr | () -> "C" as ptr
+fn language_name_2 : () -> ptr | () -> "C++" as ptr
+fn language_name_3 : () -> ptr | () -> "CSharp" as ptr
+fn language_name_4 : () -> ptr | () -> "Java" as ptr
+fn language_name_5 : () -> ptr | () -> "JavaScript" as ptr
+fn language_name_6 : () -> ptr | () -> "TypeScript" as ptr
+fn language_name_7 : () -> ptr | () -> "Go" as ptr
+fn language_name_8 : () -> ptr | () -> "Rust" as ptr
+fn language_name_9 : () -> ptr | () -> "Python" as ptr
+fn language_name_10 : () -> ptr | () -> "Ruby" as ptr
+fn language_name_11 : () -> ptr | () -> "Shell" as ptr
+fn language_name_12 : () -> ptr | () -> "PowerShell" as ptr
+fn language_name_13 : () -> ptr | () -> "Perl" as ptr
+fn language_name_14 : () -> ptr | () -> "PHP" as ptr
+fn language_name_15 : () -> ptr | () -> "Swift" as ptr
+fn language_name_16 : () -> ptr | () -> "Kotlin" as ptr
+fn language_name_17 : () -> ptr | () -> "Scala" as ptr
+fn language_name_18 : () -> ptr | () -> "Haskell" as ptr
+fn language_name_19 : () -> ptr | () -> "Lua" as ptr
+fn language_name_20 : () -> ptr | () -> "SQL" as ptr
+fn language_name_21 : () -> ptr | () -> "HTML" as ptr
+fn language_name_22 : () -> ptr | () -> "XML" as ptr
+fn language_name_23 : () -> ptr | () -> "CSS" as ptr
+fn language_name_24 : () -> ptr | () -> "SCSS" as ptr
+fn language_name_25 : () -> ptr | () -> "Markdown" as ptr
+fn language_name_26 : () -> ptr | () -> "YAML" as ptr
+fn language_name_27 : () -> ptr | () -> "TOML" as ptr
+fn language_name_28 : () -> ptr | () -> "JSON" as ptr
+fn language_name_29 : () -> ptr | () -> "Dart" as ptr
+fn language_name_30 : () -> ptr | () -> "Elixir" as ptr
+fn language_name_31 : () -> ptr | () -> "Erlang" as ptr
+fn language_name_32 : () -> ptr | () -> "OCaml" as ptr
+fn language_name_33 : () -> ptr | () -> "FSharp" as ptr
+fn language_name_34 : () -> ptr | () -> "Clojure" as ptr
+fn language_name_35 : () -> ptr | () -> "Lisp" as ptr
+fn language_name_36 : () -> ptr | () -> "Fortran" as ptr
+fn language_name_37 : () -> ptr | () -> "Cobol" as ptr
+fn language_name_38 : () -> ptr | () -> "Assembly" as ptr
+fn language_name_39 : () -> ptr | () -> "Makefile" as ptr
+fn language_name_40 : () -> ptr | () -> "Dockerfile" as ptr
+fn language_name_41 : () -> ptr | () -> "Protobuf" as ptr
+fn language_name_42 : () -> ptr | () -> "GraphQL" as ptr
+fn language_name_43 : () -> ptr | () -> "Zig" as ptr
+fn language_name_44 : () -> ptr | () -> "Nim" as ptr
+fn language_name_45 : () -> ptr | () -> "Crystal" as ptr
+fn language_name_46 : () -> ptr | () -> "Julia" as ptr
+fn language_name_47 : () -> ptr | () -> "Solidity" as ptr
+fn language_name_48 : () -> ptr | () -> "Verilog" as ptr
+fn language_name_49 : () -> ptr | () -> "VHDL" as ptr
+fn language_name_50 : () -> ptr | () -> "Terraform" as ptr
+fn language_name_51 : () -> ptr | () -> "Nix" as ptr
+fn language_name_52 : () -> ptr | () -> "CMake" as ptr
+fn language_name_53 : () -> ptr | () -> "Batch" as ptr
+fn language_name_54 : () -> ptr | () -> "Basic" as ptr
+fn language_name_55 : () -> ptr | () -> "Ada" as ptr
+fn language_name_56 : () -> ptr | () -> "Pascal" as ptr
+fn language_name_57 : () -> ptr | () -> "Dlang" as ptr
+fn language_name_58 : () -> ptr | () -> "ObjectiveC" as ptr
+fn language_name_59 : () -> ptr | () -> "Groovy" as ptr
+fn language_name_60 : () -> ptr | () -> "R" as ptr
+fn language_name_61 : () -> ptr | () -> "MATLAB" as ptr
+fn language_name_62 : () -> ptr | () -> "Octave" as ptr
+fn language_name_63 : () -> ptr | () -> "Forth" as ptr
+fn language_name_64 : () -> ptr | () -> "Tcl" as ptr
+fn language_name_65 : () -> ptr | () -> "Awk" as ptr
+fn language_name_66 : () -> ptr | () -> "Gnuplot" as ptr
+fn language_name_67 : () -> ptr | () -> "Diff" as ptr
+fn language_name_68 : () -> ptr | () -> "Text" as ptr
+fn language_name_69 : () -> ptr | () -> "Svelte" as ptr
+fn language_name_70 : () -> ptr | () -> "Vue" as ptr
+fn language_name_71 : () -> ptr | () -> "Astro" as ptr
+fn language_name_72 : () -> ptr | () -> "SolidityYul" as ptr
+fn language_name_73 : () -> ptr | () -> "LaTeX" as ptr
+fn language_name_74 : () -> ptr | () -> "Racket" as ptr
+fn language_name_75 : () -> ptr | () -> "Scheme" as ptr
+fn language_name_76 : () -> ptr | () -> "Cython" as ptr
+fn language_name_77 : () -> ptr | () -> "CoffeeScript" as ptr
+fn language_name_78 : () -> ptr | () -> "GDScript" as ptr
+fn language_name_79 : () -> ptr | () -> "Vala" as ptr
+fn language_name_80 : () -> ptr | () -> "ObjectiveCpp" as ptr
+fn language_name_81 : () -> ptr | () -> "Reason" as ptr
+fn language_name_82 : () -> ptr | () -> "Dhall" as ptr
+fn language_name_83 : () -> ptr | () -> "Jsonnet" as ptr
+fn language_name_84 : () -> ptr | () -> "CUE" as ptr
+fn language_name_85 : () -> ptr | () -> "Puppet" as ptr
+fn language_name_86 : () -> ptr | () -> "Chef" as ptr
+fn language_name_87 : () -> ptr | () -> "Ansible" as ptr
+fn language_name_88 : () -> ptr | () -> "Properties" as ptr
+fn language_name_89 : () -> ptr | () -> "Meson" as ptr
+fn language_name_90 : () -> ptr | () -> "Ninja" as ptr
+fn language_name_91 : () -> ptr | () -> "SystemRDL" as ptr
+fn language_name_92 : () -> ptr | () -> "V" as ptr
+fn language_name_93 : () -> ptr | () -> "Odin" as ptr
+fn language_name_94 : () -> ptr | () -> "Carbon" as ptr
+fn language_name_95 : () -> ptr | () -> "Bazel" as ptr
+fn language_name_96 : () -> ptr | () -> "Starlark" as ptr
+fn language_name_97 : () -> ptr | () -> "Pride" as ptr
+
+fn language_name_group_0 : i64 -> ptr
+  | id ->
+      if id == 1i64 then "C" as ptr
+      else if id == 2i64 then "C++" as ptr
+      else if id == 3i64 then "CSharp" as ptr
+      else if id == 4i64 then "Java" as ptr
+      else if id == 5i64 then "JavaScript" as ptr
+      else if id == 6i64 then "TypeScript" as ptr
+      else if id == 7i64 then "Go" as ptr
+      else if id == 8i64 then "Rust" as ptr
+      else if id == 9i64 then "Python" as ptr
+      else if id == 10i64 then "Ruby" as ptr
+      else if id == 11i64 then "Shell" as ptr
+      else if id == 12i64 then "PowerShell" as ptr
+      else "Unknown" as ptr
+
+fn language_name_group_1 : i64 -> ptr
+  | id ->
+      if id == 13i64 then "Perl" as ptr
+      else if id == 14i64 then "PHP" as ptr
+      else if id == 15i64 then "Swift" as ptr
+      else if id == 16i64 then "Kotlin" as ptr
+      else if id == 17i64 then "Scala" as ptr
+      else if id == 18i64 then "Haskell" as ptr
+      else if id == 19i64 then "Lua" as ptr
+      else if id == 20i64 then "SQL" as ptr
+      else if id == 21i64 then "HTML" as ptr
+      else if id == 22i64 then "XML" as ptr
+      else if id == 23i64 then "CSS" as ptr
+      else if id == 24i64 then "SCSS" as ptr
+      else "Unknown" as ptr
+
+fn language_name_group_2 : i64 -> ptr
+  | id ->
+      if id == 25i64 then "Markdown" as ptr
+      else if id == 26i64 then "YAML" as ptr
+      else if id == 27i64 then "TOML" as ptr
+      else if id == 28i64 then "JSON" as ptr
+      else if id == 29i64 then "Dart" as ptr
+      else if id == 30i64 then "Elixir" as ptr
+      else if id == 31i64 then "Erlang" as ptr
+      else if id == 32i64 then "OCaml" as ptr
+      else if id == 33i64 then "FSharp" as ptr
+      else if id == 34i64 then "Clojure" as ptr
+      else if id == 35i64 then "Lisp" as ptr
+      else if id == 36i64 then "Fortran" as ptr
+      else "Unknown" as ptr
+
+fn language_name_group_3 : i64 -> ptr
+  | id ->
+      if id == 37i64 then "Cobol" as ptr
+      else if id == 38i64 then "Assembly" as ptr
+      else if id == 39i64 then "Makefile" as ptr
+      else if id == 40i64 then "Dockerfile" as ptr
+      else if id == 41i64 then "Protobuf" as ptr
+      else if id == 42i64 then "GraphQL" as ptr
+      else if id == 43i64 then "Zig" as ptr
+      else if id == 44i64 then "Nim" as ptr
+      else if id == 45i64 then "Crystal" as ptr
+      else if id == 46i64 then "Julia" as ptr
+      else if id == 47i64 then "Solidity" as ptr
+      else if id == 48i64 then "Verilog" as ptr
+      else "Unknown" as ptr
+
+fn language_name_group_4 : i64 -> ptr
+  | id ->
+      if id == 49i64 then "VHDL" as ptr
+      else if id == 50i64 then "Terraform" as ptr
+      else if id == 51i64 then "Nix" as ptr
+      else if id == 52i64 then "CMake" as ptr
+      else if id == 53i64 then "Batch" as ptr
+      else if id == 54i64 then "Basic" as ptr
+      else if id == 55i64 then "Ada" as ptr
+      else if id == 56i64 then "Pascal" as ptr
+      else if id == 57i64 then "Dlang" as ptr
+      else if id == 58i64 then "ObjectiveC" as ptr
+      else if id == 59i64 then "Groovy" as ptr
+      else if id == 60i64 then "R" as ptr
+      else "Unknown" as ptr
+
+fn language_name_group_5 : i64 -> ptr
+  | id ->
+      if id == 61i64 then "MATLAB" as ptr
+      else if id == 62i64 then "Octave" as ptr
+      else if id == 63i64 then "Forth" as ptr
+      else if id == 64i64 then "Tcl" as ptr
+      else if id == 65i64 then "Awk" as ptr
+      else if id == 66i64 then "Gnuplot" as ptr
+      else if id == 67i64 then "Diff" as ptr
+      else if id == 68i64 then "Text" as ptr
+      else if id == 69i64 then "Svelte" as ptr
+      else if id == 70i64 then "Vue" as ptr
+      else if id == 71i64 then "Astro" as ptr
+      else if id == 72i64 then "SolidityYul" as ptr
+      else "Unknown" as ptr
+
+fn language_name_group_6 : i64 -> ptr
+  | id ->
+      if id == 73i64 then "LaTeX" as ptr
+      else if id == 74i64 then "Racket" as ptr
+      else if id == 75i64 then "Scheme" as ptr
+      else if id == 76i64 then "Cython" as ptr
+      else if id == 77i64 then "CoffeeScript" as ptr
+      else if id == 78i64 then "GDScript" as ptr
+      else if id == 79i64 then "Vala" as ptr
+      else if id == 80i64 then "ObjectiveCpp" as ptr
+      else if id == 81i64 then "Reason" as ptr
+      else if id == 82i64 then "Dhall" as ptr
+      else if id == 83i64 then "Jsonnet" as ptr
+      else if id == 84i64 then "CUE" as ptr
+      else "Unknown" as ptr
+
+fn language_name_group_7 : i64 -> ptr
+  | id ->
+      if id == 85i64 then "Puppet" as ptr
+      else if id == 86i64 then "Chef" as ptr
+      else if id == 87i64 then "Ansible" as ptr
+      else if id == 88i64 then "Properties" as ptr
+      else if id == 89i64 then "Meson" as ptr
+      else if id == 90i64 then "Ninja" as ptr
+      else if id == 91i64 then "SystemRDL" as ptr
+      else if id == 92i64 then "V" as ptr
+      else if id == 93i64 then "Odin" as ptr
+      else if id == 94i64 then "Carbon" as ptr
+      else if id == 95i64 then "Bazel" as ptr
+      else if id == 96i64 then "Starlark" as ptr
+      else "Unknown" as ptr
+
+fn language_name_group_8 : i64 -> ptr
+  | id ->
+      if id == 97i64 then "Pride" as ptr
+      else "Unknown" as ptr
+
+fn language_name : i64 -> ptr
+  | id ->
+      if id <= 12i64 then language_name_group_0(id)
+      else if id <= 24i64 then language_name_group_1(id)
+      else if id <= 36i64 then language_name_group_2(id)
+      else if id <= 48i64 then language_name_group_3(id)
+      else if id <= 60i64 then language_name_group_4(id)
+      else if id <= 72i64 then language_name_group_5(id)
+      else if id <= 84i64 then language_name_group_6(id)
+      else if id <= 96i64 then language_name_group_7(id)
+      else if id <= 97i64 then language_name_group_8(id)
+      else "Unknown" as ptr
+
+fn language_line_marker_group_0 : i64 -> ptr
+  | id ->
+      if id == 1i64 then "//" as ptr
+      else if id == 2i64 then "//" as ptr
+      else if id == 3i64 then "//" as ptr
+      else if id == 4i64 then "//" as ptr
+      else if id == 5i64 then "//" as ptr
+      else if id == 6i64 then "//" as ptr
+      else if id == 7i64 then "//" as ptr
+      else if id == 8i64 then "//" as ptr
+      else if id == 9i64 then "#" as ptr
+      else if id == 10i64 then "#" as ptr
+      else if id == 11i64 then "#" as ptr
+      else if id == 12i64 then "#" as ptr
+      else "" as ptr
+
+fn language_line_marker_group_1 : i64 -> ptr
+  | id ->
+      if id == 13i64 then "#" as ptr
+      else if id == 14i64 then "//" as ptr
+      else if id == 15i64 then "//" as ptr
+      else if id == 16i64 then "//" as ptr
+      else if id == 17i64 then "//" as ptr
+      else if id == 18i64 then "--" as ptr
+      else if id == 19i64 then "--" as ptr
+      else if id == 20i64 then "--" as ptr
+      else if id == 21i64 then "" as ptr
+      else if id == 22i64 then "" as ptr
+      else if id == 23i64 then "" as ptr
+      else if id == 24i64 then "//" as ptr
+      else "" as ptr
+
+fn language_line_marker_group_2 : i64 -> ptr
+  | id ->
+      if id == 25i64 then "" as ptr
+      else if id == 26i64 then "#" as ptr
+      else if id == 27i64 then "#" as ptr
+      else if id == 28i64 then "//" as ptr
+      else if id == 29i64 then "//" as ptr
+      else if id == 30i64 then "#" as ptr
+      else if id == 31i64 then "%" as ptr
+      else if id == 32i64 then "(*" as ptr
+      else if id == 33i64 then "//" as ptr
+      else if id == 34i64 then ";" as ptr
+      else if id == 35i64 then ";" as ptr
+      else if id == 36i64 then "!" as ptr
+      else "" as ptr
+
+fn language_line_marker_group_3 : i64 -> ptr
+  | id ->
+      if id == 37i64 then "*>" as ptr
+      else if id == 38i64 then ";" as ptr
+      else if id == 39i64 then "#" as ptr
+      else if id == 40i64 then "#" as ptr
+      else if id == 41i64 then "//" as ptr
+      else if id == 42i64 then "#" as ptr
+      else if id == 43i64 then "//" as ptr
+      else if id == 44i64 then "#" as ptr
+      else if id == 45i64 then "#" as ptr
+      else if id == 46i64 then "#" as ptr
+      else if id == 47i64 then "//" as ptr
+      else if id == 48i64 then "//" as ptr
+      else "" as ptr
+
+fn language_line_marker_group_4 : i64 -> ptr
+  | id ->
+      if id == 49i64 then "--" as ptr
+      else if id == 50i64 then "#" as ptr
+      else if id == 51i64 then "#" as ptr
+      else if id == 52i64 then "#" as ptr
+      else if id == 53i64 then "REM " as ptr
+      else if id == 54i64 then "'" as ptr
+      else if id == 55i64 then "--" as ptr
+      else if id == 56i64 then "//" as ptr
+      else if id == 57i64 then "//" as ptr
+      else if id == 58i64 then "//" as ptr
+      else if id == 59i64 then "//" as ptr
+      else if id == 60i64 then "#" as ptr
+      else "" as ptr
+
+fn language_line_marker_group_5 : i64 -> ptr
+  | id ->
+      if id == 61i64 then "%" as ptr
+      else if id == 62i64 then "%" as ptr
+      else if id == 63i64 then "\\" as ptr
+      else if id == 64i64 then "#" as ptr
+      else if id == 65i64 then "#" as ptr
+      else if id == 66i64 then "#" as ptr
+      else if id == 67i64 then "" as ptr
+      else if id == 68i64 then "" as ptr
+      else if id == 69i64 then "//" as ptr
+      else if id == 70i64 then "//" as ptr
+      else if id == 71i64 then "//" as ptr
+      else if id == 72i64 then "//" as ptr
+      else "" as ptr
+
+fn language_line_marker_group_6 : i64 -> ptr
+  | id ->
+      if id == 73i64 then "%" as ptr
+      else if id == 74i64 then ";" as ptr
+      else if id == 75i64 then ";" as ptr
+      else if id == 76i64 then "#" as ptr
+      else if id == 77i64 then "#" as ptr
+      else if id == 78i64 then "#" as ptr
+      else if id == 79i64 then "//" as ptr
+      else if id == 80i64 then "//" as ptr
+      else if id == 81i64 then "//" as ptr
+      else if id == 82i64 then "" as ptr
+      else if id == 83i64 then "//" as ptr
+      else if id == 84i64 then "//" as ptr
+      else "" as ptr
+
+fn language_line_marker_group_7 : i64 -> ptr
+  | id ->
+      if id == 85i64 then "#" as ptr
+      else if id == 86i64 then "#" as ptr
+      else if id == 87i64 then "#" as ptr
+      else if id == 88i64 then "#" as ptr
+      else if id == 89i64 then "#" as ptr
+      else if id == 90i64 then "#" as ptr
+      else if id == 91i64 then "//" as ptr
+      else if id == 92i64 then "//" as ptr
+      else if id == 93i64 then "//" as ptr
+      else if id == 94i64 then "//" as ptr
+      else if id == 95i64 then "#" as ptr
+      else if id == 96i64 then "#" as ptr
+      else "" as ptr
+
+fn language_line_marker_group_8 : i64 -> ptr
+  | id ->
+      if id == 97i64 then "--" as ptr
+      else "" as ptr
+
+fn language_line_marker : i64 -> ptr
+  | id ->
+      if id <= 12i64 then language_line_marker_group_0(id)
+      else if id <= 24i64 then language_line_marker_group_1(id)
+      else if id <= 36i64 then language_line_marker_group_2(id)
+      else if id <= 48i64 then language_line_marker_group_3(id)
+      else if id <= 60i64 then language_line_marker_group_4(id)
+      else if id <= 72i64 then language_line_marker_group_5(id)
+      else if id <= 84i64 then language_line_marker_group_6(id)
+      else if id <= 96i64 then language_line_marker_group_7(id)
+      else if id <= 97i64 then language_line_marker_group_8(id)
+      else "" as ptr
+
+fn language_block_open_group_0 : i64 -> ptr
+  | id ->
+      if id == 1i64 then "/*" as ptr
+      else if id == 2i64 then "/*" as ptr
+      else if id == 3i64 then "/*" as ptr
+      else if id == 4i64 then "/*" as ptr
+      else if id == 5i64 then "/*" as ptr
+      else if id == 6i64 then "/*" as ptr
+      else if id == 7i64 then "/*" as ptr
+      else if id == 8i64 then "/*" as ptr
+      else if id == 9i64 then "\"\"\"" as ptr
+      else if id == 10i64 then "=begin" as ptr
+      else if id == 11i64 then "" as ptr
+      else if id == 12i64 then "<#" as ptr
+      else "" as ptr
+
+fn language_block_open_group_1 : i64 -> ptr
+  | id ->
+      if id == 13i64 then "=pod" as ptr
+      else if id == 14i64 then "/*" as ptr
+      else if id == 15i64 then "/*" as ptr
+      else if id == 16i64 then "/*" as ptr
+      else if id == 17i64 then "/*" as ptr
+      else if id == 18i64 then "{-" as ptr
+      else if id == 19i64 then "--[[" as ptr
+      else if id == 20i64 then "/*" as ptr
+      else if id == 21i64 then "<!--" as ptr
+      else if id == 22i64 then "<!--" as ptr
+      else if id == 23i64 then "/*" as ptr
+      else if id == 24i64 then "/*" as ptr
+      else "" as ptr
+
+fn language_block_open_group_2 : i64 -> ptr
+  | id ->
+      if id == 25i64 then "<!--" as ptr
+      else if id == 26i64 then "" as ptr
+      else if id == 27i64 then "" as ptr
+      else if id == 28i64 then "/*" as ptr
+      else if id == 29i64 then "/*" as ptr
+      else if id == 30i64 then "" as ptr
+      else if id == 31i64 then "" as ptr
+      else if id == 32i64 then "(*" as ptr
+      else if id == 33i64 then "(*" as ptr
+      else if id == 34i64 then "" as ptr
+      else if id == 35i64 then "" as ptr
+      else if id == 36i64 then "" as ptr
+      else "" as ptr
+
+fn language_block_open_group_3 : i64 -> ptr
+  | id ->
+      if id == 37i64 then "" as ptr
+      else if id == 38i64 then "" as ptr
+      else if id == 39i64 then "" as ptr
+      else if id == 40i64 then "" as ptr
+      else if id == 41i64 then "/*" as ptr
+      else if id == 42i64 then "" as ptr
+      else if id == 43i64 then "" as ptr
+      else if id == 44i64 then "" as ptr
+      else if id == 45i64 then "" as ptr
+      else if id == 46i64 then "#=" as ptr
+      else if id == 47i64 then "/*" as ptr
+      else if id == 48i64 then "/*" as ptr
+      else "" as ptr
+
+fn language_block_open_group_4 : i64 -> ptr
+  | id ->
+      if id == 49i64 then "" as ptr
+      else if id == 50i64 then "/*" as ptr
+      else if id == 51i64 then "/*" as ptr
+      else if id == 52i64 then " #[[" as ptr
+      else if id == 53i64 then "" as ptr
+      else if id == 54i64 then "" as ptr
+      else if id == 55i64 then "" as ptr
+      else if id == 56i64 then "(*" as ptr
+      else if id == 57i64 then "/*" as ptr
+      else if id == 58i64 then "/*" as ptr
+      else if id == 59i64 then "/*" as ptr
+      else if id == 60i64 then "" as ptr
+      else "" as ptr
+
+fn language_block_open_group_5 : i64 -> ptr
+  | id ->
+      if id == 61i64 then "%{" as ptr
+      else if id == 62i64 then "%{" as ptr
+      else if id == 63i64 then "(" as ptr
+      else if id == 64i64 then "" as ptr
+      else if id == 65i64 then "" as ptr
+      else if id == 66i64 then "" as ptr
+      else if id == 67i64 then "" as ptr
+      else if id == 68i64 then "" as ptr
+      else if id == 69i64 then "/*" as ptr
+      else if id == 70i64 then "<!--" as ptr
+      else if id == 71i64 then "<!--" as ptr
+      else if id == 72i64 then "/*" as ptr
+      else "" as ptr
+
+fn language_block_open_group_6 : i64 -> ptr
+  | id ->
+      if id == 73i64 then "" as ptr
+      else if id == 74i64 then "#|" as ptr
+      else if id == 75i64 then "#|" as ptr
+      else if id == 76i64 then "\"\"\"" as ptr
+      else if id == 77i64 then "###" as ptr
+      else if id == 78i64 then "" as ptr
+      else if id == 79i64 then "/*" as ptr
+      else if id == 80i64 then "/*" as ptr
+      else if id == 81i64 then "/*" as ptr
+      else if id == 82i64 then "{-" as ptr
+      else if id == 83i64 then "/*" as ptr
+      else if id == 84i64 then "/*" as ptr
+      else "" as ptr
+
+fn language_block_open_group_7 : i64 -> ptr
+  | id ->
+      if id == 85i64 then "" as ptr
+      else if id == 86i64 then "" as ptr
+      else if id == 87i64 then "" as ptr
+      else if id == 88i64 then "" as ptr
+      else if id == 89i64 then "" as ptr
+      else if id == 90i64 then "" as ptr
+      else if id == 91i64 then "/*" as ptr
+      else if id == 92i64 then "/*" as ptr
+      else if id == 93i64 then "/*" as ptr
+      else if id == 94i64 then "/*" as ptr
+      else if id == 95i64 then "" as ptr
+      else if id == 96i64 then "" as ptr
+      else "" as ptr
+
+fn language_block_open_group_8 : i64 -> ptr
+  | id ->
+      if id == 97i64 then "" as ptr
+      else "" as ptr
+
+fn language_block_open : i64 -> ptr
+  | id ->
+      if id <= 12i64 then language_block_open_group_0(id)
+      else if id <= 24i64 then language_block_open_group_1(id)
+      else if id <= 36i64 then language_block_open_group_2(id)
+      else if id <= 48i64 then language_block_open_group_3(id)
+      else if id <= 60i64 then language_block_open_group_4(id)
+      else if id <= 72i64 then language_block_open_group_5(id)
+      else if id <= 84i64 then language_block_open_group_6(id)
+      else if id <= 96i64 then language_block_open_group_7(id)
+      else if id <= 97i64 then language_block_open_group_8(id)
+      else "" as ptr
+
+fn language_block_close_group_0 : i64 -> ptr
+  | id ->
+      if id == 1i64 then "*/" as ptr
+      else if id == 2i64 then "*/" as ptr
+      else if id == 3i64 then "*/" as ptr
+      else if id == 4i64 then "*/" as ptr
+      else if id == 5i64 then "*/" as ptr
+      else if id == 6i64 then "*/" as ptr
+      else if id == 7i64 then "*/" as ptr
+      else if id == 8i64 then "*/" as ptr
+      else if id == 9i64 then "\"\"\"" as ptr
+      else if id == 10i64 then "=end" as ptr
+      else if id == 11i64 then "" as ptr
+      else if id == 12i64 then "#>" as ptr
+      else "" as ptr
+
+fn language_block_close_group_1 : i64 -> ptr
+  | id ->
+      if id == 13i64 then "=cut" as ptr
+      else if id == 14i64 then "*/" as ptr
+      else if id == 15i64 then "*/" as ptr
+      else if id == 16i64 then "*/" as ptr
+      else if id == 17i64 then "*/" as ptr
+      else if id == 18i64 then "-}" as ptr
+      else if id == 19i64 then "]]" as ptr
+      else if id == 20i64 then "*/" as ptr
+      else if id == 21i64 then "-->" as ptr
+      else if id == 22i64 then "-->" as ptr
+      else if id == 23i64 then "*/" as ptr
+      else if id == 24i64 then "*/" as ptr
+      else "" as ptr
+
+fn language_block_close_group_2 : i64 -> ptr
+  | id ->
+      if id == 25i64 then "-->" as ptr
+      else if id == 26i64 then "" as ptr
+      else if id == 27i64 then "" as ptr
+      else if id == 28i64 then "*/" as ptr
+      else if id == 29i64 then "*/" as ptr
+      else if id == 30i64 then "" as ptr
+      else if id == 31i64 then "" as ptr
+      else if id == 32i64 then "*)" as ptr
+      else if id == 33i64 then "*)" as ptr
+      else if id == 34i64 then "" as ptr
+      else if id == 35i64 then "" as ptr
+      else if id == 36i64 then "" as ptr
+      else "" as ptr
+
+fn language_block_close_group_3 : i64 -> ptr
+  | id ->
+      if id == 37i64 then "" as ptr
+      else if id == 38i64 then "" as ptr
+      else if id == 39i64 then "" as ptr
+      else if id == 40i64 then "" as ptr
+      else if id == 41i64 then "*/" as ptr
+      else if id == 42i64 then "" as ptr
+      else if id == 43i64 then "" as ptr
+      else if id == 44i64 then "" as ptr
+      else if id == 45i64 then "" as ptr
+      else if id == 46i64 then "=#" as ptr
+      else if id == 47i64 then "*/" as ptr
+      else if id == 48i64 then "*/" as ptr
+      else "" as ptr
+
+fn language_block_close_group_4 : i64 -> ptr
+  | id ->
+      if id == 49i64 then "" as ptr
+      else if id == 50i64 then "*/" as ptr
+      else if id == 51i64 then "*/" as ptr
+      else if id == 52i64 then "]]" as ptr
+      else if id == 53i64 then "" as ptr
+      else if id == 54i64 then "" as ptr
+      else if id == 55i64 then "" as ptr
+      else if id == 56i64 then "*)" as ptr
+      else if id == 57i64 then "*/" as ptr
+      else if id == 58i64 then "*/" as ptr
+      else if id == 59i64 then "*/" as ptr
+      else if id == 60i64 then "" as ptr
+      else "" as ptr
+
+fn language_block_close_group_5 : i64 -> ptr
+  | id ->
+      if id == 61i64 then "%}" as ptr
+      else if id == 62i64 then "%}" as ptr
+      else if id == 63i64 then ")" as ptr
+      else if id == 64i64 then "" as ptr
+      else if id == 65i64 then "" as ptr
+      else if id == 66i64 then "" as ptr
+      else if id == 67i64 then "" as ptr
+      else if id == 68i64 then "" as ptr
+      else if id == 69i64 then "*/" as ptr
+      else if id == 70i64 then "-->" as ptr
+      else if id == 71i64 then "-->" as ptr
+      else if id == 72i64 then "*/" as ptr
+      else "" as ptr
+
+fn language_block_close_group_6 : i64 -> ptr
+  | id ->
+      if id == 73i64 then "" as ptr
+      else if id == 74i64 then "|#" as ptr
+      else if id == 75i64 then "|#" as ptr
+      else if id == 76i64 then "\"\"\"" as ptr
+      else if id == 77i64 then "###" as ptr
+      else if id == 78i64 then "" as ptr
+      else if id == 79i64 then "*/" as ptr
+      else if id == 80i64 then "*/" as ptr
+      else if id == 81i64 then "*/" as ptr
+      else if id == 82i64 then "-}" as ptr
+      else if id == 83i64 then "*/" as ptr
+      else if id == 84i64 then "*/" as ptr
+      else "" as ptr
+
+fn language_block_close_group_7 : i64 -> ptr
+  | id ->
+      if id == 85i64 then "" as ptr
+      else if id == 86i64 then "" as ptr
+      else if id == 87i64 then "" as ptr
+      else if id == 88i64 then "" as ptr
+      else if id == 89i64 then "" as ptr
+      else if id == 90i64 then "" as ptr
+      else if id == 91i64 then "*/" as ptr
+      else if id == 92i64 then "*/" as ptr
+      else if id == 93i64 then "*/" as ptr
+      else if id == 94i64 then "*/" as ptr
+      else if id == 95i64 then "" as ptr
+      else if id == 96i64 then "" as ptr
+      else "" as ptr
+
+fn language_block_close_group_8 : i64 -> ptr
+  | id ->
+      if id == 97i64 then "" as ptr
+      else "" as ptr
+
+fn language_block_close : i64 -> ptr
+  | id ->
+      if id <= 12i64 then language_block_close_group_0(id)
+      else if id <= 24i64 then language_block_close_group_1(id)
+      else if id <= 36i64 then language_block_close_group_2(id)
+      else if id <= 48i64 then language_block_close_group_3(id)
+      else if id <= 60i64 then language_block_close_group_4(id)
+      else if id <= 72i64 then language_block_close_group_5(id)
+      else if id <= 84i64 then language_block_close_group_6(id)
+      else if id <= 96i64 then language_block_close_group_7(id)
+      else if id <= 97i64 then language_block_close_group_8(id)
+      else "" as ptr
+
+fn language_nested_blocks : i64 -> bool
+  | id ->
+      if id == 8i64 || id == 15i64 || id == 16i64 || id == 17i64 || id == 18i64 || id == 29i64 || id == 32i64 || id == 33i64 || id == 46i64 || id == 57i64 || id == 74i64 || id == 75i64 then true
+      else if id == 82i64 then true
+      else false
+

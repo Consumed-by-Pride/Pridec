@@ -109,7 +109,7 @@ air_lower.c3        AirLower walks the tree and builds AirModule in AirArena:
                       N_USE→import, N_MODULE→module_decl, clause-syntax params
   │
   ▼
-air_write.c3        THE `.air` printer (AIR 2.0, docs/specs/AIR.md): whole program,
+air_write.c3        THE `.air` printer (AIR 2.2, docs/specs/AIR.md): whole program,
                     canonical, lossless; air_text.c3 holds the shared vocabulary.
                     air_read.c3 is its strict parser (used by airtool, by
                     `--air-roundtrip`, and by every backend); air_verify.c3
@@ -117,7 +117,7 @@ air_write.c3        THE `.air` printer (AIR 2.0, docs/specs/AIR.md): whole progr
                     lossy pretty-printer kept as `--emit-air-pretty` (diagnostic).
   │
   ▼
-  file.air  (AIR 2.0 text; THE interface; pfrontc ends here and links no LLVM)
+  file.air  (AIR 2.2 text; THE interface; pfrontc ends here and links no LLVM)
   │
   ▼  a backend starts from the file and nowhere else
   ├─ legacy/pear1/pear1c   PEAR 1: .air → LLVM 23 → bitcode / native ELF (frozen;

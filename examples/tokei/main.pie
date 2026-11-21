@@ -1,0 +1,116 @@
+mod tokei.main
+
+use os.linux
+use tokei.model
+use tokei.languages
+use tokei.walker
+use tokei.report
+use tokei.selftest
+use tokei.stress
+
+fn printf : (ptr, ...) -> i32 #extern("printf") #cc(c)
+
+fn parse_sort : ptr -> i64
+  | value ->
+      if os.linux.strcmp(value, "code" as ptr) == 0i32 then report.SORT_CODE
+      else if os.linux.strcmp(value, "lines" as ptr) == 0i32 then report.SORT_LINES
+      else if os.linux.strcmp(value, "files" as ptr) == 0i32 then report.SORT_FILES
+      else if os.linux.strcmp(value, "name" as ptr) == 0i32 then report.SORT_NAME
+      else -1i64
+
+fn starts_with : (ptr, ptr) -> bool
+  | (value, prefix) ->
+      let n = os.linux.strlen(prefix) as i64
+      let v = value as *u8
+      let p = prefix as *u8
+      let mut i : i64 = 0i64
+      let mut same = true
+      while i < n
+        if v[i] != p[i]
+          same = false
+          break
+        i = i + 1i64
+      same
+
+fn show_files_header : () -> ()
+  | () -> printf("     Lines      Code   Comments     Blanks       TODO  Path\n" as ptr)
+
+fn main : (i64, ptr) -> i64
+  | (argc, argv_ptr) ->
+      let mut options = options_default()
+      let mut totals = totals_new()
+      let workload_checksum = stress.stress_checksum()
+      if workload_checksum == -1i64
+        printf("tokei-pride: stress workload sentinel\n" as ptr)
+      let mut roots : [ptr; 128] = [null; 128]
+      let mut root_count : i64 = 0i64
+      let argv = argv_ptr as *ptr
+      let mut i : i64 = 1i64
+      let mut bad_option = false
+      let mut do_help = false
+      let mut do_version = false
+      let mut do_selftest = false
+      while i < argc
+        let arg = argv[i]
+        if os.linux.strcmp(arg, "--help" as ptr) == 0i32
+          do_help = true
+        else if os.linux.strcmp(arg, "--version" as ptr) == 0i32
+          do_version = true
+        else if os.linux.strcmp(arg, "--self-test" as ptr) == 0i32
+          do_selftest = true
+        else if os.linux.strcmp(arg, "--json" as ptr) == 0i32
+          options.json = true
+        else if os.linux.strcmp(arg, "--files" as ptr) == 0i32
+          options.show_files = true
+        else if os.linux.strcmp(arg, "--hidden" as ptr) == 0i32
+          options.show_hidden = true
+        else if os.linux.strcmp(arg, "--no-ignore" as ptr) == 0i32
+          options.include_ignored = true
+        else if os.linux.strcmp(arg, "--summary" as ptr) == 0i32
+          options.summary_only = true
+        else if starts_with(arg, "--sort=" as ptr)
+          let sort_value = (arg as i64 + 7i64) as ptr
+          let selected = parse_sort(sort_value)
+          if selected < 0i64
+            printf("tokei-pride: invalid sort key: %s\n" as ptr, sort_value)
+            bad_option = true
+          else
+            options.sort_by = selected
+        else if starts_with(arg, "-" as ptr)
+          printf("tokei-pride: unknown option: %s\n" as ptr, arg)
+          bad_option = true
+        else
+          if root_count >= 128i64
+            printf("tokei-pride: too many input roots (maximum 128)\n" as ptr)
+            bad_option = true
+          else
+            roots[root_count] = arg
+            root_count = root_count + 1i64
+        i = i + 1i64
+      if do_help
+        report.report_help()
+        return 0i64
+      if do_version
+        report.report_version()
+        return 0i64
+      if do_selftest
+        let (passed, failed) = selftest.run_selftests()
+        printf("scanner tests: %ld passed, %ld failed\n" as ptr, passed, failed)
+        if failed == 0i64 then return 0i64 else return 1i64
+      if bad_option
+        report.report_help()
+        return 2i64
+      if root_count == 0i64
+        roots[0i64] = "." as ptr
+        root_count = 1i64
+      if options.show_files && !options.json
+        show_files_header()
+      let mut root_index : i64 = 0i64
+      while root_index < root_count
+        walker.walker_scan_root(&totals, &options, roots[root_index])
+        root_index = root_index + 1i64
+      if options.json
+        report.report_json(&totals)
+      else
+        report.report_text(&totals, &options)
+      if totals.total_failed > 0i64 then 1i64 else 0i64

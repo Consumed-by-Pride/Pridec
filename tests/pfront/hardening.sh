@@ -73,11 +73,17 @@ fi
 # ── 3. Compiler failures are not silently counted as clean ───────────────────
 # Covered in depth by tests/pfront/selftest.sh; this is the single check that the
 # harness hooks are present, so a future edit to run.sh cannot quietly drop them.
-if grep -q 'crashed?' tests/pfront/run.sh && grep -q 'did not finish' tests/pfront/run.sh; then
-    ok "the regression harness still checks exit status and the summary line"
-else
-    bad "tests/pfront/run.sh lost its crash detection"
-fi
+# Behaviour, not wording: a crashing compiler must not be scored healthy. This
+# runs the real harness against a stub that always dies, and asserts the harness
+# reports failures -- the guard can be rewritten, but it cannot be removed.
+stub="$W/crashbin"
+printf '#!/bin/sh\nexit 139\n' > "$stub"; chmod +x "$stub"
+verdict=$(PFRONT_BIN="$PWD/$stub" PF_BIN="$PWD/$stub" bash tests/pfront/run.sh 2>&1 | sed -n 's/^pfront regression: //p')
+case "$verdict" in
+    *"fail=0"*) bad "the regression harness scored a crashing compiler as healthy: $verdict" ;;
+    "")         bad "the regression harness produced no verdict against a crashing compiler" ;;
+    *)          ok "the regression harness rejects a crashing compiler: $verdict" ;;
+esac
 
 rm -rf "$W"
 echo "---"

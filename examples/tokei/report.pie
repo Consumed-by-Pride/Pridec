@@ -1,0 +1,105 @@
+mod tokei.report
+
+use os.linux
+use tokei.model
+use tokei.languages
+
+fn printf : (ptr, ...) -> i32 #extern("printf") #cc(c)
+
+const SORT_CODE : i64 = 1i64
+const SORT_LINES : i64 = 2i64
+const SORT_FILES : i64 = 3i64
+const SORT_NAME : i64 = 4i64
+
+fn report_metric : (*Totals, i64, i64) -> i64
+  | (t, id, sort_by) ->
+      if sort_by == SORT_LINES then t.lines[id]
+      else if sort_by == SORT_FILES then t.files[id]
+      else t.code[id]
+
+fn report_before : (*Totals, i64, i64, i64) -> bool
+  | (t, a, b, sort_by) ->
+      if sort_by == SORT_NAME
+        os.linux.strcmp(language_name(a), language_name(b)) < 0i32
+      else
+        report_metric(t, a, sort_by) > report_metric(t, b, sort_by)
+
+fn report_order : (*Totals, i64, *i64) -> i64
+  | (t, sort_by, out) ->
+      let mut used : [bool; 128] = [false; 128]
+      let mut count : i64 = 0i64
+      let mut step : i64 = 0i64
+      while step < LANGUAGE_COUNT
+        let mut best : i64 = 0i64
+        let mut id : i64 = 1i64
+        while id <= LANGUAGE_COUNT
+          if !used[id] && (best == 0i64 || report_before(t, id, best, sort_by))
+            best = id
+          id = id + 1i64
+        if best != 0i64
+          used[best] = true
+          out[count] = best
+          count = count + 1i64
+        step = step + 1i64
+      count
+
+fn report_text : (*Totals, *Options) -> ()
+  | (t, options) ->
+      if !options.summary_only
+        printf("Language              Files       Lines         Code     Comments       Blanks        Bytes        TODO\n" as ptr)
+        printf("-----------------------------------------------------------------------------------------------\n" as ptr)
+        let mut order : [i64; 128] = [0i64; 128]
+        let count = report_order(t, options.sort_by, &order[0])
+        let mut i : i64 = 0i64
+        while i < count
+          let id = order[i]
+          if t.files[id] > 0i64 || t.failed[id] > 0i64
+            printf("%-20s %9ld %11ld %12ld %12ld %11ld %12ld %10ld\n" as ptr,
+                   language_name(id), t.files[id], t.lines[id], t.code[id],
+                   t.comments[id], t.blanks[id], t.bytes[id], t.todos[id])
+          i = i + 1i64
+      printf("-----------------------------------------------------------------------------------------------\n" as ptr)
+      printf("Total: %ld files, %ld lines (%ld code, %ld comments, %ld blanks), %ld bytes, %ld TODO/FIXME\n" as ptr,
+             t.total_files, t.total_lines, t.total_code, t.total_comments,
+             t.total_blanks, t.total_bytes, t.total_todos)
+      if t.total_failed > 0i64
+        printf("Unreadable files: %ld\n" as ptr, t.total_failed)
+      printf("Directories: %ld visited, %ld skipped; max depth: %ld\n" as ptr,
+             t.visited_dirs, t.skipped_dirs, t.max_depth_seen)
+
+fn report_json : *Totals -> ()
+  | t ->
+      printf("{\n  \"languages\": [\n" as ptr)
+      let mut comma : bool = false
+      let mut id : i64 = 1i64
+      while id <= LANGUAGE_COUNT
+        if t.files[id] > 0i64 || t.failed[id] > 0i64
+          if comma then printf(",\n" as ptr)
+          printf("    {\"name\":\"%s\",\"files\":%ld,\"lines\":%ld,\"code\":%ld,\"comments\":%ld,\"blanks\":%ld,\"bytes\":%ld,\"todos\":%ld,\"failed\":%ld}" as ptr,
+                 language_name(id), t.files[id], t.lines[id], t.code[id],
+                 t.comments[id], t.blanks[id], t.bytes[id], t.todos[id], t.failed[id])
+          comma = true
+        id = id + 1i64
+      printf("\n  ],\n  \"total\": {\"files\":%ld,\"lines\":%ld,\"code\":%ld,\"comments\":%ld,\"blanks\":%ld,\"bytes\":%ld,\"todos\":%ld,\"failed\":%ld,\"directories\":%ld,\"skipped_directories\":%ld}\n}\n" as ptr,
+             t.total_files, t.total_lines, t.total_code, t.total_comments,
+             t.total_blanks, t.total_bytes, t.total_todos, t.total_failed,
+             t.visited_dirs, t.skipped_dirs)
+
+fn report_help : () -> ()
+  | () ->
+      printf("tokei-pride — source statistics in Pride\n\n" as ptr)
+      printf("Usage: tokei-pride [OPTIONS] [PATH ...]\n\n" as ptr)
+      printf("Options:\n" as ptr)
+      printf("  --help             show this help\n" as ptr)
+      printf("  --version          show version\n" as ptr)
+      printf("  --hidden           include hidden files and directories\n" as ptr)
+      printf("  --no-ignore        descend into common generated/vendor directories\n" as ptr)
+      printf("  --files            print per-file counts before the summary\n" as ptr)
+      printf("  --summary          print only the aggregate row\n" as ptr)
+      printf("  --json             emit machine-readable JSON\n" as ptr)
+      printf("  --sort code|lines|files|name\n" as ptr)
+      printf("\nRecognized source extensions: %ld across %ld language families.\n" as ptr,
+             189i64, LANGUAGE_COUNT)
+
+fn report_version : () -> ()
+  | () -> printf("tokei-pride 0.1.0 (Pride implementation)\n" as ptr)

@@ -1,9 +1,18 @@
 # pfront bugs — reduced test cases
 
-Files here are MINIMAL repro cases for pfront bugs. They're expected to fail
-until the corresponding parser/resolver bug is fixed. Fix a bug by:
-  1. Move the file out of `known/` (typically to `bug/fixed/` and add a
-     numbered regression test like `70_xxx.pie` in `pfront_tests/`).
+This directory is reserved for MINIMAL repro cases of unresolved pfront bugs;
+not every open issue has a repro checked in yet. Any repro placed here is
+expected to fail until its corresponding bug is fixed. The current regression
+runner enumerates numbered cases in `tests/pfront/` (not this directory), so
+promote a fix by moving the repro to `bug/fixed/` and adding a numbered case
+under `tests/pfront/`.
+
+Status in this page is the current triage; older planning snapshots are in
+`docs/dev/pfront_TODO.md` and may be stale.
+
+Fix a bug by:
+  1. Move the file out of `known/` (typically to `bug/fixed/`) and add a
+     numbered regression test under `tests/pfront/`.
   2. Fix the bug in pfront/*.c3.
   3. Rebuild and confirm the new test passes AND all prior tests still pass.
 
@@ -13,7 +22,7 @@ until the corresponding parser/resolver bug is fixed. Fix a bug by:
 
 The previously-open `layout_elseif_nest.pie` (nested `if/then/else-if/then`
 chains swallowing sibling declarations) is now fixed in `Parser.parse_if()` —
-see `pfront_tests/bug/fixed/layout_elseif_nest.pie` for the repro and a note
+see `tests/pfront/bug/fixed/layout_elseif_nest.pie` for the repro and a note
 on the root cause. The `bug/min/` directory contains additional regression
 cases (char-classify chains, deep-nest, let-init with inline if) that now
 parse with all fns at top level.

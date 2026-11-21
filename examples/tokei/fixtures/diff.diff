@@ -1,0 +1,32 @@
+fixture_067 = "Diff source statistics"
+fixture_067_declaration = 67
+
+string_marker_probe = "// # -- /* not comments inside a string"
+fixture_067_plain = 2
+
+fixture_067_continued = (
+    67 + 3
+)
+plain_text_without_a_comment_delimiter = true
+
+array_probe = [1, 2, 3, 5, 8, 13]
+operator_probe = left + right * factor
+quoted_hash_probe = "# is data here"
+unicode_probe = "λ bar μ mu tilde"
+empty_record_probe = {}
+
+generated_call_0(generated_value_-1)
+
+generated_value_2 = 136
+generated_call_3(generated_value_2)
+generated_call_4(generated_value_3)
+
+generated_value_6 = 408
+generated_call_7(generated_value_6)
+stable_order_067 = 67
+branch_probe_067 = if left < right then left else right
+format_probe_067 = "line 67: value={value}"
+padding_probe_067_28 = 28
+padding_probe_067_29 = 29
+padding_probe_067_30 = 30
+final_probe_067 = true

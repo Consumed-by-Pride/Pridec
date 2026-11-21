@@ -46,6 +46,7 @@ bool g_air_pretty = false;
 bool g_air_roundtrip = false;
 bool g_air_low = false;
 bool g_low_failed = false;       // --emit-air-low: the typed AIR 3.0 low-profile lowering (air_low.c3)
+bool g_air_failed = false;       // AIR allocation/lowering failed; no usable .air was published
 // Lowering errors are counted by the lowerer, not by the DiagBag: `lw.err` prints a
 // line and bumps `lw.errors`. Without this the summary reported "errors: 0" for a
 // file the lowerer had just refused, because `rr.errors` only ever read the
@@ -600,7 +601,12 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
         {
             // `--emit-air-pretty`: the old human-oriented, lossy dump of the entry
             // module. A diagnostic, not a contract, so it stays unconditional.
-            air::emit_air(entry.ast, it, path);
+            int pretty_err = air::emit_air(entry.ast, it, path);
+            if (pretty_err != 0)
+            {
+                printf("air: lowering/allocation failed (%d) -- no usable .air emitted\n", pretty_err);
+                g_air_failed = true;
+            }
         }
         // Artifacts that are meant to be run or linked are written only when the
         // program actually compiled. Reporting errors and still leaving an
@@ -627,7 +633,12 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 }
                 if (an == 0) { air_roots[0] = entry.ast; an = 1; }
                 int werrs = air::emit_air_program(&air_roots[0], an, it, path);
-                if (werrs != 0) { printf("air: %d writer error(s) -- the .air is unusable\n", werrs); }
+                if (werrs != 0)
+                {
+                    if (werrs == -3) { printf("air: allocation/lowering failed -- no usable .air emitted\n"); }
+                    else { printf("air: %d writer/setup error(s) -- the .air is unusable\n", werrs); }
+                    g_air_failed = true;
+                }
             }
             else
             {
@@ -1024,7 +1035,7 @@ fn int main(String[] args)
     }
 
     if (rr.errors > 0) { return 2; }
-    if (g_low_failed) { return 3; }
+    if (g_low_failed || g_air_failed) { return 3; }
     if (rr.warnings > 0) { return 1; }
     return 0;
 }
