@@ -741,6 +741,26 @@ for f in tests/pfront/syntax/x*.pie; do
   fi
 done
 
+# A continuation line indented deeper than its statement must not end the
+# enclosing block. The parser absorbed the INDENT but never counted it, so the
+# matching DEDENT reached the block parser and closed the clause body: every
+# statement after the continuation was ejected from the function and reported
+# as an unresolved name AT THE USE SITE, while the binder sat inside it.
+#
+# "parses clean" does not catch this — the ejected statement is still valid at
+# top level. Assert the SHAPE: every expression must stay inside its `fn`.
+cont_sexp=$(printf 'mod t\nfn f : ptr -> i64\n  | path ->\n      let a = path\n      let d = 1i64\n        + 2i64\n      (a as i64) + d\n' > /tmp/pf_cont.pie; ./pfrontc /tmp/pf_cont.pie --emit-sexp 2>/dev/null)
+# A top-level `(ident d)` (or any ident) sitting beside `(fn f` means the body
+# was split. The whole function must be a single balanced form.
+cont_toplevel=$(printf '%s\n' "$cont_sexp" | grep -cE '^\((ident|cast|add|int) ')
+cont_ok=$(printf '%s\n' "$cont_sexp" | grep -c '^(fn f')
+if [ "$cont_ok" = "1" ] && [ "$cont_toplevel" = "0" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s %s\n' "syntax_continuation_scope" "(deeper continuation keeps the body intact)"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "syntax_continuation_scope" "fn=$cont_ok stray-toplevel=$cont_toplevel (want 1/0)"
+  printf '%s\n' "$cont_sexp" | head -6 | sed 's/^/      /'
+fi
+
 # `not x` and `¬x` are LOGICAL negation. Both lowered to bitwise
 # complement (AUO_BNOT) because only TOKEN_BANG was mapped, so `not true`
 # became ~1 = -2 rather than false. Assert the opcode, since the parse was
