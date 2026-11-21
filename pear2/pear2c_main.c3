@@ -73,11 +73,29 @@ extern fn void ll_init_x86_asmpa() @cname("LLVMInitializeX86AsmParser");
 // wasm32-freestanding, and the optimiser is measurably better with a target
 // machine (vector widths and cost decisions come from the target), so the target
 // that a requested triple names is the one that gets initialised.
-extern fn void ll_init_all_target_infos() @cname("LLVMInitializeAllTargetInfos");
-extern fn void ll_init_all_targets() @cname("LLVMInitializeAllTargets");
-extern fn void ll_init_all_target_mcs() @cname("LLVMInitializeAllTargetMCs");
-extern fn void ll_init_all_asm_printers() @cname("LLVMInitializeAllAsmPrinters");
-extern fn void ll_init_all_asm_parsers() @cname("LLVMInitializeAllAsmParsers");
+//
+// LLVM 21 made `LLVMInitializeAllTargetInfos` and friends `static inline` in
+// llvm-c/Target.h (they now expand to the per-target calls) and dropped them from
+// the shared library, so linking against libLLVM-23 meant an undefined symbol for
+// every one of them. The named set below is exactly what that inline expansion
+// does for the three targets this LLVM was built with (x86, AArch64, WebAssembly);
+// a fourth target would have to be added here AND to the runtime library.
+extern fn void ll_init_a64_ti() @cname("LLVMInitializeAArch64TargetInfo");
+extern fn void ll_init_wasm_ti() @cname("LLVMInitializeWebAssemblyTargetInfo");
+extern fn void ll_init_a64_t() @cname("LLVMInitializeAArch64Target");
+extern fn void ll_init_wasm_t() @cname("LLVMInitializeWebAssemblyTarget");
+extern fn void ll_init_a64_tmc() @cname("LLVMInitializeAArch64TargetMC");
+extern fn void ll_init_wasm_tmc() @cname("LLVMInitializeWebAssemblyTargetMC");
+extern fn void ll_init_a64_asmp() @cname("LLVMInitializeAArch64AsmPrinter");
+extern fn void ll_init_wasm_asmp() @cname("LLVMInitializeWebAssemblyAsmPrinter");
+extern fn void ll_init_a64_asmpa() @cname("LLVMInitializeAArch64AsmParser");
+extern fn void ll_init_wasm_asmpa() @cname("LLVMInitializeWebAssemblyAsmParser");
+fn void ll_register_targets()
+{
+    ll_init_x86_ti(); ll_init_x86_t(); ll_init_x86_tmc(); ll_init_x86_asmp(); ll_init_x86_asmpa();
+    ll_init_a64_ti(); ll_init_a64_t(); ll_init_a64_tmc(); ll_init_a64_asmp(); ll_init_a64_asmpa();
+    ll_init_wasm_ti(); ll_init_wasm_t(); ll_init_wasm_tmc(); ll_init_wasm_asmp(); ll_init_wasm_asmpa();
+}
 // The host machine, asked of LLVM rather than guessed from /proc/cpuinfo: the
 // target library already knows how to answer this for the platform it was built
 // for, and a second implementation would eventually disagree with it.
@@ -90,7 +108,48 @@ extern fn char* ll_host_cpu_features() @cname("LLVMGetHostCPUFeatures");
 // Module linking. The source module is consumed whether the call succeeds or
 // fails, which is why every call site below drops its reference immediately.
 extern fn int ll_link_modules(void* dst, void* src) @cname("LLVMLinkModules2");
-extern fn char* ll_get_triple(void* m) @cname("LLVMGetTargetTriple");
+// Reading a module's target triple.
+//
+// LLVM 23 removed `LLVMGetTargetTriple(LLVMModuleRef)` from the C API (only
+// `LLVMSetTarget` is left; `TargetMachine.h` exposes the *machine's* triple, not
+// the module's). The triple is still needed here: `want_triple` below refuses a
+// module that describes a different target than the one asked for, and a
+// silently-wrong artifact is the exact failure this compiler is built to avoid.
+//
+// So it is read out of the module's text form, which is the one place the C API
+// still exposes it. Printing a module to compare one string is wasteful and this
+// is on the verify path, not the emit path, so the cost is acceptable; the scan
+// is exact (a `target triple = "..."` line emitted by LLVM itself), not a guess.
+extern fn char* ll_print_module_to_string(void* m) @cname("LLVMPrintModuleToString");
+extern fn void ll_free_string(char* s) @cname("LLVMDisposeMessage");
+const char* LLVM_TRIPLE_PREFIX = "target triple = \"";
+fn char* starts_at(char* s, char* prefix)
+{
+    for (usz i = 0; prefix[i] != 0; i++) { if (s[i] != prefix[i]) { return null; } }
+    return s;
+}
+fn char* ll_get_triple(void* m)
+{
+    if (m == null) { return null; }
+    char* text = ll_print_module_to_string(m);
+    if (text == null) { return null; }
+    char* hit = null;
+    for (char* p = text; *p != 0 && hit == null; p++)
+    {
+        if (p[0] == 't' && starts_at(p, (char*)LLVM_TRIPLE_PREFIX) != null) { hit = p; }
+    }
+    if (hit == null) { ll_free_string(text); return null; }
+    char* at = hit + 17;   // strlen("target triple = \"")
+    char* end = at;
+    while (*end != 0 && *end != '"' && *end != '\n') { end++; }
+    usz n = (usz)(end - at);
+    char* out = (char*)malloc(n + 1);
+    if (out == null) { ll_free_string(text); return null; }
+    for (usz i = 0; i < n; i++) { out[i] = at[i]; }
+    out[n] = 0;
+    ll_free_string(text);
+    return out;
+}
 extern fn int ll_get_target_from_triple(char* triple, void** target, char** msg) @cname("LLVMGetTargetFromTriple");
 extern fn void* ll_create_tm(void* target, char* triple, char* cpu, char* features, int level, int reloc, int model) @cname("LLVMCreateTargetMachine");
 extern fn void ll_dispose_tm(void* tm) @cname("LLVMDisposeTargetMachine");
@@ -6358,16 +6417,7 @@ fn bool m1_emit_native(void* m, char* path, int file_type, char** failure)
     }
     // The x86-64 entry points stay because they are what the object/executable
     // modes use; the All* registration is what makes a wasm32 request work.
-    ll_init_x86_ti();
-    ll_init_x86_t();
-    ll_init_x86_tmc();
-    ll_init_x86_asmp();
-    ll_init_x86_asmpa();
-    ll_init_all_target_infos();
-    ll_init_all_targets();
-    ll_init_all_target_mcs();
-    ll_init_all_asm_printers();
-    ll_init_all_asm_parsers();
+    ll_register_targets();
     void* target = null;
     char* err = null;
     if (ll_get_target_from_triple(triple, &target, &err) != 0 || target == null)
@@ -6624,6 +6674,26 @@ fn bool make_paths(char* input, int mode, char* out, usz cap, char* temp_ll, cha
     return ll_n >= 0 && (usz)ll_n < cap && bc_n >= 0 && (usz)bc_n < cap && exe_n >= 0 && (usz)exe_n < cap &&
            obj_n >= 0 && (usz)obj_n < cap;
 }
+// Output mode for this invocation, as one number so every place that needs it
+// (path computation, stale-output clearing) agrees. 0 = native executable,
+// 1 = bitcode, 2 = textual IR, 3 = object, 4 = assembly.
+fn int output_mode(bool emit_ll, bool emit_exe, bool emit_obj, bool emit_native, bool emit_asm)
+{
+    if (emit_ll) { return 2; }
+    if (emit_exe) { return 0; }
+    if (emit_obj || emit_native) { return 3; }
+    if (emit_asm) { return 4; }
+    return 1;
+}
+// Delete every artifact this stem could have: the executable, the bitcode, the
+// IR, the object, the assembly, and the temporaries of each, so a failed or
+// partial build cannot leave an older file where the new one was expected.
+//
+// The rule is one artifact per stem. A `pear2c foo.air --emit-exe` that leaves an
+// older `foo.bc` behind is not "keeping the user's work", it is leaving a file
+// that no command in this session produced and that a later `--verify-bc` would
+// happily bless. Callers that must not delete anything (`--check`, `--probe`,
+// `--verify-bc`) never reach this function.
 fn void clear_stale_outputs(char* input)
 {
     for (int mode = 0; mode <= 4; mode++)
@@ -6633,14 +6703,12 @@ fn void clear_stale_outputs(char* input)
         char[4096] bc_tmp;
         char[4096] exe_tmp;
         char[4096] obj_tmp;
-        if (make_paths(input, mode, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
-        {
-            (void)remove(&out_path[0]);
-            (void)remove(&ll_path[0]);
-            (void)remove(&bc_tmp[0]);
-            (void)remove(&exe_tmp[0]);
-            (void)remove(&obj_tmp[0]);
-        }
+        if (!make_paths(input, mode, &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0])) { continue; }
+        (void)remove(&out_path[0]);
+        (void)remove(&ll_path[0]);
+        (void)remove(&bc_tmp[0]);
+        (void)remove(&exe_tmp[0]);
+        (void)remove(&obj_tmp[0]);
     }
 }
 fn int main(String[] args)
@@ -6816,7 +6884,11 @@ fn int main(String[] args)
     }
     if (usage_error)
     {
+        // `input` is only assigned after this point (it is derived from the input
+        // list), so a bad option used to skip the cleanup entirely: `input` was
+        // still null. The first input is what names the stem either way.
         if (input != null) { clear_stale_outputs(input); }
+        else if (input_count > 0) { clear_stale_outputs(inputs[0]); }
         if (bad_option != null) { printf("pear2c: unsupported option `%s` in PEAR2\n", bad_option); }
         else { printf("pear2c: invalid arguments; choose one input and one output mode\n"); }
         return 2;
@@ -6978,7 +7050,7 @@ fn int main(String[] args)
     char[4096] bc_tmp;
     char[4096] exe_tmp;
     char[4096] obj_tmp;
-    if (!make_paths(input, emit_ll ? 2 : (emit_exe ? 0 : ((emit_obj || emit_native) ? 3 : (emit_asm ? 4 : 1))), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
+    if (!make_paths(input, output_mode(emit_ll, emit_exe, emit_obj, emit_native, emit_asm), &out_path[0], 4096, &ll_path[0], &bc_tmp[0], &exe_tmp[0], &obj_tmp[0]))
     {
         printf("pear2c: output path too long\n"); return 2;
     }
