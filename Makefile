@@ -53,7 +53,45 @@ LDFLAGS     := -L $(LLVM_LIBDIR) -l $(LLVM_LIB)
 
 # ── Sources ──────────────────────────────────────────────────────────────
 PFRONT    := $(wildcard pfront/*.c3)
-PEAR_IR   := $(wildcard pfront/pear_ir/*.c3)
+# ── the AIR boundary ────────────────────────────────────────────────────────
+# The AIR layer is cut in two, and the two halves may not import each other:
+#
+#   AIR_EMIT  what PRODUCES an AirModule: the front end's lowerings, the pass
+#             driver, and the printer. `pfrontc` links exactly this half plus
+#             PFRONT/THEORY, so the compiler never contains a backend.
+#   AIR_USE   what READS an AirModule: the text reader, the verifier, the facts
+#             table, the LLVM text printer, the linter. `pear2c` and `airtool`
+#             link this half.
+#   AIR_CORE  the shared floor: IR types, text helpers, utilities. Both sides.
+#   AIR_MID   reads a module, rewrites it, writes it back. Only the tools link it.
+#
+# Files used to be swept in with a wildcard, which is how `pfrontc` came to
+# contain air_ll (a 68 KB LLVM IR printer it can never call) and how a new file
+# silently landed on whichever side happened to build it. Every file is now
+# named on exactly one side, and tests/air/boundary.sh fails the build when a
+# module on one side imports a module on the other.
+AIR_CORE  := pfront/pear_ir/air_ir.c3 pfront/pear_ir/air_text.c3 pfront/pear_ir/air_util.c3
+AIR_EMIT  := pfront/pear_ir/air_low.c3 pfront/pear_ir/air_lower.c3 pfront/pear_ir/air_emit.c3 \
+             pfront/pear_ir/air_scope.c3 pfront/pear_ir/air_types.c3 pfront/pear_ir/air_audit.c3 \
+             pfront/pear_ir/air_fold.c3 pfront/pear_ir/air_write.c3 pfront/pear_ir/air.c3
+AIR_USE   := pfront/pear_ir/air_read.c3 pfront/pear_ir/air_verify.c3 \
+             pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3
+# MID is neither side: it reads a module, rewrites it, and writes it back, so it
+# needs both. It splits into three kinds, and the difference matters:
+#
+#   air_facts    analysis that WRITES facts into the module (memory_readonly,
+#                no_capture); every emitter reads them, so `pfrontc` links it.
+#   air_pass     the pass driver: reads AIR, rewrites AIR. Tools only today.
+#   air_roundtrip the write/read fidelity check. It lowers a program before it has
+#                anything to round-trip, so it needed the emitter AND the reader --
+#                which is why it left `pfrontc` entirely. `--air-roundtrip` is now
+#                `airtool roundtrip`.
+#
+# Adding a pass to the compiler (`pfrontc --opt=`) means putting air_pass in
+# PFRONT_SRC deliberately. That is the point of the list being explicit.
+AIR_MID   := pfront/pear_ir/air_pass.c3 pfront/pear_ir/air_facts.c3 \
+             pfront/pear_ir/air_roundtrip.c3
+PEAR_IR   := $(AIR_CORE) $(AIR_EMIT) $(AIR_MID) $(AIR_USE)
 THEORY    := $(wildcard pfront/theory/*.c3) \
              $(wildcard pfront/theory/types/*.c3) \
              $(wildcard pfront/theory/meta/*.c3) \
@@ -61,6 +99,10 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
              $(wildcard pfront/theory/rewrite/*.c3) \
              $(wildcard pfront/theory/lower/*.c3) \
              $(wildcard pfront/theory/analysis/*.c3)
+# The union of both sides. Only the harness builds want this: they exercise the
+# emitter and the consumer in one process on purpose. The two shipped binaries do
+# NOT use it -- pfrontc is PFRONT_SRC, pear2c is PEAR2_SRC, and that difference is
+# the boundary.
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # The slice of pfront that reads AIR text: what a backend (pear1c, airtool) links.
@@ -68,14 +110,19 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c lint-pride probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
+.PHONY: all c3c air-boundary air-pass lint-pride probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
 
 # pfrontc ends at .air: no LLVM, no backend. Native code is pear1c (legacy/pear1) or PEAR 2.
-$(BINARY): $(SOURCES) | c3c
-	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) --max-stack-object-size 262144 -o $(BINARY)
+# The compiler proper: front end + theory + the AIR it EMITS. No verifier, no LLVM
+# text printer. `air_roundtrip` is the single consumer-side module it links, and
+# only because --air-roundtrip is a self-test of the writer that has to read its
+# own output back.
+PFRONT_SRC := $(PFRONT) $(THEORY) $(AIR_CORE) $(AIR_EMIT) pfront/pear_ir/air_facts.c3
+$(BINARY): $(PFRONT_SRC) | c3c
+	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(PFRONT_SRC) --max-stack-object-size 262144 -o $(BINARY)
 
 # ── Bootstrap c3c if missing ────────────────────────────────────────────
 c3c:
@@ -163,19 +210,25 @@ $(PEAR1): $(PEAR1_SRC) $(AIR_READ_CORE) | c3c
 
 # AIR 2.0 text tools: `airtool check|fmt|verify FILE.air`. No LLVM, no theory layer:
 # only the IR, the text reader/writer and the validity rules.
-AIR_CORE  := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/air_text.c3 \
-             pfront/pear_ir/air_write.c3 pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3 \
-             pfront/pear_ir/air_verify.c3 pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3 tools/air/airtool.c3
+# The consumer side plus the tools that drive it. `airtool` reads and writes AIR
+# text and runs the pass pipeline; it needs both the printer (it can write) and
+# the reader (it can read), which is why it links AIR_CORE + AIR_EMIT + AIR_USE.
+# `airtool` is the one binary that lives on both sides: it reads AIR, runs passes
+# and writes AIR, and `air_roundtrip` lowers a program before it has anything to
+# round-trip. What the lowerings need from the front end is exactly pfront_core
+# and pfront_lex (they walk a PNode tree), not the parser, the theory layer or
+# the driver -- so the tool links those two and stays free of pfront_main.
+CONSUMER_SRC := pfront/pfront_core.c3 pfront/pfront_lex.c3 $(AIR_CORE) $(AIR_EMIT) $(AIR_MID) $(AIR_USE) tools/air/airtool.c3
 AIRTOOL   := tmp/airtool
 airtool: $(AIRTOOL)
-$(AIRTOOL): $(AIR_CORE) | c3c
+$(AIRTOOL): $(CONSUMER_SRC) | c3c
 	mkdir -p tmp
-	$(C3C) compile --stdlib $(C3C_LIB) $(AIR_CORE) --max-stack-object-size 262144 -o $(AIRTOOL)
+	$(C3C) compile --stdlib $(C3C_LIB) $(CONSUMER_SRC) --max-stack-object-size 262144 -o $(AIRTOOL)
 
 # PEAR 2 bootstrap backend. It is a separate executable and links the shared
 # AIR reader/verifier plus LLVM 23; it does not link PEAR 1 or pfrontc.
 PEAR2_BIN := pear2/pear2c
-PEAR2_SRC := $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3
+PEAR2_SRC := pfront/pfront_core.c3 $(AIR_CORE) $(AIR_USE) pfront/pear_ir/air_facts.c3 pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3
 PEAR2_LDFLAGS ?= -L $(LLVM23_LIBDIR) -l LLVM-23
 LLVM23_BIN ?= $(LLVM23_DIR)/bin
 PEAR2_CLANG ?= $(LLVM23_BIN)/clang
@@ -237,7 +290,7 @@ probe-pear2: $(PEAR2_BIN)
 # LLVM, then run LLVM-independent arithmetic model tests. This does not replace
 # executing the optimizer or backend fixtures.
 check-pear2: | c3c
-	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) pfront/pfront_core.c3 $(AIR_CORE) $(AIR_USE) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
 	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
 	bash -n tests/pear2/run.sh
 	bash -n tests/pear2/native.sh
@@ -249,9 +302,18 @@ lint-pride:
 	python3 scripts/pride-lint.py --docs docs/pride
 	python3 scripts/pride-lint.py --no-compile examples/pride/template.pie
 
+# AIR middle end: the pass driver and its passes (no LLVM, no front end).
+air-boundary:
+	bash tests/air/boundary.sh
+
+air-pass: $(AIRTOOL)
+	bash tests/air/pass.sh
+
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
 # (canonical re-print, validity ledger) and the write->read round trip.
 test-air: $(BINARY) $(AIRTOOL)
+	@echo "==> AIR boundary (emit side may not import consume side)"
+	bash tests/air/boundary.sh
 	@echo "==> AIR 2.0 text contract"
 	bash tests/air/run.sh ./$(BINARY) $(AIRTOOL)
 

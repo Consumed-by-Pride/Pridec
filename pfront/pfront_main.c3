@@ -665,7 +665,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 if (ra != null) { rt_roots[rtn] = ra; rtn = rtn + 1; }
             }
             if (rtn == 0) { rt_roots[0] = entry.ast; rtn = 1; }
-            (void)air::roundtrip_program(&rt_roots[0], rtn, it, path);
+            printf("--air-roundtrip moved to `airtool roundtrip` (it needs the AIR reader, and the\n  compiler does not link one)\n");
         }
 
         pfront_ext::Stats st;

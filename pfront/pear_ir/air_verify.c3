@@ -36,7 +36,7 @@
 module air_verify;
 import air_ir;
 import air_text;
-import air_ll;
+import air_util;
 
 extern fn int   fprintf(void* f, char* fmt, ...);
 extern fn void* fdopen(int fd, char* mode);
@@ -324,7 +324,7 @@ fn void Verify.low_decl(Verify* v, AirDecl* d)
         {
             if (!(is_def || d.tag == ADECL_DECLARE)) { v.viol5("callconv applies to functions:", d.name); }
             char* cn = d.attr_str[i];
-            if (cn == null || !air_ll::cc_known(cn)) { v.viol5("unknown calling convention:", cn); }
+            if (cn == null || !air_util::cc_known(cn)) { v.viol5("unknown calling convention:", cn); }
             else if (air_text::streq(cn, "x86_intr"))
             {
                 // LLVM: the handler takes a pointer to the frame (passed byval) and optionally the error code, and returns nothing

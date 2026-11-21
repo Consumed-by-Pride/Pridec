@@ -14,6 +14,12 @@
 module air_ll;
 import air_ir;
 import air_text;
+import air_util;
+
+// The type predicates, the byte builder and the calling-convention table live in
+// air_util: they are properties of the AIR layer, not of this printer. Aliased
+// here so the 120-odd uses below read the same as before.
+alias Sb = air_util::Sb;
 
 extern fn void* malloc(usz size_);
 extern fn void* realloc(void* p, usz size_);
@@ -30,122 +36,7 @@ const usz MAXB = 4096;      // blocks per function
 const usz MAXI = 16384;     // phi incoming edges per function
 const usz MAXS = 8192;      // string literals per module
 
-// ── string builder ─────────────────────────────────────────────────────────
-struct Sb { char* d; usz n; usz cap; }
-fn void Sb.init(Sb* s) { s.d = null; s.n = 0; s.cap = 0; }
-fn void Sb.reserve(Sb* s, usz more)
-{
-    if (s.n + more + 1 <= s.cap) { return; }
-    usz nc = s.cap == 0 ? 256 : s.cap;
-    while (nc < s.n + more + 1) { nc = nc * 2; }
-    s.d = (char*)realloc((void*)s.d, nc); s.cap = nc;
-}
-fn void Sb.putc(Sb* s, char c) { s.reserve(1); s.d[s.n] = c; s.n++; s.d[s.n] = 0; }
-fn void Sb.put(Sb* s, char* t)
-{
-    if (t == null) { return; }
-    usz k = 0; while (t[k] != 0) { k++; }
-    s.reserve(k);
-    for (usz i = 0; i < k; i++) { s.d[s.n + i] = t[i]; }
-    s.n = s.n + k; s.d[s.n] = 0;
-}
-fn void Sb.int_(Sb* s, long v)
-{
-    if (v == 0) { s.putc('0'); return; }
-    char[24] tmp; usz k = 0; bool neg = v < 0;
-    ulong u = neg ? (ulong)(0 - v) : (ulong)v;
-    while (u > 0) { tmp[k] = (char)('0' + (int)(u % 10)); u = u / 10; k++; }
-    if (neg) { s.putc('-'); }
-    while (k > 0) { k--; s.putc(tmp[k]); }
-}
-fn void Sb.hex(Sb* s, ulong v, int digits)
-{
-    int i = digits - 1;
-    while (i >= 0)
-    {
-        int d = (int)((v >> (ulong)(i * 4)) & 15);
-        s.putc((char)(d < 10 ? '0' + d : 'A' + (d - 10)));
-        i = i - 1;
-    }
-}
-fn void Sb.name(Sb* s, char sigil, char* nm)   // %"x"  /  @"x"
-{
-    s.putc(sigil); s.putc('"');
-    if (nm != null) { for (usz i = 0; nm[i] != 0; i++) { if (nm[i] == '"' || nm[i] == '\\') { s.putc('_'); } else { s.putc(nm[i]); } } }
-    s.putc('"');
-}
-fn char* Sb.take(Sb* s)
-{
-    usz n = s.n;
-    char* r = (char*)malloc(n + 1);
-    for (usz i = 0; i < n; i++) { r[i] = s.d[i]; }
-    r[n] = 0; s.n = 0; if (s.d != null) { s.d[0] = 0; }
-    return r;
-}
-
 // ── types ──────────────────────────────────────────────────────────────────
-fn bool ty_is_int(AirTyp* t)
-{
-    if (t == null) { return false; }
-    switch (t.tag)
-    {
-        case ATYP_I8: case ATYP_I16: case ATYP_I32: case ATYP_I64: case ATYP_ISZ:
-        case ATYP_U8: case ATYP_U16: case ATYP_U32: case ATYP_U64: case ATYP_USZ: case ATYP_CHAR: return true;
-        default: return false;
-    }
-}
-fn bool ty_is_signed(AirTyp* t)
-{
-    if (t == null) { return false; }
-    return t.tag == ATYP_I8 || t.tag == ATYP_I16 || t.tag == ATYP_I32 || t.tag == ATYP_I64 || t.tag == ATYP_ISZ;
-}
-// `usz`/`isz` are as wide as a pointer of the target (docs/specs/AIR3.md "Target"): 64 unless `emit-ll --target=` names a 32-bit triple
-int g_ptr_bits = 64;
-char* g_triple = null;
-fn int triple_ptr_bits(char* tr)
-{
-    usz n = 0; while (tr[n] != 0 && tr[n] != '-') { n++; }
-    char[24] a; if (n >= 23) { return 64; }
-    for (usz i = 0; i < n; i++) { a[i] = tr[i]; } a[n] = 0;
-    char* s = &a[0];
-    if (air_text::streq(s, "wasm32") || air_text::streq(s, "x86") || air_text::streq(s, "riscv32") || air_text::streq(s, "mips") || air_text::streq(s, "mipsel")
-        || air_text::streq(s, "powerpc") || air_text::streq(s, "sparc") || air_text::streq(s, "hexagon") || air_text::streq(s, "avr") || air_text::streq(s, "msp430")) { return 32; }
-    if (n >= 4 && s[0] == 'i' && s[2] == '8' && s[3] == '6') { return 32; }                      // i386 .. i686
-    if (n >= 3 && s[0] == 'a' && s[1] == 'r' && s[2] == 'm' && !(n >= 5 && s[3] == '6' && s[4] == '4')) { return 32; }   // arm, armv7 (not arm64/aarch64)
-    if (n >= 5 && s[0] == 't' && s[1] == 'h' && s[2] == 'u' && s[3] == 'm' && s[4] == 'b') { return 32; }
-    return 64;
-}
-fn int ty_bits(AirTyp* t)
-{
-    switch (t.tag)
-    {
-        case ATYP_ISZ: case ATYP_USZ: return g_ptr_bits;
-        case ATYP_I8: case ATYP_U8: return 8;
-        case ATYP_I16: case ATYP_U16: return 16;
-        case ATYP_I32: case ATYP_U32: case ATYP_CHAR: return 32;
-        case ATYP_F32: return 32;
-        case ATYP_BOOL: return 1;
-        default: return 64;
-    }
-}
-fn bool ty_is_float(AirTyp* t) { return t != null && (t.tag == ATYP_F32 || t.tag == ATYP_F64); }
-fn bool ty_is_ptr(AirTyp* t)   { return t != null && (t.tag == ATYP_PTR || t.tag == ATYP_ARROW); }
-fn bool ty_is_bool(AirTyp* t)  { return t != null && t.tag == ATYP_BOOL; }
-fn bool ty_is_unit(AirTyp* t)  { return t != null && t.tag == ATYP_UNIT; }
-
-fn bool ty_eq(AirTyp* a, AirTyp* b)
-{
-    if (a == b) { return true; }
-    if (a == null || b == null) { return false; }
-    if (a.tag != b.tag) { return false; }
-    if (a.tag == ATYP_NOMINAL) { return air_text::streq(a.name, b.name); }
-    if (a.tag == ATYP_ARRAY && a.ival != b.ival) { return false; }
-    if (a.arg_count != b.arg_count) { return false; }
-    for (usz i = 0; i < a.arg_count; i++) { if (!ty_eq(a.args[i], b.args[i])) { return false; } }
-    return true;
-}
-
-// Does `t` mention only things a consumer can size? infer/var/generic/... are rejected.
 fn bool ty_low(AirTyp* t, int depth)
 {
     if (t == null || depth > 24) { return false; }
@@ -228,6 +119,17 @@ struct Ll
     Sb         types_out;
 }
 
+// The call convention a declaration asks for, resolved through the shared table.
+// It stays on this side because it reads `AirDecl` attributes, which is a printer
+// concern; `cc_keyword` is the part that is a fact about AIR.
+fn char* decl_cc(AirDecl* d)
+{
+    if (d == null) { return null; }
+    char* a = decl_attr_str(d, "callconv");
+    if (a != null) { return air_util::cc_keyword(a); }
+    return d.is_fastcc ? "fastcc" : null;
+}
+
 fn void Ll.err(Ll* l, char* what, char* who)
 {
     l.errs++;
@@ -268,29 +170,6 @@ fn long decl_attr_int(AirDecl* d, char* nm)
 }
 // calling convention of a declaration: `attr callconv "NAME"` (or the `fastcc` modifier) -> LLVM keyword; null = the C convention.
 // Unknown names are rejected by air_verify V5, so this never has to guess.
-fn char* cc_keyword(char* nm)
-{
-    if (nm == null) { return null; }
-    if (air_text::streq(nm, "c")) { return null; }
-    if (air_text::streq(nm, "fast")) { return "fastcc"; }
-    if (air_text::streq(nm, "preserve_most")) { return "preserve_mostcc"; }
-    if (air_text::streq(nm, "preserve_all")) { return "preserve_allcc"; }
-    if (air_text::streq(nm, "x86_intr")) { return "x86_intrcc"; }
-    if (air_text::streq(nm, "win64")) { return "win64cc"; }
-    if (air_text::streq(nm, "sysv64")) { return "x86_64_sysvcc"; }
-    if (air_text::streq(nm, "aapcs")) { return "arm_aapcscc"; }
-    if (air_text::streq(nm, "aapcs_vfp")) { return "arm_aapcs_vfpcc"; }
-    return null;
-}
-fn bool cc_known(char* nm) { return nm != null && (air_text::streq(nm, "c") || cc_keyword(nm) != null); }
-fn char* decl_cc(AirDecl* d)
-{
-    if (d == null) { return null; }
-    char* a = decl_attr_str(d, "callconv");
-    if (a != null) { return cc_keyword(a); }
-    return d.is_fastcc ? "fastcc" : null;
-}
-// ` section "x", align N` suffix for a global (LLVM wants the commas for globals)
 fn void Ll.global_attrs(Ll* l, Sb* o, AirDecl* d)
 {
     char* sec = decl_attr_str(d, "section");
@@ -318,7 +197,7 @@ fn void Ll.ty(Ll* l, Sb* o, AirTyp* t)
         case ATYP_I16: case ATYP_U16: o.put("i16"); return;
         case ATYP_I32: case ATYP_U32: case ATYP_CHAR: o.put("i32"); return;
         case ATYP_I64: case ATYP_U64: o.put("i64"); return;
-        case ATYP_ISZ: case ATYP_USZ: o.put(g_ptr_bits == 32 ? "i32" : "i64"); return;
+        case ATYP_ISZ: case ATYP_USZ: o.put(air_util::g_ptr_bits == 32 ? "i32" : "i64"); return;
         case ATYP_F32: o.put("float"); return;
         case ATYP_F64: o.put("double"); return;
         case ATYP_BOOL: o.put("i1"); return;
@@ -416,13 +295,13 @@ fn Val Ll.prd(Ll* l, AirPrd* p)
         }
         case APRD_INT:
         {
-            if (!ty_is_int(p.ty)) { l.err("integer literal without an integer type", null); v.ty = l.m.t_i64; }
+            if (!air_util::ty_is_int(p.ty)) { l.err("integer literal without an integer type", null); v.ty = l.m.t_i64; }
             else { v.ty = p.ty; }
             Sb s; s.init(); s.int_(p.ival); v.op = s.take(); return v;
         }
         case APRD_FLOAT:
         {
-            if (!ty_is_float(p.ty)) { l.err("float literal without a float type", null); v.ty = l.m.t_f64; } else { v.ty = p.ty; }
+            if (!air_util::ty_is_float(p.ty)) { l.err("float literal without a float type", null); v.ty = l.m.t_f64; } else { v.ty = p.ty; }
             double dv = p.fval; ulong bits = 0;
             // bit pattern of the double via memcpy-free union trick
             ulong* bp = (ulong*)&dv; bits = *bp;
@@ -453,7 +332,7 @@ fn Val Ll.prd(Ll* l, AirPrd* p)
             Val a = l.prd(p.sub_count > 0 ? p.subs[0] : null);
             if (a.ty == null || a.ty.tag != ATYP_PTR) { l.err("load from a non-pointer", null); return v; }
             AirTyp* et = a.ty.args[0];
-            if (p.ty != null && !ty_eq(p.ty, et)) { l.err("load annotation differs from the pointee type", null); }
+            if (p.ty != null && !air_util::ty_eq(p.ty, et)) { l.err("load annotation differs from the pointee type", null); }
             char* t = l.fresh();
             Sb* o = l.out(); o.put("  "); o.put(t); o.put(" = load "); if (p.bval) { o.put("volatile "); } l.ty(o, et); o.put(", ptr "); o.put(a.op); o.putc('\n');
             v.op = t; v.ty = et; return v;
@@ -466,7 +345,7 @@ fn Val Ll.prd(Ll* l, AirPrd* p)
             char* t1 = l.fresh(); char* t2 = l.fresh();
             Sb* o = l.out();
             o.put("  "); o.put(t1); o.put(" = getelementptr "); l.ty(o, p.ty); o.put(", ptr null, i64 1\n");
-            o.put("  "); o.put(t2); o.put(" = ptrtoint ptr "); o.put(t1); o.put(g_ptr_bits == 32 ? " to i32\n" : " to i64\n");
+            o.put("  "); o.put(t2); o.put(" = ptrtoint ptr "); o.put(t1); o.put(air_util::g_ptr_bits == 32 ? " to i32\n" : " to i64\n");
             v.op = t2; v.ty = l.m.t_usz; return v;
         }
         default:
@@ -572,7 +451,7 @@ fn Val Ll.aggregate(Ll* l, AirPrd* p)
     for (usz i = 0; i < n; i++)
     {
         parts[i] = l.prd(p.tag == APRD_RECORD ? p.rec_inits[i].value : p.subs[i]);
-        if (parts[i].ty != null && want[i] != null && !ty_eq(parts[i].ty, want[i])) { l.err("aggregate part has the wrong type", null); }
+        if (parts[i].ty != null && want[i] != null && !air_util::ty_eq(parts[i].ty, want[i])) { l.err("aggregate part has the wrong type", null); }
     }
     char* cur = "undef";
     for (usz i = 0; i < n; i++)
@@ -594,7 +473,7 @@ fn Val Ll.gep(Ll* l, AirPrd* p)
     if (b.ty == null || b.ty.tag != ATYP_PTR) { l.err("gep base is not a pointer", null); return v; }
     AirTyp* cur = p.ty_arg;
     if (!ty_low(cur, 0)) { l.err("gep over a non-low type", null); return v; }
-    if (!ty_eq(b.ty.args[0], cur)) { l.err("gep source element type differs from the base pointee", null); }
+    if (!air_util::ty_eq(b.ty.args[0], cur)) { l.err("gep source element type differs from the base pointee", null); }
     Sb* o = l.out();
     Val[16] idx; char* t0 = null;
     for (usz i = 1; i < p.sub_count; i++) { idx[i] = l.prd(p.subs[i]); }
@@ -604,7 +483,7 @@ fn Val Ll.gep(Ll* l, AirPrd* p)
     o.put("  "); o.put(t); o.put(" = getelementptr "); l.ty(o, p.ty_arg); o.put(", ptr "); o.put(b.op);
     for (usz i = 1; i < p.sub_count; i++)
     {
-        if (!ty_is_int(idx[i].ty)) { l.err("gep index is not an integer", null); }
+        if (!air_util::ty_is_int(idx[i].ty)) { l.err("gep index is not an integer", null); }
         o.put(", ");
         if (i == 1) { l.ty(o, idx[i].ty); o.putc(' '); o.put(idx[i].op); continue; }
         // step into the aggregate
@@ -626,7 +505,7 @@ fn Val Ll.gep(Ll* l, AirPrd* p)
     }
     o.putc('\n');
     v.op = t; v.ty = cur == null ? null : l.mk_ptr(cur);
-    if (p.ty != null && v.ty != null && !ty_eq(p.ty, v.ty)) { l.err("gep annotation differs from the computed pointer type", null); }
+    if (p.ty != null && v.ty != null && !air_util::ty_eq(p.ty, v.ty)) { l.err("gep annotation differs from the computed pointer type", null); }
     return v;
 }
 
@@ -635,28 +514,28 @@ fn Val Ll.binop(Ll* l, AirPrd* p)
     Val v; v.op = "undef"; v.ty = null;
     Val a = l.prd(p.subs[0]); Val b = l.prd(p.subs[1]);
     if (a.ty == null || b.ty == null) { return v; }
-    if (!ty_eq(a.ty, b.ty)) { l.err("binary operands have different types", air_text::binop_name(p.bop)); return v; }
+    if (!air_util::ty_eq(a.ty, b.ty)) { l.err("binary operands have different types", air_text::binop_name(p.bop)); return v; }
     AirTyp* t = a.ty;
-    bool isi = ty_is_int(t); bool isf = ty_is_float(t); bool isb = ty_is_bool(t); bool isp = ty_is_ptr(t);
+    bool isi = air_util::ty_is_int(t); bool isf = air_util::ty_is_float(t); bool isb = air_util::ty_is_bool(t); bool isp = air_util::ty_is_ptr(t);
     char* opn = null; bool cmp = false; bool boolres = false;
     switch (p.bop)
     {
         case ABIN_ADD: opn = isf ? "fadd" : "add"; break;
         case ABIN_SUB: opn = isf ? "fsub" : "sub"; break;
         case ABIN_MUL: opn = isf ? "fmul" : "mul"; break;
-        case ABIN_DIV: opn = isf ? "fdiv" : (ty_is_signed(t) ? "sdiv" : "udiv"); break;
-        case ABIN_MOD: opn = isf ? "frem" : (ty_is_signed(t) ? "srem" : "urem"); break;
+        case ABIN_DIV: opn = isf ? "fdiv" : (air_util::ty_is_signed(t) ? "sdiv" : "udiv"); break;
+        case ABIN_MOD: opn = isf ? "frem" : (air_util::ty_is_signed(t) ? "srem" : "urem"); break;
         case ABIN_AND: case ABIN_LAND: opn = "and"; break;
         case ABIN_OR: case ABIN_LOR: opn = "or"; break;
         case ABIN_XOR: opn = "xor"; break;
         case ABIN_SHL: opn = "shl"; break;
-        case ABIN_SHR: opn = ty_is_signed(t) ? "ashr" : "lshr"; break;
+        case ABIN_SHR: opn = air_util::ty_is_signed(t) ? "ashr" : "lshr"; break;
         case ABIN_EQ: cmp = true; opn = isf ? "fcmp oeq" : "icmp eq"; break;
         case ABIN_NEQ: cmp = true; opn = isf ? "fcmp une" : "icmp ne"; break;
-        case ABIN_LT: cmp = true; opn = isf ? "fcmp olt" : (ty_is_signed(t) ? "icmp slt" : "icmp ult"); break;
-        case ABIN_GT: cmp = true; opn = isf ? "fcmp ogt" : (ty_is_signed(t) ? "icmp sgt" : "icmp ugt"); break;
-        case ABIN_LE: cmp = true; opn = isf ? "fcmp ole" : (ty_is_signed(t) ? "icmp sle" : "icmp ule"); break;
-        case ABIN_GE: cmp = true; opn = isf ? "fcmp oge" : (ty_is_signed(t) ? "icmp sge" : "icmp uge"); break;
+        case ABIN_LT: cmp = true; opn = isf ? "fcmp olt" : (air_util::ty_is_signed(t) ? "icmp slt" : "icmp ult"); break;
+        case ABIN_GT: cmp = true; opn = isf ? "fcmp ogt" : (air_util::ty_is_signed(t) ? "icmp sgt" : "icmp ugt"); break;
+        case ABIN_LE: cmp = true; opn = isf ? "fcmp ole" : (air_util::ty_is_signed(t) ? "icmp sle" : "icmp ule"); break;
+        case ABIN_GE: cmp = true; opn = isf ? "fcmp oge" : (air_util::ty_is_signed(t) ? "icmp sge" : "icmp uge"); break;
         default: l.err("binary operator is not part of the low profile", air_text::binop_name(p.bop)); return v;
     }
     boolres = cmp;
@@ -673,7 +552,7 @@ fn Val Ll.binop(Ll* l, AirPrd* p)
     Sb* o = l.out();
     o.put("  "); o.put(r); o.put(" = "); o.put(opn); o.putc(' '); l.ty(o, t); o.putc(' '); o.put(a.op); o.put(", "); o.put(b.op); o.putc('\n');
     v.op = r; v.ty = boolres ? l.m.t_bool : t;
-    if (p.ty != null && !ty_eq(p.ty, v.ty)) { l.err("operation annotation differs from the computed type", air_text::binop_name(p.bop)); }
+    if (p.ty != null && !air_util::ty_eq(p.ty, v.ty)) { l.err("operation annotation differs from the computed type", air_text::binop_name(p.bop)); }
     return v;
 }
 
@@ -686,20 +565,20 @@ fn Val Ll.unop(Ll* l, AirPrd* p)
     switch (p.uop)
     {
         case AUN_NEG:
-            if (ty_is_float(a.ty)) { o.put("  "); o.put(r); o.put(" = fneg "); l.ty(o, a.ty); o.putc(' '); o.put(a.op); o.putc('\n'); }
-            else if (ty_is_int(a.ty)) { o.put("  "); o.put(r); o.put(" = sub "); l.ty(o, a.ty); o.put(" 0, "); o.put(a.op); o.putc('\n'); }
+            if (air_util::ty_is_float(a.ty)) { o.put("  "); o.put(r); o.put(" = fneg "); l.ty(o, a.ty); o.putc(' '); o.put(a.op); o.putc('\n'); }
+            else if (air_util::ty_is_int(a.ty)) { o.put("  "); o.put(r); o.put(" = sub "); l.ty(o, a.ty); o.put(" 0, "); o.put(a.op); o.putc('\n'); }
             else { l.err("neg of a non-number", null); return v; }
             break;
         case AUN_NOT:
-            if (!ty_is_bool(a.ty)) { l.err("not of a non-bool", null); return v; }
+            if (!air_util::ty_is_bool(a.ty)) { l.err("not of a non-bool", null); return v; }
             o.put("  "); o.put(r); o.put(" = xor i1 "); o.put(a.op); o.put(", true\n"); break;
         case AUN_BITNOT:
-            if (!ty_is_int(a.ty)) { l.err("bitnot of a non-integer", null); return v; }
+            if (!air_util::ty_is_int(a.ty)) { l.err("bitnot of a non-integer", null); return v; }
             o.put("  "); o.put(r); o.put(" = xor "); l.ty(o, a.ty); o.putc(' '); o.put(a.op); o.put(", -1\n"); break;
         default: l.err("unary operator is not part of the low profile", air_text::unop_name(p.uop)); return v;
     }
     v.op = r; v.ty = a.ty;
-    if (p.ty != null && !ty_eq(p.ty, v.ty)) { l.err("operation annotation differs from the computed type", null); }
+    if (p.ty != null && !air_util::ty_eq(p.ty, v.ty)) { l.err("operation annotation differs from the computed type", null); }
     return v;
 }
 
@@ -710,23 +589,23 @@ fn Val Ll.coerce(Ll* l, AirPrd* p)
     AirTyp* to = p.ty;
     if (a.ty == null || to == null) { l.err("coerce without types", null); return v; }
     if (!ty_low(to, 0)) { l.err("coerce to a non-low type", null); return v; }
-    if (ty_eq(a.ty, to)) { v.op = a.op; return v; }
+    if (air_util::ty_eq(a.ty, to)) { v.op = a.op; return v; }
     char* kind = null;
     AirTyp* f = a.ty;
-    bool fi = ty_is_int(f) || ty_is_bool(f); bool ti = ty_is_int(to) || ty_is_bool(to);
+    bool fi = air_util::ty_is_int(f) || air_util::ty_is_bool(f); bool ti = air_util::ty_is_int(to) || air_util::ty_is_bool(to);
     if (fi && ti)
     {
-        int fb = ty_bits(f); int tb = ty_bits(to);
+        int fb = air_util::ty_bits(f); int tb = air_util::ty_bits(to);
         if (fb == tb) { v.op = a.op; return v; }       // same width, different signedness: no-op
-        kind = fb > tb ? "trunc" : ((ty_is_signed(f) && !ty_is_bool(f)) ? "sext" : "zext");
+        kind = fb > tb ? "trunc" : ((air_util::ty_is_signed(f) && !air_util::ty_is_bool(f)) ? "sext" : "zext");
     }
-    else if (fi && ty_is_float(to)) { kind = (ty_is_signed(f) && !ty_is_bool(f)) ? "sitofp" : "uitofp"; }
-    else if (ty_is_float(f) && ti) { kind = ty_is_signed(to) ? "fptosi" : "fptoui"; }
-    else if (ty_is_float(f) && ty_is_float(to)) { kind = ty_bits(f) < ty_bits(to) ? "fpext" : "fptrunc"; }
-    else if (ty_is_ptr(f) && ti) { kind = "ptrtoint"; }
-    else if (fi && ty_is_ptr(to)) { kind = "inttoptr"; }
-    else if (ty_is_ptr(f) && ty_is_ptr(to)) { v.op = a.op; return v; }
-    else if ((f.tag == ATYP_ARROW && ty_is_ptr(to)) || (ty_is_ptr(f) && to.tag == ATYP_ARROW)) { v.op = a.op; return v; }   // a code pointer is a pointer
+    else if (fi && air_util::ty_is_float(to)) { kind = (air_util::ty_is_signed(f) && !air_util::ty_is_bool(f)) ? "sitofp" : "uitofp"; }
+    else if (air_util::ty_is_float(f) && ti) { kind = air_util::ty_is_signed(to) ? "fptosi" : "fptoui"; }
+    else if (air_util::ty_is_float(f) && air_util::ty_is_float(to)) { kind = air_util::ty_bits(f) < air_util::ty_bits(to) ? "fpext" : "fptrunc"; }
+    else if (air_util::ty_is_ptr(f) && ti) { kind = "ptrtoint"; }
+    else if (fi && air_util::ty_is_ptr(to)) { kind = "inttoptr"; }
+    else if (air_util::ty_is_ptr(f) && air_util::ty_is_ptr(to)) { v.op = a.op; return v; }
+    else if ((f.tag == ATYP_ARROW && air_util::ty_is_ptr(to)) || (air_util::ty_is_ptr(f) && to.tag == ATYP_ARROW)) { v.op = a.op; return v; }   // a code pointer is a pointer
     else { l.err("coerce between these types is not defined", null); return v; }
     char* r = l.fresh(); Sb* o = l.out();
     o.put("  "); o.put(r); o.putc(' '); o.put("= "); o.put(kind); o.putc(' '); l.ty(o, f); o.putc(' '); o.put(a.op); o.put(" to "); l.ty(o, to); o.putc('\n');
@@ -757,15 +636,15 @@ fn void Ll.terminate(Ll* l) { l.blks[l.cur].done = true; }
 fn void Ll.emit_ret(Ll* l, AirPrd* p)
 {
     Sb* o = l.out();
-    if (l.cur_ret == null || ty_is_unit(l.cur_ret) || l.cur_ret.tag == ATYP_BOTTOM)
+    if (l.cur_ret == null || air_util::ty_is_unit(l.cur_ret) || l.cur_ret.tag == ATYP_BOTTOM)
     {
-        if (p != null) { Val v = l.prd(p); if (v.ty != null && !ty_is_unit(v.ty)) { l.err("ret of a value in a unit function", null); } }
+        if (p != null) { Val v = l.prd(p); if (v.ty != null && !air_util::ty_is_unit(v.ty)) { l.err("ret of a value in a unit function", null); } }
         l.out().put("  ret void\n");
     }
     else
     {
         Val v = l.prd(p);
-        if (v.ty != null && !ty_eq(v.ty, l.cur_ret)) { l.err("ret value type differs from the function's return type", null); }
+        if (v.ty != null && !air_util::ty_eq(v.ty, l.cur_ret)) { l.err("ret value type differs from the function's return type", null); }
         o = l.out(); o.put("  ret "); l.ty(o, l.cur_ret); o.putc(' '); o.put(v.op); o.putc('\n');
     }
     l.terminate();
@@ -792,9 +671,9 @@ fn void Ll.emit_call(Ll* l, AirPrd* callee, AirCns* k, AirCmd** next_out, char**
     if (dom.arg_count > na || (!va && dom.arg_count != na)) { l.err("call has the wrong number of arguments", callee.name); return; }
     for (usz i = 0; i < dom.arg_count; i++)
     {
-        if (args[i].ty != null && !ty_eq(args[i].ty, dom.args[i])) { l.err("argument has the wrong type", callee.name); }
+        if (args[i].ty != null && !air_util::ty_eq(args[i].ty, dom.args[i])) { l.err("argument has the wrong type", callee.name); }
     }
-    bool isvoid = ret == null || ty_is_unit(ret) || ret.tag == ATYP_BOTTOM;
+    bool isvoid = ret == null || air_util::ty_is_unit(ret) || ret.tag == ATYP_BOTTOM;
     char* r = isvoid ? "zeroinitializer" : l.fresh();
     Sb* o = l.out();
     o.put("  ");
@@ -841,8 +720,8 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
             {
                 Val p = l.prd(c.prds[0]); Val v = l.prd(c.prds[1]);
                 if (p.ty == null || p.ty.tag != ATYP_PTR) { l.err("store to a non-pointer", null); return; }
-                if (v.ty != null && !ty_eq(p.ty.args[0], v.ty)) { l.err("stored value type differs from the pointee type", null); }
-                if (ty_is_unit(v.ty)) { return; }
+                if (v.ty != null && !air_util::ty_eq(p.ty.args[0], v.ty)) { l.err("stored value type differs from the pointee type", null); }
+                if (air_util::ty_is_unit(v.ty)) { return; }
                 Sb* o = l.out(); o.put("  store "); if (c.vol) { o.put("volatile "); } l.ty(o, v.ty); o.putc(' '); o.put(v.op); o.put(", ptr "); o.put(p.op); o.putc('\n');
                 return;
             }
@@ -864,7 +743,7 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
                 for (usz i = 0; i < c.jump_arg_count && i < tb.np; i++)
                 {
                     Val a; if (!l.lookup(c.jump_args[i], &a)) { l.err("jump argument is unbound", c.jump_args[i]); continue; }
-                    if (a.ty != null && !ty_eq(a.ty, tb.params[i].ty)) { l.err("jump argument has the wrong type", c.jump_args[i]); }
+                    if (a.ty != null && !air_util::ty_eq(a.ty, tb.params[i].ty)) { l.err("jump argument has the wrong type", c.jump_args[i]); }
                     if (l.ni >= MAXI) { l.err("too many jump arguments", null); continue; }
                     l.incs[l.ni].val = a.op; l.incs[l.ni].pred = l.blks[l.cur].name; l.incs[l.ni].blk = bi; l.incs[l.ni].param = i; l.ni++;
                 }
@@ -874,7 +753,7 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
             case ACMD_IF:
             {
                 Val cv = l.prd(c.prd);
-                if (!ty_is_bool(cv.ty)) { l.err("if condition is not a bool", null); }
+                if (!air_util::ty_is_bool(cv.ty)) { l.err("if condition is not a bool", null); }
                 char* tn = l.anon_name("then"); char* en = l.anon_name("else");
                 Sb* o = l.out();
                 o.put("  br i1 "); o.put(cv.op); o.put(", label %"); o.putc('"'); o.put(tn); o.put("\", label %"); o.putc('"'); o.put(en); o.put("\"\n");
@@ -977,14 +856,14 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
             case ACMD_ATOMIC:
             {
                 Val p = l.prd(c.prd);
-                if (p.ty == null || p.ty.tag != ATYP_PTR || p.ty.args[0] == null || !ty_is_int(p.ty.args[0]) || ty_bits(p.ty.args[0]) > 64) { l.err("atomic operand 0 must be a pointer to an integer of at most 64 bits", null); return; }
-                AirTyp* et = p.ty.args[0]; long bytes = (long)(ty_bits(et) / 8); if (bytes < 1) { bytes = 1; }
+                if (p.ty == null || p.ty.tag != ATYP_PTR || p.ty.args[0] == null || !air_util::ty_is_int(p.ty.args[0]) || air_util::ty_bits(p.ty.args[0]) > 64) { l.err("atomic operand 0 must be a pointer to an integer of at most 64 bits", null); return; }
+                AirTyp* et = p.ty.args[0]; long bytes = (long)(air_util::ty_bits(et) / 8); if (bytes < 1) { bytes = 1; }
                 Val[2] a; usz na = 0;
                 for (usz i = 0; i < c.prd_count && na < 2; i++) { a[na] = l.prd(c.prds[i]); na++; }
                 int op = c.atomic_op; int ord = c.atomic_order;
                 usz want = op == 0 ? 0 : (op == 13 ? 2 : 1);
                 if (na != want) { l.err("atomic operation with the wrong number of operands", air_text::atomic_op_name(op)); return; }
-                for (usz i = 0; i < na; i++) { if (a[i].ty == null || !ty_eq(a[i].ty, et)) { l.err("atomic operand type differs from the pointee type", null); return; } }
+                for (usz i = 0; i < na; i++) { if (a[i].ty == null || !air_util::ty_eq(a[i].ty, et)) { l.err("atomic operand type differs from the pointee type", null); return; } }
                 if (op == 0 && (ord == 2 || ord == 3)) { l.err("an atomic load cannot be release or acq_rel", null); return; }
                 if (op == 1 && (ord == 1 || ord == 3)) { l.err("an atomic store cannot be acquire or acq_rel", null); return; }
                 Sb* o = l.out(); char* r = null; AirTyp* rt = et;
@@ -1022,7 +901,7 @@ fn void Ll.cmd(Ll* l, AirCmd* c)
                 if (c.asm_cons == null || c.asm_ret == null) { l.err("asm in the low profile needs LLVM constraints and a result type", null); return; }
                 Val[16] a; usz na = 0;
                 for (usz i = 0; i < c.prd_count && na < 16; i++) { a[na] = l.prd(c.prds[i]); na++; }
-                bool isvoid = ty_is_unit(c.asm_ret);
+                bool isvoid = air_util::ty_is_unit(c.asm_ret);
                 char* r = isvoid ? "zeroinitializer" : l.fresh();
                 Sb* o = l.out(); o.put("  ");
                 if (!isvoid) { o.put(r); o.put(" = "); }
@@ -1062,7 +941,7 @@ fn void Ll.llstr(Ll* l, Sb* o, char* t)
 fn void Ll.emit_switch(Ll* l, AirCmd* c)
 {
     Val s = l.prd(c.prd);
-    if (!(ty_is_int(s.ty) || ty_is_bool(s.ty))) { l.err("match scrutinee is not an integer or bool", null); l.terminate(); return; }
+    if (!(air_util::ty_is_int(s.ty) || air_util::ty_is_bool(s.ty))) { l.err("match scrutinee is not an integer or bool", null); l.terminate(); return; }
     usz[64] bi; long[64] cv; usz nc = 0; usz def = MAXB;
     for (usz i = 0; i < c.branch_count; i++)
     {
@@ -1102,8 +981,8 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
     l.cur_ret = d.ret_ty;
     if (!ty_low(d.ret_ty, 0)) { l.err("return type is not part of the low profile", null); }
     bool is_main = air_text::streq(d.name, "main");
-    bool unit_main = d.ret_ty == null || ty_is_unit(d.ret_ty);
-    bool int_main = is_main && d.ret_ty != null && ty_is_int(d.ret_ty) && ty_bits(d.ret_ty) != 32;   // the C ABI entry returns i32 (a wasm32 `main` of another width has a different signature)
+    bool unit_main = d.ret_ty == null || air_util::ty_is_unit(d.ret_ty);
+    bool int_main = is_main && d.ret_ty != null && air_util::ty_is_int(d.ret_ty) && air_util::ty_bits(d.ret_ty) != 32;   // the C ABI entry returns i32 (a wasm32 `main` of another width has a different signature)
     bool wrap = is_main && (unit_main || int_main);
     Sb hdr; hdr.init();
     hdr.put("define "); if (is_internal(d)) { hdr.put("internal "); } { char* cck = decl_cc(d); if (cck != null) { hdr.put(cck); hdr.putc(' '); } } l.ret_ty(&hdr, d.ret_ty); hdr.putc(' '); hdr.name('@', wrap ? "pride_main" : d.name); hdr.putc('(');
@@ -1205,9 +1084,9 @@ fn void Ll.function(Ll* l, AirDecl* d, Sb* out)
         else
         {
             out.put("define i32 @main() {\n  %r = call "); l.ty(out, d.ret_ty); out.put(" @\"pride_main\"()\n");
-            int mb = ty_bits(d.ret_ty);
+            int mb = air_util::ty_bits(d.ret_ty);
             if (mb > 32) { out.put("  %t = trunc "); l.ty(out, d.ret_ty); out.put(" %r to i32\n  ret i32 %t\n}\n\n"); }
-            else { out.put(ty_is_signed(d.ret_ty) ? "  %t = sext " : "  %t = zext "); l.ty(out, d.ret_ty); out.put(" %r to i32\n  ret i32 %t\n}\n\n"); }
+            else { out.put(air_util::ty_is_signed(d.ret_ty) ? "  %t = sext " : "  %t = zext "); l.ty(out, d.ret_ty); out.put(" %r to i32\n  ret i32 %t\n}\n\n"); }
         }
     }
     l.fn_name = null;
@@ -1302,7 +1181,7 @@ fn int to_ll(AirModule* m, char** result, bool want_text)
     }
     Sb all; all.init();
     all.put("; generated by air_ll from an AIR 3.0 module -- reference consumer, docs/specs/AIR3.md\n");
-    if (g_triple != null) { all.put("target triple = \""); all.put(g_triple); all.put("\"\n"); }
+    if (air_util::g_triple != null) { all.put("target triple = \""); all.put(air_util::g_triple); all.put("\"\n"); }
     if (l.types_out.d != null) { all.put(l.types_out.d); all.putc('\n'); }
     if (l.pre.d != null) { all.put(l.pre.d); all.putc('\n'); }
     all.put("declare void @llvm.trap()\n");
