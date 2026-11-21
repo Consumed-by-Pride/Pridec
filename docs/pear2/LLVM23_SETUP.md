@@ -75,12 +75,15 @@ The following smoke was run against `tests/pear2/ret_main.air`:
 ```sh
 ./pear2c tests/pear2/ret_main.air --emit-bc --quiet
 od -An -tx1 -N4 tests/pear2/ret_main.bc   # 42 43 c0 de
-$LLVM23_BIN/clang -x ir -c tests/pear2/ret_main.bc -o tmp/ret_main.bc.o
-./pear2c tests/pear2/ret_main.air --emit-exe --quiet
+$LLVM23_BIN/clang -c tests/pear2/ret_main.bc -o tmp/ret_main.bc.o   # clang reads bitcode directly
+./pear2c tests/pear2/ret_main.air --emit-exe --quiet                 # emits an object in process and links it with ld
 tests/pear2/ret_main                    # exit status 42
 ```
 
-Observed: bitcode magic `4243c0de`, clang verification exit **0**, native executable exit **42**. In addition, the `p04_loop_sum` and `p07_mut_reassign` outputs produced with `BACKEND=./pear2c ... --emit-bc` were accepted by LLVM 23 clang's `-c -x ir` verifier. The full `tests/pear2/pointer_index_main.air` module, including `roundtrip_nested_array`, was likewise compiled and verified; a C harness invoked `roundtrip_nested_array` on four bytes and confirmed the returned value was 3.
+Observed: bitcode magic `4243c0de`, clang verification exit **0**, native executable exit **42**.
+`--emit-exe` does not invoke `clang`: PEAR 2 emits the object with LLVM's backend in process and links it with
+`ld` against glibc's `crt1.o`/`crti.o`/`crtn.o` and `-lc` (`PEAR2_CRT_DIR` relocates those objects,
+`PEAR2_LINK=clang` swaps in a clang driver over the same object). In addition, the `p04_loop_sum` and `p07_mut_reassign` outputs produced with `BACKEND=./pear2c ... --emit-bc` were accepted by LLVM 23 clang's bitcode verifier (`clang -c FILE.bc`). The full `tests/pear2/pointer_index_main.air` module, including `roundtrip_nested_array`, was likewise compiled and verified; a C harness invoked `roundtrip_nested_array` on four bytes and confirmed the returned value was 3.
 
 ## Scope of the test result
 

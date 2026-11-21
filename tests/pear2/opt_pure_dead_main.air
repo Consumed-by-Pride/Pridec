@@ -1,0 +1,16 @@
+// PEAR 2 pass 3: pure-but-unused initializer elimination (-O3).
+//
+// Pass 2 only removes a binding whose value is inert (a literal or a variable),
+// because that is all an expression-local pass can prove. A tuple built from two
+// literals is not inert, but it is *pure*: constructing it cannot trap, call,
+// allocate, or touch memory, so once nothing reads `pair` the work is dead.
+// Pass 3's whole-body census proves nothing reads it and removes the binding;
+// -O2 keeps it.
+//
+// Both tiers must return 42.
+air 2.2 Main "opt_pure_dead_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let pair = (20 : i64, 22 : i64) in
+      <42 : i64 | %ret>;

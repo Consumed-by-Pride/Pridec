@@ -1,0 +1,222 @@
+-- main.pie -- a complete, copyable Pride program.
+--
+-- Reads stdin, counts words and distinct leading bytes, prints a summary, and
+-- exits with (distinct % 256). Runs its own selftest first.
+--
+--   0  success
+--   1  no input
+--   2  selftest failed
+--
+-- Build:  ./pfrontc main.pie --emit-air-low
+--         ./pear2/pear2c main.low.air
+--         ./main.low < some.txt ; echo "exit=$?"
+--
+-- Every construct here is in the executed subset: i64 everywhere, flat buffers
+-- allocated at the point of use, (ptr, n) passed between functions, no pointer
+-- fields, no closures, no effects. See docs/pride/PROGRAMMING.md.
+
+-- ── prelude ────────────────────────────────────────────────────────────────
+fn write_bytes : (*u8, i64) -> ()
+  | (buf, n) ->
+      if n > 0
+        syscall(1, 1, buf as i64, n)
+
+fn fmt_i64 : (*u8, i64) -> i64
+  | (buf, n) ->
+      let mut x : i64 = n
+      let mut neg : i64 = 0
+      if x < 0
+        neg = 1
+      let mut i : i64 = 0
+      if x == 0
+        buf[0] = 48u8
+        i = 1
+      else
+        let tmp : *u8 = alloc [u8; 24]
+        let mut t : i64 = 0
+        while x != 0
+          let d : i64 = x % 10
+          if d < 0
+            tmp[t] = (0 - d + 48) as u8
+          else
+            tmp[t] = (d + 48) as u8
+          x = x / 10
+          t = t + 1
+        if neg == 1
+          tmp[t] = 45u8
+          t = t + 1
+        let mut k : i64 = t - 1
+        while k >= 0
+          buf[i] = tmp[k]
+          i = i + 1
+          k = k - 1
+        free tmp
+      i
+
+fn print_i64 : i64 -> ()
+  | n ->
+      let b : *u8 = alloc [u8; 24]
+      let len : i64 = fmt_i64(b, n)
+      write_bytes(b, len)
+      free b
+
+fn print_i64_nl : i64 -> ()
+  | n ->
+      print_i64(n)
+      write_bytes("\n", 1)
+
+-- ── input ──────────────────────────────────────────────────────────────────
+-- One read is enough for a regular file or a terminal paste; a pipe may return
+-- less, so chunk and copy (there is no pointer arithmetic to advance `dst`).
+fn read_stdin : (*u8, i64) -> i64
+  | (dst, cap) ->
+      let mut total : i64 = 0
+      let mut done : i64 = 0
+      let chunk : *u8 = alloc [u8; 65536]
+      while done == 0
+        let got : i64 = syscall(0, 0, chunk as i64, 65536)
+        if got <= 0
+          done = 1
+        else
+          let mut i : i64 = 0
+          while i < got and total < cap
+            dst[total] = chunk[i]
+            total = total + 1
+            i = i + 1
+          if total >= cap
+            done = 1
+      free chunk
+      total
+
+-- ── model ──────────────────────────────────────────────────────────────────
+fn is_space : (u8) -> bool
+  | (c) -> c == 32u8 or c == 9u8 or c == 10u8 or c == 13u8
+
+fn count_words : (*u8, i64) -> i64
+  | (s, n) ->
+      let mut count : i64 = 0
+      let mut in_word : i64 = 0
+      let mut i : i64 = 0
+      while i < n
+        if is_space(s[i])
+          in_word = 0
+        else
+          if in_word == 0
+            count = count + 1
+          in_word = 1
+        i = i + 1
+      count
+
+fn first_bytes : (*u8, i64, *i64, i64) -> i64
+  | (s, n, out, outcap) ->
+      let mut seen : i64 = 0
+      let mut in_word : i64 = 0
+      let mut i : i64 = 0
+      while i < n
+        if is_space(s[i])
+          in_word = 0
+        else
+          if in_word == 0 and seen < outcap
+            out[seen] = s[i] as i64
+            seen = seen + 1
+          in_word = 1
+        i = i + 1
+      seen
+
+-- ── algorithms ─────────────────────────────────────────────────────────────
+fn sort_i64 : (*i64, i64) -> ()
+  | (a, n) ->
+      let mut i : i64 = 1
+      while i < n
+        let v : i64 = a[i]
+        let mut j : i64 = i - 1
+        while j >= 0 and a[j] > v
+          a[j + 1] = a[j]
+          j = j - 1
+        a[j + 1] = v
+        i = i + 1
+
+fn dedup_i64 : (*i64, i64) -> i64
+  | (a, n) ->
+      if n == 0
+        0
+      else
+        let mut w : i64 = 1
+        let mut i : i64 = 1
+        while i < n
+          if a[i] != a[w - 1]
+            a[w] = a[i]
+            w = w + 1
+          i = i + 1
+        w
+
+fn put_char : (u8) -> ()
+  | (c) ->
+      let b : *u8 = alloc [u8; 1]
+      b[0] = c
+      write_bytes(b, 1)
+      free b
+
+-- ── tests ──────────────────────────────────────────────────────────────────
+fn check : (i64, i64, i64) -> i64
+  | (label, got, want) ->
+      if got == want
+        0
+      else
+        write_bytes("FAIL ", 5)
+        print_i64(label)
+        write_bytes(" got ", 5)
+        print_i64(got)
+        write_bytes(" want ", 6)
+        print_i64_nl(want)
+        1
+
+fn selftest : () -> i64
+  | () ->
+      let mut bad : i64 = 0
+      let a : *i64 = alloc [i64; 5]
+      a[0] = 5
+      a[1] = 3
+      a[2] = 5
+      a[3] = 1
+      a[4] = 3
+      sort_i64(a, 5)
+      bad = bad + check(1, a[0], 1)
+      bad = bad + check(2, a[4], 5)
+      bad = bad + check(3, dedup_i64(a, 5), 3)
+      free a
+      bad = bad + check(4, count_words("a bb ccc", 8), 3)
+      bad = bad + check(5, count_words("", 0), 0)
+      bad
+
+-- ── main ───────────────────────────────────────────────────────────────────
+fn main : () -> i64
+  | () ->
+      if selftest() != 0
+        write_bytes("selftest failed\n", 16)
+        return 2
+      let cap : i64 = 33554432
+      let text : *u8 = alloc [u8; cap]
+      let n : i64 = read_stdin(text, cap)
+      if n <= 0
+        write_bytes("no input\n", 9)
+        free text
+        return 1
+      let words : i64 = count_words(text, n)
+      let firsts : *i64 = alloc [i64; words + 1]
+      let seen : i64 = first_bytes(text, n, firsts, words)
+      sort_i64(firsts, seen)
+      let uniq : i64 = dedup_i64(firsts, seen)
+      print_i64(words)
+      write_bytes(" words, ", 8)
+      print_i64(uniq)
+      write_bytes(" distinct first bytes: ", 23)
+      let mut i : i64 = 0
+      while i < uniq and i < 3
+        put_char(firsts[i] as u8)
+        i = i + 1
+      write_bytes("\n", 1)
+      let code : i64 = uniq % 256
+      free firsts
+      free text
+      code

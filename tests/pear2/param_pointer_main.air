@@ -1,0 +1,46 @@
+// AIR 3: a pointer parameter is an object the callee was handed.
+//
+// Real programs pass buffers to helpers. Before this every `p[0]` through a
+// parameter died with "memory access with unknown/out-of-bounds/misaligned
+// provenance", which made real Pride programs uncompilable however small they
+// were, so the model has to say what a caller-supplied pointer *is*.
+//
+// It is a trusted base: the callee knows the pointee type and nothing about how
+// many elements there are, because the AIR carries no length. So the parameter
+// is recorded as M1PROV_PARAM -- known object, unknown extent, alignment claim 1
+// -- and every access through it is written as the pointee type says with no
+// bound to check. That is the contract every systems language makes when it
+// hands a callee a pointer, and it is the only provenance kind the model trusts
+// instead of proving. `free` still wants a heap base and an atomic still wants a
+// constant address, so the trust does not spread.
+//
+// `bump` stores through its parameter; `sum2` reads two elements through its own.
+// The caller's array is a stack object the callee cannot see the size of, which
+// is the point: both functions work on a buffer they did not allocate.
+//
+// bump writes 30 over the 30 already there, sum2 = 30 + 12 = 42.
+air 3.0 Main "param_pointer_main.pie";
+
+def bump(p : ptr(array#2(i64)), v : i64) : i64 =
+  mu~ %ret.
+    seq {
+      store(gep[array#2(i64)](p, 0 : i64, 0 : i64) : ptr(i64), v);
+      <v | %ret>
+    };
+
+def sum2(p : ptr(array#2(i64))) : i64 =
+  mu~ %ret.
+    <load(gep[array#2(i64)](p, 0 : i64, 0 : i64) : ptr(i64)) : i64 | comu a.
+      <load(gep[array#2(i64)](p, 0 : i64, 1 : i64) : ptr(i64)) : i64 | comu b.
+        <(add a b) : i64 | %ret>>>;
+
+def main() : i64 =
+  mu~ %ret.
+    <alloca(array#2(i64)) : ptr(array#2(i64)) | comu buf.
+      seq {
+        store(gep[array#2(i64)](buf, 0 : i64, 0 : i64) : ptr(i64), 30 : i64);
+        store(gep[array#2(i64)](buf, 0 : i64, 1 : i64) : ptr(i64), 12 : i64);
+        <bump | call · buf · 30 : i64 · comu _.
+          <sum2 | call · buf · comu total.
+            <total | %ret>>>
+      }>;

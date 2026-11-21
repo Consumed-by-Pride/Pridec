@@ -1,0 +1,33 @@
+// AIR 3: a buffer grows to a size the program chooses.
+//
+// `realloc` is the step a container is built on. The old pointer is gone -- it may
+// have moved -- and the new one carries the requested size, so an index the old
+// object could not have held is in bounds afterwards. Here the buffer starts as
+// one element and grows to `n` (32 bytes at the call site), then element 3 is
+// written and read back: 41.
+air 3.0 Main "realloc_grow_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare realloc(p : ptr(i64), size : i64) : ptr(i64);
+extern declare free(p : ptr(i64)) : unit;
+
+def grow(n : i64) : i64 =
+  mu~ %ret.
+    <malloc | call · 8 : i64 · comu small.
+      seq {
+        store(small, 1 : i64);
+        <realloc | call · small · n · comu grown.
+          seq {
+            store(gep[i64](grown, 3 : i64) : ptr(i64), 41 : i64);
+            <load(gep[i64](grown, 3 : i64) : ptr(i64)) : i64 | comu got.
+              <free | call · grown · comu _.
+                <got | %ret>
+              >
+          }
+        >
+      }
+    >;
+
+def main() : i64 =
+  mu~ %ret.
+    <grow | call · 32 : i64 · %ret>;

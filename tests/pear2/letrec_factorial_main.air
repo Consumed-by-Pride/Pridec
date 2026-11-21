@@ -1,0 +1,25 @@
+// PEAR 2: a self-recursive local binding (`letrec`) with a base case.
+//
+// `fact` names itself inside its own body. PEAR 2 lifts every member of the
+// group to a module-level function whose environment is `null` -- a recursive
+// binding may not capture, because its own closure value does not exist while
+// its body is being emitted -- and the self reference inside the body therefore
+// denotes the constant closure `{ @pear2.lam.*, null }`. LLVM folds that pair
+// straight back into a direct call.
+//
+// The recursive call sits inside the else arm, so the result type is decided by
+// the arm that does not recurse; the `call`/`comu` continuation is the ordinary
+// CPS shape for using a result, not a special case of the recursion.
+//
+// fact(5) = 120, so the program exits 120 - 78 = 42 at every tier.
+air 2.2 Main "letrec_factorial_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    letrec (fact = lam (n : i64) -> if (lt n 2 : i64) then
+                                   <1 : i64 | %ret>
+                                 else
+                                   <fact | call · (sub n 1 : i64) · comu m.
+                                     <(mul n m) | %ret>>) in
+      <fact | call · 5 : i64 · comu f.
+        <(sub f 78 : i64) | %ret>>;

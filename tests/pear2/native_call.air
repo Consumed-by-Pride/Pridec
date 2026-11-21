@@ -1,0 +1,16 @@
+// PEAR 2 native backend: a direct call across two functions.
+//
+// `twice_plus` reads both parameters from the System V argument registers, the
+// call in `main` marshals two constants into RDI/RSI and binds the result from
+// RAX, and `_start` turns the i64 return value into the process exit status.
+// Expected exit status: 2*20+2 = 42.
+air 2.2 Main "native_call.pie";
+
+def twice_plus(a : i64, b : i64) : i64 =
+  mu~ %ret.
+    <(add (mul a : i64 2 : i64) : i64 b : i64) : i64 | %ret>;
+
+def main() : i64 =
+  mu~ %ret_2.
+    <twice_plus | call · 20 : i64 · 2 : i64 · comu _x1.
+      <_x1 : i64 | %ret_2>>;

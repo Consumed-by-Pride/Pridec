@@ -1,0 +1,19 @@
+// AIR 3 globals holding function addresses.
+//
+// A vtable, a callback table, or a dispatch array is a constant global whose
+// elements are function symbols. `twice` is not data and has no allocation, so
+// it is neither a tracked pointer nor a global reference — it is a third kind of
+// constant address, and the model records a load of it as "live, non-null,
+// nothing behind it". Such a value may be called; it may not be dereferenced,
+// which is exactly what a function pointer is.
+air 3.0 Main "global_fnptr_main.pie";
+
+def twice(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 2 : i64) | %ret>;
+
+global ops : array#2(ptr(u8)) = array(twice, null);
+
+def main() : i64 =
+  mu~ %ret.
+    <twice | call · 21 : i64 · %ret>;

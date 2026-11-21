@@ -1,0 +1,18 @@
+// A constant-length copy that cannot fit is a compile-time error, not a trap.
+//
+// Both ends are known: the object is eight bytes and the copy is thirty-two, so
+// there is nothing to check at run time -- the answer is already no.
+air 3.0 Main "reject_bulk_copy_main.pie";
+
+extern declare malloc(size : i64) : ptr(i64);
+extern declare memcpy(dst : ptr(u8), src : ptr(u8), n : i64) : ptr(u8);
+
+def copy_overflow() : i64 =
+  mu~ %ret.
+    <malloc | call · 8 : i64 · comu small.
+      <memcpy | call · small · small · 32 : i64 · comu _.
+        <0 : i64 | %ret>
+      >
+    >;
+
+def main() : i64 = mu~ %ret. <0 : i64 | %ret>;

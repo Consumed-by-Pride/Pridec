@@ -1,0 +1,22 @@
+// PEAR 2 pass 3: whole-body constant propagation (-O3).
+//
+// `base` is bound at the top of the body and read two constructs deep, inside
+// an if-arm. Pass 1 only reaches a constant through an immediate initializer or
+// an immediate result, so at -O2 both `base` and `step` stay names and the
+// addition is emitted as written. Pass 3 counts binder positions for the whole
+// body, proves neither name is rebound anywhere, and substitutes both, after
+// which the comparison folds to `false`, the if selects its else arm, and the
+// sum folds to 42.
+//
+// Both tiers must return 42: the point of the fixture is that -O3 folds more
+// without changing the answer.
+air 2.2 Main "opt_propagate_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let base = 40 in
+      let step = 2 in
+        if (lt step 0) then
+          <0 : i64 | %ret>
+        else
+          <(add base step) : i64 | %ret>;
