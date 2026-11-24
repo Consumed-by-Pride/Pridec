@@ -100,5 +100,38 @@ class WriteResultTests(unittest.TestCase):
         )
 
 
+class StaleArtifactTests(unittest.TestCase):
+    """Refusing to emit must not leave the previous artifact in place.
+
+    A failed compile used to return before writing, leaving whatever `.air` was
+    already on disk. Measured: a 551 KB artifact from an earlier good run
+    survived a compile that reported an error, with the same path, the same size
+    and nothing to distinguish it. Nothing downstream compares mtimes, so a
+    consumer reads a program that does not match the source.
+
+    The repository's own rule for the removed --emit-exe flag is that it "fails
+    loudly instead of being ignored, so a stale script cannot believe it built
+    something". A stale .air breaks the same rule quietly.
+    """
+
+    MAIN = ROOT / "pfront" / "pfront_main.c3"
+
+    def test_refusal_removes_the_stale_artifact(self):
+        text = self.MAIN.read_text()
+        self.assertRegex(
+            text, r"derive_air_path\([^)]*\)[\s\S]{0,400}?remove\(",
+            "the refusal path does not remove the stale .air; a failed compile "
+            "leaves the previous artifact looking current",
+        )
+
+    def test_stdout_target_is_not_removed(self):
+        text = self.MAIN.read_text()
+        # `-` means stdout: there is no file to remove, and calling remove("-")
+        # must not run.
+        self.assertRegex(
+            text, r"path\[0\] == '-'",
+            "the stale-artifact cleanup does not exclude the stdout target",
+        )
+
 if __name__ == "__main__":
     unittest.main()

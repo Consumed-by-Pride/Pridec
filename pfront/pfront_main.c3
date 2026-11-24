@@ -61,6 +61,12 @@ extern fn int   printf(char* fmt, ...);
 extern fn int   strncmp(char* a, char* b, usz n);
 extern fn void* opendir(char* path);
 extern fn int   closedir(void* dir);
+extern fn int   remove(char* path);
+
+// Module-scoped consts are not re-exported across modules in this dialect;
+// air_roundtrip.c3 redeclares the same value for the same reason. Keep the two
+// in step with air.c3's AIR_PATH_MAX.
+const usz PF_AIR_PATH_MAX = 4096;
 
 alias Node = pfront_core::PNode;
 alias Nk   = pfront_core::NodeKind;
@@ -642,6 +648,26 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
             }
             else
             {
+                /*
+                 Refusing to emit must also mean the OLD artifact does not
+                 survive. Before this, a failed compile left whatever .air was
+                 lying there from a previous good run -- measured: 551 KB, same
+                 size, same path, nothing to distinguish it from a fresh one. A
+                 backend or test that opens FILE.air then reads a program that
+                 does not match the source it just failed to compile.
+
+                 This is the same rule the removed --emit-exe flag follows: fail
+                 loudly, so a stale script cannot believe it built something.
+                */
+                if (path != null && path[0] != 0 && !(path[0] == '-' && path[1] == 0))
+                {
+                    char[PF_AIR_PATH_MAX] stale;
+                    char* sp = air::derive_air_path(path, &stale[0], PF_AIR_PATH_MAX);
+                    if (sp != null && remove(sp) == 0)
+                    {
+                        printf("air: removed the stale .air left by an earlier run\n");
+                    }
+                }
                 // Say WHY. A bare count leaves the reader with "2 error(s)" and no
                 // way to find them: the diagnostic lines were printed above only
                 // in verbose mode, so --quiet produced a refusal with no cause.
