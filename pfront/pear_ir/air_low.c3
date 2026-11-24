@@ -3919,6 +3919,48 @@ fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
             }
             return true;
         }
+        case Nk.N_PAT_OR:
+        {
+            /*
+             Or-pattern: `| A | B -> ...`, parsed as an n-ary N_PAT_OR.
+
+             Neither lowerer handled this, so every or-pattern was refused with
+             "pattern (not lowered yet)" even though AIR has carried an APAT_OR
+             constructor all along (air_ir.c3, air_write, air_read, air_emit all
+             define it) -- the producer was simply missing. A construct the IR
+             can express and the front end refuses is not a backend gap; it is
+             an unfinished lowering.
+
+             Each alternative matches the SAME scrutinee, and only one of them
+             runs, so each is compiled against `fail` = the next alternative's
+             entry block. The last alternative falls through to the caller's
+             `fail`. Bindings inside alternatives therefore live in separate
+             blocks, which is what the semantics require: `| Some(x) | None`
+             must not promise `x` after the match.
+
+             Binds correct by construction: the arm body is only reachable after
+             one alternative succeeded.
+            */
+            if (p.child_count < 2) { lw.unsup(p, "or-pattern with fewer than two alternatives"); return false; }
+            usz n = p.child_count;
+            bool ok = true;
+            for (usz i = 0; i < n && ok; i++)
+            {
+                /*
+                 Each alternative tests the same scrutinee and jumps to the next
+                 one's block when it does not match; the last alternative falls
+                 through to the caller's `fail`.
+
+                 A failed alternative does NOT leave `lw.cur` live -- pat_variant
+                 sets cur to NOBLK after emitting t_cond -- so the next
+                 alternative has to be entered explicitly rather than assumed.
+                */
+                usz alt_fail = (i + 1 < n) ? lw.blk("or.next") : fail;
+                lw.cur = alt_fail;
+                ok = lw.pat(p.children[i], v, alt_fail);
+            }
+            return ok;
+        }
         default:
             lw.unsup(p, "pattern"); return false;
     }
