@@ -163,12 +163,27 @@ os.linux.syscalls` is loaded for every program, so:
     fn main : () -> i64 | () -> 0i64
       -> 16410 lines, 2413 defs (os.linux 1786, syscalls 438, mem 168)
 
-For `tokei/scanner.pie` (187 source lines) that is 1.1 GB; `languages.pie` is
-1.43 GB. `--emit-air-low` is reachability-filtered and emits 18 lines for the
-same program, so the filter exists — the 2.2 writer just does not apply it.
-This also makes `make test-air` fail on `examples_tokei_languages` and
-`examples_tokei_scanner`, because the huge file is what trips the `fmt` bug
-above.
+For `tokei/main.pie` (187 source lines) that is **20.6 GB** — measured, not
+estimated; the earlier 1.1 GB figure for `scanner.pie` understates it because
+`main.pie` pulls in the whole CLI. `--emit-air-low` is reachability-filtered and
+emits 18 lines for the same program, so the filter exists — the 2.2 writer just
+does not apply it. This also makes `make test-air` fail on
+`examples_tokei_languages` and `examples_tokei_scanner`, because the huge file is
+what trips the `fmt` bug above.
+
+This is not only a size problem. Writing 20.6 GB **filled the sandbox disk**,
+and once the disk was full every subsequent `--emit-air` produced a **0-byte
+`.air` while still reporting `errors=0`** — the same "reports success, artifact
+is empty" shape as the `fmt` truncation. A write that fails part-way is not
+distinguished from one that succeeded. Measured on a disk with 845 MB free after
+cleanup: `pfrontc x.pie --emit-air` on a 6-line input wrote 551 KB and reported
+`errors=0`; with the disk full the same command wrote 0 bytes and still reported
+`errors=0`.
+
+So there are two defects here, not one:
+1. unbounded whole-program output (20.6 GB for 187 lines);
+2. a failed/ENOSPC write is not reported, and leaves a partial or empty `.air`
+   that the caller is told is fine.
 
 The whole-program scope is a deliberate choice (the comment in
 `pfront_main.c3` argues the backend should see everything the native path

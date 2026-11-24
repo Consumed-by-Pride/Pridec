@@ -100,7 +100,14 @@ fn int emit_air(PNode* root, pfront_core::Interner* it, char* path)
     air_facts::validate_module(&mod);
 
     // ── Emit text ──────────────────────────────────────────────────────
-    air_emit::emit_module(&mod, &lr, out_path);
+    int werr = air_emit::emit_module(&mod, &lr, out_path);
+    if (werr != 0)
+    {
+        printf("air: write failed -- the .air on disk is incomplete (out of space?)\n");
+        sc.destroy();
+        arena.destroy();
+        return werr;
+    }
 
     // ── Teardown ───────────────────────────────────────────────────────
     sc.destroy();

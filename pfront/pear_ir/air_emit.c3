@@ -1598,7 +1598,7 @@ fn void emit_decl(AirEmitter* e, AirDecl* d)
 }
 
 // ── Public entry point ─────────────────────────────────────────────────
-fn void emit_module(AirModule* mod, AirLower* lr, char* path)
+fn int emit_module(AirModule* mod, AirLower* lr, char* path)
 {
     AirEmitter e;
     e.mod = mod;
@@ -1631,5 +1631,15 @@ fn void emit_module(AirModule* mod, AirLower* lr, char* path)
 
     e.wr("\n; end of AIR\n");
 
-    if (path != null && e.out != std_out) { fclose(e.out); }
+    /*
+     Return the write result. stdio does its last flush inside fclose, so on a
+     full disk every wr() succeeds and fclose returns EOF -- the artifact is
+     short or empty and the caller was previously told nothing. Measured: with
+     the disk full, --emit-air wrote a 0-byte .air and still reported errors=0.
+    */
+    if (path != null && e.out != std_out)
+    {
+        if (fclose(e.out) != 0) { return -1; }
+    }
+    return 0;
 }

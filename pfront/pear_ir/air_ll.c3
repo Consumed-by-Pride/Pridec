@@ -1202,6 +1202,10 @@ fn int write_ll(AirModule* m, char* path)
     if (f == null) { return -1; }
     usz n = 0; while (text[n] != 0) { n++; }
     fwrite((void*)text, 1, n, f);
-    if (path != null) { fclose(f); } else { fflush(f); }
+    // The close/flush IS the write result: stdio can fail there (a full disk
+    // returns EOF from fclose) after every fwrite reported success. Ignoring it
+    // published a short or empty artifact as if it were complete.
+    int close_rc = (path != null) ? fclose(f) : fflush(f);
+    if (close_rc != 0 && errs == 0) { errs = 1; }
     return errs;
 }
