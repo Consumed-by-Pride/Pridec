@@ -236,6 +236,21 @@ class LowererParityTests(unittest.TestCase):
             + "\n".join(f"  {k}" for k in unrecorded),
         )
 
+    def test_refusal_retracts_the_audit_mark(self):
+        """A refused pattern must not still count as consumed.
+
+        pat_node calls air_audit::mark(p) before its switch, so without an
+        explicit unmark the node stays recorded as lowered and `--air-audit`
+        prints `unlowered=0` about a pattern it just dropped -- which is how
+        the struct-pattern wildcarding stayed invisible.
+        """
+        _, body = self._pat_cases(LOWER, "pat_node")
+        self.assertIn(
+            "air_audit::unmark", body,
+            "pat_node refuses a pattern without retracting its audit mark; "
+            "--air-audit will report the construct as consumed",
+        )
+
     def test_pat_node_does_not_wildcard_a_struct_pattern(self):
         # The exact shape of the x05 miscompile: an N_PAT_STRUCT arm must not
         # come out as APAT_WILD.

@@ -759,6 +759,10 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
             {
                 lr.note_bad(lr, (char*)"pattern kind this lowerer does not model; refusing rather than treating it as a wildcard");
             }
+            // pat_node marks the node before the switch, so a refusal would
+            // otherwise leave it recorded as consumed and --air-audit would
+            // report unlowered=0 about a construct that was just dropped.
+            air_audit::unmark(p);
             return lr.mod.pat_wild;
         }
     }

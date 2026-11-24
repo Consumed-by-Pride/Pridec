@@ -53,6 +53,25 @@ fn void mark(Node* n)
     g_bits[n.id / 64] |= (ulong)1 << (n.id % 64);
 }
 
+// unmark — retract a mark for a node that was LOOKED AT but not lowered.
+//
+// mark() is called at the top of a lowering routine, before the routine decides
+// whether it can handle the node. A node that then falls to a refusal or a
+// poison path was not lowered, but it stays marked -- so the audit reports the
+// construct as consumed and `--air-audit` says `unlowered=0` about a program
+// whose struct patterns were wildcarded. Adjusting an instrument until it
+// agrees with the bug is exactly how a silent-drop goes unnoticed.
+//
+// A refusing routine calls this so the node is reported as what it is: seen,
+// and dropped.
+fn void unmark(Node* n)
+{
+    if (!g_on || n == null) { return; }
+    usz w = (usz)(n.id / 64);
+    if (w >= g_cap_words) { return; }
+    g_bits[w] &= ~((ulong)1 << (n.id % 64));
+}
+
 fn bool seen(Node* n)
 {
     usz w = (usz)(n.id / 64);
