@@ -1,0 +1,34 @@
+-- BUG (open): a statement that dedents back to the enclosing block's indent
+-- after TWO OR MORE line-continuation lines is parsed OUTSIDE the function.
+--
+-- Expected: `s` is a local of `t`, and `t` returns it.
+-- Actual:   the block closes after the `let`, and `s` becomes a TOP-LEVEL
+--           expression: `error[E3005]: unresolved name` at the use site, while
+--           the binder sits inside the function. Exit status still 0 on the
+--           parse; only the checker notices, and only because the name is
+--           then genuinely unbound.
+--
+-- The shape that matters is the DEDENT, not the number of operands:
+--
+--   1 continuation line, close at stmt indent  -> OK
+--   2+ continuation lines, close at stmt indent -> BROKEN   (this file)
+--   2+ continuation lines, close at CONT        -> OK (no layout token emitted)
+--
+-- Confirmed against pfrontc built from 4550225. `--emit-sexp` shows it
+-- directly:
+--
+--   (fn t (clause (pat-ident a) (block (let s (pat-ident s)
+--          (binary + (binary + (ident a :syn) (int 1 :syn)) (int 2 :syn))))))
+--   (ident s)                        <-- escaped to top level
+--
+-- Neither `a + 1 + 2` nor the operator kind matters; `||`, `as i64` and
+-- plain `+` all reproduce. No file under examples/tokei uses this shape
+-- (checked mechanically), so nothing currently built is miscompiled by it --
+-- it is a trap for the next author, not a live regression.
+
+fn t : i64 -> i64
+  | a ->
+      let s = a
+        + 1i64
+        + 2i64
+      s

@@ -22,7 +22,7 @@ enum Colour
   Unknown
 
 -- Two alternatives, distinct nullary variants.
-fn or_two (c : Colour) -> i64
+fn or_two : Colour -> i64
   | c ->
       match c
         | Red | Green -> 1i64
@@ -30,7 +30,7 @@ fn or_two (c : Colour) -> i64
         | Unknown -> 3i64
 
 -- Three alternatives in one arm, plus a literal alternative on an integer.
-fn or_three (n : i64) -> i64
+fn or_three : i64 -> i64
   | n ->
       match n
         | 0i64 | 1i64 | 2i64 -> 10i64
@@ -43,7 +43,7 @@ enum Shape
   Circle(i64)
   Square(i64)
 
-fn or_payload (s : Shape) -> i64
+fn or_payload : Shape -> i64
   | s ->
       match s
         | Circle(r) | Square(r) -> r

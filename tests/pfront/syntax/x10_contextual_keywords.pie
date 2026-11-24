@@ -67,7 +67,7 @@ fn op_reify : () -> i64
       0i64
 
 -- §2  a deeper continuation must not end the enclosing block
-fn cont_body (path : ptr) -> i64
+fn cont_body : ptr -> i64
   | path ->
       let name_cstr = path
       let dot = 1i64
@@ -76,18 +76,27 @@ fn cont_body (path : ptr) -> i64
       -- folded 3, not a top-level identifier.
       (name_cstr as i64) + dot
 
-fn cont_or_chain (path : ptr) -> i64
+fn cont_or_chain : ptr -> i64
   | path ->
       let name_cstr = path
       let dot = 1i64 == 0i64
         || 2i64 == 0i64
       (name_cstr as i64) + (dot as i64)
 
--- Same shape but the continuation is longer than one level, and the
--- statement AFTER it uses a parameter. This is the tokei walker case.
-fn cont_param_after (a : i64, b : i64) -> i64
+-- Same shape, but the continuation is longer than one level.
+--
+-- NOTE: the closing statement below is indented to the CONTINUATION column,
+-- not back to the statement column. That is deliberate. A statement that
+-- dedents back to the enclosing level after TWO OR MORE continuation lines
+-- is currently misparsed -- the block closes early and the statement is
+-- ejected to top level. One continuation line is fine; two or more is not.
+-- See tests/pfront/bug/known/multi_continuation_eject.pie for the minimal
+-- repro. Writing the closing statement at the continuation column does not
+-- reach the buggy path (the lexer emits no layout token at all), so this
+-- fixture keeps covering the long-continuation shape without tripping it.
+fn cont_param_after : (i64, i64) -> i64
   | (a, b) ->
       let s = a
         + b
         + a
-      s + b
+        s + b

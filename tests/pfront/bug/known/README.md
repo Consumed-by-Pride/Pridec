@@ -28,6 +28,52 @@ on the root cause. The `bug/min/` directory contains additional regression
 cases (char-classify chains, deep-nest, let-init with inline if) that now
 parse with all fns at top level.
 
+## Open bugs found while running the first real binary
+
+### Multi-continuation DEDENT ejects the following statement from its function
+
+Repro: `tests/pfront/bug/known/multi_continuation_eject.pie`.
+
+```
+fn t : i64 -> i64
+  | a ->
+      let s = a
+        + 1i64
+        + 2i64
+      s
+```
+
+`--emit-sexp` shows the body's block closed after the `let`, with `(ident s)`
+sitting at top level beside `(fn t ...)`. The checker then reports
+`error[E3005]: unresolved name` at the use site — the binder is inside the
+function and the use is not.
+
+The trigger is the DEDENT back to the enclosing block's indent, and it needs
+TWO OR MORE continuation lines:
+
+| continuation lines | closing stmt indent | result |
+| --- | --- | --- |
+| 1 | statement column | OK |
+| 2+ | statement column | **BROKEN** |
+| 2+ | continuation column | OK (lexer emits no layout token at all) |
+
+Operator kind is irrelevant — `+`, `||`, and `as` all reproduce.
+
+The `settle_continuation` / `end_stmt` / `skip_continuation_layout` trio
+balances `cont_indents` one-for-one against absorbed INDENTs, which is correct
+for a single continuation. With two or more, the `cont_indents` the block
+parser later drains is what closes the block early, so the balance is
+one DEDENT short. Reading the token stream is the next step; `pfrontc` has no
+`--dump-tokens`, so a small lexer driver is needed first.
+
+Not currently miscompiling anything: no file under `examples/tokei` uses this
+shape (checked mechanically), and `x10_contextual_keywords.pie` was written to
+avoid it. It is a trap for the next author, not a live regression.
+
+Severity: silent tree corruption, but loud downstream (the ejected statement
+almost always references a function-local name, so the checker fires). A
+top-level-independent statement would be silently miscompiled.
+
 ## Open bugs found via examples/tokei
 
 ### `airtool fmt` silently drops declarations and still exits 0
@@ -94,6 +140,11 @@ program still compiled, it just built the wrong tree:
    parser as end-of-block. Statements after a deeper-indented continuation were
    ejected from the function — visible in `--emit-sexp` as a top-level
    `(ident d)` beside `(fn f ...)`. Counted into `cont_indents`.
+
+   **Partially fixed only.** The single-continuation case is fixed and is
+   covered by `syntax_continuation_scope`. The same ejection still happens
+   with two or more continuation lines — see
+   `multi_continuation_eject.pie` above.
 
 Regression: `tests/pfront/syntax/x10_contextual_keywords.pie` plus
 `syntax_continuation_scope` in `tests/pfront/run.sh`, which asserts the tree
