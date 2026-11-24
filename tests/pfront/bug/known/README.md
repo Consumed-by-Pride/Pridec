@@ -154,6 +154,44 @@ None of the five files in the tree that use a struct pattern is consumed as
 `.air` — they are all checked for *compile* success only — so refusing
 regresses no gate.
 
+### `--emit-air` drops the parameter of a function whose clauses match on values
+
+Any function whose clause heads are not plain binders loses its parameter in
+the 2.2 `.air` — the declaration comes out with **no parameters at all** while
+call sites still pass arguments:
+
+```
+fn by_literal : i64 -> bool          facts air_checked readonly def by_literal(_ : infer) : infer =
+  | 0i64 -> true                       ...
+  | _ -> false
+                                     facts ... def main() : i64 =
+                                       ...
+                                       <by_literal | call · 0 : infer · comu _x1.
+```
+
+A `call · 0 · …` against a zero-parameter `def` is an arity mismatch inside a
+single artifact, and `air_verify` does not flag it. `by_literal` also loses its
+return type (`bool` became `infer`), because the signature is reconstructed from
+the clause head rather than from the declared `fn` type.
+
+The trigger is the clause head, not the body:
+
+| clause head | emitted parameters |
+| --- | --- |
+| `\| x ->` (binder) | `(x : infer)` — correct |
+| `\| (a, b) ->` (tuple) | `(a : infer, b : infer)` — correct |
+| `\| 0i64 ->` / `\| _ ->` (literal, wildcard, or any non-binder) | **none** |
+
+The 3.0 lowerer does not have this defect: for the same source `--emit-air-low`
+emits `pub def by_literal(a2 : i64) : bool` with the parameter and the return
+type both correct. So this is another place where the two lowerers disagree and
+the 2.2 one is wrong.
+
+Consequence for anything consuming the 2.2 artifact: a function reached through
+a value-matching clause cannot be called with the right number of arguments, and
+its result type is `infer`. Worth fixing before any backend is pointed at 2.2
+output.
+
 ### `--emit-air` writes the entire loaded stdlib
 
 `write_module` writes every decl in the module, and `emit_air_program` lowers
