@@ -296,5 +296,30 @@ class ArmCapTests(unittest.TestCase):
         self.assertIn("too_many_arms", text,
                       "the cap is reached without a diagnostic")
 
+class SyntheticDeclTests(unittest.TestCase):
+    """A `rewrite` rule parses as a synthetic fn; it must not become a stub.
+
+    `rewrite simp | 0i64 -> 1i64` produces `(fn simp :syn (clause (int 0) (int 1)))`
+    -- an N_DECL_FN carrying NF_SYNTHETIC, structurally identical to a real
+    function. Lowering it as one emitted
+
+        def simp() : infer = <unit | %ret_2>;
+
+    i.e. the rule silently became a function that does nothing, in an artifact
+    that looks well-formed. air_low.c3 refuses the same declaration; only the
+    2.2 path guessed.
+    """
+
+    def test_decl_fn_refuses_synthetic_rewrite_rules(self):
+        text = LOWER.read_text()
+        m = re.search(r"fn AirDecl\* AirLower\.decl_fn\([^)]*\)\s*\{", text)
+        self.assertIsNotNone(m, "decl_fn not found")
+        body = re.match(r"[\s\S]*?\n\}", text[m.start():]).group(0)
+        self.assertIn("NF_SYNTHETIC", body,
+                      "decl_fn does not distinguish a synthetic rewrite rule from "
+                      "a real function, so the rule is lowered as an empty body")
+        self.assertRegex(body, r"NF_SYNTHETIC[\s\S]{0,300}?note_bad",
+                         "decl_fn notices the synthetic decl but does not refuse")
+
 if __name__ == "__main__":
     unittest.main()

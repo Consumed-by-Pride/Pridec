@@ -3922,6 +3922,27 @@ fn void AirLower.reg_clause_pat_params(AirLower* lr, AirDecl* dd, Node* pat)
 
 fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
 {
+    /*
+     A `rewrite` declaration is parsed as a synthetic N_DECL_FN whose children
+     are RULES, not a body and not parameters. Lowering it as a function produced
+     a zero-argument body of `<unit>` and reported nothing:
+
+         rewrite simp
+           | 0i64 -> 1i64            def simp() : infer = <unit | %ret_2>;
+
+     so the rule became a function that does nothing, in an artifact that looks
+     well-formed. air_low.c3 refuses the same declaration ("not lowered yet
+     (clause pattern shape): int"); the 2.2 path guessed.
+
+     There is no AIR representation for a rewrite rule yet, so refuse. An
+     SCCP-level fold may still use the rule during optimisation -- this only
+     stops the .air from claiming a lowering that did not happen.
+    */
+    if ((n.flags & pfront_core::NF_SYNTHETIC) != 0)
+    {
+        lr.note_bad(lr, (char*)"rewrite rules have no AIR lowering yet; refusing rather than emitting an empty function");
+        return null;
+    }
     // A hoisted nested function is emitted under the AIR name chosen for it.
     char* nm = null;
     for (usz hi = 0; hi < lr.hoist_count; hi++)
