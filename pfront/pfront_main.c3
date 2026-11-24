@@ -88,6 +88,38 @@ fn bool streq(char* a, char* b)
     return true;
 }
 
+// remove_stale_artifact — delete the .air a REFUSED emit would have written.
+//
+// The artifact is only written for a program that compiled, which is right. But
+// returning early left the previous run's artifact untouched: same path, same
+// size, nothing to tell it apart. Nothing in the tree compares mtimes, so a
+// consumer opens FILE.air and reads a program that does not match the source it
+// just failed to compile.
+//
+// `suffix` is ".air" for the 2.2 artifact and ".low.air" for the 3.0 one; both
+// replace the source extension, and neither appends to it. Returns true when a
+// stale file was actually removed, so the caller can say so.
+fn bool remove_stale_artifact(char* path, char* suffix)
+{
+    // `-` means stdout: no file exists, and remove("-") must not run.
+    if (path == null || path[0] == 0) { return false; }
+    if (path[0] == '-' && path[1] == 0) { return false; }
+    char[PF_AIR_PATH_MAX] buf;
+    usz n = 0; usz dot = 0; bool has_dot = false;
+    while (path[n] != 0 && n < PF_AIR_PATH_MAX - 16)
+    {
+        if (path[n] == '.') { dot = n; has_dot = true; }
+        if (path[n] == '/') { has_dot = false; }
+        n = n + 1;
+    }
+    usz stem = has_dot ? dot : n;
+    usz sfx = slen(suffix);
+    if (stem + sfx + 1 >= PF_AIR_PATH_MAX) { return false; }
+    for (usz i = 0; i < stem; i++) { buf[i] = path[i]; }
+    for (usz i = 0; i <= sfx; i++) { buf[stem + i] = suffix[i]; }
+    return remove(&buf[0]) == 0;
+}
+
 // ── AST dump ────────────────────────────────────────────────────────────────
 fn void indent_by(int n)
 {
@@ -659,14 +691,9 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                  This is the same rule the removed --emit-exe flag follows: fail
                  loudly, so a stale script cannot believe it built something.
                 */
-                if (path != null && path[0] != 0 && !(path[0] == '-' && path[1] == 0))
+                if (remove_stale_artifact(path, (char*)".air"))
                 {
-                    char[PF_AIR_PATH_MAX] stale;
-                    char* sp = air::derive_air_path(path, &stale[0], PF_AIR_PATH_MAX);
-                    if (sp != null && remove(sp) == 0)
-                    {
-                        printf("air: removed the stale .air left by an earlier run\n");
-                    }
+                    printf("air: removed the stale .air left by an earlier run\n");
                 }
                 // Say WHY. A bare count leaves the reader with "2 error(s)" and no
                 // way to find them: the diagnostic lines were printed above only
@@ -702,10 +729,27 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 char* suf = ".low.air";
                 for (usz i = 0; i < 9; i++) { lowp[stem + i] = suf[i]; }
                 int lerrs = air_low::emit_low_program(&low_roots[0], ln, entry.ast, it, path, &lowp[0]);
-                if (lerrs != 0) { g_low_failed = true; g_low_errors = g_low_errors + (lerrs > 0 ? lerrs : 0); }
+                if (lerrs != 0)
+                {
+                    g_low_failed = true; g_low_errors = g_low_errors + (lerrs > 0 ? lerrs : 0);
+                    // The lowering refused, so whatever FILE.low.air is on disk
+                    // is from an earlier run. Remove it for the same reason as
+                    // the 2.2 path: a stale artifact reads as current.
+                    if (remove_stale_artifact(path, (char*)".low.air"))
+                    {
+                        printf("air-low: removed the stale .low.air left by an earlier run\n");
+                    }
+                }
             }
             else
             {
+                // Same rule as the 2.2 path above: refusing to emit must not
+                // leave a stale FILE.low.air behind for a consumer to read as if
+                // it described the current source.
+                if (remove_stale_artifact(path, (char*)".low.air"))
+                {
+                    printf("air-low: removed the stale .low.air left by an earlier run\n");
+                }
                 printf("air-low: %d error(s) -- refusing to emit a .air; first error:\n", (int)diags.error_count);
                 for (usz di = 0; di < diags.count; di++)
                 {

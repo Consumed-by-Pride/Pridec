@@ -118,11 +118,16 @@ class StaleArtifactTests(unittest.TestCase):
 
     def test_refusal_removes_the_stale_artifact(self):
         text = self.MAIN.read_text()
-        self.assertRegex(
-            text, r"derive_air_path\([^)]*\)[\s\S]{0,400}?remove\(",
-            "the refusal path does not remove the stale .air; a failed compile "
-            "leaves the previous artifact looking current",
-        )
+        # The helper exists and actually calls remove() on the derived path.
+        m = re.search(r"fn bool remove_stale_artifact\([^)]*\)\s*\{[\s\S]*?\n\}", text)
+        self.assertIsNotNone(m, "remove_stale_artifact helper is missing")
+        body = m.group(0)
+        self.assertIn("remove(&buf[0])", body,
+                      "the helper derives a path but never removes anything")
+        # Every artifact kind must go through it, so no refusal path can skip it.
+        for suffix in (".air", ".low.air"):
+            self.assertIn(f'remove_stale_artifact(path, (char*)"{suffix}")', text,
+                          f"no refusal path clears a stale {suffix}")
 
     def test_stdout_target_is_not_removed(self):
         text = self.MAIN.read_text()
