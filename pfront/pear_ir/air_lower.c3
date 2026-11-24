@@ -322,6 +322,20 @@ fn void AirLower.note_oom(AirLower* lr)
     }
 }
 
+// Refuse: a construct this lowerer does not model. Sets the same latch as an
+// allocation failure, so `emit_air_program` returns -3 and NO .air is written.
+//
+// This exists because the alternative -- the behaviour before this -- was to
+// substitute something plausible and publish it. See pat_node's default.
+fn void AirLower.note_bad(AirLower* lr, char* why)
+{
+    if (lr.fatal_errors == 0)
+    {
+        lr.fatal_errors = 1;
+        lr.fatal_message = why;
+    }
+}
+
 // ── Small helpers ──────────────────────────────────────────────────────────
 // These are used everywhere; keeping them short but well-named makes the
 // code below read like pseudocode.
@@ -658,6 +672,32 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
             }
             return air_ir::air_mk_pat_variant(lr.arena, lr.dup(vnm), &subs[0], n);
         }
+        case Nk.N_PAT_OR:
+        {
+            /*
+             `| A | B -> ...`. AIR has carried APAT_OR (/or(a, b)/) all along --
+             air_ir declares it, air_write prints it, air_read parses it -- but
+             neither lowerer produced one, so or-patterns were refused by
+             air_low.c3 and silently became a WILDCARD here.
+
+             APAT_OR is binary, so an n-ary N_PAT_OR folds left:
+             or(or(a, b), c). The AST arrives in both shapes anyway -- the
+             parser builds n-ary siblings from parse_pattern and a left-nested
+             pair from the clause matcher -- and folding covers both, because a
+             nested child recurses back into this case.
+            */
+            if (p.child_count == 0) { lr.note_bad(lr, (char*)"or-pattern with no alternatives"); return lr.mod.pat_wild; }
+            AirPat* acc = lr.pat_node(p.children[0]);
+            for (usz i = 1; i < p.child_count; i++)
+            {
+                AirPat* alt = lr.pat_node(p.children[i]);
+                AirPat* orp = air_ir::air_mk_pat(lr.arena, APAT_OR);
+                orp.sub[0] = acc; orp.sub_count = 1;
+                orp.or_alt = alt;
+                acc = orp;
+            }
+            return acc;
+        }
         case Nk.N_PAT_ARRAY:
         {
             AirPat*[64] subs; usz n = 0;
@@ -670,7 +710,28 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
             for (usz i = 0; i < n && i < 64; i++) { pp.sub[i] = subs[i]; pp.sub_count++; }
             return pp;
         }
-        default: return lr.mod.pat_wild;
+        default:
+        {
+            /*
+             An unhandled pattern used to become `_` here: `return lr.mod.pat_wild`.
+
+             That is a silent WRONG ANSWER, not a missing feature. A pattern
+             that fails to match is supposed to send control to the next arm;
+             `_` always matches, so the arm body ran for inputs it was written
+             to exclude. Nothing reported it -- the .air was published looking
+             perfectly well-formed.
+
+             `air_low.c3` (the low-profile lowerer) has always refused this case
+             with `unsup(p, "pattern")`. The two lowerers disagreed, and the one
+             that disagreed silently was the one whose output is the
+             whole-program contract artifact.
+
+             Refuse instead. Refusing costs a diagnostic; guessing costs a
+             miscompile.
+            */
+            lr.note_bad(lr, (char*)"pattern kind this lowerer does not model; refusing rather than treating it as a wildcard");
+            return lr.mod.pat_wild;
+        }
     }
 }
 

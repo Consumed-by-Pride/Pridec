@@ -40,6 +40,20 @@ KNOWN_GAPS = {
                  "lowerer handles it, and it appears nowhere in the spec or the "
                  "stdlib. Left refused rather than given invented semantics.",
 }
+
+# Pattern kinds air_lower.c3 does not model. It used to turn all of these into a
+# WILDCARD -- which always matches, so the arm body ran for inputs it was
+# written to exclude, and the .air was published looking well-formed. It now
+# latches a refusal (note_bad) and no .air is written. Refusing is the honest
+# failure; the construct is still unimplemented, and that is recorded here
+# rather than hidden behind a default.
+PATTERN_GAPS_AIR_LOWER = {
+    "N_PAT_STRUCT": "struct and enum struct-patterns. air_low.c3 lowers these; "
+                    "air_lower.c3 does not. Exercised by "
+                    "tests/exec/32_enum_clauses.pie, which is already XFAIL.",
+    "N_PAT_RANGE": "range patterns (`1..=9`). air_low.c3 lowers these; "
+                   "air_lower.c3 does not.",
+}
 # NOTE: N_EXPR_PIPELINE used to be listed here. pfront_core.c3 documents that
 # `|>` lowers as an N_EXPR_BINARY with TOKEN_PIPELINE, and that the dedicated
 # enum member "existed with no producer and no consumer" -- it has since been
