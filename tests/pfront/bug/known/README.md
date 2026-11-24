@@ -74,7 +74,7 @@ Severity: silent tree corruption, but loud downstream (the ejected statement
 almost always references a function-local name, so the checker fires). A
 top-level-independent statement would be silently miscompiled.
 
-## Open bugs found via examples/tokei
+## Open bugs in the AIR 2.2 artifact
 
 ### `airtool fmt` silently drops declarations and still exits 0
 
@@ -191,6 +191,13 @@ Consequence for anything consuming the 2.2 artifact: a function reached through
 a value-matching clause cannot be called with the right number of arguments, and
 its result type is `infer`. Worth fixing before any backend is pointed at 2.2
 output.
+
+The return type is lost more widely than the parameter. `24_kw_module_type.pie`
+declares `fn f : ptr -> (meta.Metadata, i64)` with a plain binder clause; the
+artifact says `def f(p : infer) : infer`. So the declared result type is
+reconstructed only in the cases the lowerer models, and falls back to `infer`
+everywhere else — while `air_verify` accepts `infer` as a valid answer, which is
+why nothing notices.
 
 ### `--emit-air` silently truncates a match at 64 arms
 
