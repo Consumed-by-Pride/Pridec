@@ -102,6 +102,58 @@ Not fixed yet: the toolchain to rebuild `pfrontc`/`airtool` is not available in
 the current sandbox (see the note at the end of this file), so the fix could not
 be written against a running binary.
 
+### `--emit-air` wildcards struct patterns, leaving both arms and free variables
+
+`x05_lowlevel_ub.pie` has the canonical struct pattern:
+
+```
+match p
+  | { x: 0i64, y } -> y
+  | { x, y } -> x + y
+```
+
+`--emit-air` on it (any build to `1c29d65`) writes:
+
+```
+match p {
+  bind p ->
+    <p | case {
+      _ ->            <y | %ret_2>;          <- was `{ x: 0i64, y }`
+      _ ->            <(add x y) | %ret_2>;  <- was `{ x, y }`
+    }>;
+};
+```
+
+Both arms became `_`, so the FIRST arm matches everything, and the bodies
+reference `y`, `x`, `y` — names the pattern never bound. This is worse than
+the or-pattern case: there the wildcard was at least the last-resort arm and
+the bodies were self-contained; here the miscompile also drops the binders, so
+the emitted function is not merely wrong but unverifiable — `air_verify` binds
+nothing for `APAT_WILD`, so the uses are free variables.
+
+The front end is innocent. `--emit-sexp` shows the correct tree,
+`(pat-struct (pat-field x (pat-literal (int 0))) (pat-field y (pat-ident y)))`,
+so the source binds `x` and `y` properly. The defect is `air_lower.c3`'s
+`pat_node` only; `air_low.c3`'s `Low.pat` handles `N_PAT_STRUCT` correctly
+(lines ~3920-3931: it resolves each field against the struct decl and recurses
+into the field's sub-pattern). So `--emit-air` and `--emit-air-low` disagree
+about the same program, and the high lowerer is the wrong one.
+
+`pat_node` now REFUSES `N_PAT_STRUCT` (as of `4889f55`) rather than wildcarding
+it, so no wrong `.air` is written. That is the right stopgap but it leaves the
+2.2 path unable to express a construct the 3.0 path already lowers. The fix is
+to port `Low.pat`'s struct case into `pat_node`.
+
+Not expressible as `APAT_RECORD`: that constructor is name-only (`air_write.c3`
+even flags a field with a payload as an error — `"record-pattern field with a
+payload"`), so it cannot carry `x: 0i64`. A faithful `pat_node` has to test
+each field with `APAT_INT`-style sub-patterns, exactly as `Low` does, or the IR
+needs a record pattern that can hold sub-patterns.
+
+None of the five files in the tree that use a struct pattern is consumed as
+`.air` — they are all checked for *compile* success only — so refusing
+regresses no gate.
+
 ### `--emit-air` writes the entire loaded stdlib
 
 `write_module` writes every decl in the module, and `emit_air_program` lowers

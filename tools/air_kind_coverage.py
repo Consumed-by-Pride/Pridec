@@ -48,9 +48,17 @@ KNOWN_GAPS = {
 # failure; the construct is still unimplemented, and that is recorded here
 # rather than hidden behind a default.
 PATTERN_GAPS_AIR_LOWER = {
-    "N_PAT_STRUCT": "struct and enum struct-patterns. air_low.c3 lowers these; "
-                    "air_lower.c3 does not. Exercised by "
-                    "tests/exec/32_enum_clauses.pie, which is already XFAIL.",
+    "N_PAT_STRUCT": "struct and enum struct-patterns. air_low.c3 lowers these correctly "
+                    "(Low.pat resolves each field against the struct decl and recurses into "
+                    "the field's sub-pattern); air_lower.c3's pat_node wildcarded them, leaving "
+                    "both arms `_` and every field name unbound. pat_node now refuses instead. "
+                    "Five files in the tree use the syntax: tests/exec/32_enum_clauses.pie "
+                    "(XFAIL for an unrelated PEAR1 reason), tests/pfront/syntax/x05_lowlevel_ub.pie "
+                    "(a PASSING test whose .air was silently wrong), "
+                    "conformance/cases/253_enum_clause_patterns.pie, "
+                    "conformance/cases/63_union_exhaustive_clean.pie and "
+                    "tests/pfront/stress/s03_effects_data.pie. None of them is consumed as .air, "
+                    "so the refusal regresses no gate.",
     "N_PAT_RANGE": "range patterns (`1..=9`). air_low.c3 lowers these; "
                    "air_lower.c3 does not.",
 }

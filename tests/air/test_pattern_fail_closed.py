@@ -179,5 +179,74 @@ class NoSilentDefaultTests(unittest.TestCase):
         )
 
 
+class LowererParityTests(unittest.TestCase):
+    """Constructs one lowerer models and the other does not must not be guessed.
+
+    `x05_lowlevel_ub.pie` is a PASSING test whose `.air` was silently wrong:
+    `Low.pat` lowered `| { x: 0i64, y } -> y` correctly, while `pat_node` turned
+    both arms into `_` and dropped every field binding. The 2.2 artifact and the
+    3.0 artifact for the same program disagreed and nothing compared them.
+
+    These tests pin the disagreement so it cannot silently widen: every kind the
+    enumeration below names is handled by `Low.pat` and must be either handled by
+    `pat_node` or explicitly refused there.
+    """
+
+    # Pattern kinds that `Low.pat` dispatches on. Not a wish list -- this is read
+    # off air_low.c3 below and cross-checked, so adding a case to one lowerer
+    # without deciding about the other fails here.
+    PAT_CASES = ["N_PAT_WILDCARD", "N_PAT_IDENT", "N_PAT_LITERAL", "N_PAT_RANGE",
+                 "N_PAT_TUPLE", "N_PAT_VARIANT", "N_PAT_STRUCT", "N_PAT_OR"]
+
+    def _pat_cases(self, path, fn_name):
+        src = path.read_text()
+        # The body of the named fn, brace-balanced from its opening brace.
+        m = re.search(r"^fn\s+[\w*][\w*\s]*\." + re.escape(fn_name) + r"\s*\(", src, re.M)
+        self.assertIsNotNone(m, f"{fn_name} not found in {path.name}")
+        i = src.index("{", m.end())
+        depth, j = 0, i
+        while j < len(src):
+            if src[j] == "{":
+                depth += 1
+            elif src[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        body = src[i:j]
+        return {k for k in self.PAT_CASES if re.search(r"case\s+Nk\." + k + r"\b", body)}, body
+
+    def test_low_pat_handles_every_kind_in_the_vocabulary(self):
+        cases, _ = self._pat_cases(LOW, "pat")
+        self.assertEqual(set(self.PAT_CASES), cases,
+                         "air_low.c3's Low.pat lost a pattern case; update the "
+                         "vocabulary here and decide what pat_node must do")
+
+    def test_pat_node_handles_or_refuses_every_kind_low_pat_handles(self):
+        handled, body = self._pat_cases(LOWER, "pat_node")
+        # Kinds pat_node genuinely lowers.
+        missing = [k for k in self.PAT_CASES if k not in handled]
+        # Each missing kind must be named in a refusal/comment inside pat_node,
+        # so the next reader sees it is a known gap rather than an oversight.
+        unrecorded = [k for k in missing if k not in body]
+        self.assertEqual(
+            [], unrecorded,
+            "pat_node neither handles nor names these pattern kinds that Low.pat "
+            "does handle; an unrecorded gap is how N_PAT_STRUCT stayed silent:\n"
+            + "\n".join(f"  {k}" for k in unrecorded),
+        )
+
+    def test_pat_node_does_not_wildcard_a_struct_pattern(self):
+        # The exact shape of the x05 miscompile: an N_PAT_STRUCT arm must not
+        # come out as APAT_WILD.
+        _, body = self._pat_cases(LOWER, "pat_node")
+        self.assertNotRegex(
+            body,
+            r"N_PAT_STRUCT[^;]{0,400}?pat_wild",
+            "pat_node maps N_PAT_STRUCT to a wildcard; that arm then matches "
+            "every input and its field binders are lost (see x05_lowlevel_ub.pie)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

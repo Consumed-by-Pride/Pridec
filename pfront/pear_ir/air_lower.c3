@@ -729,7 +729,36 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
              Refuse instead. Refusing costs a diagnostic; guessing costs a
              miscompile.
             */
-            lr.note_bad(lr, (char*)"pattern kind this lowerer does not model; refusing rather than treating it as a wildcard");
+            /*
+             Name the gap. A generic "does not model" message leaves the reader
+             to work out which construct they hit and whether it is worth fixing;
+             worse, N_PAT_STRUCT was listed in the audit as "only exercised by
+             an XFAIL" when tests/pfront/syntax/x05_lowlevel_ub.pie -- a passing
+             test -- was having its struct patterns wildcarded. Both gaps below
+             are already lowered correctly by air_low.c3's Low.pat, so the fix in
+             each case is a port, not new design:
+
+               N_PAT_STRUCT  Low.pat resolves each field against the struct decl
+                             and recurses into the field's sub-pattern. Not
+                             expressible as APAT_RECORD, which is name-only and
+                             rejects a field carrying a payload.
+               N_PAT_RANGE   `1..=9`; Low.pat lowers it as a two-sided compare.
+
+             N_PAT_REF and N_PAT_REST are deliberately absent from Low.pat too:
+             the parser can produce them but the spec and the stdlib never do.
+            */
+            if (p.kind == Nk.N_PAT_STRUCT)
+            {
+                lr.note_bad(lr, (char*)"struct patterns are not lowered by this lowerer yet (air_low.c3 does); refusing rather than matching everything");
+            }
+            else if (p.kind == Nk.N_PAT_RANGE)
+            {
+                lr.note_bad(lr, (char*)"range patterns are not lowered by this lowerer yet (air_low.c3 does); refusing rather than matching everything");
+            }
+            else
+            {
+                lr.note_bad(lr, (char*)"pattern kind this lowerer does not model; refusing rather than treating it as a wildcard");
+            }
             return lr.mod.pat_wild;
         }
     }
