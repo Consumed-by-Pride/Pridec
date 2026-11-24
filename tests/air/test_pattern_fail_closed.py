@@ -86,5 +86,98 @@ class PatternFailClosedTests(unittest.TestCase):
         self.assertIn("sub[0]", body, "the fold must set sub[0]")
 
 
+class NoSilentDefaultTests(unittest.TestCase):
+    """No `default:` in the lowerer may return a plausible value unattended.
+
+    Two were found by hand: pat_node returned pat_wild, and control_expr
+    returned unit (dropping the computation). Both published a well-formed .air
+    for a program the lowerer had not actually modelled. This is the general
+    form of that check, so the next one is caught by the suite rather than by
+    someone reading the file.
+
+    `default: return null` and delegation to another function are allowed: null
+    is the "no decl here" answer for a decl dispatcher, and delegating keeps the
+    real decision in the callee, which is checked on its own.
+    """
+
+    ALLOWED = (
+        "return null",                 # decl dispatchers: no decl of this kind
+        "return lr.prd_or_bind(n)",    # producer fallback: the callee decides
+        "return lr.cut(lr.mod.p_unit, k);"  # only inside the handled reasons above
+    )
+
+    # Predicates and queries answer a yes/no question about AIR that has already
+    # been built; `false` is a real answer there, not a lowering decision. Only
+    # functions that PRODUCE AIR must refuse instead of guessing.
+    PRODUCER_PREFIXES = (
+        "AirCmd* AirLower.", "AirPrd* AirLower.", "AirPat* AirLower.",
+        "AirDecl* AirLower.", "Vx AirLower.",
+    )
+
+    def test_no_bare_default_returns(self):
+        """A block-form default must refuse, or delegate, before returning AIR.
+
+        Heuristic and deliberately narrow: for each `default:` inside a producer
+        function, scan to the end of its block and require that the block either
+        latches a refusal (note_bad/unsup/fail) or returns something the block
+        above already justified. The check is on the *whole* default block, not
+        a fixed window -- the first version used 12 lines and flagged three
+        defaults that were fine (one had a long comment, two delegate).
+        """
+        src = LOWER.read_text(encoding="utf-8")
+        lines = src.splitlines()
+
+        owning: list[str] = []
+        cur = ""
+        for line in lines:
+            m = re.match(r"fn\s+([A-Za-z_][\w:*\[\]]*\s+[\w.]+)\(", line)
+            if m:
+                cur = m.group(1)
+            owning.append(cur)
+
+        offenders = []
+        for i, line in enumerate(lines):
+            if "default:" not in line:
+                continue
+            if not owning[i].startswith(self.PRODUCER_PREFIXES):
+                continue
+            if re.search(r"default:\s*return\s+", line):
+                tail = line.split("default:", 1)[1].strip()
+                if any(a in tail for a in ("return null", "return lr.prd_or_bind(n)")):
+                    continue
+                offenders.append((i + 1, line.strip()))
+                continue
+            # Block form: read until the braces balance out of the default arm.
+            depth = 0
+            block = []
+            for j in range(i + 1, len(lines)):
+                depth += lines[j].count("{") - lines[j].count("}")
+                block.append(lines[j])
+                if depth <= 0 and "{" in "".join(block):
+                    break
+            text = "\n".join(block)
+            # A refusal latched in the block.
+            if ("note_bad" in text or ".unsup(" in text or "fail(" in text):
+                continue
+            # An explicit poison marker: the .air is left obviously wrong rather
+            # than silently wrong. That is the acceptable fallback for a kind the
+            # lowerer cannot classify, and it is deliberately visible.
+            if "air_mk_poison" in text:
+                continue
+            # A guarded delegation: the block classifies the node first
+            # (is_expr / a kind range) and only substitutes unit for the residue.
+            if re.search(r"if\s*\([^)]*(is_expr|Nk\.|kind)", text) and "return lr." in text:
+                continue
+            if re.search(r"\breturn\s+(lr\.|air_ir::)", text):
+                offenders.append((i + 1, line.strip()))
+
+        self.assertEqual(
+            [], offenders,
+            "a `default:` in a producer returns AIR without latching a refusal; "
+            "an unmodelled construct would publish a wrong .air:\n"
+            + "\n".join(f"  line {n}: {t}" for n, t in offenders),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

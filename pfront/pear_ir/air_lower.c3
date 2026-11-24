@@ -3047,7 +3047,22 @@ fn AirCmd* AirLower.control_expr(AirLower* lr, Node* n, AirCns* k)
             lr.total_prd++;
             return lr.cut(air_ir::air_mk_sizeof(lr.arena, lr.mod.t_usz), k);
         }
-        default: return lr.cut(lr.mod.p_unit, k);
+        default:
+        {
+            /*
+             Unreachable today: control_expr has exactly one caller, and that
+             caller switches on a closed set of six kinds before dispatching
+             here. offsetof is the only one that reaches this switch's cases.
+
+             It stays a refusal rather than `lr.cut(lr.mod.p_unit, k)` because
+             that default DROPPED the computation -- the expression became
+             unit, so an effectful body silently produced nothing. The kind list
+             at the call site will grow; when it does, the construct should cost
+             a diagnostic, not vanish.
+            */
+            lr.note_bad(lr, (char*)"control expression this lowerer does not model; refusing rather than lowering it to unit");
+            return lr.cut(lr.mod.p_unit, k);
+        }
     }
 }
 
