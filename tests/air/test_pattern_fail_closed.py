@@ -263,5 +263,38 @@ class LowererParityTests(unittest.TestCase):
         )
 
 
+class ArmCapTests(unittest.TestCase):
+    """Fixed-size arm arrays must refuse, not truncate.
+
+    x09_torture_scale.pie has a 300-arm function. The lowerer held arms in
+    `AirBranch*[64]` and stopped at it (`&& bc < 64`), so the artifact carried 64
+    arms and the match simply ended: every input from 64 up matched nothing, with
+    no diagnostic anywhere. 437 of the 439 arms in that file were reported
+    UNLOWERED by --air-audit, which is how this was finally visible.
+    """
+
+    def test_arm_loops_do_not_stop_at_the_cap_silently(self):
+        text = LOWER.read_text()
+        # Only the ARM accumulators are in scope here. The other `i < 64` loops
+        # fill pattern-sub / field-init arrays, and the front end refuses a tuple
+        # or struct literal past 64 elements before the lowerer sees it
+        # (E1052 "expected '}' to close struct literal"), so they are unreachable.
+        # The arm arrays are not: x09 has a 300-arm function and it compiled.
+        bad = re.findall(r"for\s*\([^)]*&&\s*bc\s*<\s*64\s*;", text)
+        self.assertEqual(
+            [], bad,
+            "an arm loop truncates at 64 in its guard instead of refusing; the "
+            "dropped arms vanish from the match with no diagnostic:\n"
+            + "\n".join("  " + " ".join(b.split()) for b in bad),
+        )
+
+    def test_the_cap_is_refused_explicitly(self):
+        text = LOWER.read_text()
+        self.assertIn("AIR_ARM_CAP", text,
+                      "no named arm cap; a bare 64 in three places is how the "
+                      "limit stayed invisible")
+        self.assertIn("too_many_arms", text,
+                      "the cap is reached without a diagnostic")
+
 if __name__ == "__main__":
     unittest.main()

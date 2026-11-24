@@ -336,6 +336,25 @@ fn void AirLower.note_bad(AirLower* lr, char* why)
     }
 }
 
+// air_arm_cap — how many alternatives a single `case` can carry.
+//
+// The arm loops below write into `AirBranch*[64]`, so 64 is the real limit.
+// They used to stop at it (`&& bc < 64`) and drop the rest WITHOUT A WORD: a
+// 300-arm function emitted 64 arms and ended the match, so every input from 64
+// up matched nothing at all. The source limit is 400 (MAX_DEPTH), and
+// tests/pfront/syntax/x09_torture_scale.pie has a 300-arm function, so this was
+// reachable from a checked-in test.
+//
+// Refuse instead. A truncation that reports nothing is the "tool says yes while
+// doing something else" shape this branch has been removing; a refusal costs a
+// diagnostic, a truncation costs correctness.
+const int AIR_ARM_CAP = 64;
+
+fn void AirLower.too_many_arms(AirLower* lr)
+{
+    lr.note_bad(lr, (char*)"more than 64 match arms or clause alternatives; this lowerer holds them in a fixed 64-slot array and refuses rather than truncating");
+}
+
 // ── Small helpers ──────────────────────────────────────────────────────────
 // These are used everywhere; keeping them short but well-named makes the
 // code below read like pseudocode.
@@ -2676,8 +2695,9 @@ fn AirCmd* AirLower.match_(AirLower* lr, Node* n, AirCns* k)
             air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
     }
     AirBranch*[64] bs; usz bc = 0;
-    for (usz i = 1; i < n.child_count && bc < 64; i++)
+    for (usz i = 1; i < n.child_count; i++)   // AIR_ARM_CAP checked in the body
     {
+        if (bc >= AIR_ARM_CAP) { lr.too_many_arms(lr); break; }
         Node* arm = n.children[i];
         if (arm == null) continue;
         air_audit::mark(arm);
@@ -3261,8 +3281,9 @@ fn AirCmd* AirLower.handle(AirLower* lr, Node* n, AirCns* k)
         comp = lr.cmd_to_cns(n.children[0], k);
     }
     AirBranch*[64] bs; usz bc = 0;
-    for (usz i = 1; i < n.child_count && bc < 64; i++)
+    for (usz i = 1; i < n.child_count; i++)   // AIR_ARM_CAP checked in the body
     {
+        if (bc >= AIR_ARM_CAP) { lr.too_many_arms(lr); break; }
         Node* arm = n.children[i];
         if (arm == null) continue;
         air_audit::mark(arm);
@@ -4261,7 +4282,12 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     lr.scope.leave();
                     AirBranch* br = air_ir::air_mk_branch(lr.arena, pat, bcmd);
                     br.guard = gcmd;
-                    if (bc < 64) { bs[bc] = br; bc++; }
+                    // Refuse at the cap; do not drop the alternative. `bc < 64`
+                    // here silently discarded every clause alternative past the
+                    // 64th, and x09's many_clauses (300 arms) was only the most
+                    // obvious case -- it lost 236 arms with no diagnostic.
+                    if (bc >= AIR_ARM_CAP) { lr.too_many_arms(lr); }
+                    else { bs[bc] = br; bc++; }
                 }
                 if (bc == 0) { body = lr.cut(lr.mod.p_unit, lr.cns_k(ret)); }
                 else if (bc == 1 && bs[0].pat == lr.mod.pat_wild && scr == lr.mod.p_unit)

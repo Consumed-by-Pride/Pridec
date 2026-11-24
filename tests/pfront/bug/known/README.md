@@ -192,6 +192,47 @@ a value-matching clause cannot be called with the right number of arguments, and
 its result type is `infer`. Worth fixing before any backend is pointed at 2.2
 output.
 
+### `--emit-air` silently truncates a match at 64 arms
+
+Found by running `--air-audit` over the checked-in corpus after fixing the
+instrument's mark-unmark problem. `x09_torture_scale.pie` contains a 300-arm
+function; the audit reported **437 of its 439 arms UNLOWERED**. The artifact
+carries 64 arms and then the match simply ends:
+
+```
+def many_clauses(_ : infer) : i64 =   <- source: 300 arms
+  mu~ %ret_2.
+    match _ {
+      0 -> <0 | %ret_2>;
+      ...
+      63 -> <63 | %ret_2>;
+    };
+```
+
+There is no wildcard fallthrough, so `many_clauses(65)` matches nothing at all.
+The floor is exact — 63 and 64 arms are fine, 65 loses one, 70 loses six:
+
+| source arms | emitted |
+| --- | --- |
+| 63 | 63 |
+| 64 | 64 |
+| 65 | **64** |
+| 70 | **64** |
+
+Three arm loops had the shape `for (...; i < n.child_count && bc < 64; i++)`,
+writing into `AirBranch bs[64]`. Arm 65 onwards was dropped in silence — no
+diagnostic, no wildcard, no poison `ub`. Fixed by removing the cap from the loop
+guard and refusing through `AirLower.too_many_arms` when a 65th alternative
+arrives, using a named `AIR_ARM_CAP` so the limit appears once instead of as a
+bare 64 in three places.
+
+The same file has other `i < 64` loops (pattern sub-arrays, struct-literal field
+inits, call arguments). Those are not reachable: the front end refuses a tuple or
+struct literal past 64 elements first (`E1052: expected '}' to close struct
+literal`), and a 65-element tuple *pattern* falls back to an explicit
+`ub "multi-parameter clause requires tuple pattern matching..."` rather than
+dropping elements. Only the arm arrays were both capped and reachable.
+
 ### `--emit-air` writes the entire loaded stdlib
 
 `write_module` writes every decl in the module, and `emit_air_program` lowers
