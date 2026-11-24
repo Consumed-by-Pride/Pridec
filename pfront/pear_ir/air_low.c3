@@ -1729,6 +1729,17 @@ fn Vx Low.lit(Low* lw, Node* n, AirTyp* want)
         }
         default: break;
     }
+    /*
+     Not a literal. Every current caller pre-guards on kind -- 2680 lists the
+     eight literal kinds and matches them into the case above, 2076 and 3030
+     test the kind before calling -- and 2076 also rejects a non-literal tag on
+     the way out, so this is not reachable today.
+
+     Returning `lw.unit()` here would make a non-literal silently lower to unit,
+     which is the failure this file has spent the day removing elsewhere: a
+     well-formed .air for a construct the lowerer did not model. Refuse.
+    */
+    lw.unsup(n, "a non-literal expression reached the literal lowerer");
     return lw.unit();
 }
 // translate a type but do not report an unsupported one (hints only)
