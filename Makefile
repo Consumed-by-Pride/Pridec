@@ -323,6 +323,8 @@ air-pass: $(AIRTOOL)
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
 # (canonical re-print, validity ledger) and the write->read round trip.
 test-air: $(BINARY) $(AIRTOOL)
+	@echo "==> AST->AIR dispatch coverage (source only; runs before anything is built)"
+	python3 tests/air/test_kind_coverage.py
 	@echo "==> AIR boundary (emit side may not import consume side)"
 	bash tests/air/boundary.sh
 	@echo "==> AIR 2.0 text contract"
