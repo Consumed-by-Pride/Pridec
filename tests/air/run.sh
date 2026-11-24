@@ -68,7 +68,29 @@ nair=$(ls "$W"/*.air 2>/dev/null | wc -l); nsrc=$(wc -l < "$W/sources.txt")
 : > "$W/verify.tsv"
 for f in "$W"/*.air; do
     id=$(basename "$f" .air)
-    "$AT" fmt "$f" 2>/dev/null | cmp -s - "$f" || { bad "corpus/$id: fmt not idempotent"; continue; }
+    # `fmt` must BOTH succeed and be a fixed point. Piping into cmp discarded
+    # airtool's exit status -- the pipeline reports only cmp's -- so a fmt that
+    # failed, or that dropped half the module and still exited 0, was reported
+    # as "not idempotent" at worst and not detected at all if the truncated
+    # output happened to compare equal. Capture the status separately.
+    if ! "$AT" fmt "$f" > "$W/fmt.out" 2>"$W/fmt.err"; then
+        bad "corpus/$id: fmt FAILED (exit $?) on a file pfrontc just wrote"
+        sed 's/^/    /' "$W/fmt.err" | head -3
+        continue
+    fi
+    if ! cmp -s "$W/fmt.out" "$f"; then
+        # Distinguish "reformatted" from "lost data": a fmt that changes bytes
+        # is a canonicalisation bug, but one that drops declarations is a
+        # correctness bug, and the two must not read the same.
+        n_in=$(grep -c '^\(def\|defco\|declare\|codata\|data\|module\) ' "$f" 2>/dev/null || echo 0)
+        n_out=$(grep -c '^\(def\|defco\|declare\|codata\|data\|module\) ' "$W/fmt.out" 2>/dev/null || echo 0)
+        if [ "$n_in" != "$n_out" ]; then
+            bad "corpus/$id: fmt DROPPED DECLARATIONS ($n_in in, $n_out out) and exited 0"
+        else
+            bad "corpus/$id: fmt not idempotent"
+        fi
+        continue
+    fi
     line=$("$AT" verify "$f" 2>&1 | tail -1)
     cnt=$(echo "$line" | sed -n 's/.*V1=\([0-9]*\) V2=\([0-9]*\) V3=\([0-9]*\) V4=\([0-9]*\).*/\1 \2 \3 \4/p')
     [ -n "$cnt" ] || { bad "corpus/$id: verify produced no summary"; continue; }

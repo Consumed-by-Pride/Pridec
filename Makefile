@@ -391,7 +391,15 @@ clean:
 	@echo "clean: tracked sources untouched"
 
 # A large multi-module Pride application and language-fixture stress workload.
-.PHONY: test-tokei
+.PHONY: test-tokei gen-tokei-stress
 test-tokei: pfrontc
 	python3 tests/tokei/test_fixtures.py
 	./tests/tokei/run.sh
+
+# examples/tokei/stress.pie is generated: its value is the number of functions,
+# not their content. Regenerate and diff to prove the checked-in file is current
+# -- a stale one silently shrinks the workload without failing anything.
+gen-tokei-stress:
+	python3 tools/gen_tokei_stress.py
+	@git diff --quiet -- examples/tokei/stress.pie || \
+	  { echo "stress.pie was stale; regenerated. Commit it."; exit 1; }
