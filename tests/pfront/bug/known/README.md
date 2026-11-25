@@ -237,42 +237,122 @@ literal`), and a 65-element tuple *pattern* falls back to an explicit
 `ub "multi-parameter clause requires tuple pattern matching..."` rather than
 dropping elements. Only the arm arrays were both capped and reachable.
 
-### `--emit-air` writes the entire loaded stdlib
+### `--emit-air` on a short-circuit chain: quadratic-to-exponential output
 
-`write_module` writes every decl in the module, and `emit_air_program` lowers
-every loaded root. The implicit chain `prelude -> mem -> os.linux ->
-os.linux.syscalls` is loaded for every program, so:
+> **CORRECTION.** This section used to say the 20.6 GB came from
+> `--emit-air` writing the entire loaded stdlib. That was wrong. The stdlib
+> baseline is a *flat* 551 KB / 16,410 lines, identical for every program.
+> The growth was a continuation-sharing defect in the short-circuit lowering.
+> The stdlib-scope issue is real but separate and is now described after this
+> one. Both are measured; see the numbers below.
+
+The trigger is `||` / `&&` chains. `examples/tokei/languages.pie` builds its
+extension matcher exactly that way:
+
+    fn extension_matches_0 : ptr -> bool
+      | extension ->
+          os.linux.strcmp(extension, "c" as ptr) == 0i32 ||
+          os.linux.strcmp(extension, "h" as ptr) == 0i32 ||
+          ... 97 terms ...
+
+The old `shortcircuit_or` / `shortcircuit_and` passed the **same consumer `k`**
+into both arms of the generated `if`:
+
+    if a then <true | k>  else <b | k>
+
+`k` is a shared node in the AIR graph. The AIR text format cannot express
+sharing, so `air_write` inlines the node at every position that references it.
+Because a chained operator's tail is itself another short-circuit, the tail is
+printed once per path and the duplication doubles per level.
+
+Measured with the supplied `pfrontc` (built from `4550225`, i.e. *before* the
+fix) on `x == 1 || x == 2 || ... || x == n`:
+
+| n | emitted lines in `f` |
+|---|---|
+| 2 | 10 |
+| 3 | 18 |
+| 4 | 34 |
+| 5 | 66 |
+| 6 | 130 |
+| 7 | 258 |
+| 8 | 514 |
+
+That is `2^(n+1) + 2`. At n = 8 the single source term `x == 8` was printed
+**64 times** in the artifact. Measured module sizes for the same construct:
+`tokei.languages` alone emits **1,434,649,249 bytes** (12 modules); the whole of
+`tokei/main.pie` is the 20.6 GB figure.
+
+Things this is **not** — all checked and ruled out before the cause was found:
+`mul64_hi` (constant 5,785 lines at every depth; a legitimate linear staircase),
+the number of loaded modules, the number of `def`s (constant 60 on the synthetic
+probe), and `if_`/`else if` chains themselves (a proper `else if` chain is
+*linear*: 62 lines at depth 8, 230 at depth 32). Only the short-circuit
+continuation duplicates.
+
+#### Fixed
+
+`AirLower.shortcircuit_join` mirrors the 3.0 reference, `Low.shortcircuit`, which
+never had this bug: branch, send **both** arms to a join label carrying the bool
+as a parameter, and run the consumer once inside the label body.
+
+    label sc.join7(_b8 : bool).
+      <_b8 | k>;
+    seq {
+      if a then  let _v1 = true  in jump sc.join7(_v1)
+      else       <b | μ̃_x. jump sc.join7(_x)>
+    }
+
+Jump arguments are variable *names* (`air_mk_jump` takes `char**`), so the
+constant is let-bound first — the 3.0 lowerer does the same. Each operand is now
+lowered exactly once, which is what bounds the output.
+
+`tests/air/test_shortcircuit_sharing.py` pins this: it asserts both operators
+route through the helper, that the consumer is cut exactly once, that both arms
+jump to the join, and that the label is sequenced *after* the branch. Two
+mutations were used to confirm the test bites — restoring the old "cut `k` in the
+short arm" shape fails 2 of 5 assertions; making `&&` skip the helper fails 1.
+
+### `--emit-air` writes the entire loaded stdlib (separate, flat cost)
+
+Independent of the above: `write_module` writes every decl in the module, and
+`emit_air_program` lowers every loaded root. The implicit chain
+`prelude -> mem -> os.linux -> os.linux.syscalls` is loaded for every program,
+so even
 
     fn main : () -> i64 | () -> 0i64
-      -> 16410 lines, 2413 defs (os.linux 1786, syscalls 438, mem 168)
 
-For `tokei/main.pie` (187 source lines) that is **20.6 GB** — measured, not
-estimated; the earlier 1.1 GB figure for `scanner.pie` understates it because
-`main.pie` pulls in the whole CLI. `--emit-air-low` is reachability-filtered and
-emits 18 lines for the same program, so the filter exists — the 2.2 writer just
-does not apply it. This also makes `make test-air` fail on
-`examples_tokei_languages` and `examples_tokei_scanner`, because the huge file is
-what trips the `fmt` bug above.
+emits 16,410 lines / 2,430 defs (`os.linux` 1786, syscalls 438, mem 168,
+prelude 23) — 551 KB for a three-line program. This cost is **flat**: it does not
+grow with the program, and it is not what produced 20.6 GB. Import isolation
+confirms each module simply drags its own dependency closure: `os.linux` 551,683
+bytes / 5 modules, `str.string` 620,529 / 9, `fs.file` 646,822 / 11.
 
-This is not only a size problem. Writing 20.6 GB **filled the sandbox disk**,
-and once the disk was full every subsequent `--emit-air` produced a **0-byte
-`.air` while still reporting `errors=0`** — the same "reports success, artifact
-is empty" shape as the `fmt` truncation. A write that fails part-way is not
-distinguished from one that succeeded. Measured on a disk with 845 MB free after
-cleanup: `pfrontc x.pie --emit-air` on a 6-line input wrote 551 KB and reported
+`--emit-air-low` is reachability-filtered and emits 18 lines / 1 def for the same
+program, so the filter exists — the 2.2 writer just does not apply it.
+
+This also makes `make test-air` fail on `examples_tokei_languages` and
+`examples_tokei_scanner`, because the large file is what trips the `fmt` bug
+above.
+
+#### The ENOSPC trap
+
+Writing gigabytes **filled the sandbox disk**, and once full every subsequent
+`--emit-air` produced a **0-byte `.air` while still reporting `errors=0`** — the
+same "reports success, artifact is empty" shape as the `fmt` truncation. A write
+that fails part-way is not distinguished from one that succeeded. Measured on a
+disk with 845 MB free after cleanup: a 6-line input wrote 551 KB and reported
 `errors=0`; with the disk full the same command wrote 0 bytes and still reported
 `errors=0`.
 
-So there are two defects here, not one:
-1. unbounded whole-program output (20.6 GB for 187 lines);
+So there are two defects in this section, not one:
+1. unbounded whole-program output relative to the input (flat 551 KB baseline
+   plus, before the fix above, exponential short-circuit expansion);
 2. a failed/ENOSPC write is not reported, and leaves a partial or empty `.air`
    that the caller is told is fine.
 
-The whole-program scope is a deliberate choice (the comment in
-`pfront_main.c3` argues the backend should see everything the native path
-compiled) — but a 7-million-fold blowup on a 187-line input is not a scope
-decision, it is an unbounded output. Reachability filtering, or at minimum a
-size guard that refuses rather than writing gigabytes, is needed.
+A reachability filter, or at minimum a size guard that refuses rather than
+writing gigabytes, is still needed.
 
 ## Fixed (this cycle)
 
@@ -299,6 +379,30 @@ program still compiled, it just built the wrong tree:
 Regression: `tests/pfront/syntax/x10_contextual_keywords.pie` plus
 `syntax_continuation_scope` in `tests/pfront/run.sh`, which asserts the tree
 shape rather than the exit status (both defects parse "cleanly").
+
+## Fixed (AIR 2.2 lowerer)
+
+**4. `add_decl` silently dropped declarations past a hard cap of 4096.** The
+decl array is a fixed `AirDecl*[4096]`; `add_decl` returned `false` when full and
+every caller ignored it, so a module over the cap would have been written short
+while still reporting `errors=0` — the same shape as the `fmt` and ENOSPC bugs.
+Nothing reaches the cap today (2,430 decls), which is exactly why it would have
+gone unnoticed. The drop is now recorded on a sticky `AirModule.decl_overflow`
+flag (cleared in `init`, since the struct is stack-allocated) and `write_module`
+refuses to emit an overflowed module instead of publishing a body missing
+declarations. Pinned by `tests/air/test_decl_cap.py` (4 assertions, both halves
+mutation-checked).
+
+**3. Short-circuit continuation was duplicated into both arms.** `&&` and `||`
+passed the same consumer `k` to the then- and else-arm of the generated `if`.
+The AIR text writer cannot express sharing, so the shared tail was inlined once
+per path and the output grew as `2^(n+1) + 2` in the number of chained terms —
+which is what turned 187 lines of `examples/tokei` into 20.6 GB. Fixed by
+`AirLower.shortcircuit_join`, which routes both arms to a join label and runs the
+consumer once, mirroring `Low.shortcircuit` in the 3.0 lowerer. Pinned by
+`tests/air/test_shortcircuit_sharing.py` (5 assertions, mutation-checked). Full
+measurements and the constructs that were ruled out first are in the section
+above.
 
 ## Soft issues / warnings (not errors, workarounds exist)
 

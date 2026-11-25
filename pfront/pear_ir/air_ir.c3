@@ -252,6 +252,14 @@ struct AirModule {
     AirPrd* p_null;
     AirCns* c_ret; AirPat* pat_wild; AirCmd* nop;
     bool low;   // AIR 3.0 profile: the file claims to be low-level (typed, explicit memory, no high-level forms)
+    // Sticky overflow flag. `decls` is a fixed [4096] array, so a program that
+    // loads more decls than that silently lost the rest: add_decl returned
+    // false and every caller ignored it, so the artifact was written short and
+    // still reported errors=0 -- the same "success, truncated artifact" shape as
+    // the fmt and ENOSPC bugs. Tolerable at today's 2,430 decls, but silent
+    // truncation is exactly the failure mode this project keeps getting bitten
+    // by, so the drop is now recorded and the writer refuses.
+    bool decl_overflow;
 }
 
 // ── Allocators ────────────────────────────────────────────────────────────
@@ -287,6 +295,7 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
     m.name=a.dup(name,(usz)air_cstrlen(name));
     m.source_path = src_path==null?null:a.dup(src_path,(usz)air_cstrlen(src_path));
     m.decl_count=0;
+    m.decl_overflow=false;
     m.t_unit=air_mk_typ_simple(a,ATYP_UNIT); m.t_i8=air_mk_typ_simple(a,ATYP_I8);
     m.t_i16=air_mk_typ_simple(a,ATYP_I16); m.t_i32=air_mk_typ_simple(a,ATYP_I32);
     m.t_i64=air_mk_typ_simple(a,ATYP_I64); m.t_u8=air_mk_typ_simple(a,ATYP_U8);
@@ -357,7 +366,12 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
 }
 
 // ── Append helpers ───────────────────────────────────────────────────────
-fn bool AirModule.add_decl(AirModule* m, AirDecl* d){ if(d==null)return false; if(m.decl_count>=4096)return false; m.decls[m.decl_count]=d; m.decl_count++; return true; }
+fn bool AirModule.add_decl(AirModule* m, AirDecl* d)
+{
+    if (d == null) return false;
+    if (m.decl_count >= 4096) { m.decl_overflow = true; return false; }
+    m.decls[m.decl_count] = d; m.decl_count++; return true;
+}
 fn void AirTyp.add_arg(AirTyp* t, AirTyp* a){ if(t==null||a==null)return; if(t.arg_count>=64)return; t.args[t.arg_count]=a; t.arg_count++; }
 fn void AirPrd.push_sub(AirPrd* p, AirPrd* s)   // like add_sub, but a null operand keeps its slot
 {

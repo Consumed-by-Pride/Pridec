@@ -829,6 +829,27 @@ fn int write_module(AirModule* m, char* path)
     AirW w;
     w.errs = 0;
     for (usz i = 0; i < 8; i++) { w.first_err[i] = null; }
+    /*
+     Refuse to write a module that overflowed its decl array.
+
+     `AirModule.decls` is a fixed [4096]. Once full, add_decl dropped the rest
+     and every caller ignored the false return, so the artifact was written
+     SHORT while the caller was told errors=0 -- the same "success, truncated
+     artifact" shape as the fmt and ENOSPC bugs. Nothing reaches this today
+     (2,430 decls), which is exactly why it would go unnoticed when it did.
+     Fail loudly instead of publishing a body missing declarations.
+    */
+    if (m.decl_overflow)
+    {
+        // Nested scope so this stderr handle does not collide with the one the
+        // write-failure path declares later in this function.
+        {
+            void* se = fdopen(2, "w");
+            fprintf(se, "air-write: module '%s' exceeded the 4096-decl cap; the .air would be missing declarations, refusing to write it\n", m.name);
+            fflush(se);
+        }
+        return 1;
+    }
     void* f = (path != null) ? fopen(path, "w") : fdopen(1, "w");
     if (f == null) { return -1; }
     w.out = f;

@@ -1606,6 +1606,21 @@ fn int emit_module(AirModule* mod, AirLower* lr, char* path)
     e.indent = 0;
     e.need_space = false;
     e.in_tail = false;
+    /*
+     Refuse to emit a module that overflowed its decl array. `decls` is a fixed
+     [4096]; add_decl dropped anything past it and callers ignored the false
+     return, so the artifact would be written SHORT while reporting errors=0 --
+     the same "success, truncated artifact" shape as the fmt and ENOSPC bugs.
+     This is the writer `--emit-air` uses, so the guard has to live here too and
+     not only in air_write::write_module (which serves the reader/round-trip
+     paths). Nothing reaches the cap today (2,430 decls); that is the point.
+    */
+    if (mod.decl_overflow)
+    {
+        void* se = fdopen(2, "w");
+        fprintf(se, "air-emit: module exceeded the 4096-decl cap; the .air would be missing declarations, refusing to write it\n", (char*)null);
+        return 1;
+    }
     void* std_out = get_stdout();
     if (path != null)
     {

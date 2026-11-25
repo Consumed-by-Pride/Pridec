@@ -2521,51 +2521,101 @@ fn AirCmd* AirLower.binop(AirLower* lr, Node* n, AirCns* k)
 fn AirCmd* AirLower.shortcircuit_and(AirLower* lr, Node* n, AirCns* k)
 {
     if (n.child_count < 2) return lr.cut(lr.mod.p_false, k);
+    return lr.shortcircuit_join(n, k, true);
+}
+
+/*
+ SHORT-CIRCUIT `&&` / `||` — join-point form, not duplicated continuations.
+
+ The old lowering passed the SAME consumer `k` into both arms of the `if`:
+
+     if a then <true | k>  else <b | k>
+
+ `k` is a shared node, and the AIR text format has no way to share: the writer
+ inlines a node into every position that references it. So the tail under `k`
+ was printed once per path, and with a chained operator the tail is itself
+ another short-circuit -- which doubles again at every level.
+
+ Measured before the fix, for `x == 1 || x == 2 || ... || x == n`:
+
+     n :  2   3   4    5    6     7     8
+     lines: 10  18  34  66  130  258  514      =  2^(n+1) + 2
+
+ and for `n = 8`, the ONE source term `x == 8` appeared **64 times** in the
+ artifact. `examples/tokei/languages.pie` has 97-term chains built exactly this
+ way, which is where the measured 1.43 GB (and 20.6 GB for main.pie) came from.
+ The 3.0 lowerer never had this: Low.shortcircuit routes both sides through a
+ join label, so each side is emitted once.
+
+ Same shape here: evaluate the left operand into a fresh covar, branch, and send
+ both arms to a join label carrying the bool as a parameter. The tail under `k`
+ is then emitted exactly once, after the join.
+*/
+fn AirCmd* AirLower.shortcircuit_join(AirLower* lr, Node* n, AirCns* k, bool is_and)
+{
     lr.scope.enter();
-    AirCmd* els = lr.cut(lr.mod.p_false, k);
-    AirCmd* thn = lr.expr_to_cns(n.children[1], k);
-    AirCmd* iff = air_ir::air_mk_if(lr.arena, lr.mod.p_unit, thn, els);
-    AirCmd* out;
+    // `%scjoinN` for the label. fresh_lbl mints "%<hint><n>" and binds it as a
+    // covar, which is what a label name is; the hint stays dot-free so the name
+    // stays a bare identifier (a `.` would force air_write to backtick-quote it,
+    // as it does for the 3.0 `sc.join7` labels). `_xN` for the parameter.
+    char* join = lr.fresh_lbl("scjoin");
+    char* pv   = lr.fresh_x();
+
+    // join(bool v) { <v | k> }   -- the consumer runs once, here.
+    AirPrd* pvar = air_ir::air_mk_var(lr.arena, lr.dup(pv));
+    AirBinder*[1] argv;
+    argv[0] = air_ir::air_mk_binder(lr.arena, pv, lr.mod.t_bool, AMULT_UNR);
+    lr.labels++;
+    AirCmd* join_lbl = air_ir::air_mk_label(lr.arena, join, &argv[0], 1, lr.cut(pvar, k));
+
+    // Short arm jumps to the join with the short-circuit value. Jump arguments
+    // are variable NAMES (air_mk_jump takes char**), so the constant has to be
+    // materialised with a `let` first — the 3.0 lowerer does the same:
+    //   let _v10 = true : bool in jump sc.join7(_v10);
+    char* sv = lr.fresh_x();
+    char*[1] short_args;
+    short_args[0] = sv;
+    lr.jumps++;
+    AirCmd* short_jmp = air_ir::air_mk_let(lr.arena, sv, is_and ? lr.mod.p_false : lr.mod.p_true,
+        air_ir::air_mk_jump(lr.arena, join, &short_args[0], 1));
+
+    // Long arm evaluates the right operand and jumps to the join with it.
+    char* rx = lr.fresh_x();
+    char*[1] long_args;
+    long_args[0] = rx;
+    lr.jumps++;
+    AirCmd* rgt = lr.expr_to_cns(n.children[1], air_ir::air_mk_comu_cns(lr.arena, rx,
+        air_ir::air_mk_jump(lr.arena, join, &long_args[0], 1)));
+
+    AirCmd* iff;
     if (is_value_node(n.children[0]))
     {
-        // iff needs real scrutinee; rebuild with prd:
-        iff = air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), thn, els);
-        out = iff;
+        // `a && b`: true -> b, false -> short.  `a || b`: true -> short, false -> b.
+        iff = is_and ? air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), rgt, short_jmp)
+                     : air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), short_jmp, rgt);
     }
     else
     {
         char* ax = lr.fresh_x();
         AirPrd* ap = air_ir::air_mk_var(lr.arena, ax);
-        iff = air_ir::air_mk_if(lr.arena, ap, thn, els);
-        out = lr.expr_to_cns(n.children[0],
+        iff = is_and ? air_ir::air_mk_if(lr.arena, ap, rgt, short_jmp)
+                     : air_ir::air_mk_if(lr.arena, ap, short_jmp, rgt);
+        iff = lr.expr_to_cns(n.children[0],
             air_ir::air_mk_comu_cns(lr.arena, ax, iff));
     }
     lr.scope.leave();
-    return out;
+    // Labels are declared BEFORE the code that jumps to them: `seq { label
+    // join(v). <v|k>; <branch> }`. Confirmed against the emitted shape of
+    // `while` (air_lower.c3:2886), which sequences `label %exit(). ...` and
+    // `label %loop(). ...` ahead of the `jump %loop()` that enters. Putting the
+    // branch first would make the join label unreachable-by-declaration.
+    return air_ir::air_mk_seq(lr.arena, join_lbl, iff);
 }
 
 fn AirCmd* AirLower.shortcircuit_or(AirLower* lr, Node* n, AirCns* k)
 {
     if (n.child_count < 2) return lr.cut(lr.mod.p_true, k);
-    lr.scope.enter();
-    AirCmd* thn = lr.cut(lr.mod.p_true, k);
-    AirCmd* els = lr.expr_to_cns(n.children[1], k);
-    AirCmd* out;
-    if (is_value_node(n.children[0]))
-    {
-        AirCmd* iff = air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), thn, els);
-        out = iff;
-    }
-    else
-    {
-        char* ax = lr.fresh_x();
-        AirPrd* ap = air_ir::air_mk_var(lr.arena, ax);
-        AirCmd* iff = air_ir::air_mk_if(lr.arena, ap, thn, els);
-        out = lr.expr_to_cns(n.children[0],
-            air_ir::air_mk_comu_cns(lr.arena, ax, iff));
-    }
-    lr.scope.leave();
-    return out;
+    return lr.shortcircuit_join(n, k, false);
 }
 
 fn AirCmd* AirLower.unop(AirLower* lr, Node* n, AirCns* k)
