@@ -376,6 +376,33 @@ fn char* node_text(Node* n, pfront_core::Interner* it)
         char* fname = it.text(n.name_id);
         if (fname != null && fname[0] != 0) return fname;
     }
+    /*
+     An enum VARIANT has the same shape as a field init: its own name lives in
+     `name_id` (set by the parser at pfront_parse.c3:5128), and its children are
+     the PAYLOAD TYPES. The generic decl case below scans children for an
+     ident/ty-name and therefore returned the first payload type instead of the
+     variant name:
+
+         enum E
+           | Point(i64, i64)
+
+         data E {
+           ctor `i64`(_0 : i64, _1 : i64) : nominal E;    <-- should be `Point`
+         }
+
+     This is not only a naming cosmetic. The match arm still emits the real
+     name (`Point`), so the artifact declares a constructor called `i64` and
+     then matches on one called `Point` -- two names for one variant, with the
+     type's own declaration disagreeing with every use of it. Reported errors=0.
+
+     A bare variant (`| B`) was unaffected because it has no children, which is
+     why this survived: it only shows up when a variant carries a payload.
+    */
+    if ((n.kind == Nk.N_DECL_VARIANT || n.kind == Nk.N_DECL_FIELD) && it != null && n.name_id != 0)
+    {
+        char* vname = it.text(n.name_id);
+        if (vname != null && vname[0] != 0) return vname;
+    }
     // Decl/binder/module/use/field/etc: name lives in the first ident child.
     if (pfront_core::is_decl(n.kind)
         || n.kind == Nk.N_MODULE
@@ -871,6 +898,28 @@ fn AirPrd* AirLower.prd(AirLower* lr, Node* n)
 fn AirPrd* AirLower.lambda_prd(AirLower* lr, Node* n)
 {
     lr.scope.enter();
+    /*
+     16 is `AirPrd.binders`' width (air_ir.c3), and the loop below used to stop
+     there and simply not bind the rest:
+
+         for (i = 0; i < n.child_count && bc < 16; i++)
+
+     The parameters past 15 were dropped from the emitted `lam(...)` header but
+     the BODY still referenced them, because their names had already been
+     recorded in the scope. Measured with the supplied binary on a 70-parameter
+     lambda:
+
+         let h = lam(p0 : infer, ... p15 : infer).
+           <(add p0 p1) | comu _x69. ... (add _x68 p3) ... (add p60 p61) ...
+
+     -- `lam` declares 16 parameters and the body uses names up to `p69`, i.e.
+     45 free variables inside a module that still reported `errors=0`. That is
+     the same "publishes a plausible artifact that is wrong" shape as the fmt
+     truncation, the ENOSPC 0-byte write, and the 4096-decl cap.
+
+     Refuse instead. `note_bad` sets the same latch as an allocation failure, so
+     emit_air_program returns -3 and no .air is written.
+    */
     AirBinder*[16] bv; usz bc = 0;
     usz i;
     for (i = 0; i < n.child_count && bc < 16; i++)
@@ -891,6 +940,23 @@ fn AirPrd* AirLower.lambda_prd(AirLower* lr, Node* n)
             char* an = lr.scope.bind_var(pnm, c);
             bv[bc] = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
             bc = bc + 1;
+        }
+    }
+    if (bc >= 16)
+    {
+        // There may be more parameters than the header can carry. Only refuse
+        // when there actually are, so a lambda with exactly 16 params still
+        // lowers (its body cannot reference a 17th).
+        usz nparams = 0;
+        for (usz q = 0; q < n.child_count; q++)
+        {
+            if (n.children[q] != null && n.children[q].kind == Nk.N_DECL_PARAM) { nparams = nparams + 1; }
+        }
+        if (nparams > 16)
+        {
+            lr.note_bad((char*)"lambda has more than 16 parameters; AIR 2.2 cannot represent them");
+            lr.scope.leave();
+            return null;
         }
     }
     char* ret = lr.scope.push_ret("%ret");
@@ -4426,6 +4492,32 @@ fn AirDecl* AirLower.decl_struct(AirLower* lr, Node* n)
     if (nm == null) nm = (char*)"S";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_CODATA, lr.dup(nm));
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
+    /*
+     `AirDecl.dtors` is a fixed AirDtorDecl*[64] and `add_dtor` returns silently
+     once it is full, so a struct with more fields than that used to be emitted
+     with the extras MISSING while still reporting errors=0. Measured with the
+     supplied binary on an 80-field struct: the artifact contained
+
+         op f0() : i64; ... op f63() : i64;     (exactly 64)
+
+     and nothing else -- 16 fields gone, no diagnostic. A program using one of
+     the dropped fields then produced an artifact referring to a field the
+     type does not declare.
+
+     Count first and refuse, rather than emit a type that is not the one that
+     was written.
+    */
+    usz nfields = 0;
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        if (n.children[i] != null && n.children[i].kind == Nk.N_DECL_FIELD) { nfields = nfields + 1; }
+    }
+    if (nfields > 64)
+    {
+        lr.note_bad((char*)"struct has more than 64 fields; AIR 2.2 cannot represent them");
+        lr.total_decl++;
+        return d;
+    }
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* f = n.children[i];
@@ -4448,6 +4540,23 @@ fn AirDecl* AirLower.decl_enum(AirLower* lr, Node* n)
     if (nm == null) nm = (char*)"E";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DATA, lr.dup(nm));
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
+    /*
+     Same fixed-array problem as decl_struct: `ctors` is AirCtorDecl*[64] and
+     `add_ctor` drops silently past it, so an enum with more than 64 variants
+     would be emitted short. Variant field counts are capped at 64 too
+     (`AirCtorDecl.fields`). Refuse rather than publish a partial type.
+    */
+    usz nvariants = 0;
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        if (n.children[i] != null && n.children[i].kind == Nk.N_DECL_VARIANT) { nvariants = nvariants + 1; }
+    }
+    if (nvariants > 64)
+    {
+        lr.note_bad((char*)"enum has more than 64 variants; AIR 2.2 cannot represent them");
+        lr.total_decl++;
+        return d;
+    }
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* v = n.children[i];

@@ -331,6 +331,8 @@ test-air: $(BINARY) $(AIRTOOL)
 	python3 tests/air/test_shortcircuit_sharing.py
 	python3 tests/air/test_decl_cap.py
 	python3 tests/air/test_depth_limit.py
+	python3 tests/air/test_lambda_param_cap.py
+	python3 tests/air/test_variant_name.py
 	@echo "==> AIR boundary (emit side may not import consume side)"
 	bash tests/air/boundary.sh
 	@echo "==> AIR 2.0 text contract"
