@@ -310,6 +310,33 @@ fn void dump_sexp(Node* n, pfront_core::Interner* it, int depth)
     if ((n.flags & pfront_core::NF_SYNTHETIC) != 0) { printf(" :syn"); }
     if (n.effects != pfront_core::EFF_PURE) { print_effects(n.effects); }
 
+    /*
+     `type_ann` is not a child, and this function used to print only children.
+
+     The result: the s-expression dump silently dropped every type annotation in
+     the program. Measured:
+
+         fn f : i64 -> bool
+           | a -> a > 0i64
+
+         --emit-ast    fn 'f'  : ty-fn -> ty-name 'i64', ty-name 'bool'
+         --emit-sexp   (fn f (clause (pat-ident a) (block (binary > ...))))
+
+     ...and `type Age = i64` printed as `(type Age)` with the target gone, which
+     is indistinguishable from an alias with no target at all. Anyone reading
+     the sexp to answer "did this parse?" would conclude the annotation or the
+     alias target had been lost -- a false report about a correct tree.
+
+     The tree dump above already handles `type_ann`; this makes the sexp dump
+     agree with it. It is emitted inside the node's own parentheses so the shape
+     stays "(kind name [:syn] [types] children...)".
+    */
+    if (n.type_ann != null)
+    {
+        printf(" ");
+        dump_sexp(n.type_ann, it, depth + 1);
+    }
+
     for (usz i = 0; i < n.child_count; i++)
     {
         printf(" ");

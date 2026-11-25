@@ -4595,9 +4595,28 @@ fn AirDecl* AirLower.decl_type(AirLower* lr, Node* n)
     if (nm == null) nm = (char*)"T";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DECLARE, lr.dup(nm));
     d.ret_ty = lr.mod.t_infer;
-    if (n.child_count > 0 && n.children[0] != null)
+    /*
+     The target of `type Name = Target` is NOT a child of the declaration
+     node. `parse_type_alias` stores it in `n.type_ann`
+     (pfront_parse.c3:5268), having built the alias's own node before it saw
+     the `=`. This function only ever looked at `children[0]`, which for an
+     alias is empty, so every alias was emitted as
+
+         type Age = i64   ->   declare Age() : infer;
+
+     with the target silently discarded and errors=0. The AIR type layer could
+     represent it (the writer prints `ret_ty` for ADECL_DECLARE); only this
+     read was wrong.
+
+     `children[0]` is kept as a fallback rather than replaced: a type node
+     that does carry its target as a child (however it got built) should keep
+     working.
+    */
+    Node* target = n.type_ann;
+    if (target == null && n.child_count > 0) { target = n.children[0]; }
+    if (target != null)
     {
-        d.ret_ty = air_types::air_ty(lr.mod, n.children[0], lr.it);
+        d.ret_ty = air_types::air_ty(lr.mod, target, lr.it);
     }
     lr.total_decl++;
     return d;
