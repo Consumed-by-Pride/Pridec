@@ -386,11 +386,40 @@ fn void Parser.sync(Parser* p)
     }
 }
 
+/*
+ Depth guard.
+
+ `enter` increments depth; every caller is written
+
+     if (!p.enter()) { Tok c = p.cur(); return p.mk_error(c); }
+
+ and returns WITHOUT calling leave(), so the frame that failed to enter was
+ never balanced. It happened to come out right because the normal path calls
+ leave() once per frame, but the imbalance is real and the failed frame leaked.
+
+ The second half of the bug was the diagnosis itself. `mk_error` runs while the
+ parser is still parked on the offending token, so hitting the limit produced
+
+     error[E1001]: expression nests too deeply
+     error[E1041]: expected ')' after expression
+
+ The second error is noise: it reads like a missing paren in the source and
+ sends the reader looking for one that is not missing. A nesting limit is not a
+ syntax error. Entering the existing panic state on the limit hit makes
+ `err`/`err_hint` suppress the cascade, so only the real cause is reported.
+*/
 fn bool Parser.enter(Parser* p)
 {
     p.depth = p.depth + 1;
     if (p.depth > MAX_DEPTH)
     {
+        p.depth = p.depth - 1;          // balance the frame that never entered
+        // Enter the parser's existing panic state. `err`/`err_hint` already
+        // return early while panicking, so the follow-on diagnostics that used
+        // to accompany a limit hit ("expected ')' after expression") are
+        // suppressed by the mechanism that exists for exactly this purpose:
+        // after one real error, stop piling on.
+        p.panicking = true;
         if (!p.depth_reported)
         {
             Tok c = p.cur();
@@ -404,6 +433,8 @@ fn bool Parser.enter(Parser* p)
 }
 
 fn void Parser.leave(Parser* p) { p.depth = p.depth - 1; }
+
+
 
 // ── Node helpers ────────────────────────────────────────────────────────────
 fn Node* Parser.mk(Parser* p, Nk k, int line, int col)
