@@ -382,6 +382,72 @@ shape rather than the exit status (both defects parse "cleanly").
 
 ## Fixed (AIR 2.2 lowerer)
 
+**5. Enum variants took their payload type's name.** `node_text` routed
+`N_DECL_VARIANT` through the generic decl branch, which scans children for the
+first ident/ty-name. A variant's own name is in `name_id`, not a child, and its
+children are the payload types, so
+
+    enum E
+      | Point(i64, i64)
+
+emitted `ctor \`i64\`(_0 : i64, _1 : i64)` while the match arm in the same file
+still said `Point` — the type's declaration disagreeing with every use of it,
+with `errors=0`. Bare variants (`| B`) were fine, which is why it survived.
+Fixed by reading `name_id`; `N_DECL_FIELD` is covered by the same rule.
+
+**6. Four hard caps dropped elements silently.** All four are fixed arrays whose
+append helper returns `void` and just stops:
+
+| construct | cap | what was lost |
+|---|---|---|
+| lambda parameters (`AirPrd.binders`) | 16 | the header, while the body kept the names — 45 free variables on a 70-param lambda |
+| struct fields (`AirDecl.dtors`) | 64 | an 80-field struct emitted `op f0`..`op f63` |
+| enum variants (`AirDecl.ctors`) | 64 | variants past the 64th |
+| variant payload fields (`AirCtorDecl.fields`) | 64 | fields past the 64th |
+
+Each now refuses via `note_bad`, so no `.air` is written. The function-declaration
+parameter cap had already been fixed this way; `lambda_prd` had the identical
+loop and was missed.
+
+Worth noting the asymmetry that let these live: the AIR *reader* fails loudly on
+every one of these caps ("more than 64 type arguments", …) while the *builder*
+dropped silently.
+
+**7. `type_ann` is not a child, and two readers forgot.** `fn`, `let`,
+`type Name = T` and parameters store the annotation in `Node.type_ann`.
+
+* `dump_sexp` printed `name_id` and children only, so **every type annotation in
+  the program was invisible in `--emit-sexp`**: `fn f : i64 -> bool` printed as
+  `(fn f (clause ...))`, and `type Age = i64` printed as `(type Age)`. The tree
+  dump (`--emit-ast`) printed it correctly the whole time — that disagreement
+  between the two dumps is what hid the bug. It misled me during this session: I
+  read `(type Age)` as the parser dropping the alias target.
+* `decl_type` read the alias target from `children[0]`, which is empty for an
+  alias, so every `type Age = i64` emitted `declare Age() : infer;` with the
+  target discarded and `errors=0`.
+
+**8. The parser depth guard was unbalanced and reported a limit as a syntax
+error.** On hitting `MAX_DEPTH` (400), `enter` returned without undoing its own
+increment, and the follow-on diagnostic was
+
+    error[E1001]: expression nests too deeply
+    error[E1041]: expected ')' after expression
+
+— the second sending the reader to look for a missing paren that is not missing.
+The failure path now balances and enters the parser's existing panic state, so
+only the real cause is reported. The limit itself was left alone: no file in
+`examples/` or `stdlib/` comes near it. The neighbouring `DUMP_MAX_DEPTH` (200)
+was checked too and prints an explicit `... (depth limit)` marker rather than
+truncating silently.
+
+**A note on test quality.** Writing the tests for the above exposed a hole in my
+own method: assertions matched the fixes' explanatory *comments* as readily as
+their code, so a mutation that deleted the code still passed. Tests now strip
+comments before asserting, and the five earlier test files on this branch were
+re-checked the same way (all pass with comments stripped, so they were checking
+code).
+
+
 **4. `add_decl` silently dropped declarations past a hard cap of 4096.** The
 decl array is a fixed `AirDecl*[4096]`; `add_decl` returned `false` when full and
 every caller ignored it, so a module over the cap would have been written short
@@ -405,6 +471,15 @@ measurements and the constructs that were ruled out first are in the section
 above.
 
 ## Soft issues / warnings (not errors, workarounds exist)
+
+* **`examples/effect_demo.pie` no longer compiles** (3 errors: two unknown type
+  names, and `ub!` outside an `unsafe` block). The other two effect examples
+  (`02_algebraic_effects_state_logger`, `03_hose_prompt_dynamic_wind`) compile
+  clean and their handler lowering is compact (49 and 34 lines), so this is a
+  stale example rather than a front-end defect. Left in place because deciding
+  whether to fix or retire an example is not the front end's call.
+
+
 
 1. `if cond then a; b` single-line multi-stmt then-branch misparse.
    Workaround: use indented block.
