@@ -327,6 +327,7 @@ test-air: $(BINARY) $(AIRTOOL)
 	python3 tests/air/test_kind_coverage.py
 	python3 tests/air/test_pattern_fail_closed.py
 	python3 tests/air/test_write_result.py
+	python3 tests/air/test_clause_signature.py
 	@echo "==> AIR boundary (emit side may not import consume side)"
 	bash tests/air/boundary.sh
 	@echo "==> AIR 2.0 text contract"

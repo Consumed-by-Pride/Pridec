@@ -154,50 +154,47 @@ None of the five files in the tree that use a struct pattern is consumed as
 `.air` — they are all checked for *compile* success only — so refusing
 regresses no gate.
 
-### `--emit-air` drops the parameter of a function whose clauses match on values
+### `--emit-air` loses parameter *names* and result types for non-binder clauses
 
-Any function whose clause heads are not plain binders loses its parameter in
-the 2.2 `.air` — the declaration comes out with **no parameters at all** while
-call sites still pass arguments:
+CORRECTION. An earlier revision of this section claimed the 2.2 artifact emitted
+"no parameters at all", which would have been an arity mismatch against a caller
+passing one argument. That was wrong — it was a misread of `(_ : infer)`, which
+is ONE parameter named `_`. The arity is correct. `(_, b) ->` likewise keeps two.
+
+What is actually lost is narrower and much less severe:
+
+| source | 2.2 emits | problem |
+| --- | --- | --- |
+| `\| x ->` | `(x : infer)` | none |
+| `\| (a, b) ->` | `(a : infer, b : infer)` | none |
+| `\| 0i64 ->` | `(_ : infer)` | name dropped, arity kept |
+| `\| (0i64, b) ->` | `(_, b : infer)` | first name dropped |
+
+The name is recovered by `node_text(p)` on the pattern; a literal head has no
+text, so it falls back to `_`. Losing a parameter *name* in AIR is a readability
+and debuggability loss, not a correctness one — AIR has no notion of parameter
+names mattering to a caller.
+
+The real defect in this area is the **result type**. `fn by_literal : i64 -> bool`
+emits `: infer`, and so does `fn f : ptr -> (meta.Metadata, i64)`. That one is
+deliberate and documented at the assignment site in `decl_fn`:
 
 ```
-fn by_literal : i64 -> bool          facts air_checked readonly def by_literal(_ : infer) : infer =
-  | 0i64 -> true                       ...
-  | _ -> false
-                                     facts ... def main() : i64 =
-                                       ...
-                                       <by_literal | call · 0 : infer · comu _x1.
+// Only the 64-bit integer results are adopted: PEAR 1 represents every value as
+// i64, and giving it a narrower/ptr/bool/unit return type for a clause fn
+// produces `ret i64` in an `i1`/`void` function. Other results stay `infer`
+// until PEAR 2.
 ```
 
-A `call · 0 · …` against a zero-parameter `def` is an arity mismatch inside a
-single artifact, and `air_verify` does not flag it. `by_literal` also loses its
-return type (`bool` became `infer`), because the signature is reconstructed from
-the clause head rather than from the declared `fn` type.
+So `bool`→`infer` is a PEAR 1 limitation with a stated reason, not a bug, and
+`infer` is a legal AIR type that `air_verify` accepts on purpose. Whether it
+should be *silent* is a separate question; changing it needs a rebuild to verify
+and risks the exact miscompile the comment warns about (`ret i64` in an `i1`
+function), so it is left alone.
 
-The trigger is the clause head, not the body:
-
-| clause head | emitted parameters |
-| --- | --- |
-| `\| x ->` (binder) | `(x : infer)` — correct |
-| `\| (a, b) ->` (tuple) | `(a : infer, b : infer)` — correct |
-| `\| 0i64 ->` / `\| _ ->` (literal, wildcard, or any non-binder) | **none** |
-
-The 3.0 lowerer does not have this defect: for the same source `--emit-air-low`
-emits `pub def by_literal(a2 : i64) : bool` with the parameter and the return
-type both correct. So this is another place where the two lowerers disagree and
-the 2.2 one is wrong.
-
-Consequence for anything consuming the 2.2 artifact: a function reached through
-a value-matching clause cannot be called with the right number of arguments, and
-its result type is `infer`. Worth fixing before any backend is pointed at 2.2
-output.
-
-The return type is lost more widely than the parameter. `24_kw_module_type.pie`
-declares `fn f : ptr -> (meta.Metadata, i64)` with a plain binder clause; the
-artifact says `def f(p : infer) : infer`. So the declared result type is
-reconstructed only in the cases the lowerer models, and falls back to `infer`
-everywhere else — while `air_verify` accepts `infer` as a valid answer, which is
-why nothing notices.
+Net: no open correctness defect here. The 3.0 path additionally preserves names
+and exact types (`pub def by_literal(a2 : i64) : bool`), so the two artifacts
+still differ — but only in precision, not in meaning.
 
 ### `--emit-air` silently truncates a match at 64 arms
 
