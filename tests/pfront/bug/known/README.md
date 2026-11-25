@@ -237,7 +237,7 @@ literal`), and a 65-element tuple *pattern* falls back to an explicit
 `ub "multi-parameter clause requires tuple pattern matching..."` rather than
 dropping elements. Only the arm arrays were both capped and reachable.
 
-### `--emit-air` on a short-circuit chain: quadratic-to-exponential output
+### `--emit-air` on a short-circuit chain: exponential in the chain length
 
 > **CORRECTION.** This section used to say the 20.6 GB came from
 > `--emit-air` writing the entire loaded stdlib. That was wrong. The stdlib
