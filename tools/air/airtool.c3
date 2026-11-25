@@ -19,6 +19,7 @@ import air_facts;
 import air_verify;
 import air_lint;
 import air_ll;
+import air_c3;
 import air_util;
 import air_pass;
 
@@ -37,7 +38,7 @@ fn int main(String[] args)
 {
     if (args.len < 3)
     {
-        printf("usage: airtool check|verify|lint|fmt|opt|roundtrip FILE.air [-o OUT] [--passes=LIST]\n");
+        printf("usage: airtool check|verify|lint|fmt|opt|roundtrip|emit-ll|emit-c3 FILE.air [-o OUT] [--passes=LIST]\n");
         return 2;
     }
     char* cmd = (char*)args[1].ptr;
@@ -93,6 +94,23 @@ fn int main(String[] args)
             if (w != 0) { errs = errs + 1; }
         }
         else { printf("verify-low: %d error(s)\n", errs); }
+        arena.destroy();
+        return errs == 0 ? 0 : 1;
+    }
+    if (eq(cmd, "emit-c3"))
+    {
+        // emit-c3 FILE.air [-o OUT.c3]: the AIR 3.0 low profile -> C3 source.
+        // The second complete consumer (docs/pear2/C3_TARGET.md). It runs the
+        // same walk and the same typing rules as emit-ll; the two are asserted to
+        // agree on every tag by tests/air3/test_c3_target.py.
+        char* txt = null;
+        int errs = air_c3::to_c3(&mod, &txt, true);
+        if (errs == 0 && txt != null)
+        {
+            int w = air_c3::write_c3(&mod, out);
+            if (w != 0) { errs = errs + 1; }
+        }
+        else { printf("emit-c3: %d error(s)\n", errs); }
         arena.destroy();
         return errs == 0 ? 0 : 1;
     }

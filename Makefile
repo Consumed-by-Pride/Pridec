@@ -75,7 +75,7 @@ AIR_EMIT  := pfront/pear_ir/air_low.c3 pfront/pear_ir/air_lower.c3 pfront/pear_i
              pfront/pear_ir/air_scope.c3 pfront/pear_ir/air_types.c3 pfront/pear_ir/air_audit.c3 \
              pfront/pear_ir/air_fold.c3 pfront/pear_ir/air_write.c3 pfront/pear_ir/air.c3
 AIR_USE   := pfront/pear_ir/air_read.c3 pfront/pear_ir/air_verify.c3 \
-             pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3
+             pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3 pfront/pear_ir/air_c3.c3
 # MID is neither side: it reads a module, rewrites it, and writes it back, so it
 # needs both. It splits into three kinds, and the difference matters:
 #
@@ -307,6 +307,18 @@ check-pear2: | c3c
 	bash -n tests/pear2/native.sh
 	python3 tests/pear2/signed_division_model_test.py
 
+# The C3 transpilation target (docs/pear2/C3_TARGET.md). air_c3 is a consumer of
+# AIR, so it type-checks in the same link as every other consumer (CONSUMER_SRC
+# already contains AIR_USE), and its textual contract is checked without a
+# producer:
+#   * every tag it handles is a tag air_ll handles too (the two consumers may not
+#     disagree about what the low profile is);
+#   * no emitted template contains `goto`, which C3 does not have;
+#   * the type names it prints exist in c3c v0.8.4, the tag pinned above.
+check-c3-target: | c3c
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(CONSUMER_SRC) --max-stack-object-size 262144
+	python3 tests/air3/test_c3_target.py
+
 # The documents a program is written from, checked by the rules they teach.
 # Static only: no compiler, no LLVM, so this runs anywhere.
 lint-pride:
@@ -343,6 +355,8 @@ test-air: $(BINARY) $(AIRTOOL)
 # with the known-failing cases recorded exactly (tests/lowering/KNOWN.tsv).
 # AIR 3.0 low profile: hand-written good/bad .air + the reference consumer (.air -> .ll -> executable)
 test-air3: $(BINARY) $(AIRTOOL)
+	@echo "==> AIR 3.0 -> C3 target (source only; no producer, no compiler)"
+	python3 tests/air3/test_c3_target.py
 	@echo "==> AIR 3.0 low profile (reference consumer)"
 	bash tests/air3/run.sh $(AIRTOOL)
 	@echo "==> AIR 3.0 lowering gate (pfrontc --emit-air-low -> LLVM -> run)"
