@@ -444,7 +444,17 @@ fn void C.scalar(C* c, Sb* o, AirPrd* p, AirTyp* typed)
             return;
         }
         case APRD_BOOL: o.put(p.bval ? (char*)"true" : (char*)"false"); return;
-        case APRD_CHAR: o.put((char*)"((uint32_t)"); o.int_(p.ival); o.putc(')'); return;
+        case APRD_CHAR:
+        {
+            // air_ll.c3:311 types a char t_char and prints the code point as a
+            // bare number. Doing the same here is what keeps the two consumers
+            // agreeing, but a bare number is only correct if the operand type is
+            // also t_char (uint32_t): C's usual conversions would otherwise make
+            // `i8 -61 == 195` quietly false. So the cast is explicit and the
+            // type is ATYP_CHAR, never a fixed width that fights the context.
+            o.put((char*)"((uint32_t)"); o.int_(p.ival); o.putc(')');
+            return;
+        }
         case APRD_NULL: o.put((char*)"NULL"); return;
         default: c.err((char*)"not a scalar constant", prd_tag_name(p.tag)); return;
     }
@@ -467,9 +477,18 @@ fn Val C.prd(C* c, AirPrd* p)
             }
             c.err((char*)"unbound variable", p.name); return v;
         }
-        case APRD_INT: case APRD_FLOAT: case APRD_BOOL: case APRD_CHAR: case APRD_NULL:
+        case APRD_INT: case APRD_FLOAT: case APRD_BOOL: case APRD_NULL:
         {
             Sb s; s.init(); c.scalar(&s, p, p.ty); v.op = s.take(); v.ty = p.ty; return v;
+        }
+        case APRD_CHAR:
+        {
+            // air_ll types a char literal t_char unconditionally (air_ll.c3:311).
+            // Doing it here too keeps `v.ty` non-null: `binop` refuses operands
+            // whose type it cannot see, so a null type turned every char
+            // comparison into `/*undef*/` -- silently, because the error was
+            // reported against a producer, not the expression.
+            Sb s; s.init(); c.scalar(&s, p, p.ty); v.op = s.take(); v.ty = c.m.t_char; return v;
         }
         case APRD_UNIT: v.ty = p.ty; v.op = (char*)"((pride_unit){0})"; return v;
         case APRD_STRING: case APRD_BYTES: v.ty = p.ty; v.op = c.str_const(c, p); return v;

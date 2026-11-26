@@ -154,12 +154,75 @@ def unescape(s):
     return re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}.get(m.group(1), m.group(1)), s)
 
 
+
+def check_char_literals_are_ordinary_integers():
+    """A char literal in a byte context lowers to the SAME AIR as a suffixed one.
+
+    examples/tokei compares bytes: `c == 34u8`. The idiomatic spelling is
+    `c == '"'`, and it is only safe because of a chain in air_low.c3, not because
+    `char` and `u8` are the same type (they are not -- ATYP_CHAR is its own tag,
+    and air_c/air_ll both refuse a binop whose operand types differ). The chain:
+
+      1. Low.hint(N_EXPR_CHAR) returns t_char, so the binary op hands t_char to
+         BOTH operands as its hint;
+      2. the variable side ignores the hint (read_var loads at its own type, u8);
+      3. the literal side becomes lit_int(v, t_char), and lit_int builds APRD_INT
+         -- NOT APRD_CHAR, which air_low never emits at all;
+      4. so the two operands are (u8, char), and Low.binary's repair rewrites an
+         APRD_INT literal to the other side's type.
+
+    Break any link and the char literal stops being interchangeable with the
+    suffixed one. Each is asserted here against the source, because the compiler
+    cannot be built in this environment.
+    """
+    low = read("pfront/pear_ir/air_low.c3")
+
+    # 1. the hint for a char literal is t_char
+    m = re.search(r"case Nk\.N_EXPR_CHAR: return lw\.m\.(t_[a-z0-9]+);", low)
+    assert m, "Low.hint no longer names a type for Nk.N_EXPR_CHAR"
+    assert m.group(1) == "t_char", (
+        "Low.hint types a char literal %s; the rest of this check assumes t_char" % m.group(1))
+
+    # 2. the char expression case adopts an integer hint, and builds an INTEGER literal
+    m = re.search(r"case Nk\.N_EXPR_CHAR: \{ AirTyp\* t = \(want != null && "
+                  r"air_util::ty_is_int\(want\)\) \? want : lw\.m\.t_char; "
+                  r"return lw\.(lit_[a-z]+)\(", low)
+    assert m, "the char-literal expression case changed shape"
+    assert m.group(1) == "lit_int", (
+        "a char literal is lowered by %s; if it ever builds APRD_CHAR the binop "
+        "repair below cannot fire, because that repair only rewrites APRD_INT" % m.group(1))
+
+    # 3. air_low never emits APRD_CHAR -- the producer the repair does not know
+    assert "air_mk_char" not in low, (
+        "air_low now emits APRD_CHAR; Low.binary's repair only rewrites APRD_INT, "
+        "so a char literal would no longer adapt to the byte it is compared with")
+
+    # 4. the repair: an APRD_INT literal becomes the other operand's type
+    m = re.search(r"if \(r\.p != null && r\.p\.tag == APRD_INT && "
+                  r"air_util::ty_is_int\(l\.t\)\) \{ r = lw\.lit_int\(r\.p\.ival, l\.t\); \}", low)
+    assert m, "Low.binary no longer rewrites an integer literal to the other operand's type"
+
+    # And the example must still use it where it complained about magic numbers.
+    # Deliberately specific: `c == '\\'` also counts as "a char literal", so a
+    # loose check stays green when the quoted characters are turned back into
+    # 34u8/39u8/96u8. These are the exact spellings the reviewer objected to.
+    scanner = read("examples/tokei/scanner.pie")
+    for ch, code in (('"', 34), ("'", 39), ("`", 96)):
+        assert "c == %du8" % code not in scanner, (
+            "examples/tokei/scanner.pie compares byte %d as a number again; the "
+            "quoted character is the same AIR and the reader can see what it is" % code)
+    assert re.search(r"c == '\"'", scanner), "scanner.pie no longer quotes the double quote"
+    assert "chars[0i64] == '.'" in read("examples/tokei/walker.pie"), (
+        "walker.pie compares a leading dot as 46u8 again")
+
 def main():
     src = read(C_FILE)
     src_c = strip_comments(src)
     src_code = code_only(src)
     ll_code = code_only(read(LL_FILE))
     ir = read(IR_FILE)
+
+    check_char_literals_are_ordinary_integers()
 
     # ── 1. consumer agreement with air_ll ──────────────────────────────────
     for enum, prefix, where in (("AirCmdTag", "ACMD", "command"), ("AirPrdTag", "APRD", "producer")):

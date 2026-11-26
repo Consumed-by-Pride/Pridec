@@ -15,7 +15,7 @@ fn path_is_hidden : ptr -> bool
   | path ->
       let base = fs.path.path_basename(path)
       let chars = string.string_as_slice(&base) as *u8
-      let hidden = string.string_len(&base) > 0i64 && chars[0i64] == 46u8
+      let hidden = string.string_len(&base) > 0i64 && chars[0i64] == '.'
       string.string_destroy(&base)
       hidden
 

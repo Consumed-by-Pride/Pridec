@@ -11,6 +11,9 @@
 #      shape the emitter prints, with executed checks: -Werror, then ASan+UBSan.
 #   3. two mutations of shape_test.c are REQUIRED to fail. A test whose mutations
 #      survive is not a test; this repository has learned that twice.
+#   4. a char literal must carry the width its AIR type declares, and that width
+#      is read out of air_c.c3 -- so the check tracks the emitter instead of
+#      restating what the emitter is supposed to do.
 #
 # Usage: bash tests/air3/c/run.sh
 set -u
@@ -132,9 +135,69 @@ mutate dropped_case \
 '        case 7: y = 700; goto M2;' \
 ''
 
+# ── 4. a char literal must carry the width its type says it has ──────────────
+# air_ll types APRD_CHAR t_char -- i32 -- and prints the code point as a bare
+# number, so the emitted value and the emitted type are the same width. air_c
+# has to keep that agreement: if the cast on the literal and the C type printed
+# for ATYP_CHAR ever diverge, every char comparison is decided by C's usual
+# arithmetic conversions instead of by AIR's typing, and gcc will not say a word.
+# So both are read out of air_c.c3 and compared to each other, not to a copy.
+if ! python3 - "$W" <<'PY'
+import re, sys
+src = open("pfront/pear_ir/air_c.c3").read()
+
+# what C.ty prints for ATYP_CHAR
+m = re.search(r"case ATYP_CHAR: o\.put\(\(char\*\)\"([^\"]+)\"\);", src)
+if not m: sys.exit("C.ty no longer prints a type for ATYP_CHAR")
+char_c_ty = m.group(1)
+
+# what the char-literal arm casts to, and what it keeps as its AIR type
+m = re.search(r"case APRD_CHAR:\s*\{(.*?)\n        \}", src, re.S)
+if not m: sys.exit("the APRD_CHAR arm is gone from air_c.c3")
+arm = m.group(1)
+cm = re.search(r"\(\(([A-Za-z_][A-Za-z0-9_]*)\)\"\); o\.int_\(p\.ival\)", arm)
+if not cm: sys.exit("the char arm no longer prints a cast around the code point")
+lit_cast = cm.group(1)
+
+if lit_cast != char_c_ty:
+    sys.exit("the char literal is cast to %s but its type prints as %s: the "
+             "value and the type disagree in width" % (lit_cast, char_c_ty))
+
+# and the producer must carry that type, or binop refuses the operand
+if not re.search(r"case APRD_CHAR:\s*\{[^}]*v\.ty = c\.m\.t_char", src, re.S):
+    sys.exit("C.prd leaves APRD_CHAR untyped: binop cannot see an operand type")
+open(sys.argv[1] + "/char_arm.txt", "w").write(arm)
+PY
+then
+    bad "the char literal and its AIR type no longer agree in width"
+fi
+
+# The C semantics that agreement buys: a code point compared at the type's own
+# width answers correctly for both signednesses of the byte it meets.
+cat > "$W/char_width.c" <<'CEOF'
+#include <stdint.h>
+int main(void)
+{
+    volatile int8_t  sb = (int8_t)0xC3;      /* AIR i8: -61 */
+    volatile uint8_t ub = (uint8_t)0xC3;     /* AIR u8: 195 */
+    /* the literal at the char type's width, then converted to the operand */
+    if (!(sb == ((int8_t)((uint32_t)195))))  { return 1; }
+    if (!(ub == ((uint8_t)((uint32_t)195)))) { return 2; }
+    /* and the trap: the same number at a NARROWER type is a different value */
+    if (((uint32_t)195) == ((uint8_t)195)) { } else { return 3; }
+    return 0;
+}
+CEOF
+if "$CC" -std=c11 -O2 -Wall -Wextra -Wtype-limits -Werror "$W/char_width.c" -o "$W/char_width" 2>"$W/char_width.log"; then
+    if "$W/char_width"; then ok; else bad "a char literal at its type's width gave the wrong answer"; fi
+else
+    bad "the char-width shape does not compile: $(head -3 "$W/char_width.log" | tr '\n' ' ')"
+fi
+
 if [ $fail -ne 0 ]; then
     echo "test-c-target: $pass passed, $fail failed"
     exit 1
 fi
 echo "PASS: C target -- prelude compiled from the emitter's own literals and executed;"
-echo "      9 shape checks at -Werror and under ASan/UBSan; 2 mutations caught"
+echo "      10 shape checks at -Werror and under ASan/UBSan; 2 mutations caught;"
+echo "      char literals carry the width their type declares"

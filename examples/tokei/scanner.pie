@@ -15,7 +15,7 @@ const SCAN_IO_ERROR : i64 = 1i64
 const SCAN_UNKNOWN_LANGUAGE : i64 = 2i64
 
 fn byte_is_space : u8 -> bool
-  | b -> b == 32u8 || b == 9u8 || b == 13u8 || b == 11u8 || b == 12u8
+  | b -> b == ' ' || b == '\t' || b == '\r' || b == '\x0b' || b == '\x0c'
 
 fn bytes_match : (ptr, i64, i64, ptr) -> bool
   | (source, source_len, at, token) ->
@@ -76,7 +76,7 @@ fn scanner_count_buffer : (i64, ptr, i64) -> FileCount
       else
         while i < length
           let c = input[i]
-          if c == 10u8
+          if c == '\n'
             scanner_finish_line(&s)
             i = i + 1i64
           else
@@ -101,7 +101,7 @@ fn scanner_count_buffer : (i64, ptr, i64) -> FileCount
               if s.escaped
                 s.escaped = false
                 i = i + 1i64
-              else if c == 92u8
+              else if c == '\\'
                 s.escaped = true
                 i = i + 1i64
               else if c as i64 == s.quote
@@ -117,7 +117,7 @@ fn scanner_count_buffer : (i64, ptr, i64) -> FileCount
               s.in_line_comment = true
               s.line_comment = true
               i = i + os.linux.strlen(line_marker) as i64
-            else if c == 34u8 || c == 39u8 || c == 96u8
+            else if c == '"' || c == '\'' || c == '`'
               s.quote = c as i64
               s.line_code = true
               i = i + 1i64

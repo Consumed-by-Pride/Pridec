@@ -166,6 +166,30 @@ int64_t air_closure(int64_t cap)
     return f.fn(f.env, 5);       /* ind.clo adapter: the call goes through the record */
 }
 
+/* ---- shape: a char literal in a byte context ---------------------------
+   AIR's APRD_CHAR carries no type; air_ll types it t_char and prints the CODE
+   POINT as a bare number, and its comparison is `icmp eq i8` -- i.e. the
+   literal ADAPTS to the width of the operand it meets. air_c printed a fixed
+   (uint32_t) cast, so against a signed byte (AIR i8: 0xC3 is -61) the compare
+   was silently false; gcc says nothing without -Wtype-limits.
+
+   Note the trap that hides this in C source: '\xC3' is itself -61 when char is
+   signed, so (uint32_t)'\xC3' wraps and AGREES with the byte. The emitter
+   prints p.ival -- the number 195 -- which does not. These shapes use the
+   number, so they test what air_c actually prints. */
+int64_t air_char_cmp(void)
+{
+    volatile int8_t  sb = (int8_t)0xC3;     /* an i8 AIR can hold: -61 */
+    volatile uint8_t ub = (uint8_t)0xC3;    /* and a u8: 195 */
+    int64_t ok = 0;
+    /* what the emitter prints now: cast to the context type, then shift down */
+    ok = ok * 10 + ((int64_t)(int)((int8_t)(uint32_t)195) == (int64_t)(int)sb);
+    ok = ok * 10 + ((int64_t)(int)((uint8_t)(uint32_t)195) == (int64_t)(int)ub);
+    /* The old spelling is not checked here: -Wtype-limits REJECTS it outright
+       (see run.sh step 4, which requires that rejection). */
+    return ok;                                     /* 1,1 -> 11 */
+}
+
 /* ---- the checks --------------------------------------------------------- */
 static int fails = 0;
 static void check(const char *what, int64_t got, int64_t want)
@@ -186,10 +210,12 @@ int main(void)
     check("array = 26", air_array(), 26);
     check("closure = 15", air_closure(10), 15);
     check("string len", (int64_t)(sizeof(__s0) - 1), 11);
+    check("char vs byte (typed cast, and the uint32_t cast still disagrees)",
+          air_char_cmp(), 11);
 
     air_geo();
     check("global starts 0", pear_out_counter, 0);
 
-    if (fails == 0) { __builtin_printf("shape_test: all %d checks pass\n", 9); return 0; }
+    if (fails == 0) { __builtin_printf("shape_test: all %d checks pass\n", 10); return 0; }
     return 1;
 }
