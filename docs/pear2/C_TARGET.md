@@ -261,13 +261,89 @@ the module.
 Refused, as in `air_ll`: a module referencing `__pride_fiber_*` (the non-tail
 resume path) — it would be emitted and then fail to link.
 
-## 5. Placement and the boundary rule
+## 5. Where the C target can be faster than C — measured
+
+The goal for this backend is not "portable C". It is **C + the information a C
+compiler does not have**, and the only honest way to say which information that is
+is to measure what it buys.
+
+AIR's fact layer (`pfront/pear_ir/air_facts.c3`) computes two properties per
+declaration and certifies them `AFACT_AIR_CHECKED`:
+
+| AIR fact | meaning | C form it licenses |
+|---|---|---|
+| `memory_readonly` | the function writes no externally visible memory | `__attribute__((pure))` |
+| `no_capture` | the parameter's pointee does not escape the callee | `restrict` on the parameter |
+
+**Until this commit nothing consumed them.** `air_ll`, `air_c`, `air_c3` and PIR
+all ignored both fields; only the retired PEAR-1 backend emitted LLVM
+`memory(read)` from them. That is a computed property of every module in the
+repository sitting unused, and it is exactly the kind of information the C
+compiler cannot recover: given only the emitted C, gcc sees a `const int64_t *`
+and must assume the callee might write through it.
+
+### 5.1 The measurement
+
+`tests/air3/c/opt/` is the same program twice. The callee `width()` — which only
+reads — sits in **its own translation unit**, because that is how AIR modules
+lower: one `.c` per module. The caller cannot see into it, which is the whole
+point. The only difference between the two variants is the qualifiers `air_c`
+prints.
+
+```
+plain C          (facts withheld):   1.635 ms
+air_c output     (facts licensed):   1.423 ms
+```
+
+Best of five runs, `-O2`: **1.46x – 1.77x**. The gate
+(`make test-c-target` → `tests/air3/c/opt/run.sh`) requires ≥ 1.10x and fails at
+0.96x when the attribute is removed, which is what makes it a test of the
+mechanism rather than a benchmark of the machine.
+
+### 5.2 What this is NOT
+
+The temptation is to say "faster than C". Say instead what was measured:
+
+* **Not faster than C on a whole program.** On a tight numeric kernel that has
+  nothing to do with aliasing or cross-module calls, `air_c`'s output and
+  hand-written C are the *same program* and gcc compiles them the same way. A
+  sieve ties. Reporting a speedup there would be reporting compiler noise.
+* **`restrict` alone bought nothing measurable.** The first version of this
+  experiment put `restrict` on an 8M-element scale loop; gcc 12 emitted *identical*
+  code (`-O3 -march=native`: 11 SIMD instructions in both). gcc does runtime
+  dependence testing, so the qualifier it already knows how to work around was
+  worth 0.86x–1.03x, i.e. noise. `restrict` is still printed — it is free and it
+  helps compilers that do not version — but it is not where the win is.
+* **The win is bounded to the shape.** It materialises where a call or a load sits
+  inside a loop and the callee's effects are invisible. `memory_readonly` is the
+  load-bearing fact; `no_capture` is the cheap one.
+
+### 5.3 On Goose, and why the comparison is only partially available
+
+Goose's headline numbers are 3.3x over *idiomatic* C++ and **1.16x over
+hand-optimized C++** — and the independent reproductions find parity with
+hand-written C on kernels that exercise none of its data-layout advantages (a
+sieve measured 19.7 ms in both). Goose's wins come from its **memory model**:
+no heap, everything inline on compiler-managed data stacks, variable-sized enums,
+narrow relative links.
+
+**That is precisely the part that cannot be transplanted here, and the reason is
+the user's own constraint: no change to the memory model.** Goose's speed *is* its
+memory model — there is no separate optimisation to lift. What can be lifted, and
+is lifted above, is the smaller class of facts a whole-program compiler has and a C
+compiler does not.
+
+So the honest goal for this backend is **"C plus what AIR knows"**, with the
+per-shape number attached. "Faster than C" as a blanket claim would not survive
+the first kernel with nothing to alias.
+
+## 6. Placement and the boundary rule
 
 `air_c.c3` is a consumer of AIR, so it sits on the **AIR_USE** side and may not
 import an emitter (rule 1 of `tests/air/boundary.sh`). `airtool emit-c` sits beside
 `emit-ll` and `emit-c3` and shares their parse walk.
 
-## 6. Tests
+## 7. Tests
 
 **Executed (needs only `cc`)** — `make test-c-target`:
 
@@ -312,7 +388,36 @@ import an emitter (rule 1 of `tests/air/boundary.sh`). `airtool emit-c` sits bes
 Four deliberate breakages are now each required to fail: a renamed prelude, an
 undeclared syscall helper, a stale mutation anchor, and a wrong expected value.
 
-## 7. Honest limits
+## 8. How complete this is, measured
+
+"Complete Pride → AIR → C" has three joins, and each has a number:
+
+| join | state | number |
+|---|---|---|
+| Pride source → AIR 3.0 low | done, gated | 84/84 exec programs, 260/260 stdlib modules lower and compile (`docs/pear2/AIR3_PLAN.md`) |
+| AIR 3.0 low → C | written, output executed | 15/34 command tags, 19/33 producer tags, 6/9 declaration tags — the same subset `air_ll` covers |
+| C → executable | proven | every shape in `tests/air3/c/shape_test.c`, plus the prelude, compiled at `-Werror` and run |
+
+The subset is not an accident of this backend: `air_c` refuses exactly what
+`air_ll` refuses, asserted on every tag, because the low profile is defined by the
+producer (`air_low`) and not by a consumer. What BOTH refuse today:
+
+* `ADECL_EFFECT`, `ADECL_CODATA`, `ADECL_DEFCO` — the effect and co-data
+  declarations. A module containing one is refused by name, so effects that
+  *survive lowering as declarations* cannot be compiled yet. (Effects that lower
+  to ordinary code already can — that is what `examples/02_…`/`03_…` exercise.)
+* `ATYP_STR`, `ATYP_BYTES`, `ATYP_SLICE`, `ATYP_RECORD`, `ATYP_SUM`, `ATYP_UNION` —
+  string and slice types do not reach the C target as their own type; they arrive
+  as `ptr(u8)` + length, which the low profile already does.
+* A `data` with more than one constructor (the enum/variant layout).
+* The fiber-based non-tail `resume` path (`__pride_fiber_*`).
+
+So "complete" is true for the subset the low profile defines, and the subset is
+the same one the reference consumer defines — not a C-target-specific narrowing.
+The measurement that would falsify this is `airtool emit-c` on `tests/air3/prog/`
+once a producer exists.
+
+## 9. Honest limits
 
 * **The emitter has not been compiled.** It is C3, and there is no `c3c` here. What
   *is* proven is that the C it is written to produce compiles and runs correctly.
@@ -327,3 +432,13 @@ undeclared syscall helper, a stale mutation anchor, and a wrong expected value.
   `air_util::g_triple` names another.
 * **C is a second backend, not a replacement.** The LLVM path compiles real
   programs today.
+* **"Faster than C" is a per-shape number, not a property of the language.** §5
+  measures 1.46–1.77x where AIR knows something the C compiler cannot, and parity
+  where it does not. Any claim broader than that is not supported by anything in
+  this repository, and the benchmark in `tests/air3/c/opt/` is the thing to point
+  at when someone asks.
+* **The `pure` attribute is trusted, not proven.** It is emitted only for
+  `AFACT_AIR_CHECKED`, which `air_facts` sets from a conservative whole-body scan.
+  If that scan is wrong, the emitted C is quietly wrong, and gcc will not catch
+  it — that is the price of the speedup, and it is why the fact path is gated on
+  the certified state rather than the candidate state.

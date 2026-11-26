@@ -329,6 +329,7 @@ check-targets: | c3c
 # else -- no c3c, no pfrontc, no .air fixture.
 test-c-target:
 	bash tests/air3/c/run.sh
+	bash tests/air3/c/opt/run.sh
 
 # The documents a program is written from, checked by the rules they teach.
 # Static only: no compiler, no LLVM, so this runs anywhere.
