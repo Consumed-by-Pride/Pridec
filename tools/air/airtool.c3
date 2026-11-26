@@ -20,6 +20,7 @@ import air_verify;
 import air_lint;
 import air_ll;
 import air_c3;
+import air_c;
 import air_util;
 import air_pass;
 
@@ -38,7 +39,7 @@ fn int main(String[] args)
 {
     if (args.len < 3)
     {
-        printf("usage: airtool check|verify|lint|fmt|opt|roundtrip|emit-ll|emit-c3 FILE.air [-o OUT] [--passes=LIST]\n");
+        printf("usage: airtool check|verify|lint|fmt|opt|roundtrip|emit-ll|emit-c3|emit-c FILE.air [-o OUT] [--passes=LIST]\n");
         return 2;
     }
     char* cmd = (char*)args[1].ptr;
@@ -111,6 +112,23 @@ fn int main(String[] args)
             if (w != 0) { errs = errs + 1; }
         }
         else { printf("emit-c3: %d error(s)\n", errs); }
+        arena.destroy();
+        return errs == 0 ? 0 : 1;
+    }
+    if (eq(cmd, "emit-c"))
+    {
+        // emit-c FILE.air [-o OUT.c]: the AIR 3.0 low profile -> C11 source.
+        // C needs no dispatch loop and no relooper for AIR's label/jump CFG, which
+        // is why it is the target (docs/pear2/C_TARGET.md §1). The emitted text is
+        // compiled and executed by `make test-c-target`.
+        char* txt = null;
+        int errs = air_c::to_c(&mod, &txt, true);
+        if (errs == 0 && txt != null)
+        {
+            int w = air_c::write_c(&mod, out);
+            if (w != 0) { errs = errs + 1; }
+        }
+        else { printf("emit-c: %d error(s)\n", errs); }
         arena.destroy();
         return errs == 0 ? 0 : 1;
     }

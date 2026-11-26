@@ -354,12 +354,25 @@ fn void C3.ty(C3* c, Sb* o, AirTyp* t)
             // A raw code pointer (a `declare`, an `ind.clo` adapter result, an
             // extern). AIR 3.0 function values are {fn, env} records; those are
             // ordinary nominal types and never reach this case.
+            // AIR arrows are `domain -> codomain`: args[0] is the DOMAIN (which is
+            // a tuple of the parameter types) and args[1] is the result. Checked
+            // against air_emit.c3's ATYP_ARROW printer, which writes
+            // `emit_typ(args[0]); " -> "; emit_typ(args[1])`. An earlier draft of
+            // this file had the two reversed.
             o.put((char*)"fn ");
-            AirTyp* r = t.arg_count > 0 ? t.args[0] : null;      // args[0] is the result
-            if (r == null || r.tag == ATYP_UNIT) { o.put((char*)"void"); } else { c.ty(o, r); }
+            AirTyp* dom = t.arg_count > 0 ? t.args[0] : null;
+            AirTyp* cod = t.arg_count > 1 ? t.args[1] : null;
+            if (cod == null || cod.tag == ATYP_UNIT) { o.put((char*)"void"); } else { c.ty(o, cod); }
             o.putc('(');
             bool wrote = false;
-            for (usz i = 1; i < t.arg_count; i++) { if (wrote) { o.put((char*)", "); } c.ty(o, t.args[i]); o.putc('*'); wrote = true; }
+            usz nargs = (dom != null && dom.tag == ATYP_TUPLE) ? dom.arg_count : 1;
+            for (usz i = 0; i < nargs; i++)
+            {
+                AirTyp* a = (dom != null && dom.tag == ATYP_TUPLE) ? dom.args[i] : dom;
+                if (a == null) { continue; }
+                if (wrote) { o.put((char*)", "); }
+                c.ty(o, a); o.putc('*'); wrote = true;
+            }
             o.putc(')');
             return;
         }

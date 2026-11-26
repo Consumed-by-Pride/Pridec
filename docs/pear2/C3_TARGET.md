@@ -10,7 +10,12 @@ the **output language** here; the fact that this repository's compiler is itself
 written in C3 is a coincidence of implementation, not part of the argument. Nothing
 in this document asks anyone to write software *in* C3 by hand.
 
-**Status: designed, not implemented.** No emitter has been written or built yet. The
+> **Superseded for the shipping target.** `docs/pear2/C_TARGET.md` chooses C instead,
+> because C's `goto` removes the whole control-flow problem this document works
+> around (§3.3). This file is kept as the record of that investigation and of the
+> argument it overturned.
+>
+> **Status (as written): designed, not implemented.** No emitter has been written or built yet. The
 mapping below is derived from, and checked against, the two files that actually
 define the interface: `docs/specs/AIR3.md` (what a producer guarantees) and
 `pfront/pear_ir/air_ll.c3` (the only complete consumer, 1,211 lines). Where this

@@ -75,7 +75,8 @@ AIR_EMIT  := pfront/pear_ir/air_low.c3 pfront/pear_ir/air_lower.c3 pfront/pear_i
              pfront/pear_ir/air_scope.c3 pfront/pear_ir/air_types.c3 pfront/pear_ir/air_audit.c3 \
              pfront/pear_ir/air_fold.c3 pfront/pear_ir/air_write.c3 pfront/pear_ir/air.c3
 AIR_USE   := pfront/pear_ir/air_read.c3 pfront/pear_ir/air_verify.c3 \
-             pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3 pfront/pear_ir/air_c3.c3
+             pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3 pfront/pear_ir/air_c3.c3 \
+             pfront/pear_ir/air_c.c3
 # MID is neither side: it reads a module, rewrites it, and writes it back, so it
 # needs both. It splits into three kinds, and the difference matters:
 #
@@ -307,17 +308,27 @@ check-pear2: | c3c
 	bash -n tests/pear2/native.sh
 	python3 tests/pear2/signed_division_model_test.py
 
-# The C3 transpilation target (docs/pear2/C3_TARGET.md). air_c3 is a consumer of
-# AIR, so it type-checks in the same link as every other consumer (CONSUMER_SRC
-# already contains AIR_USE), and its textual contract is checked without a
-# producer:
-#   * every tag it handles is a tag air_ll handles too (the two consumers may not
+# The transpilation targets. Both air_c3 (-> C3) and air_c (-> C) are consumers
+# of AIR, so they type-check in the same link as every other consumer
+# (CONSUMER_SRC already contains AIR_USE), and their textual contracts are checked
+# without a producer:
+#   * every tag either handles is a tag air_ll handles too (the consumers may not
 #     disagree about what the low profile is);
-#   * no emitted template contains `goto`, which C3 does not have;
-#   * the type names it prints exist in c3c v0.8.4, the tag pinned above.
-check-c3-target: | c3c
+#   * C3: no emitted template contains `goto`, and the type names printed exist in
+#     c3c v0.8.4, the tag pinned above;
+#   * C: the emitted prelude declares every __pride_ name the emitter prints.
+check-targets: | c3c
 	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(CONSUMER_SRC) --max-stack-object-size 262144
 	python3 tests/air3/test_c3_target.py
+	python3 tests/air3/test_c_target.py
+	python3 tests/air3/test_c_target.py --emit-prelude-check
+
+# The C target's OUTPUT is executed, not just inspected: the C text for every
+# awkward AIR form, plus the prelude extracted from the emitter's own literals,
+# compiled with gcc at -Werror, ASan and UBSan. Needs a C compiler and nothing
+# else -- no c3c, no pfrontc, no .air fixture.
+test-c-target:
+	bash tests/air3/c/run.sh
 
 # The documents a program is written from, checked by the rules they teach.
 # Static only: no compiler, no LLVM, so this runs anywhere.
