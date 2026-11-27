@@ -156,6 +156,7 @@ struct Ctx
     usz        tmp;
     AirTyp*    cur_ret;
     AirTyp*    ret_seen;   // the type infer_ret settled on
+    bool       quiet;      // a prescan pass: a partial answer is not an error
 
     // module level
     Sb         types_out;  // structs, one per distinct shape
@@ -165,6 +166,7 @@ struct Ctx
 
 fn void Ctx.err(Ctx* c, char* what, char* who)
 {
+    if (c.quiet) { return; }
     c.errs++;
     void* se = fdopen(2, "w");
     if (c.errs <= 12) { fprintf(se, "air-c: in `%s`: %s%s%s\n", c.fn_name == null ? (char*)"<module>" : c.fn_name, what, who == null ? (char*)"@" : (char*)": ", who == null ? (char*)"" : who); }
@@ -626,7 +628,13 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
             c.err((char*)"gep indexes into a type with no members", null); break;
         }
     }
-    Sb s; s.init(); s.putc('&'); s.put((char*)"("); s.put(acc.take()); s.put((char*)")");
+    Sb s; s.init();
+    // A pointer-element gep IS the address: `base + i` is `&base[i]`, and its C
+    // type is already the element pointer AIR's `: ptr(T)` names. Wrapping it in
+    // `&` produced `&(base + i)` -- type T**, one indirection too many, so `store`
+    // wrote through the wrong level. An aggregate gep needs `&(base.field)`.
+    char* accs = acc.take();
+    s.put((char*)"("); s.put(accs); s.putc(')');
     v.op = s.take();
     v.ty = (step != null && p.ty != null) ? p.ty : null;
     return v;
@@ -769,6 +777,9 @@ fn Val Ctx.coerce(Ctx* c, AirPrd* p)
     Val v; v.op = (char*)"/*undef*/"; v.ty = p.ty;
     Val a = c.prd(p.sub_count > 0 ? p.subs[0] : null);
     AirTyp* to = p.ty;
+    // A coerced operand may be a binder the text does not re-type (`coerce(_sz2,
+    // i64)`). The prescan already recorded it; ask before giving up.
+    if (a.ty == null && p.sub_count > 0 && p.subs[0] != null) { Val t = c.prd_ty(p.subs[0]); a.ty = t.ty; }
     if (a.ty == null || to == null) { c.err((char*)"coerce without types", null); return v; }
     if (!ty_low(to, 0)) { c.err((char*)"coerce to a non-low type", null); return v; }
     if (air_util::ty_eq(a.ty, to)) { v.op = a.op; return v; }
@@ -776,13 +787,24 @@ fn Val Ctx.coerce(Ctx* c, AirPrd* p)
     bool fi = air_util::ty_is_int(f) || air_util::ty_is_bool(f);
     bool ti = air_util::ty_is_int(to) || air_util::ty_is_bool(to);
     bool legal = false;
-    if (fi && ti) { legal = (air_util::ty_bits(f) != air_util::ty_bits(to)); }
+    // Two integer types are coercible whenever they differ -- `usz -> i64` is a
+    // 64-bit-to-64-bit reinterpret and air_low emits it for every sizeof. Testing
+    // the bit widths instead called that "not defined" and refused the program.
+    if (fi && ti) { legal = !air_util::ty_eq(f, to); }
     else if (fi && air_util::ty_is_float(to)) { legal = true; }
     else if (air_util::ty_is_float(f) && ti) { legal = true; }
     else if (air_util::ty_is_float(f) && air_util::ty_is_float(to)) { legal = true; }
     else if (air_util::ty_is_ptr(f) && ti) { legal = true; }
     else if (fi && air_util::ty_is_ptr(to)) { legal = true; }
-    else if (air_util::ty_is_ptr(f) && air_util::ty_is_ptr(to)) { v.op = a.op; return v; }
+    // Two pointers of different pointee types are NOT the same C type, so a bare
+    // `v.op = a.op` silently reinterprets `uint8_t*` as `int64_t*` (gcc warns and
+    // the arithmetic is then wrong). Emit the cast that says what AIR meant.
+    else if (air_util::ty_is_ptr(f) && air_util::ty_is_ptr(to))
+    {
+        if (air_util::ty_eq(f, to)) { v.op = a.op; return v; }
+        Sb ps; ps.init(); ps.put((char*)"(("); c.ty(&ps, to); ps.put((char*)")(("); ps.put(a.op); ps.put((char*)")))");
+        v.op = ps.take(); return v;
+    }
     else if ((f.tag == ATYP_ARROW && air_util::ty_is_ptr(to)) || (air_util::ty_is_ptr(f) && to.tag == ATYP_ARROW)) { v.op = a.op; return v; }
     if (!legal) { c.err((char*)"coerce between these types is not defined", null); return v; }
     // One cast. Ctx picks the signed/unsigned and truncate/extend path from the
@@ -826,14 +848,24 @@ fn void Ctx.call(Ctx* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
         cur = cur.tail;
     }
     if (cur == null || cur.tag != ACNS_COMU) { c.err((char*)"call continuation is not `comu`", null); *next_out = null; return; }
+    // AIR writes a call's continuation as bare `comu _r2.` -- the text carries no
+    // type there, because the callee's declaration already says it. Take it from
+    // the callee rather than emitting an untyped declaration.
+    AirTyp* rty = cur.ty;
+    if (rty == null && callee != null && callee.tag == APRD_VAR)
+    {
+        AirDecl* fd = c.find(callee.name);
+        if (fd != null) { rty = fd.ret_ty; }
+    }
     Sb s; s.init();
     c.pad(o);
-    if (cur.bind != null) { c.ty_decl(&s, cur.ty, cur.bind); s.put((char*)" = "); }
+    if (cur.bind != null && rty != null && !ty_is_void(rty)) { c.ty_decl(&s, rty, cur.bind); s.put((char*)" = "); }
+    else if (cur.bind != null && rty == null) { c.err((char*)"call result has no known type", callee != null ? callee.name : null); }
     s.putc('('); s.put(f.op); s.put((char*)")(");
     for (usz i = 0; i < na; i++) { if (i > 0) { s.put((char*)", "); } s.put(args[i].op); }
     s.put((char*)")"); s.put((char*)";\n");
     o.put(s.take());
-    if (cur.bind != null) { c.bind(cur.bind, cur.bind, cur.ty); }
+    if (cur.bind != null) { c.bind(cur.bind, cur.bind, rty); }
     *next_out = cur.body;
 }
 
@@ -1222,7 +1254,13 @@ fn AirTyp* Ctx.infer_ret(Ctx* c, AirCmd* body, int* seen)
     {
         if (x.tag == ACMD_RET && x.prd != null)
         {
-            Val v = c.prd(x.prd);
+            // The prd's own `: T` annotation is readable without any binder, which
+            // matters because this runs in the prototype pass, before the body's
+            // binders exist. Fall back to the walked value when it is absent.
+            AirTyp* at = x.prd.ty;
+            Val v;
+            if (at != null) { v.ty = at; v.op = (char*)"/*undef*/"; }
+            else { v = c.prd(x.prd); }
             if (v.ty != null && !ty_is_void(v.ty))
             {
                 if (*seen > 0 && c.ret_seen != null && !air_util::ty_eq(c.ret_seen, v.ty)) { return null; }
@@ -1236,6 +1274,95 @@ fn AirTyp* Ctx.infer_ret(Ctx* c, AirCmd* body, int* seen)
         x = (x.tag == ACMD_SEQ) ? x.next : x.next;
     }
     return c.ret_seen;
+}
+
+// Record the type of every `let` binder before any body is walked.
+//
+// AIR's dominator spine binds at the point of domination and the text omits an
+// operand's type when the binder already carries it -- `let n = a2 : i64 in ...
+// (mul n _r8) : i64`. Walking in emit order, `mul n` is reached before `let n`,
+// so the operand looked untyped and `binop` refused it. This pass makes the type
+// of every binder known up front, for the same reason the declarations are
+// hoisted: emit order is not definition order.
+fn void Ctx.prescan_let(Ctx* c, AirCmd* x)
+{
+    // Diagnostics are suppressed for the duration: a type this pass cannot see is
+    // not an error, it is a type the walk will resolve -- and reporting it here
+    // both duplicates the message and points at the wrong pass.
+    bool was = c.quiet; c.quiet = true;
+    int guard = 0;
+    while (x != null && guard++ < 1000000)
+    {
+        if (x.tag == ACMD_LET && x.binder != null && x.prd != null)
+        {
+            Val v = c.prd_ty(x.prd);
+            if (v.ty != null && !c.has_type(x.binder)) { c.bind(x.binder, v.op, v.ty); }
+        }
+        if (x.tag == ACMD_SEQ && x.body != null) { c.prescan_let(x.body); }
+        if (x.tag == ACMD_LETREC && x.body != null) { c.prescan_let(x.body); }
+        if (x.then_c != null) { c.prescan_let(x.then_c); }
+        if (x.else_c != null) { c.prescan_let(x.else_c); }
+        // `cut` names its result with `comu <binder>`; without this the very next
+        // instruction reads a binder the prescan never saw.
+        if (x.tag == ACMD_CUT && x.cns != null)
+        {
+            AirCns* k = x.cns;
+            while (k != null)
+            {
+                if (k.tag == ACNS_COMU && k.bind != null && k.ty != null && !c.has_type(k.bind)) { c.bind(k.bind, k.bind, k.ty); }
+                if (k.tag == ACNS_CALL && k.bind != null && k.ty != null && !c.has_type(k.bind)) { c.bind(k.bind, k.bind, k.ty); }
+                if (k.tag == ACNS_COMU && k.body != null) { c.prescan_let(k.body); }
+                if (k.tag == ACNS_CALL && k.body != null) { c.prescan_let(k.body); }
+                k = k.tail;
+            }
+        }
+        x = x.next;
+    }
+    c.quiet = was;
+}
+
+// The type of `let x = <prd>`, where <prd> may itself be a bare var or a binop
+// whose operands omit their type. Deliberately narrow: it answers with the
+// prd's own annotation when there is one, else the binder type, else null.
+fn Val Ctx.prd_ty(Ctx* c, AirPrd* p)
+{
+    Val v; v.op = (char*)"/*undef*/"; v.ty = null;
+    if (p == null) { return v; }
+    if (p.ty != null) { v.ty = p.ty; return v; }
+    if (p.tag == APRD_VAR)
+    {
+        for (usz i = 0; i < c.nv; i++) { if (air_text::streq(c.vn[i], p.name)) { v.ty = c.vv[i].ty; return v; } }
+        AirDecl* d = c.find(p.name);
+        if (d != null) { v.ty = d.ret_ty; }
+        return v;
+    }
+    if (p.tag == APRD_BINOP)
+    {
+        Val a = c.prd_ty(p.sub_count > 0 ? p.subs[0] : null);
+        Val b = c.prd_ty(p.sub_count > 1 ? p.subs[1] : null);
+        if (a.ty != null && b.ty != null && air_util::ty_eq(a.ty, b.ty)) { v.ty = a.ty; }
+        else if (a.ty != null && air_util::ty_is_int(a.ty) && b.ty != null && air_util::ty_is_int(b.ty)) { v.ty = a.ty; }
+        return v;
+    }
+    if (p.tag == APRD_LOAD)
+    {
+        Val a = c.prd_ty(p.sub_count > 0 ? p.subs[0] : null);
+        if (a.ty != null && a.ty.tag == ATYP_PTR) { v.ty = a.ty.args[0]; }
+        return v;
+    }
+    if (p.tag == APRD_COERCE) { v.ty = p.ty; return v; }
+    // sizeof yields usize, which is what makes `coerce(sizeof(i64), i64)` legal.
+    if (p.tag == APRD_SIZEOF || p.tag == APRD_ALIGNOF || p.tag == APRD_OFFSETOF) { v.ty = c.m.t_usz; return v; }
+    if (p.tag == APRD_GEP) { v.ty = p.ty; return v; }
+    if (p.tag == APRD_ALLOCA) { v.ty = p.ty; return v; }
+    if (p.tag == APRD_STRING || p.tag == APRD_BYTES) { v.ty = null; return v; }
+    return v;
+}
+
+fn bool Ctx.has_type(Ctx* c, char* nm)
+{
+    for (usz i = 0; i < c.nv; i++) { if (air_text::streq(c.vn[i], nm)) { return c.vv[i].ty != null; } }
+    return false;
 }
 
 fn void Ctx.function(Ctx* c, AirDecl* d, Sb* out)
@@ -1275,6 +1402,8 @@ fn void Ctx.function(Ctx* c, AirDecl* d, Sb* out)
     AirCmd* tail = x;
 
     for (usz i = 0; i < d.param_count; i++) { AirBinder* b = d.params[i]; if (b != null) { c.bind(b.name, b.name, b.ty); } }
+    // Types of every binder in the body, before emitting a single instruction.
+    c.prescan_let(d.def_body);
 
     bool is_main = air_text::streq(d.name, "main");
     bool wrap = is_main && (ty_is_void(d.ret_ty) || air_util::ty_is_int(d.ret_ty));
@@ -1367,7 +1496,7 @@ fn void Ctx.data_type(Ctx* c, AirDecl* d, Sb* o)
     if (d.ctor_count != 1) { c.err((char*)"data with several constructors (enum layout) is not part of this profile yet", d.name); return; }
     if (d.typaram_count > 0) { c.err((char*)"generic data is not part of the low profile", d.name); return; }
     if (decl_has_attr(d, "packed")) { o.put((char*)"PRIDE_PACKED "); }
-    o.put((char*)"struct "); c.name(o, d.name, false); o.put((char*)" {\n");
+    o.put((char*)"typedef struct "); c.name(o, d.name, false); o.put((char*)" {\n");
     AirCtorDecl* ct = d.ctors[0];
     for (usz j = 0; j < ct.field_count; j++)
     {
@@ -1377,7 +1506,9 @@ fn void Ctx.data_type(Ctx* c, AirDecl* d, Sb* o)
         o.put((char*)";\n");
     }
     if (ct.field_count == 0) { o.put((char*)"    char __unit;\n"); }
-    o.put((char*)"};\n\n");
+    // `typedef struct P {...} P;` -- without the second name there is no plain `P`
+    // in scope, and C has no implicit tag-to-type conversion.
+    o.put((char*)"} "); c.name(o, d.name, false); o.put((char*)" ;\n\n");
 }
 
 fn void Ctx.global_decl(Ctx* c, AirDecl* d, Sb* o)
@@ -1474,7 +1605,7 @@ fn void Ctx.prelude(Ctx* c, Sb* o)
 fn int to_c(AirModule* m, char** result, bool want_text)
 {
     Ctx* c = (Ctx*)malloc(Ctx::size);
-    c.m = m; c.errs = 0; c.fn_name = null; c.emit = want_text;
+    c.m = m; c.errs = 0; c.fn_name = null; c.emit = want_text; c.quiet = false;
     c.vn = (char**)malloc(8 * MAXV); c.vv = (Val*)malloc(Val::size * MAXV);
     c.dn = (char**)malloc(8 * MAXV); c.ndn = 0;
     c.lbls = (Lbl*)malloc(Lbl::size * MAXL);
@@ -1499,10 +1630,15 @@ fn int to_c(AirModule* m, char** result, bool want_text)
         if (d == null || d.tag != ADECL_DEF) { continue; }
         if (d.ret_ty == null || d.ret_ty.tag == ATYP_UNIT)
         {
+            // infer_ret reads rets, whose operands carry no type of their own in
+            // the text (`ret(_r2)`), so it needs the program's binder types --
+            // the same prescan the body walk uses, run here for the same reason.
             int seen = 0;
-            c.ret_seen = null;
+            c.nv = 0; c.ret_seen = null;
+            for (usz pi = 0; pi < d.param_count; pi++) { AirBinder* b = d.params[pi]; if (b != null) { c.bind(b.name, b.name, b.ty); } }
+            c.prescan_let(d.def_body);
             AirTyp* inf = c.infer_ret(d.def_body, &seen);
-            c.ret_seen = null;
+            c.ret_seen = null; c.nv = 0;
             if (inf != null) { d.ret_ty = inf; }
         }
         c.fn_name = d.name;

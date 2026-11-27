@@ -36,7 +36,7 @@ fn int usage()
 fn int main(String[] args)
 {
     if (args.len < 2) { return usage(); }
-    char* in_path = args[1].ptr;
+    char* in_path = (char*)args[1].ptr;
     bool to_stdout = args.len < 3;
 
     AirArena arena;
@@ -63,11 +63,11 @@ fn int main(String[] args)
     }
 
     if (to_stdout) { io::printf("%s", text); }
-    else if (air_c::write_c(&mod, args[2].ptr) != 0)
+    else if (air_c::write_c(&mod, (char*)args[2].ptr) != 0)
     {
-        io::eprintfn("airc: could not write %s", args[2].ptr);
+        io::eprintfn("airc: could not write %s", (char*)args[2].ptr);
         return 1;
     }
-    io::eprintfn("airc: wrote C for %s", to_stdout ? (char*)"stdout" : args[2].ptr);
+    io::eprintfn("airc: wrote C for %s", to_stdout ? (char*)"stdout" : (char*)args[2].ptr);
     return 0;
 }

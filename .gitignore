@@ -66,3 +66,7 @@ bench/arr1
 bench/arr2
 bench/arr3
 bench/arr4
+
+# Large downloaded artifacts (Drive uploads land here)
+google_drive/
+tmp/
