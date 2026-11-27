@@ -2664,9 +2664,16 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
     // A same-width integer reinterpretation is exactly what `as` would produce,
     // so it is safe to apply here; widening into a narrower-magnitude unsigned
     // type is the only case that could lose a value, and that still requires `as`.
-    if (air_util::ty_is_int(a.t) && air_util::ty_is_int(want))
+    // `bool` IS `i1` (docs/specs/AIR.md:201), so it is a 1-bit integer here even
+    // though the surface language keeps `ty_is_int` false for it. WIDENING from
+    // 1 bit is lossless in both directions, which is why the spec says a backend
+    // "may be stricter but must not rely on a type being present or exact":
+    // refusing `bool -> i64` rejected programs the front end had already
+    // accepted (b09_cmp, b17_call_cond, b18_chain_eq).
+    if ((air_util::ty_is_int(a.t) || air_util::ty_is_bool(a.t)) && (air_util::ty_is_int(want) || air_util::ty_is_bool(want)))
     {
-        usz ab = (usz)air_util::ty_bits(a.t); usz wb = (usz)air_util::ty_bits(want);
+        usz ab = air_util::ty_is_bool(a.t) ? 1 : (usz)air_util::ty_bits(a.t);
+        usz wb = air_util::ty_is_bool(want) ? 1 : (usz)air_util::ty_bits(want);
         if (ab < wb) { return lw.cast(a, want); }          // widening: lossless either way
         if (ab == wb) { return lw.cast(a, want); }         // same width: reinterpret, as `as` would
     }
@@ -3188,6 +3195,10 @@ fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
         else if (l.p != null && l.p.tag == APRD_INT && air_util::ty_is_int(r.t)) { l = lw.lit_int(l.p.ival, r.t); }
         else if (l.t.tag == ATYP_PTR && r.p != null && r.p.tag == APRD_NULL) { r = lw.coerce(r, l.t); }
         else if (shift && air_util::ty_is_int(l.t) && air_util::ty_is_int(r.t)) { r = lw.coerce(r, l.t); }
+        // `(a == b) + 2`: bool is i1, so the integer operand's type wins. Without
+        // this, every comparison used arithmetically was "bool vs i64".
+        else if (air_util::ty_is_bool(l.t) && air_util::ty_is_int(r.t)) { l = lw.coerce(l, r.t); }
+        else if (air_util::ty_is_bool(r.t) && air_util::ty_is_int(l.t)) { r = lw.coerce(r, l.t); }
         else if (lw.lit_note(n.children[0], r.t) || lw.lit_note(n.children[1], l.t)) { return lw.unit(); }
         else { char[200] lb; usz ln = mang(l.t, &lb[0], 0, 90); lb[ln] = 0; char[100] rb; usz rn = mang(r.t, &rb[0], 0, 90); rb[rn] = 0; char[320] mb; snprintf(&mb[0], 320, "%s vs %s", &lb[0], &rb[0]); lw.err(n, "operands have different types", lw.dup(&mb[0])); return lw.unit(); }
     }
@@ -3439,7 +3450,17 @@ fn Vx Low.if_(Low* lw, Node* n, AirTyp* want)
     if (n.child_count < 2) { return lw.unit(); }
     Vx c = lw.expr(n.children[0], lw.m.t_bool);
     if (!lw.live()) { return lw.unit(); }
-    if (c.t == null || c.t.tag != ATYP_BOOL) { lw.err(n, "if condition is not a bool", null); return lw.unit(); }
+    // A condition is a truth value, and every scalar HAS one: the legacy backend
+    // tests an integer as `!= 0` (`b17_call_cond` calls `g(3)` where `g` returns
+    // `x < 6`, an i64 by its declared signature). Only aggregates have no truth
+    // value, so only they are refused.
+    if (c.t == null) { lw.err(n, "if condition has no type", null); return lw.unit(); }
+    if (c.t.tag != ATYP_BOOL)
+    {
+        if (air_util::ty_is_int(c.t)) { c = lw.binop(ABIN_NEQ, c, lw.lit_int(0, c.t)); }
+        else { lw.err(n, "if condition is not a bool", null); return lw.unit(); }
+        if (!lw.live()) { return lw.unit(); }
+    }
     bool has_else = n.child_count > 2;
     usz tb = lw.blk("then"); usz eb = lw.blk("else"); usz jb = lw.blk("join");
     lw.t_cond(c, tb, eb);
