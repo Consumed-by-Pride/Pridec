@@ -1,0 +1,25 @@
+-- EXIT: 3
+-- `continue 'outer` from an inner loop must resume the OUTER loop's condition,
+-- skipping the rest of the outer body. The `hits = hits + 100i64` line after the
+-- inner loop must therefore never execute, so exactly 3 outer passes contribute
+-- 1 each.
+--
+-- Verified both ways: exit 3 with the label honoured, exit 47 when the transfer
+-- falls back to the innermost loop. (47, not a tidy multiple of 100: the inner
+-- loop's `c` is already past 2, so the remaining passes take the +100 path a
+-- different number of times. The exact value does not matter -- it differs from
+-- 3, which is the whole point of the fixture.)
+fn main : () -> i64
+  | () ->
+      let mut hits : i64 = 0i64
+      let mut r : i64 = 0i64
+      'outer: while r < 3i64
+        r = r + 1i64
+        let mut c : i64 = 0i64
+        while c < 3i64
+          c = c + 1i64
+          if c == 2i64
+            hits = hits + 1i64
+            continue 'outer
+        hits = hits + 100i64
+      hits

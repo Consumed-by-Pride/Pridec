@@ -1161,13 +1161,27 @@ fn AirCmd* AirLower.cmd(AirLower* lr, Node* n, char* k)
         }
         case Nk.N_STMT_BREAK:
         {
-            char* lbl = lr.scope.current_break();
+            char* want = n.name_id != 0 ? lr.it.text(n.name_id) : null;
+            char* lbl = lr.scope.break_for(want);
+            if (lbl == null)
+            {
+                // A label that names no enclosing loop must not silently break the
+                // innermost one: fail closed with a named diagnostic.
+                lr.note_bad((char*)"`break` names a label that no enclosing loop declares");
+                return lr.nop();
+            }
             lr.jumps++;
             return air_ir::air_mk_jump0(lr.arena, lbl);
         }
         case Nk.N_STMT_CONTINUE:
         {
-            char* lbl = lr.scope.current_continue();
+            char* want = n.name_id != 0 ? lr.it.text(n.name_id) : null;
+            char* lbl = lr.scope.continue_for(want);
+            if (lbl == null)
+            {
+                lr.note_bad((char*)"`continue` names a label that no enclosing loop declares");
+                return lr.nop();
+            }
             lr.jumps++;
             return air_ir::air_mk_jump0(lr.arena, lbl);
         }
@@ -2982,7 +2996,14 @@ fn AirCmd* AirLower.for_(AirLower* lr, Node* n, AirCns* k)
 
     char* brk = lr.fresh_lbl("exit");
     char* cont = lr.fresh_lbl("loop");
-    lr.scope.push_loop(brk, cont);
+    /*
+     A labelled loop (`'rowscan: while ..`) records its name on the node, so
+     `break 'rowscan` inside a NESTED loop can find THIS loop rather than the
+     innermost one. Without the name a labelled transfer silently targeted the
+     innermost loop -- the label was parsed, stored on the node, and ignored.
+    */
+    char* ulabel = n.name_id != 0 ? lr.it.text(n.name_id) : null;
+    lr.scope.push_loop_named(brk, cont, ulabel);
 
     lr.scope.enter();
     char* pat_nm = null;
@@ -3044,7 +3065,14 @@ fn AirCmd* AirLower.loop_(AirLower* lr, Node* n, AirCns* k)
     lr.scope.enter();
     char* brk = lr.fresh_lbl("exit");
     char* cont = lr.fresh_lbl("loop");
-    lr.scope.push_loop(brk, cont);
+    /*
+     A labelled loop (`'rowscan: while ..`) records its name on the node, so
+     `break 'rowscan` inside a NESTED loop can find THIS loop rather than the
+     innermost one. Without the name a labelled transfer silently targeted the
+     innermost loop -- the label was parsed, stored on the node, and ignored.
+    */
+    char* ulabel = n.name_id != 0 ? lr.it.text(n.name_id) : null;
+    lr.scope.push_loop_named(brk, cont, ulabel);
 
     Node* cond; Node* body;
     if (n.kind == Nk.N_EXPR_WHILE)

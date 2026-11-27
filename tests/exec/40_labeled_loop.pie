@@ -1,0 +1,26 @@
+-- EXIT: 1
+-- Labelled break/continue must target the loop they NAME, not simply the
+-- innermost one.
+--
+-- `break 'rowscan` was parsed and then ignored: the label was stored on the node
+-- but air_lower jumped to current_break() and air_low to loops[nloops-1], so the
+-- transfer left the INNER loop. The program still compiled and still returned a
+-- number -- the answer was just wrong, which is why nothing caught it.
+--
+-- This counts how many times the OUTER body runs. Breaking (correctly) out of
+-- 'rowscan stops after one; breaking only the inner loop lets the outer loop
+-- continue and runs its body three times. Verified both ways: exit 1 with the
+-- label honoured, exit 3 when the transfer falls back to the innermost loop.
+fn main : () -> i64
+  | () ->
+      let mut outers : i64 = 0i64
+      let mut r : i64 = 0i64
+      'rowscan: while r < 3i64
+        outers = outers + 1i64
+        let mut c : i64 = 0i64
+        while c < 3i64
+          if c == 1i64
+            break 'rowscan
+          c = c + 1i64
+        r = r + 1i64
+      outers

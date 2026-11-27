@@ -63,7 +63,14 @@ struct Blk
 struct Vx { AirPrd* p; AirTyp* t; }
 struct Pl { AirPrd* ptr; AirTyp* t; }
 struct VarB { Node* decl; AirPrd* p; AirTyp* t; bool slot; bool lit; }
-struct LoopF { usz brk; usz cont; }
+const usz LOOP_NONE = (usz)-1;
+struct LoopF {
+    usz brk; usz cont;
+    // The user-written label (`'rowscan`), or null. A labelled `break`/`continue`
+    // must leave the loop it NAMES, which need not be the innermost one: without
+    // the name every labelled transfer silently targeted loops[nloops-1].
+    char* user_name;
+}
 struct Cap { Node* decl; AirTyp* t; bool by_ref; AirPrd* sp; }
 // a `defer`: function-scoped, registered by setting its flag, replayed (in reverse order) before every return
 struct DeferR { Node* node; AirPrd* flag; Cap[MAXC] snap; usz nsnap; }
@@ -853,6 +860,30 @@ fn void Low.t_jump(Low* lw, usz to, Vx* args, usz n)
     for (usz i = 0; i < n && i < 8; i++) { b.jargs[i] = names[i]; }
     lw.mark_pred(to); lw.cur = NOBLK;
 }
+// The user-written label on a loop node (`'rowscan: while ..`), or null. The
+// parser records it in name_id; see Parser.parse_stmt.
+fn char* Low.loop_label(Low* lw, Node* n)
+{
+    if (n == null || n.name_id == 0) { return null; }
+    return lw.it.text(n.name_id);
+}
+
+// Index of the loop a transfer targets. An unlabelled transfer takes the
+// innermost loop; a labelled one takes the nearest enclosing loop DECLARING that
+// name (innermost-first, so a shadowed label resolves to the closest one).
+// Returns LOOP_NONE when a label names no enclosing loop, which the caller
+// reports instead of jumping to an arbitrary loop.
+fn usz Low.loop_index_for(Low* lw, char* want)
+{
+    if (want == null) { return lw.nloops > 0 ? lw.nloops - 1 : LOOP_NONE; }
+    for (usz i = lw.nloops; i > 0; i--)
+    {
+        char* have = lw.loops[i - 1].user_name;
+        if (have != null && air_text::streq(have, want)) { return i - 1; }
+    }
+    return LOOP_NONE;
+}
+
 fn void Low.t_jump0(Low* lw, usz to) { Vx[1] none; lw.t_jump(to, &none[0], 0); }
 fn void Low.t_cond(Low* lw, Vx c, usz yes, usz no)
 {
@@ -2740,12 +2771,18 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_STMT_BREAK:
         {
             if (lw.nloops == 0) { lw.err(n, "break outside a loop", null); return lw.unit(); }
-            lw.t_jump0(lw.loops[lw.nloops - 1].brk); return lw.unit();
+            char* tgt = n.name_id != 0 ? lw.it.text(n.name_id) : null;
+            usz idx = lw.loop_index_for(tgt);
+            if (idx == LOOP_NONE) { lw.err(n, "`break` names a label that no enclosing loop declares", null); return lw.unit(); }
+            lw.t_jump0(lw.loops[idx].brk); return lw.unit();
         }
         case Nk.N_STMT_CONTINUE:
         {
             if (lw.nloops == 0) { lw.err(n, "continue outside a loop", null); return lw.unit(); }
-            lw.t_jump0(lw.loops[lw.nloops - 1].cont); return lw.unit();
+            char* tgt = n.name_id != 0 ? lw.it.text(n.name_id) : null;
+            usz idx = lw.loop_index_for(tgt);
+            if (idx == LOOP_NONE) { lw.err(n, "`continue` names a label that no enclosing loop declares", null); return lw.unit(); }
+            lw.t_jump0(lw.loops[idx].cont); return lw.unit();
         }
         case Nk.N_STMT_EXPR: return n.child_count > 0 ? lw.expr(n.children[0], null) : lw.unit();
         case Nk.N_DECL_LET: lw.let_decl(n); return lw.unit();
@@ -3531,7 +3568,7 @@ fn Vx Low.while_(Low* lw, Node* n)
         lw.t_cond(c, body, exit);
     }
     lw.cur = body;
-    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.nloops++;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.loops[lw.nloops].user_name = lw.loop_label(n); lw.nloops++;
     lw.expr(n.children[1], null);
     lw.nloops--;
     if (lw.live()) { lw.t_jump0(head); }
@@ -3544,7 +3581,7 @@ fn Vx Low.loop_(Low* lw, Node* n)
     usz head = lw.blk("lp.head"); usz exit = lw.blk("lp.exit");
     lw.t_jump0(head);
     lw.cur = head;
-    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.nloops++;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.loops[lw.nloops].user_name = lw.loop_label(n); lw.nloops++;
     if (n.child_count > 0) { lw.expr(n.children[n.child_count - 1], null); }
     lw.nloops--;
     if (lw.live()) { lw.t_jump0(head); }
@@ -3783,7 +3820,7 @@ fn Vx Low.for_each(Low* lw, Node* n, Node* pat, Node* it, Node* body)
             if (ins != null) { ins.name = nm; ins.a = ev.p; ev.p.ty = el; lw.bind_var(pat, air_ir::air_mk_var(lw.a, nm), el, false); }
         }
     }
-    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.nloops++;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.loops[lw.nloops].user_name = lw.loop_label(n); lw.nloops++;
     lw.expr(body, null);
     lw.nloops--;
     if (lw.live()) { lw.t_jump0(step); }
@@ -3831,7 +3868,7 @@ fn Vx Low.for_(Low* lw, Node* n)
         Ins* ins = lw.push(I_LET);
         if (ins != null) { ins.name = nm; ins.a = i.p; i.p.ty = t; lw.bind_var(pat, air_ir::air_mk_var(lw.a, nm), t, false); }
     }
-    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.nloops++;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.loops[lw.nloops].user_name = lw.loop_label(n); lw.nloops++;
     lw.expr(body, null);
     lw.nloops--;
     if (lw.live()) { lw.t_jump0(step); }

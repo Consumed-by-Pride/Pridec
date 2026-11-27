@@ -1,7 +1,3 @@
-# Measured on unmodified dev compiler source 5e20e0a (2026-09-30).
-# Current pfront/--plain; NOT the missing legacy ./pride harness.
-# 45_match_literal_adapts promoted by verified theory-integration b29e84e merge.
-# case<TAB>unmet contracts; no failures are hidden by aggregate counts.
 01_undefined_name.pie	resolve@3:10 text!~'undefined name'
 02_dup_binding_pattern.pie	resolve@3:9 text!~'duplicate binding'
 04_if_cond_not_bool.pie	missing type-warn at 3:13
@@ -13,11 +9,9 @@
 10_field_nonstruct.pie	count type-warn want=1 got=0
 115_module_path.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
 11_logical_nonbool.pie	missing type-warn at 3:10
-120_extern_cc.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 121_naked_fn.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 124_higher_order.pie	2 unexpected compile errors
 126_recursive_let.pie	expected CLEAN, got 1 errors/warnings
-127_labeled_break.pie	2 unexpected compile errors
 127_match_int_ranges.pie	expected CLEAN, got 1 errors/warnings
 129_effect_compose.pie	expected CLEAN, got 1 errors/warnings
 12_index_nonindex.pie	count type-warn want=1 got=0
@@ -27,22 +21,14 @@
 143_number_theory.pie	expected CLEAN, got 4 errors/warnings
 144_utf8.pie	expected CLEAN, got 1 errors/warnings
 147_effect_result.pie	expected CLEAN, got 2 errors/warnings
-153_extern_puts.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
-154_extern_multi.pie	expected CLEAN, got 5 errors/warnings; 5 unexpected compile errors
 15_effect_undeclared.pie	missing effect-warn at 4:1
 168_effect_io.pie	expected CLEAN, got 1 errors/warnings
-170_extern_math.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
-171_extern_stdio.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
 175_pattern_guards.pie	expected CLEAN, got 3 errors/warnings
 188_channel_ops.pie	expected CLEAN, got 3 errors/warnings
 18_match_nonexhaustive.pie	count lint-warn want=1 got=2
 194_compression.pie	expected CLEAN, got 1 errors/warnings
-196_break_label.pie	expected CLEAN, got 4 errors/warnings; 4 unexpected compile errors
-197_continue_label.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
-199_label_for.pie	expected CLEAN, got 4 errors/warnings; 4 unexpected compile errors
 19_match_exhaustive_bool.pie	expected CLEAN, got 1 errors/warnings
 201_naked_fn.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
-206_full_pipeline.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
 207_ascii_type_union.pie	expected CLEAN, got 1 errors/warnings
 208_multiarm_handler.pie	expected CLEAN, got 1 errors/warnings
 211_ascii_union_inline.pie	expected CLEAN, got 1 errors/warnings

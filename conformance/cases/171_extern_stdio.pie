@@ -1,13 +1,18 @@
 -- EXPECT-CLEAN
-fn fopen  #[extern("fopen")]  : (ptr, ptr) -> ptr
-fn fclose #[extern("fclose")] : ptr -> i32
-fn fread  #[extern("fread")]  : (ptr, i64, i64, ptr) -> i64
-fn fwrite #[extern("fwrite")] : (ptr, i64, i64, ptr) -> i64
-fn fseek  #[extern("fseek")]  : (ptr, i64, i32) -> i32
-fn ftell  #[extern("ftell")]  : ptr -> i64
-fn rewind #[extern("rewind")] : ptr -> ()
-fn feof   #[extern("feof")]   : ptr -> i32
-fn ferror #[extern("ferror")] : ptr -> i32
+-- Declaration attributes sit AFTER the signature, not between the name and it:
+-- tests/pfront/syntax/x07_meta_attrs.pie:23 spells an extern
+-- `fn ext_sin : f64 -> f64 #extern("sin") #cc(c)`, and that is the only form the
+-- parser accepts. The `fn puts #[extern("puts")] : ptr -> i32` spelling used
+-- here failed with E1050 "expected an expression" on the attribute.
+fn fopen : (ptr, ptr) -> ptr #[extern("fopen")]
+fn fclose : ptr -> i32 #[extern("fclose")]
+fn fread : (ptr, i64, i64, ptr) -> i64 #[extern("fread")]
+fn fwrite : (ptr, i64, i64, ptr) -> i64 #[extern("fwrite")]
+fn fseek : (ptr, i64, i32) -> i32 #[extern("fseek")]
+fn ftell : ptr -> i64 #[extern("ftell")]
+fn rewind : ptr -> () #[extern("rewind")]
+fn feof : ptr -> i32 #[extern("feof")]
+fn ferror : ptr -> i32 #[extern("ferror")]
 
 fn file_size : ptr -> i64
   | fp ->

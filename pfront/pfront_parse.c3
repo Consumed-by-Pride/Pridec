@@ -4467,6 +4467,37 @@ fn Node* Parser.parse_stmt(Parser* p)
 {
     p.skip_newlines();
     Tok t = p.cur();
+    /*
+     `'rowscan: while ..` -- a labelled loop. The lexer already produces
+     TOKEN_LABEL_REF for `'name` (it exists for `break 'name`); nothing consumed
+     it in STATEMENT position, so the label fell through to expression parsing
+     and every labelled-loop program died with E1050 "expected an expression"
+     at the colon.
+
+     The label is not a wrapper node: it is recorded on the loop it names, so
+     lowering can push the loop's own break/continue targets under that name.
+     Only a loop may carry a label -- `'x: let ..` is not a jump target.
+    */
+    if (t.type == Tk.TOKEN_LABEL_REF && p.ring[1].type == Tk.TOKEN_COLON)
+    {
+        Tok lb = p.advance();      // the label
+        p.advance();               // ':'
+        p.skip_newlines();
+        Tk after = p.ct();
+        if (after == Tk.TOKEN_KW_WHILE || after == Tk.TOKEN_KW_FOR || after == Tk.TOKEN_KW_DO)
+        {
+            Node* body = p.parse_stmt();
+            if (body != null)
+            {
+                body.name_id = p.interner.intern(lb.start, lb.len);
+                body.p.sptr = lb.start;
+                body.p.slen = lb.len;
+            }
+            return body;
+        }
+        p.err_at(1051, lb.line, lb.col, "a label must name a loop (`'name: while ..`)");
+        return p.parse_stmt();
+    }
     switch (t.type)
     {
         case TOKEN_KW_LET:      return p.parse_let();
