@@ -66,11 +66,14 @@ for pie in tests/exec/*.pie tests/bounty/b*.pie; do
     fi
 
     want=$(sed -n 's/^-- EXPECT: //p' "$pie" | head -1)
+    wantx=$(sed -n 's/^-- EXIT: \([-0-9]*\)$/\1/p' "$pie" | head -1)
     wantb=$(sed -n 's/^-- BOUNTY: hand-computed exit \([-0-9]*\)/\1/p' "$pie" | head -1)
     out=$("$exe" 2>&1); rc=$?
 
     if [ -n "$wantb" ]; then
         if [ "$rc" -eq "$wantb" ]; then pass=$((pass+1)); else echo "FAIL [$name] exit $rc, want $wantb"; fail=$((fail+1)); fi
+    elif [ -n "$wantx" ]; then
+        if [ "$rc" -eq "$wantx" ]; then pass=$((pass+1)); else echo "FAIL [$name] exit $rc, want $wantx"; fail=$((fail+1)); fi
     elif [ -n "$want" ]; then
         # The header stores the text with escaped newlines.
         exp=$(printf '%b' "$want")
