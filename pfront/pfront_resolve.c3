@@ -2253,6 +2253,30 @@ fn void attach_param_types(Node* f, Node* clause)
 }
 
 // ── Top-level driver ────────────────────────────────────────────────────────
+// Resolve every function body declared directly inside an inline `mod` node,
+// recursing into any nested `mod` blocks.
+//
+// Hoisting (`hoist_decls`) already walks the whole tree, but resolution only
+// walked direct `N_DECL_FN` children, so a `mod` nested inside another `mod`
+// was silently skipped: every binding in it stayed unbound and its body was
+// never checked. The parser nests sibling `mod` blocks this way:
+//
+//     mod a   fn f | n -> n      mod b   fn g | m -> m
+//
+// parses as `mod a { fn f; mod b { fn g } }`, so `mod b` is a nested child of
+// `mod a`, not a sibling of it.
+fn void Resolver.resolve_mod_node(Resolver* r, Node* mod_node)
+{
+    if (mod_node == null) { return; }
+    for (usz j = 0; j < mod_node.child_count; j++)
+    {
+        Node* c = mod_node.children[j];
+        if (c == null) { continue; }
+        if (c.kind == Nk.N_DECL_FN) { r.resolve_fn(c); }
+        else if (c.kind == Nk.N_MODULE) { r.resolve_mod_node(c); }
+    }
+}
+
 fn void Resolver.resolve_module(Resolver* r, Mod* m)
 {
     if (m == null || m.ast == null) { return; }
@@ -2408,11 +2432,7 @@ fn void Resolver.resolve_module(Resolver* r, Mod* m)
             case N_MODULE:
             {
                 r.hoist_decls(d);
-                for (usz j = 0; j < d.child_count; j++)
-                {
-                    Node* c = d.children[j];
-                    if (c != null && c.kind == Nk.N_DECL_FN) { r.resolve_fn(c); }
-                }
+                r.resolve_mod_node(d);
             }
             default:
                 r.resolve_stmt(d);
