@@ -387,14 +387,20 @@ fn bool param_can_restrict(AirDecl* d, AirBinder* b)
 
 // `T name` with the declarator attached where Ctx needs it. An arrow type already
 // carries its own `(*)`, so the name goes inside it; everything else is `T name`.
-fn void Ctx.ty_decl(Ctx* c, Sb* o, AirTyp* t, char* nm)
+// C's declarator syntax is not prefix: `T a[N]`, `T (*a)[N]`, `T *a`. A type
+// written `ptr(array(i64, 128))` must therefore become `int64_t (*a)[128]`, and
+// printing the type first and the name after -- which is what this did -- wrote
+// the *Pride* spelling (`int64_t[128] * a`) into the C. Build the declarator
+// from the inside out instead.
+fn void Ctx.declarator(Ctx* c, Sb* o, AirTyp* t, char* nm)
 {
-    if (t != null && t.tag == ATYP_ARROW)
+    if (t == null) { o.put((char*)"int64_t "); c.name(o, nm, false); return; }
+    if (t.tag == ATYP_ARROW)
     {
         AirTyp* dom = t.arg_count > 0 ? t.args[0] : null;
         AirTyp* cod = t.arg_count > 1 ? t.args[1] : null;
         if (cod == null || cod.tag == ATYP_UNIT) { o.put((char*)"void"); } else { c.ty(o, cod); }
-        o.put((char*)" (*"); c.name(o, nm, false); o.put((char*)")(");
+        o.put((char*)" (*"); c.name(o, nm, false); o.put((char*)")( ");
         bool wrote = false;
         usz nargs = (dom != null && dom.tag == ATYP_TUPLE) ? dom.arg_count : (dom == null ? 0 : 1);
         for (usz i = 0; i < nargs; i++)
@@ -405,10 +411,44 @@ fn void Ctx.ty_decl(Ctx* c, Sb* o, AirTyp* t, char* nm)
             c.ty(o, a); wrote = true;
         }
         if (!wrote) { o.put((char*)"void"); }
-        o.putc(')');
+        o.put((char*)"))");
+        return;
+    }
+    if (t.tag == ATYP_PTR && t.arg_count > 0 && t.args[0] != null && t.args[0].tag == ATYP_ARRAY)
+    {
+        // A pointer to an array is `T (*a)[N]`, never `T[N] *a`.
+        AirTyp* at = t.args[0];
+        long[8] dims; usz nd = 0;
+        while (at != null && at.tag == ATYP_ARRAY && nd < 8)
+        {
+            dims[nd] = at.ival; nd = nd + 1;
+            at = at.arg_count > 0 ? at.args[0] : null;
+        }
+        c.ty(o, at);
+        o.put((char*)" (*"); c.name(o, nm, false); o.putc(')');
+        for (usz di = 0; di < nd; di++) { o.putc('['); o.int_(dims[nd - 1 - di]); o.putc(']'); }
+        return;
+    }
+    if (t.tag == ATYP_ARRAY)
+    {
+        AirTyp* at = t;
+        long[8] dims; usz nd = 0;
+        while (at != null && at.tag == ATYP_ARRAY && nd < 8)
+        {
+            dims[nd] = at.ival; nd = nd + 1;
+            at = at.arg_count > 0 ? at.args[0] : null;
+        }
+        c.ty(o, at);
+        o.putc(' '); c.name(o, nm, false);
+        for (usz di = 0; di < nd; di++) { o.putc('['); o.int_(dims[nd - 1 - di]); o.putc(']'); }
         return;
     }
     c.ty(o, t); o.putc(' '); c.name(o, nm, false);
+}
+
+fn void Ctx.ty_decl(Ctx* c, Sb* o, AirTyp* t, char* nm)
+{
+    c.declarator(o, t, nm);
 }
 
 // ── producers ──────────────────────────────────────────────────────────────
@@ -417,18 +457,24 @@ fn char* Ctx.str_const(Ctx* c, AirPrd* p)
     Sb nm; nm.init(); nm.put((char*)"__s"); nm.int_((long)c.nstr);
     char* name = nm.take();
     c.nstr++;
+    // A string's bytes live in `name` and a byte-string's in `bytes`
+    // (air_ir.c3:513 vs :515 -- only the bytes constructor sets `bytes`).
+    // Reading `bytes` for both dereferenced null on the first string literal.
+    char* body = p.tag == APRD_BYTES ? p.bytes : p.name;
+    usz n = p.bytes_len > 0 ? (usz)p.bytes_len : 0;
     Sb* o = &c.pre;
     o.put((char*)"static const char ");
     c.name(o, name, false);
-    o.put((char*)"[") ; o.int_((long)(p.bytes_len + 1)); o.put((char*)"] = \"");
-    for (usz i = 0; i < p.bytes_len; i++)
+    o.put((char*)"[") ; o.int_((long)(n + 1)); o.put((char*)"] = \"");
+    for (usz i = 0; i < n; i++)
     {
-        uint b = (uint)(char)p.bytes[i];
+        uint b = body != null ? (uint)body[i] & 255 : 0;
         if (b == 34) { o.put((char*)"\\\""); }
         else if (b == 92) { o.put((char*)"\\\\"); }
         else if (b == 10) { o.put((char*)"\\n"); }
         else if (b == 9) { o.put((char*)"\\t"); }
         else if (b == 13) { o.put((char*)"\\r"); }
+        else if (b == 63) { o.put((char*)"\\?"); }      // not a trigraph by accident
         else if (b < 32 || b > 126) { o.put((char*)"\\x"); o.hex((ulong)b, 2); }
         else { o.putc((char)b); }
     }
@@ -602,6 +648,8 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
     // two consumers cannot disagree about layout.
     Sb acc; acc.init();
     AirTyp* step = cur;
+    // Index 1 scales: `base + i` IS the element address (see the note below).
+    bool acc_is_ptr = p.sub_count > 1;
     if (p.sub_count <= 1) { acc.put(b.op); }
     else
     {
@@ -609,7 +657,7 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
         for (usz i = 2; i < p.sub_count && i < 16; i++)
         {
             if (step == null) { c.err((char*)"gep indexes past a scalar", null); break; }
-            if (step.tag == ATYP_ARRAY) { acc.putc('['); acc.put(idx[i].op); acc.putc(']'); step = step.args[0]; continue; }
+            if (step.tag == ATYP_ARRAY) { acc.putc('['); acc.put(idx[i].op); acc.putc(']'); step = step.args[0]; acc_is_ptr = true; continue; }
             if (step.tag == ATYP_TUPLE || step.tag == ATYP_NOMINAL)
             {
                 AirPrd* ip = p.subs[i];
@@ -620,7 +668,14 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
                 else
                 {
                     AirDecl* dd = c.find_data(step.name);
-                    acc.putc('.'); c.name(&acc, dd.ctors[0].fields[(usz)ip.ival].name, false);
+                    // `gep` steps through ADDRESSES, so the value before this
+                    // field access is a pointer whenever the earlier steps were
+                    // not array indexing -- `(_s7 + 0).json` is the bug: C wants
+                    // `->`. Track whether the current step yields a value or an
+                    // address, which is exactly the `.` versus `->` distinction.
+                    if (acc_is_ptr) { acc.put((char*)"->"); }
+                    else { acc.putc('.'); }
+                    c.name(&acc, dd.ctors[0].fields[(usz)ip.ival].name, false);
                 }
                 step = ft;
                 continue;
@@ -1491,6 +1546,27 @@ fn void Ctx.add_label(Ctx* c, AirCmd* lb)
     c.nl++;
 }
 
+// A C struct body is written where the typedef is, so a type must be defined
+// before any type that embeds it -- `typedef struct String { RawVec buf; }`
+// cannot precede `typedef struct RawVec {...}`. AIR's module order carries no
+// such promise (tokei's model.pie declares String before RawVec), so the typedefs
+// are emitted in dependency order: every type a struct mentions comes first.
+fn bool typ_mentions(AirTyp* t, char* nm, int depth)
+{
+    if (t == null || depth > 12) { return false; }
+    if (t.tag == ATYP_NOMINAL && t.name != null && air_text::streq(t.name, nm)) { return true; }
+    for (usz i = 0; i < t.arg_count; i++) { if (typ_mentions(t.args[i], nm, depth + 1)) { return true; } }
+    return false;
+}
+
+fn bool data_mentions(AirDecl* d, char* nm)
+{
+    if (d == null || d.ctor_count < 1 || d.ctors[0] == null) { return false; }
+    AirCtorDecl* ct = d.ctors[0];
+    for (usz j = 0; j < ct.field_count; j++) { if (typ_mentions(ct.fields[j].ty, nm, 0)) { return true; } }
+    return false;
+}
+
 fn void Ctx.data_type(Ctx* c, AirDecl* d, Sb* o)
 {
     if (d.ctor_count != 1) { c.err((char*)"data with several constructors (enum layout) is not part of this profile yet", d.name); return; }
@@ -1531,6 +1607,25 @@ fn void Ctx.global_decl(Ctx* c, AirDecl* d, Sb* o)
     o.put((char*)" = ");
     Sb s; s.init(); c.scalar(&s, d.g_init, d.ret_ty); o.put(s.take());
     o.put((char*)";\n");
+}
+
+// Names the emitter's own includes already declare. A short, deliberate list:
+// every entry is provided by the prelude's standard headers, and a name NOT on
+// it is declared exactly as AIR asks. Redeclaring one of these is not harmless:
+// C rejects a second, differently-typed declaration of one function, and AIR's
+// `u64` and glibc's `size_t` are the same width but not the same type to a
+// redeclaration.
+fn bool libc_declares(char* nm)
+{
+    if (nm == null) { return false; }
+    static char*[22] names = {
+        "malloc", "calloc", "realloc", "free", "strlen", "strcmp", "strncmp",
+        "memcpy", "memmove", "memset", "printf", "fprintf", "snprintf",
+        "sprintf", "puts", "putchar", "write", "read", "open", "close",
+        "exit", "abort"
+    };
+    for (usz i = 0; i < 22; i++) { if (air_text::streq(names[i], nm)) { return true; } }
+    return false;
 }
 
 fn void Ctx.declare(Ctx* c, AirDecl* d, Sb* o)
@@ -1613,14 +1708,66 @@ fn int to_c(AirModule* m, char** result, bool want_text)
     c.decls.init(); c.types_out.init(); c.pre.init();
 
     Sb body; body.init();
+    // Dependency order (see typ_mentions). `done` records what has been written;
+    // a cycle would leave a gap, and a gap is reported rather than emitted as a
+    // struct that refers to a name C does not have yet.
+    bool[4096] data_done;
+    for (usz i = 0; i < 4096; i++) { data_done[i] = false; }
+    usz total_data = 0;
+    for (usz i = 0; i < m.decl_count; i++) { AirDecl* d = m.decls[i]; if (d != null && d.tag == ADECL_DATA) { total_data++; } }
+    for (usz pass = 0; pass <= total_data; pass++)
+    {
+        bool progress = false;
+        for (usz i = 0; i < m.decl_count && i < 4096; i++)
+        {
+            AirDecl* d = m.decls[i];
+            if (d == null || d.tag != ADECL_DATA || data_done[i]) { continue; }
+            bool ready = true;
+            for (usz j = 0; j < m.decl_count && j < 4096; j++)
+            {
+                AirDecl* e = m.decls[j];
+                if (e == null || e.tag != ADECL_DATA || j == i || data_done[j]) { continue; }
+                if (data_mentions(d, e.name)) { ready = false; break; }
+            }
+            if (!ready) { continue; }
+            c.fn_name = d.name;
+            c.data_type(d, &c.types_out);
+            c.fn_name = null;
+            data_done[i] = true; progress = true;
+        }
+        if (!progress) { break; }
+    }
+    for (usz i = 0; i < m.decl_count && i < 4096; i++)
+    {
+        AirDecl* d = m.decls[i];
+        if (d == null || d.tag != ADECL_DATA || data_done[i]) { continue; }
+        c.fn_name = d.name;
+        c.data_type(d, &c.types_out);
+        c.err((char*)"data type is part of a dependency cycle; emitted last", d.name);
+        c.fn_name = null;
+    }
+    // Extern declarations first: a call to a library function may appear in the
+    // very first body (tokei's `main` printf's immediately), while its `declare`
+    // sits wherever the module happened to put it. C requires the declaration
+    // before the call.
     for (usz i = 0; i < m.decl_count; i++)
     {
         AirDecl* d = m.decls[i];
-        if (d == null || d.tag != ADECL_DATA) { continue; }
+        if (d == null || d.tag != ADECL_DECLARE) { continue; }
+        bool defd = false;
+        for (usz j = 0; j < m.decl_count; j++) { AirDecl* e = m.decls[j]; if (e != null && e.tag == ADECL_DEF && air_text::streq(e.name, d.name)) { defd = true; } }
+        if (defd) { continue; }
+        // A name this C library already declares is NOT redeclared here. glibc's
+        // `strlen` returns `size_t` where AIR says `u64`: the same width spelled
+        // through a different typedef, which C treats as a conflicting type. The
+        // include is emitted for exactly this purpose, and the AIR type still
+        // governs every call the emitter writes.
+        if (libc_declares(d.name)) { continue; }
         c.fn_name = d.name;
-        c.data_type(d, &c.types_out);
+        c.declare(d, &c.pre);
         c.fn_name = null;
     }
+
     // One prototype per definition, BEFORE the bodies: a program's `main` is
     // usually first in the module while the functions it calls come after it,
     // and C without a prototype assumes `int f()` -- or refuses outright.
