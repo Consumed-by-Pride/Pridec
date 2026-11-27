@@ -352,7 +352,7 @@ const int AIR_ARM_CAP = 64;
 
 fn void AirLower.too_many_arms(AirLower* lr)
 {
-    lr.note_bad(lr, (char*)"more than 64 match arms or clause alternatives; this lowerer holds them in a fixed 64-slot array and refuses rather than truncating");
+    lr.note_bad((char*)"more than 64 match arms or clause alternatives; this lowerer holds them in a fixed 64-slot array and refuses rather than truncating");
 }
 
 // ── Small helpers ──────────────────────────────────────────────────────────
@@ -732,7 +732,7 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
              pair from the clause matcher -- and folding covers both, because a
              nested child recurses back into this case.
             */
-            if (p.child_count == 0) { lr.note_bad(lr, (char*)"or-pattern with no alternatives"); return lr.mod.pat_wild; }
+            if (p.child_count == 0) { lr.note_bad((char*)"or-pattern with no alternatives"); return lr.mod.pat_wild; }
             AirPat* acc = lr.pat_node(p.children[0]);
             for (usz i = 1; i < p.child_count; i++)
             {
@@ -795,15 +795,15 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
             */
             if (p.kind == Nk.N_PAT_STRUCT)
             {
-                lr.note_bad(lr, (char*)"struct patterns are not lowered by this lowerer yet (air_low.c3 does); refusing rather than matching everything");
+                lr.note_bad((char*)"struct patterns are not lowered by this lowerer yet (air_low.c3 does); refusing rather than matching everything");
             }
             else if (p.kind == Nk.N_PAT_RANGE)
             {
-                lr.note_bad(lr, (char*)"range patterns are not lowered by this lowerer yet (air_low.c3 does); refusing rather than matching everything");
+                lr.note_bad((char*)"range patterns are not lowered by this lowerer yet (air_low.c3 does); refusing rather than matching everything");
             }
             else
             {
-                lr.note_bad(lr, (char*)"pattern kind this lowerer does not model; refusing rather than treating it as a wildcard");
+                lr.note_bad((char*)"pattern kind this lowerer does not model; refusing rather than treating it as a wildcard");
             }
             // pat_node marks the node before the switch, so a refusal would
             // otherwise leave it recorded as consumed and --air-audit would
@@ -2409,7 +2409,7 @@ fn long elem_size_from_name(char* nm)
         if (nm[1] == '3' && nm[2] == '2') return 4;
         if (nm[1] == '6' && nm[2] == '4') return 8;
     }
-    else if (nm[0] == 'b' && nm[1] == 'o' && nm[2] == 'o' && nm[3] == 'l') return 1;
+    else if (nm[0] == 'b' && nm[1] == 'o' && nm[2] == 'o' && nm[3] == 'l') { return 1; }
     return 8; // pointers and unknown types default to 8 bytes.
 }
 
@@ -2813,7 +2813,7 @@ fn AirCmd* AirLower.match_(AirLower* lr, Node* n, AirCns* k)
     AirBranch*[64] bs; usz bc = 0;
     for (usz i = 1; i < n.child_count; i++)   // AIR_ARM_CAP checked in the body
     {
-        if (bc >= AIR_ARM_CAP) { lr.too_many_arms(lr); break; }
+        if (bc >= AIR_ARM_CAP) { lr.too_many_arms(); break; }
         Node* arm = n.children[i];
         if (arm == null) continue;
         air_audit::mark(arm);
@@ -3229,7 +3229,7 @@ fn AirCmd* AirLower.control_expr(AirLower* lr, Node* n, AirCns* k)
              at the call site will grow; when it does, the construct should cost
              a diagnostic, not vanish.
             */
-            lr.note_bad(lr, (char*)"control expression this lowerer does not model; refusing rather than lowering it to unit");
+            lr.note_bad((char*)"control expression this lowerer does not model; refusing rather than lowering it to unit");
             return lr.cut(lr.mod.p_unit, k);
         }
     }
@@ -3399,7 +3399,7 @@ fn AirCmd* AirLower.handle(AirLower* lr, Node* n, AirCns* k)
     AirBranch*[64] bs; usz bc = 0;
     for (usz i = 1; i < n.child_count; i++)   // AIR_ARM_CAP checked in the body
     {
-        if (bc >= AIR_ARM_CAP) { lr.too_many_arms(lr); break; }
+        if (bc >= AIR_ARM_CAP) { lr.too_many_arms(); break; }
         Node* arm = n.children[i];
         if (arm == null) continue;
         air_audit::mark(arm);
@@ -4056,7 +4056,7 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
     */
     if ((n.flags & pfront_core::NF_SYNTHETIC) != 0)
     {
-        lr.note_bad(lr, (char*)"rewrite rules have no AIR lowering yet; refusing rather than emitting an empty function");
+        lr.note_bad((char*)"rewrite rules have no AIR lowering yet; refusing rather than emitting an empty function");
         return null;
     }
     // A hoisted nested function is emitted under the AIR name chosen for it.
@@ -4423,7 +4423,7 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     // here silently discarded every clause alternative past the
                     // 64th, and x09's many_clauses (300 arms) was only the most
                     // obvious case -- it lost 236 arms with no diagnostic.
-                    if (bc >= AIR_ARM_CAP) { lr.too_many_arms(lr); }
+                    if (bc >= AIR_ARM_CAP) { lr.too_many_arms(); }
                     else { bs[bc] = br; bc++; }
                 }
                 if (bc == 0) { body = lr.cut(lr.mod.p_unit, lr.cns_k(ret)); }

@@ -8,9 +8,9 @@
 // tags air_ll handles, because a consumer that is quietly narrower than the last
 // one is how a backend silently loses features.
 //
-// C is a TRANSPILATION TARGET here (docs/pear2/C_TARGET.md §1). The reason it
-// beats C3 for this job is one property: C has `goto`. AIR 3.0 is a CFG with
-// label-parameter (phi) joins, so in C one AIR label is one C label and one AIR
+// Ctx is a TRANSPILATION TARGET here (docs/pear2/C_TARGET.md §1). The reason it
+// beats C3 for this job is one property: Ctx has `goto`. AIR 3.0 is a CFG with
+// label-parameter (phi) joins, so in Ctx one AIR label is one Ctx label and one AIR
 // `jump` is one `goto` -- the output has the same shape as the input, and there
 // is no structuring step to get wrong. In C3 that same CFG has to be recovered
 // as structured control flow or driven by a __pc switch; air_c3.c3 does the
@@ -24,7 +24,7 @@
 // minimisation is a later pass with a number attached.
 //
 // The templates this file prints are compiled and executed by
-// tests/air3/c/shape_test.c on every `make test-c-target`, so the C is proven
+// tests/air3/c/shape_test.c on every `make test-c-target`, so the Ctx is proven
 // even though this file (being C3, and there being no c3c here) is not.
 // ============================================================================
 module air_c;
@@ -141,7 +141,7 @@ fn char* ty_slug(AirTyp* t)
 struct Val { char* op; AirTyp* ty; }
 struct Lbl { char* name; AirBinder*[16] params; usz np; AirCmd* body; }
 
-struct C
+struct Ctx
 {
     AirModule* m;
     int        errs;
@@ -152,8 +152,10 @@ struct C
     char**     vn; Val* vv; usz nv;
     Lbl*       lbls; usz nl;
     Sb         decls;      // every local declaration, hoisted to the top (§3.4)
+    char**     dn; usz ndn; // names already declared in this function
     usz        tmp;
     AirTyp*    cur_ret;
+    AirTyp*    ret_seen;   // the type infer_ret settled on
 
     // module level
     Sb         types_out;  // structs, one per distinct shape
@@ -161,7 +163,7 @@ struct C
     usz        nstr;
 }
 
-fn void C.err(C* c, char* what, char* who)
+fn void Ctx.err(Ctx* c, char* what, char* who)
 {
     c.errs++;
     void* se = fdopen(2, "w");
@@ -169,7 +171,7 @@ fn void C.err(C* c, char* what, char* who)
     fflush(se);
 }
 
-fn AirDecl* C.find(C* c, char* nm)
+fn AirDecl* Ctx.find(Ctx* c, char* nm)
 {
     if (nm == null) { return null; }
     for (usz i = 0; i < c.m.decl_count; i++)
@@ -180,7 +182,7 @@ fn AirDecl* C.find(C* c, char* nm)
     return null;
 }
 
-fn AirDecl* C.find_data(C* c, char* nm)
+fn AirDecl* Ctx.find_data(Ctx* c, char* nm)
 {
     for (usz i = 0; i < c.m.decl_count; i++)
     {
@@ -209,7 +211,7 @@ fn long decl_attr_int(AirDecl* d, char* nm)
     return 0;
 }
 
-fn void C.bind(C* c, char* nm, char* op, AirTyp* ty)
+fn void Ctx.bind(Ctx* c, char* nm, char* op, AirTyp* ty)
 {
     if (nm == null) { return; }
     for (usz i = 0; i < c.nv; i++) { if (air_text::streq(c.vn[i], nm)) { c.vv[i].op = op; c.vv[i].ty = ty; return; } }
@@ -217,21 +219,25 @@ fn void C.bind(C* c, char* nm, char* op, AirTyp* ty)
     c.vn[c.nv] = nm; c.vv[c.nv].op = op; c.vv[c.nv].ty = ty; c.nv++;
 }
 
-fn bool C.lookup(C* c, char* nm, Val* out)
+fn bool Ctx.lookup(Ctx* c, char* nm, Val* out)
 {
     for (usz i = 0; i < c.nv; i++) { if (air_text::streq(c.vn[i], nm)) { *out = c.vv[i]; return true; } }
     return false;
 }
 
-fn char* C.fresh(C* c, char* stem)
+fn char* Ctx.fresh(Ctx* c, char* stem)
 {
     Sb s; s.init(); s.put(stem); s.int_((long)c.tmp); c.tmp++;
     return s.take();
 }
 
-// C has no quoted-identifier escape and a bare identifier cannot carry the
-// characters AIR allows, so a name that is not a legal C identifier is refused
-// where it would be printed. Never mangled: a mangled name is a silent rename.
+// C has no quoted-identifier escape, while AIR names may be any bytes (the spec's
+// quoted-identifier form, §3). air_low emits dotted labels as a matter of course
+// (`wh.head4`), so refusing every non-C name refuses every real loop. The mapping
+// applied by Ctx.name is injective -- `_` becomes `__`, any other byte outside
+// [A-Za-z0-9] becomes `_h` and two lowercase hex digits -- so distinct AIR names
+// stay distinct C names and nothing is silently merged. A rename that cannot
+// collide is a spelling, not a silent rename.
 fn bool c_ident_ok(char* s)
 {
     if (s == null || s[0] == 0) { return false; }
@@ -243,7 +249,7 @@ fn bool c_ident_ok(char* s)
         if (!(ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) { return false; }
         i++;
     }
-    static char*[44] kw = {
+    static char*[45] kw = {
         "auto", "break", "case", "char", "const", "continue", "default", "do",
         "double", "else", "enum", "extern", "float", "for", "goto", "if",
         "inline", "int", "long", "register", "restrict", "return", "short",
@@ -252,19 +258,44 @@ fn bool c_ident_ok(char* s)
         "_Atomic", "_Bool", "_Complex", "_Generic", "_Imaginary", "_Noreturn",
         "_Static_assert", "_Thread_local", "_FakeMono"
     };
-    for (usz i = 0; i < 43; i++) { if (air_text::streq(kw[i], s)) { return false; } }
+    for (usz ki = 0; ki < 45; ki++) { if (air_text::streq(kw[ki], s)) { return false; } }
     return true;
 }
 
-fn void C.name(C* c, Sb* o, char* nm, bool global)
+// Injective: `_` -> `__`, a legal byte -> itself, any other byte -> `_hHH`.
+// A leading digit is escaped too, since no C identifier may start with one.
+fn void Ctx.mangle(Ctx* c, Sb* o, char* nm)
 {
-    if (!c_ident_ok(nm)) { c.err((char*)"name is not a legal C identifier", nm); o.put((char*)"__bad_name"); return; }
+    (void)c;
+    char* hex = (char*)"0123456789abcdef";
+    usz i = 0;
+    while (nm[i] != 0)
+    {
+        char ch = nm[i];
+        bool legal = (ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ((ch >= '0' && ch <= '9') && i > 0));
+        if (ch == '_') { o.put((char*)"__"); }
+        else if (legal) { o.putc(ch); }
+        else
+        {
+            uint u = (uint)ch & 255;
+            o.put((char*)"_h");
+            o.putc(hex[(u >> 4) & 15]);
+            o.putc(hex[u & 15]);
+        }
+        i = i + 1;
+    }
+}
+
+fn void Ctx.name(Ctx* c, Sb* o, char* nm, bool global)
+{
+    if (nm == null || (nm[0] == '_' && nm[1] == 0)) { o.put((char*)"__anon"); return; }
     if (global) { o.put((char*)"pear_out_"); }
-    o.put(nm);
+    if (c_ident_ok(nm)) { o.put(nm); return; }
+    c.mangle(o, nm);
 }
 
 // ── types ──────────────────────────────────────────────────────────────────
-fn void C.ty(C* c, Sb* o, AirTyp* t)
+fn void Ctx.ty(Ctx* c, Sb* o, AirTyp* t)
 {
     if (t == null) { c.err((char*)"missing type", null); o.put((char*)"int64_t"); return; }
     switch (t.tag)
@@ -352,16 +383,16 @@ fn bool param_can_restrict(AirDecl* d, AirBinder* b)
     return b.no_capture;
 }
 
-// `T name` with the declarator attached where C needs it. An arrow type already
+// `T name` with the declarator attached where Ctx needs it. An arrow type already
 // carries its own `(*)`, so the name goes inside it; everything else is `T name`.
-fn void C.ty_decl(C* c, Sb* o, AirTyp* t, char* nm)
+fn void Ctx.ty_decl(Ctx* c, Sb* o, AirTyp* t, char* nm)
 {
     if (t != null && t.tag == ATYP_ARROW)
     {
         AirTyp* dom = t.arg_count > 0 ? t.args[0] : null;
         AirTyp* cod = t.arg_count > 1 ? t.args[1] : null;
         if (cod == null || cod.tag == ATYP_UNIT) { o.put((char*)"void"); } else { c.ty(o, cod); }
-        o.put((char*)" (*"); c.name(c, o, nm, false); o.put((char*)")(");
+        o.put((char*)" (*"); c.name(o, nm, false); o.put((char*)")(");
         bool wrote = false;
         usz nargs = (dom != null && dom.tag == ATYP_TUPLE) ? dom.arg_count : (dom == null ? 0 : 1);
         for (usz i = 0; i < nargs; i++)
@@ -375,11 +406,11 @@ fn void C.ty_decl(C* c, Sb* o, AirTyp* t, char* nm)
         o.putc(')');
         return;
     }
-    c.ty(o, t); o.putc(' '); c.name(c, o, nm, false);
+    c.ty(o, t); o.putc(' '); c.name(o, nm, false);
 }
 
 // ── producers ──────────────────────────────────────────────────────────────
-fn char* C.str_const(C* c, AirPrd* p)
+fn char* Ctx.str_const(Ctx* c, AirPrd* p)
 {
     Sb nm; nm.init(); nm.put((char*)"__s"); nm.int_((long)c.nstr);
     char* name = nm.take();
@@ -390,7 +421,7 @@ fn char* C.str_const(C* c, AirPrd* p)
     o.put((char*)"[") ; o.int_((long)(p.bytes_len + 1)); o.put((char*)"] = \"");
     for (usz i = 0; i < p.bytes_len; i++)
     {
-        ubyte b = (ubyte)p.bytes[i];
+        uint b = (uint)(char)p.bytes[i];
         if (b == 34) { o.put((char*)"\\\""); }
         else if (b == 92) { o.put((char*)"\\\\"); }
         else if (b == 10) { o.put((char*)"\\n"); }
@@ -403,7 +434,7 @@ fn char* C.str_const(C* c, AirPrd* p)
     return name;
 }
 
-fn void C.scalar(C* c, Sb* o, AirPrd* p, AirTyp* typed)
+fn void Ctx.scalar(Ctx* c, Sb* o, AirPrd* p, AirTyp* typed)
 {
     switch (p.tag)
     {
@@ -460,7 +491,7 @@ fn void C.scalar(C* c, Sb* o, AirPrd* p, AirTyp* typed)
     }
 }
 
-fn Val C.prd(C* c, AirPrd* p)
+fn Val Ctx.prd(Ctx* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = null;
     if (p == null) { c.err((char*)"missing producer", null); return v; }
@@ -491,18 +522,18 @@ fn Val C.prd(C* c, AirPrd* p)
             Sb s; s.init(); c.scalar(&s, p, p.ty); v.op = s.take(); v.ty = c.m.t_char; return v;
         }
         case APRD_UNIT: v.ty = p.ty; v.op = (char*)"((pride_unit){0})"; return v;
-        case APRD_STRING: case APRD_BYTES: v.ty = p.ty; v.op = c.str_const(c, p); return v;
-        case APRD_BINOP:  return c.binop(c, p);
-        case APRD_UNOP:   return c.unop(c, p);
-        case APRD_COERCE: return c.coerce(c, p);
+        case APRD_STRING: case APRD_BYTES: v.ty = p.ty; v.op = c.str_const(p); return v;
+        case APRD_BINOP:  return c.binop(p);
+        case APRD_UNOP:   return c.unop(p);
+        case APRD_COERCE: return c.coerce(p);
         case APRD_ALLOCA:
         {
             if (!ty_low(p.ty_arg, 0)) { c.err((char*)"alloca of a non-low type", null); }
-            char* t = c.fresh(c, (char*)"v");
+            char* t = c.fresh((char*)"v");
             // Hoisted with every other declaration (§3.4): a jump must never cross
             // a declaration, and the slot is addressed on more than one path.
             c.decls.put((char*)"    ");
-            c.ty_decl(c, &c.decls, p.ty_arg, t);
+            c.ty_decl(&c.decls, p.ty_arg, t);
             c.decls.put((char*)";\n");
             Sb s; s.init(); s.putc('&'); s.put(t); v.op = s.take();
             v.ty = p.ty; return v;
@@ -522,8 +553,8 @@ fn Val C.prd(C* c, AirPrd* p)
             else { s.putc('*'); s.put((char*)"("); s.put(a.op); s.putc(')'); }
             v.op = s.take(); v.ty = et; return v;
         }
-        case APRD_GEP: return c.gep(c, p);
-        case APRD_TUPLE: case APRD_RECORD: case APRD_ARRAY: return c.aggregate(c, p);
+        case APRD_GEP: return c.gep(p);
+        case APRD_TUPLE: case APRD_RECORD: case APRD_ARRAY: return c.aggregate(p);
         case APRD_SIZEOF:
         {
             Sb s; s.init(); s.put((char*)"((pride_usz)sizeof("); c.ty(&s, p.ty); s.put((char*)"))");
@@ -534,7 +565,7 @@ fn Val C.prd(C* c, AirPrd* p)
     }
 }
 
-fn bool field_at(C* c, AirTyp* cur, long ix, AirTyp** out)
+fn bool field_at(Ctx* c, AirTyp* cur, long ix, AirTyp** out)
 {
     *out = null;
     if (cur == null || ix < 0) { return false; }
@@ -551,7 +582,7 @@ fn bool field_at(C* c, AirTyp* cur, long ix, AirTyp** out)
     return false;
 }
 
-fn Val C.gep(C* c, AirPrd* p)
+fn Val Ctx.gep(Ctx* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = null;
     Val b = c.prd(p.sub_count > 0 ? p.subs[0] : null);
@@ -560,7 +591,7 @@ fn Val C.gep(C* c, AirPrd* p)
     if (!ty_low(cur, 0)) { c.err((char*)"gep over a non-low type", null); return v; }
     if (!air_util::ty_eq(b.ty.args[0], cur)) { c.err((char*)"gep source element type differs from the base pointee", null); return v; }
 
-    Val idx[16];
+    Val[16] idx;
     for (usz i = 1; i < p.sub_count && i < 16; i++) { idx[i] = c.prd(p.subs[i]); }
     for (usz i = 1; i < p.sub_count && i < 16; i++) { if (!air_util::ty_is_int(idx[i].ty)) { c.err((char*)"gep index is not an integer", null); } }
     if (p.sub_count > 16) { c.err((char*)"gep with more than 15 indices", null); }
@@ -601,7 +632,7 @@ fn Val C.gep(C* c, AirPrd* p)
     return v;
 }
 
-fn Val C.aggregate(C* c, AirPrd* p)
+fn Val Ctx.aggregate(Ctx* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = p.ty;
     if (p.ty == null) { c.err((char*)"aggregate without a type", null); return v; }
@@ -662,7 +693,7 @@ fn Val C.aggregate(C* c, AirPrd* p)
     return v;
 }
 
-fn Val C.binop(C* c, AirPrd* p)
+fn Val Ctx.binop(Ctx* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = null;
     Val a = c.prd(p.sub_count > 0 ? p.subs[0] : null);
@@ -708,7 +739,7 @@ fn Val C.binop(C* c, AirPrd* p)
     return v;
 }
 
-fn Val C.unop(C* c, AirPrd* p)
+fn Val Ctx.unop(Ctx* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = null;
     Val a = c.prd(p.sub_count > 0 ? p.subs[0] : null);
@@ -733,7 +764,7 @@ fn Val C.unop(C* c, AirPrd* p)
     return v;
 }
 
-fn Val C.coerce(C* c, AirPrd* p)
+fn Val Ctx.coerce(Ctx* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = p.ty;
     Val a = c.prd(p.sub_count > 0 ? p.subs[0] : null);
@@ -754,7 +785,7 @@ fn Val C.coerce(C* c, AirPrd* p)
     else if (air_util::ty_is_ptr(f) && air_util::ty_is_ptr(to)) { v.op = a.op; return v; }
     else if ((f.tag == ATYP_ARROW && air_util::ty_is_ptr(to)) || (air_util::ty_is_ptr(f) && to.tag == ATYP_ARROW)) { v.op = a.op; return v; }
     if (!legal) { c.err((char*)"coerce between these types is not defined", null); return v; }
-    // One cast. C picks the signed/unsigned and truncate/extend path from the
+    // One cast. Ctx picks the signed/unsigned and truncate/extend path from the
     // source type, which is exactly what AIR's coerce means; LLVM needs a
     // distinct opcode for each and air_ll therefore has eight branches here.
     Sb s; s.init(); s.put((char*)"(("); c.ty(&s, to); s.put((char*)")(("); s.put(a.op); s.put((char*)")))");
@@ -763,11 +794,11 @@ fn Val C.coerce(C* c, AirPrd* p)
 }
 
 // ── statements ─────────────────────────────────────────────────────────────
-fn void C.pad(C* c, Sb* o) { (void)c; o.put((char*)"    "); }
+fn void Ctx.pad(Ctx* c, Sb* o) { (void)c; o.put((char*)"    "); }
 
-fn void C.stmt_ret(C* c, Sb* o, AirPrd* p)
+fn void Ctx.stmt_ret(Ctx* c, Sb* o, AirPrd* p)
 {
-    c.pad(c, o);
+    c.pad(o);
     if (ty_is_void(c.cur_ret))
     {
         if (p != null)
@@ -783,7 +814,7 @@ fn void C.stmt_ret(C* c, Sb* o, AirPrd* p)
     o.put((char*)"return "); o.put(v.op); o.put((char*)";\n");
 }
 
-fn void C.call(C* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
+fn void Ctx.call(Ctx* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
 {
     Val f = c.prd(callee);
     Val[64] args; usz na = 0;
@@ -796,8 +827,8 @@ fn void C.call(C* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
     }
     if (cur == null || cur.tag != ACNS_COMU) { c.err((char*)"call continuation is not `comu`", null); *next_out = null; return; }
     Sb s; s.init();
-    c.pad(c, o);
-    if (cur.bind != null) { c.ty_decl(c, &s, cur.ty, cur.bind); s.put((char*)" = "); }
+    c.pad(o);
+    if (cur.bind != null) { c.ty_decl(&s, cur.ty, cur.bind); s.put((char*)" = "); }
     s.putc('('); s.put(f.op); s.put((char*)")(");
     for (usz i = 0; i < na; i++) { if (i > 0) { s.put((char*)", "); } s.put(args[i].op); }
     s.put((char*)")"); s.put((char*)";\n");
@@ -831,10 +862,12 @@ fn char* rmw_c(int op)
     }
 }
 
-fn void C.jump(C* c, AirCmd* x, Sb* o)
+fn void Ctx.jump(Ctx* c, AirCmd* x, Sb* o)
 {
     if (x.target_label == null) { c.err((char*)"jump without a target", null); return; }
-    if (!c_ident_ok(x.target_label)) { c.err((char*)"label is not a legal C identifier", x.target_label); return; }
+    // No raw c_ident_ok here: AIR labels carry dots (`wh.head4`) and Ctx.name
+    // applies the injective spelling. Testing the raw name here rejected every
+    // real loop before it reached the writer that knows how to spell it.
 
     // The parallel copy (§3.2). With one argument the assignment cannot interfere
     // with itself; with more than one, every source is read into a temporary
@@ -856,32 +889,36 @@ fn void C.jump(C* c, AirCmd* x, Sb* o)
         char*[16] tmps;
         for (usz i = 0; i < n; i++)
         {
-            tmps[i] = c.fresh(c, (char*)"t");
-            c.pad(c, o);
+            tmps[i] = c.fresh((char*)"t");
+            c.pad(o);
             if (tb.params[i] != null)
             {
-                c.ty_decl(c, o, tb.params[i].ty, tmps[i]);
+                c.ty_decl(o, tb.params[i].ty, tmps[i]);
                 o.put((char*)" = "); o.put(src[i].op); o.put((char*)";\n");
             }
         }
         for (usz i = 0; i < n; i++)
         {
             if (tb.params[i] == null) { continue; }
-            c.pad(c, o);
+            c.pad(o);
             c.name(o, tb.params[i].name, false);
             o.put((char*)" = "); o.put(tmps[i]); o.put((char*)";\n");
         }
     }
     else if (n == 1 && tb.params[0] != null)
     {
-        c.pad(c, o);
+        c.pad(o);
         c.name(o, tb.params[0].name, false);
         o.put((char*)" = "); o.put(src[0].op); o.put((char*)";\n");
     }
-    c.pad(c, o); o.put((char*)"goto "); o.put(x.target_label); o.put((char*)";\n");
+    c.pad(o); o.put((char*)"goto ");
+    // Through Ctx.name, not the raw bytes: the label definition was spelled by
+    // name(), so an unmangled `goto` would name a label that does not exist.
+    c.name(o, x.target_label, false);
+    o.put((char*)";\n");
 }
 
-fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
+fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
 {
     AirCmd* x = cmd;
     int guard = 0;
@@ -895,8 +932,22 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
             case ACMD_LET:
             {
                 Val v = c.prd(x.prd);
-                c.pad(c, o);
-                c.ty_decl(c, o, v.ty, x.binder);
+                // AIR nests bindings in a dominator spine, so the entry label --
+                // which binds the loop's allocas -- is the LAST element of the
+                // spine while earlier labels already read those names. C is
+                // lexically scoped, so declaring at the point of definition puts
+                // every such name out of reach. Declare at function scope
+                // instead and assign here: that is the same treatment air_ll
+                // gives an alloca, applied to every binding.
+                if (!c.declared(x.binder))
+                {
+                    c.decls.put((char*)"    ");
+                    c.ty_decl(&c.decls, v.ty, x.binder);
+                    c.decls.put((char*)";\n");
+                    c.mark_declared(x.binder);
+                }
+                c.pad(o);
+                c.name(o, x.binder, false);
                 o.put((char*)" = "); o.put(v.op); o.put((char*)";\n");
                 c.bind(x.binder, x.binder, v.ty);
                 x = x.body; continue;
@@ -907,7 +958,7 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
                 if (p.ty == null || p.ty.tag != ATYP_PTR) { c.err((char*)"store to a non-pointer", null); return; }
                 if (v.ty != null && !air_util::ty_eq(p.ty.args[0], v.ty)) { c.err((char*)"stored value type differs from the pointee type", null); }
                 if (ty_is_void(v.ty)) { x = x.next; continue; }
-                c.pad(c, o);
+                c.pad(o);
                 if (x.vol) { o.put((char*)"(*(volatile "); c.ty(o, p.ty.args[0]); o.put((char*)" *)("); o.put(p.op); o.put((char*)"))"); }
                 else { o.putc('*'); o.put((char*)"("); o.put(p.op); o.put((char*)")"); }
                 o.put((char*)" = "); o.put(v.op); o.put((char*)";\n");
@@ -916,29 +967,29 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
             case ACMD_FENCE:
             {
                 if (x.atomic_order < 1 || x.atomic_order > 4) { c.err((char*)"a fence needs acquire, release, acq_rel or seq_cst ordering", null); return; }
-                c.pad(c, o); o.put((char*)"atomic_thread_fence("); o.put(order_c(x.atomic_order)); o.put((char*)")"); o.put((char*)";\n");
+                c.pad(o); o.put((char*)"atomic_thread_fence("); o.put(order_c(x.atomic_order)); o.put((char*)")"); o.put((char*)";\n");
                 x = x.next; continue;
             }
-            case ACMD_RET: c.stmt_ret(c, o, x.prd); return;
-            case ACMD_TRAP: c.pad(c, o); o.put((char*)"__pride_trap(\"trap\")"); o.put((char*)";\n"); return;
-            case ACMD_UB:   c.pad(c, o); o.put((char*)"__pride_ub(\"ub\")"); o.put((char*)";\n"); return;
-            case ACMD_JUMP: c.jump(c, x, o); return;
+            case ACMD_RET: c.stmt_ret(o, x.prd); return;
+            case ACMD_TRAP: c.pad(o); o.put((char*)"__pride_trap(\"trap\")"); o.put((char*)";\n"); return;
+            case ACMD_UB:   c.pad(o); o.put((char*)"__pride_ub(\"ub\")"); o.put((char*)";\n"); return;
+            case ACMD_JUMP: c.jump(x, o); return;
             case ACMD_IF:
             {
                 Val cv = c.prd(x.prd);
                 if (cv.ty != null && !air_util::ty_is_bool(cv.ty)) { c.err((char*)"if condition is not a bool", null); }
-                c.pad(c, o); o.put((char*)"if ("); o.put(cv.op); o.put((char*)") {\n");
+                c.pad(o); o.put((char*)"if ("); o.put(cv.op); o.put((char*)") {\n");
                 c.cmd(x.then_c, o);
                 if (x.else_c != null)
                 {
-                    c.pad(c, o); o.put((char*)"} else {\n");
+                    c.pad(o); o.put((char*)"} else {\n");
                     c.cmd(x.else_c, o);
-                    c.pad(c, o); o.put((char*)"}\n");
+                    c.pad(o); o.put((char*)"}\n");
                 }
-                else { c.pad(c, o); o.put((char*)"}\n"); }
+                else { c.pad(o); o.put((char*)"}\n"); }
                 x = x.next; continue;
             }
-            case ACMD_MATCH: c.emit_switch(c, x, o); return;
+            case ACMD_MATCH: c.emit_switch(x, o); return;
             case ACMD_CUT:
             {
                 AirCns* k = x.cns;
@@ -946,11 +997,11 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
                 if (k.tag == ACNS_COMU)
                 {
                     Val v = c.prd(x.prd);
-                    c.pad(c, o); c.ty_decl(c, o, v.ty, k.bind); o.put((char*)" = "); o.put(v.op); o.put((char*)";\n");
+                    c.pad(o); c.ty_decl(o, v.ty, k.bind); o.put((char*)" = "); o.put(v.op); o.put((char*)";\n");
                     c.bind(k.bind, k.bind, v.ty);
                     x = k.body; continue;
                 }
-                if (k.tag == ACNS_COVAR) { c.stmt_ret(c, o, x.prd); return; }
+                if (k.tag == ACNS_COVAR) { c.stmt_ret(o, x.prd); return; }
                 if (k.tag == ACNS_CALL)
                 {
                     AirCmd* nx = null;
@@ -981,8 +1032,8 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
                     Sb s; s.init(); s.putc('('); s.put(a.op); s.put((char*)")");
                     if (k.tag == ACNS_PROJ) { s.put((char*)"._"); s.int_(ix); }
                     else { s.putc('.'); c.name(&s, k.name, false); }
-                    c.pad(c, o);
-                    c.ty_decl(c, o, ft, k.tail.bind);
+                    c.pad(o);
+                    c.ty_decl(o, ft, k.tail.bind);
                     o.put((char*)" = "); o.put(s.take()); o.put((char*)";\n");
                     c.bind(k.tail.bind, k.tail.bind, ft);
                     x = k.tail.body; continue;
@@ -1001,9 +1052,9 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
                 // four; this target refuses the ones it does not have rather than
                 // emitting a call with the wrong registers.
                 if (air_util::g_triple != null && air_util::g_ptr_bits != 64) { c.err((char*)"syscall on a non-x86-64 target is not in the C prelude", null); return; }
-                char* r = c.fresh(c, (char*)"r");
+                char* r = c.fresh((char*)"r");
                 Sb s; s.init();
-                c.pad(c, o);
+                c.pad(o);
                 s.put((char*)"int64_t "); s.put(r); s.put((char*)" = __pride_syscall"); s.int_((long)na); s.putc('(');
                 for (usz i = 0; i < na; i++) { if (i > 0) { s.put((char*)", "); } s.put(a[i].op); }
                 s.put((char*)")"); s.put((char*)";\n");
@@ -1021,9 +1072,9 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
                 if (op == 1 && (ord == 1 || ord == 3)) { c.err((char*)"an atomic store cannot be acquire or acq_rel", null); return; }
                 if (x.cns == null || x.cns.tag != ACNS_COMU) { c.err((char*)"atomic result must be bound with `comu`", null); return; }
                 AirTyp* et = p.ty.args[0];
-                char* r = c.fresh(c, (char*)"r");
+                char* r = c.fresh((char*)"r");
                 Sb s; s.init();
-                c.pad(c, o);
+                c.pad(o);
                 if (op == 0)
                 {
                     s.put((char*)"int64_t "); s.put(r); s.put((char*)" = (int64_t)atomic_load_explicit((_Atomic "); c.ty(&s, et); s.put((char*)" *)("); s.put(p.op); s.put((char*)"), "); s.put(order_c(ord)); s.putc(')');
@@ -1036,9 +1087,9 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
                 else
                 {
                     if (x.prd_count < 1) { c.err((char*)"atomic read-modify-write needs an operand", null); return; }
-                    char* fn = rmw_c(op);
-                    if (fn == null) { c.err((char*)"atomic operation is not part of the low profile", null); return; }
-                    s.put((char*)"int64_t "); s.put(r); s.put((char*)" = (int64_t)"); s.put(fn); s.put((char*)"((_Atomic "); c.ty(&s, et); s.put((char*)" *)("); s.put(p.op); s.put((char*)"), ("); c.ty(&s, et); s.put((char*)")("); s.put(c.prd(x.prds[0]).op); s.put((char*)"), "); s.put(order_c(ord)); s.putc(')');
+                    char* rmwf = rmw_c(op);
+                    if (rmwf == null) { c.err((char*)"atomic operation is not part of the low profile", null); return; }
+                    s.put((char*)"int64_t "); s.put(r); s.put((char*)" = (int64_t)"); s.put(rmwf); s.put((char*)"((_Atomic "); c.ty(&s, et); s.put((char*)" *)("); s.put(p.op); s.put((char*)"), ("); c.ty(&s, et); s.put((char*)")("); s.put(c.prd(x.prds[0]).op); s.put((char*)"), "); s.put(order_c(ord)); s.putc(')');
                 }
                 s.put((char*)";\n");
                 o.put(s.take());
@@ -1049,11 +1100,11 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
             case ACMD_ASM:
             {
                 // AIR's asm carries the GCC/Clang constraint syntax, which C
-                // accepts almost verbatim -- the one place C is easier than C3,
+                // accepts almost verbatim -- the one place Ctx is easier than C3,
                 // where air_c3 has to refuse it.
                 if (x.asm_text == null) { c.err((char*)"asm without a template", null); return; }
                 if (x.asm_cons == null) { c.err((char*)"asm without constraints", null); return; }
-                c.pad(c, o);
+                c.pad(o);
                 o.put((char*)"__asm__ volatile (\"");
                 for (usz i = 0; x.asm_text[i] != 0; i++)
                 {
@@ -1066,7 +1117,7 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
                 o.put((char*)"\" : \"");
                 o.put(x.asm_cons);
                 o.put((char*)"\");\n");
-                if (x.cns != null && x.cns.tag == ACNS_COMU) { c.bind(x.cns.bind, r_asm_unit(c), c.m.t_unit); x = x.cns.body; continue; }
+                if (x.cns != null && x.cns.tag == ACNS_COMU) { c.bind(x.cns.bind, (char*)"((pride_unit){0})", c.m.t_unit); x = x.cns.body; continue; }
                 x = x.next; continue;
             }
             default:
@@ -1075,17 +1126,17 @@ fn void C.cmd(C* c, AirCmd* cmd, Sb* o)
     }
 }
 
-fn void C.emit_switch(C* c, AirCmd* x, Sb* o)
+fn void Ctx.emit_switch(Ctx* c, AirCmd* x, Sb* o)
 {
     Val s = c.prd(x.prd);
     if (!(air_util::ty_is_int(s.ty) || air_util::ty_is_bool(s.ty))) { c.err((char*)"match scrutinee is not an integer or bool", null); return; }
-    c.pad(c, o); o.put((char*)"switch ("); o.put(s.op); o.put((char*)") {\n");
+    c.pad(o); o.put((char*)"switch ("); o.put(s.op); o.put((char*)") {\n");
     for (usz i = 0; i < x.branch_count; i++)
     {
         AirBranch* b = x.branches[i];
         if (b == null || b.pat == null) { continue; }
         if (b.guard != null) { c.err((char*)"match guard in the low profile", null); }
-        c.pad(c, o);
+        c.pad(o);
         if (b.pat.tag == APAT_WILD || b.pat.tag == APAT_BIND)
         {
             if (b.pat.tag == APAT_BIND) { c.bind(b.pat.name, s.op, s.ty); }
@@ -1097,24 +1148,24 @@ fn void C.emit_switch(C* c, AirCmd* x, Sb* o)
         }
         else { c.err((char*)"pattern is not part of the low profile", null); return; }
         c.cmd(b.body, o);
-        c.pad(c, o); o.put((char*)"}\n");
+        c.pad(o); o.put((char*)"}\n");
     }
-    c.pad(c, o); o.put((char*)"}\n");
+    c.pad(o); o.put((char*)"}\n");
 }
 
 // ── functions and module ───────────────────────────────────────────────────
 // The AIR fact attributes, printed before the function they license.
 //
-// This is the one place the C target can be better than the C a person writes,
-// and the reason is narrow and exact: a C compiler reading the emitted C cannot
+// This is the one place the Ctx target can be better than the Ctx a person writes,
+// and the reason is narrow and exact: a Ctx compiler reading the emitted Ctx cannot
 // know that `f` writes no memory or that a pointer does not escape. AIR computes
 // both (air_facts.c3) and certifies them. Throwing them away and emitting plain C
 // would make this backend a transcriber; using them makes it an optimiser that
-// happens to have a C backend.
+// happens to have a Ctx backend.
 //
 // Old-style attributes (`__attribute__((pure))`) are used rather than C23
 // `[[gnu::pure]]` because they work on every GCC/Clang this could meet.
-fn void C.fn_attrs(C* c, AirDecl* d, Sb* o)
+fn void Ctx.fn_attrs(Ctx* c, AirDecl* d, Sb* o)
 {
     if (d == null) { return; }
     if (d.fact_state == air_ir::AirFactState.AFACT_AIR_CHECKED && d.memory_readonly)
@@ -1127,17 +1178,18 @@ fn void C.fn_attrs(C* c, AirDecl* d, Sb* o)
         // Measured (tests/air3/c/opt): on a count-and-sum loop whose callee is a
         // separate module, this is 1.5-1.8x over the same program compiled as
         // plain C, and 0.96x -- i.e. nothing -- without it. It is the one thing
-        // this backend can do that a person writing C cannot, because the C
+        // this backend can do that a person writing Ctx cannot, because the C
         // compiler cannot see across the module boundary and AIR can.
         o.put((char*)"__attribute__((pure)) ");
     }
 }
 
-fn void C.header(C* c, AirDecl* d, Sb* o, bool as_main_wrapper)
+fn void Ctx.header(Ctx* c, AirDecl* d, Sb* o, bool as_main_wrapper)
 {
-    (void)as_main_wrapper;
     if (ty_is_void(d.ret_ty)) { o.put((char*)"void "); } else { c.ty(o, d.ret_ty); o.putc(' '); }
-    c.name(o, d.name, false);
+    // When a wrapper `int main(void)` is emitted below, this function must not be
+    // called `main` -- two distinct definitions of one name is not C.
+    if (as_main_wrapper) { o.put((char*)"pride_main"); } else { c.name(o, d.name, false); }
     o.putc('(');
     usz wrote = 0;
     for (usz i = 0; i < d.param_count; i++)
@@ -1152,61 +1204,121 @@ fn void C.header(C* c, AirDecl* d, Sb* o, bool as_main_wrapper)
         {
             c.ty(o, b.ty.args[0]); o.put((char*)" *restrict "); c.name(o, b.name, false);
         }
-        else { c.ty_decl(c, o, b.ty, b.name); }
+        else { c.ty_decl(o, b.ty, b.name); }
         wrote++;
     }
     if (!wrote) { o.put((char*)"void"); }
     o.putc(')');
 }
 
-fn void C.function(C* c, AirDecl* d, Sb* out)
+// An AIR def may omit its result type (air_low does for `main`). C needs it, and
+// every `ret(v)` in the body names one, so take the type of the first typed ret.
+// A def whose rets disagree is not one function, and refusing beats guessing.
+fn AirTyp* Ctx.infer_ret(Ctx* c, AirCmd* body, int* seen)
+{
+    AirCmd* x = body;
+    int guard = 0;
+    while (x != null && guard++ < 1000000)
+    {
+        if (x.tag == ACMD_RET && x.prd != null)
+        {
+            Val v = c.prd(x.prd);
+            if (v.ty != null && !ty_is_void(v.ty))
+            {
+                if (*seen > 0 && c.ret_seen != null && !air_util::ty_eq(c.ret_seen, v.ty)) { return null; }
+                c.ret_seen = v.ty; *seen = *seen + 1;
+            }
+            else if (v.ty != null) { *seen = *seen + 1; }
+        }
+        if (x.tag == ACMD_SEQ && x.body != null) { c.infer_ret(x.body, seen); }
+        if (x.then_c != null) { c.infer_ret(x.then_c, seen); }
+        if (x.else_c != null) { c.infer_ret(x.else_c, seen); }
+        x = (x.tag == ACMD_SEQ) ? x.next : x.next;
+    }
+    return c.ret_seen;
+}
+
+fn void Ctx.function(Ctx* c, AirDecl* d, Sb* out)
 {
     c.fn_name = d.name;
     c.nv = 0; c.nl = 0; c.tmp = 0;
     c.cur_ret = d.ret_ty;
     c.decls.n = 0; if (c.decls.d != null) { c.decls.d[0] = 0; }
-    if (!ty_low(d.ret_ty, 0)) { c.err((char*)"return type is not part of the low profile", null); }
+    c.ndn = 0;
+    c.ret_seen = null;
+    AirTyp* rty = d.ret_ty;
+    if (rty == null || rty.tag == ATYP_UNIT)
+    {
+        int seen = 0;
+        AirTyp* was = c.ret_seen;
+        AirTyp* inf = c.infer_ret(d.def_body, &seen);
+        c.ret_seen = was;
+        if (inf != null && seen > 0) { rty = inf; }
+    }
+    d.ret_ty = rty;
+    c.cur_ret = rty;
+    if (rty != null && !ty_low(rty, 0)) { c.err((char*)"return type is not part of the low profile", null); }
 
     // label spine: seq { label A c ; seq { label B c ; entry } }
     AirCmd* x = d.def_body;
     while (x != null && x.tag == ACMD_SEQ && x.body != null && x.body.tag == ACMD_LABEL)
     {
-        c.add_label(c, x.body);
+        c.add_label(x.body);
         x = x.next;
     }
-    if (x != null && x.tag == ACMD_LABEL) { c.add_label(c, x); x = null; }
-    if (x != null) { c.err((char*)"function body is not a label spine", null); }
+    if (x != null && x.tag == ACMD_LABEL) { c.add_label(x); x = null; }
+    // The tail is not junk. `label A c` binds A inside c (docs/specs/AIR.md, the
+    // lambda-bar mu-mu-tilde reading), so the spine's innermost command is the
+    // function's ENTRY: it allocates, initialises, and jumps to the first label.
+    // Emitting the labels first made the first label the entry, which skipped
+    // every binding the tail performs -- the loop-carried allocas among them.
+    AirCmd* tail = x;
 
     for (usz i = 0; i < d.param_count; i++) { AirBinder* b = d.params[i]; if (b != null) { c.bind(b.name, b.name, b.ty); } }
 
     bool is_main = air_text::streq(d.name, "main");
     bool wrap = is_main && (ty_is_void(d.ret_ty) || air_util::ty_is_int(d.ret_ty));
 
+    // Every label parameter is a function-scope local, declared once (§3.2).
+    // This MUST be a separate pass: a label's body may name a parameter of a
+    // label emitted later (a `jump` forwards), and binding lazily while walking
+    // reported those as unbound variables.
+    for (usz i = 0; i < c.nl; i++)
+    {
+        Lbl* lp = &c.lbls[i];
+        for (usz j = 0; j < lp.np; j++)
+        {
+            if (lp.params[j] == null) { continue; }
+            if (lp.params[j].name == null) { continue; }
+            c.decls.put((char*)"    ");
+            c.ty_decl(&c.decls, lp.params[j].ty, lp.params[j].name);
+            c.decls.put((char*)";\n");
+            c.bind(lp.params[j].name, lp.params[j].name, lp.params[j].ty);
+        }
+    }
+
     Sb body; body.init();
+    // The entry block first: C falls into it, and it is the command the spine's
+    // tail would otherwise have silently dropped.
+    if (tail != null)
+    {
+        c.cmd(tail, &body);
+    }
     for (usz i = 0; i < c.nl; i++)
     {
         Lbl* lb = &c.lbls[i];
-        // every label parameter is a function-scope local, declared once (§3.2)
-        for (usz j = 0; j < lb.np; j++)
-        {
-            if (lb.params[j] == null) { continue; }
-            c.decls.put((char*)"    ");
-            c.ty_decl(c, &c.decls, lb.params[j].ty, lb.params[j].name);
-            c.decls.put((char*)";\n");
-            c.bind(lb.params[j].name, lb.params[j].name, lb.params[j].ty);
-        }
-        // A label with no incoming jump is unreachable; C accepts it but a
+        // A label with no incoming jump is unreachable; Ctx accepts it but a
         // compiler warns, and an AIR function never has one. Still print it:
         // dropping a label silently would hide a producer bug.
-        c.pad(c, &body); body.put((char*)"goto ");
-        c.name(c, &body, lb.name, false); body.put((char*)";\n");
-        c.name(c, &body, lb.name, false); body.put((char*)": {\n");
+        c.pad(&body); body.put((char*)"goto ");
+        c.name(&body, lb.name, false); body.put((char*)";\n");
+        c.name(&body, lb.name, false); body.put((char*)": {\n");
         c.cmd(lb.body, &body);
-        c.pad(c, &body); body.put((char*)"}\n");
+        c.pad(&body); body.put((char*)"}\n");
     }
 
-    c.fn_attrs(c, d, out);            // the AIR facts, licensed to the C compiler
-    c.header(c, d, out, wrap);
+    c.fn_attrs(d, out);            // the AIR facts, licensed to the Ctx compiler
+    c.header(d, out, wrap);
     out.put((char*)"\n{\n");
     if (c.decls.d != null) { out.put(c.decls.d); }
     if (body.d != null) { out.put(body.d); }
@@ -1217,16 +1329,31 @@ fn void C.function(C* c, AirDecl* d, Sb* out)
         out.put((char*)"int main(void)\n{\n");
         if (ty_is_void(d.ret_ty))
         {
-            out.put((char*)"    "); c.name(out, d.name, false); out.put((char*)"();\n    return 0;\n}\n\n");
+            out.put((char*)"    pride_main();\n    return 0;\n}\n\n");
         }
         else
         {
-            out.put((char*)"    return (int)"); c.name(out, d.name, false); out.put((char*)"();\n}\n\n");
+            out.put((char*)"    return (int)pride_main();\n}\n\n");
         }
     }
 }
 
-fn void C.add_label(C* c, AirCmd* lb)
+// A function's locals are declared at function scope, so a name may be reached
+// from several labels; `dn` is what makes the declaration happen exactly once.
+fn bool Ctx.declared(Ctx* c, char* nm)
+{
+    if (nm == null) { return false; }
+    for (usz i = 0; i < c.ndn; i++) { if (air_text::streq(c.dn[i], nm)) { return true; } }
+    return false;
+}
+
+fn void Ctx.mark_declared(Ctx* c, char* nm)
+{
+    if (nm == null || c.ndn >= MAXV) { return; }
+    c.dn[c.ndn] = nm; c.ndn++;
+}
+
+fn void Ctx.add_label(Ctx* c, AirCmd* lb)
 {
     if (c.nl >= MAXL) { c.err((char*)"too many labels", lb.binder); return; }
     Lbl* l = &c.lbls[c.nl];
@@ -1235,7 +1362,7 @@ fn void C.add_label(C* c, AirCmd* lb)
     c.nl++;
 }
 
-fn void C.data_type(C* c, AirDecl* d, Sb* o)
+fn void Ctx.data_type(Ctx* c, AirDecl* d, Sb* o)
 {
     if (d.ctor_count != 1) { c.err((char*)"data with several constructors (enum layout) is not part of this profile yet", d.name); return; }
     if (d.typaram_count > 0) { c.err((char*)"generic data is not part of the low profile", d.name); return; }
@@ -1246,14 +1373,14 @@ fn void C.data_type(C* c, AirDecl* d, Sb* o)
     {
         o.put((char*)"    ");
         if (!ty_low(ct.fields[j].ty, 0)) { c.err((char*)"field type is not part of the low profile", ct.fields[j].name); }
-        c.ty_decl(c, o, ct.fields[j].ty, ct.fields[j].name);
+        c.ty_decl(o, ct.fields[j].ty, ct.fields[j].name);
         o.put((char*)";\n");
     }
     if (ct.field_count == 0) { o.put((char*)"    char __unit;\n"); }
     o.put((char*)"};\n\n");
 }
 
-fn void C.global_decl(C* c, AirDecl* d, Sb* o)
+fn void Ctx.global_decl(Ctx* c, AirDecl* d, Sb* o)
 {
     char* sec = decl_attr_str(d, "section");
     if (sec != null) { o.put((char*)"PRIDE_SECTION(\""); o.put(sec); o.put((char*)"\") "); }
@@ -1275,9 +1402,9 @@ fn void C.global_decl(C* c, AirDecl* d, Sb* o)
     o.put((char*)";\n");
 }
 
-fn void C.declare(C* c, AirDecl* d, Sb* o)
+fn void Ctx.declare(Ctx* c, AirDecl* d, Sb* o)
 {
-    c.fn_attrs(c, d, o);
+    c.fn_attrs(d, o);
     o.put((char*)"extern ");
     if (ty_is_void(d.ret_ty)) { o.put((char*)"void "); } else { c.ty(o, d.ret_ty); o.putc(' '); }
     c.name(o, d.name, false);
@@ -1288,7 +1415,25 @@ fn void C.declare(C* c, AirDecl* d, Sb* o)
         AirBinder* b = d.params[i];
         if (b == null) { continue; }
         if (wrote > 0) { o.put((char*)", "); }
-        c.ty_decl(c, o, b.ty, b.name);
+        // `_` is AIR's anonymous binder. Two of them in one C parameter list is
+        // a redeclaration, so each gets its own positional spelling.
+        char* pn = b.name;
+        if (pn == null || (pn[0] == '_' && pn[1] == 0))
+        {
+            char[16] anon;
+            anon[0] = '_'; anon[1] = '_'; anon[2] = 'p';
+            usz nd = 0; usz iv = wrote / 10;
+            if (iv > 0) { nd = 1; }
+            char[8] dig; usz dl = 0; usz v = wrote;
+            if (v == 0) { dig[dl] = '0'; dl = 1; }
+            while (v > 0) { dig[dl] = (char)('0' + (char)(v % 10)); dl = dl + 1; v = v / 10; }
+            usz ai = 3;
+            usz k = dl; while (k > 0) { k = k - 1; anon[ai] = dig[k]; ai = ai + 1; }
+            anon[ai] = 0;
+            pn = &anon[0];
+            c.ty_decl(o, b.ty, pn);
+        }
+        else { c.ty_decl(o, b.ty, pn); }
         wrote++;
     }
     if (d.is_varargs) { if (wrote > 0) { o.put((char*)", "); } o.put((char*)"..."); }
@@ -1301,7 +1446,7 @@ fn void C.declare(C* c, AirDecl* d, Sb* o)
 // repository's headers live. tests/air3/c/__pride_rt.h is a copy used by the
 // executed shape test, and tests/air3/test_c_target.py asserts that every
 // __pride_ name the emitter prints appears in this text.
-fn void C.prelude(C* c, Sb* o)
+fn void Ctx.prelude(Ctx* c, Sb* o)
 {
     (void)c;
     o.put((char*)"#include <stdint.h>\n#include <stdbool.h>\n#include <stdatomic.h>\n#include <string.h>\n\n");
@@ -1328,9 +1473,10 @@ fn void C.prelude(C* c, Sb* o)
 
 fn int to_c(AirModule* m, char** result, bool want_text)
 {
-    C* c = (C*)malloc(C::size);
+    Ctx* c = (Ctx*)malloc(Ctx::size);
     c.m = m; c.errs = 0; c.fn_name = null; c.emit = want_text;
     c.vn = (char**)malloc(8 * MAXV); c.vv = (Val*)malloc(Val::size * MAXV);
+    c.dn = (char**)malloc(8 * MAXV); c.ndn = 0;
     c.lbls = (Lbl*)malloc(Lbl::size * MAXL);
     c.nv = 0; c.nl = 0; c.tmp = 0; c.nstr = 0;
     c.decls.init(); c.types_out.init(); c.pre.init();
@@ -1341,24 +1487,48 @@ fn int to_c(AirModule* m, char** result, bool want_text)
         AirDecl* d = m.decls[i];
         if (d == null || d.tag != ADECL_DATA) { continue; }
         c.fn_name = d.name;
-        c.data_type(c, d, &c.types_out);
+        c.data_type(d, &c.types_out);
         c.fn_name = null;
     }
+    // One prototype per definition, BEFORE the bodies: a program's `main` is
+    // usually first in the module while the functions it calls come after it,
+    // and C without a prototype assumes `int f()` -- or refuses outright.
+    for (usz i = 0; i < m.decl_count; i++)
+    {
+        AirDecl* d = m.decls[i];
+        if (d == null || d.tag != ADECL_DEF) { continue; }
+        if (d.ret_ty == null || d.ret_ty.tag == ATYP_UNIT)
+        {
+            int seen = 0;
+            c.ret_seen = null;
+            AirTyp* inf = c.infer_ret(d.def_body, &seen);
+            c.ret_seen = null;
+            if (inf != null) { d.ret_ty = inf; }
+        }
+        c.fn_name = d.name;
+        c.decls.n = 0;
+        if (!air_text::streq(d.name, "main")) { c.header(d, &c.pre, false); }
+        else { c.header(d, &c.pre, true); }
+        c.pre.put((char*)";\n");
+        c.fn_name = null;
+    }
+    c.pre.put((char*)"\n");
+
     for (usz i = 0; i < m.decl_count; i++)
     {
         AirDecl* d = m.decls[i];
         if (d == null) { continue; }
         switch (d.tag)
         {
-            case ADECL_GLOBAL: c.fn_name = d.name; c.global_decl(c, d, &body); c.fn_name = null; break;
+            case ADECL_GLOBAL: c.fn_name = d.name; c.global_decl(d, &body); c.fn_name = null; break;
             case ADECL_DECLARE:
             {
                 bool defd = false;
                 for (usz j = 0; j < m.decl_count; j++) { AirDecl* e = m.decls[j]; if (e != null && e.tag == ADECL_DEF && air_text::streq(e.name, d.name)) { defd = true; } }
                 if (defd) { break; }
-                c.fn_name = d.name; c.declare(c, d, &body); c.fn_name = null; break;
+                c.fn_name = d.name; c.declare(d, &body); c.fn_name = null; break;
             }
-            case ADECL_DEF: c.function(c, d, &body); break;
+            case ADECL_DEF: c.function(d, &body); break;
             case ADECL_MODULE: case ADECL_IMPORT: case ADECL_DATA: break;
             default: c.fn_name = d.name; c.err((char*)"declaration is not part of the low profile", d.name); c.fn_name = null; break;
         }

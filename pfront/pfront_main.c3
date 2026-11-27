@@ -39,12 +39,18 @@ import pfront_sccp;
 import air;
 import air_audit;
 import air_low;
+import air_ir;
+import air_read;
+import air_c;
 
 // --emit-air-pretty selects the legacy human-oriented AIR dump (diagnostic only).
 bool g_air_pretty = false;
 // --air-roundtrip: test-only differential check of the .air text format (see air.c3).
 bool g_air_roundtrip = false;
 bool g_air_low = false;
+// --emit-c: read the .low.air just written and transpile it to C (air_c).
+// The C target is a consumer of the facts, so it reads AIR, not the AST.
+bool g_emit_c = false;
 bool g_low_failed = false;       // --emit-air-low: the typed AIR 3.0 low-profile lowering (air_low.c3)
 bool g_air_failed = false;       // AIR allocation/lowering failed; no usable .air was published
 // Lowering errors are counted by the lowerer, not by the DiagBag: `lw.err` prints a
@@ -729,6 +735,33 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 char* suf = ".low.air";
                 for (usz i = 0; i < 9; i++) { lowp[stem + i] = suf[i]; }
                 int lerrs = air_low::emit_low_program(&low_roots[0], ln, entry.ast, it, path, &lowp[0]);
+                if (lerrs == 0 && g_emit_c)
+                {
+                    // --emit-c: read the AIR text just written and transpile it.
+                    // Reading our own output rather than reusing in-memory state
+                    // is deliberate: it is exactly the contract airc obeys, so a
+                    // program that compiles here also compiles from the .air alone.
+                    AirArena carena;
+                    AirModule cmod;
+                    if (!air_read::read_file(&lowp[0], &carena, &cmod, false))
+                    {
+                        g_low_failed = true;
+                        printf("air-c: could not read back the .low.air it just wrote\n");
+                    }
+                    else
+                    {
+                        char[4096] cp;
+                        for (usz i = 0; i < stem; i++) { cp[i] = path[i]; }
+                        char* csuf = ".c";
+                        for (usz i = 0; i < 3; i++) { cp[stem + i] = csuf[i]; }
+                        int cerrs = air_c::write_c(&cmod, &cp[0]);
+                        if (cerrs != 0)
+                        {
+                            g_low_failed = true;
+                            printf("air-c: %d error(s) -- the C this module needs is not in air_c yet\n", cerrs);
+                        }
+                    }
+                }
                 if (lerrs != 0)
                 {
                     g_low_failed = true; g_low_errors = g_low_errors + (lerrs > 0 ? lerrs : 0);
@@ -877,6 +910,7 @@ fn void print_usage()
     printf("  -O0 | -O1 | -O2 | -O3   optimisation level for the middle end (default -O2)\n");
     printf("  --no-opt          disable the optimiser (same as -O0 for the middle end)\n");
     printf("  --emit-air        write the whole program as AIR 2.0 text next to the source (FILE.air)\n");
+    printf("  --emit-c          write the AIR 3.0 LOW-profile lowering, read it back, and transpile it to C (FILE.c) -- one command, no separate airc step\n");
     printf("  --emit-air-low    write the AIR 3.0 LOW-profile lowering (typed, reachable from main) as FILE.low.air; diagnostics instead of a file when a construct is not lowered yet\n");
     printf("  --air-audit       with --emit-air: list source constructs the AIR lowering never consumed\n");
     printf("  --emit-air-pretty print the entry module in the old human-oriented, lossy AIR notation\n");
@@ -994,6 +1028,7 @@ fn int main(String[] args)
         else if (streq(a, "--emit-sexp"))    { emit_ast = true; emit_sexp = true; }
         else if (streq(a, "--emit-air"))     { emit_air = true; }
         else if (streq(a, "--emit-air-low")) { g_air_low = true; }
+        else if (streq(a, "--emit-c")) { g_air_low = true; g_emit_c = true; }
         else if (streq(a, "--air-roundtrip")) { g_air_roundtrip = true; }
         else if (streq(a, "--air-audit")) { g_air_audit = true; air_audit::enable(true); }
         else if (streq(a, "--emit-air-pretty")) { emit_air = true; g_air_pretty = true; }

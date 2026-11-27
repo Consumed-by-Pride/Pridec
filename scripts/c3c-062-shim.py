@@ -34,6 +34,16 @@ The rewrites, each with the reason it is needed:
   5. an out-of-range integer literal gets an explicit cast, which 0.6.2
      requires and 0.8.x infers (one site: theory_sct.c3).
 
+
+# --- discovered while bringing c3c 0.6.2 up against the AIR layer ---
+# 6. an all-uppercase type name is rejected by 0.6.2 (`struct C` -> `struct Cx`).
+# 7. `ubyte` is not a type there; `char` is the 8-bit unsigned type.
+# 8. `T a[N]` is spelled `T[N] a`.
+# 9. a dot-call omits the receiver there; the source passes it explicitly.
+#    Every one of these is mechanical, which is why the port is worth having;
+#    what it is NOT is invisible, which is why this list exists.
+# 10. bare enum constants are not in scope; they need their enum's prefix.
+
 Anything this script cannot express is reported, not silently skipped: the
 point of a shim is to know exactly how far the target compiler is from the
 source, and a rewrite that quietly does nothing is how a port "works" for the
@@ -79,14 +89,16 @@ RE_ALIAS_LINE = re.compile(r"^\s*(?:pub\s+)?def\s+[A-Za-z_][A-Za-z0-9_]*\s*=")
 
 
 def to_defn(src):
+    def one(code):
+        code = RE_DEF_AFTER_BRACKET.sub(r"\1defn", code)
+        code = RE_DEF_MEMBER.sub(r"\1defn", code)
+        return RE_DEF_IDENT.sub("defn", code)
+
     out = []
     for line in src.split("\n"):
-        if RE_ALIAS_LINE.match(line):
-            out.append(line)
-        else:
-            line = RE_DEF_AFTER_BRACKET.sub(r"\1defn", line)
-            line = RE_DEF_MEMBER.sub(r"\1defn", line)
-            out.append(RE_DEF_IDENT.sub("defn", line))
+        # an alias line must keep its `def`: it is the declaration this rewrite
+        # is standing in for, not an identifier use.
+        out.append(line if RE_ALIAS_LINE.match(line) else code_only(line, one))
     return "\n".join(out)
 
 
@@ -126,12 +138,163 @@ def to_cast_big(src):
     return RE_NEG_LIMIT.sub("-(long)0x7fffffffffffffff", src)
 
 
+
+# 11. `@sizeof(x)` -> `$sizeof(x)`
+#    0.6.2 spells the value-sized form with a single `$`. (The `$$` form is a
+#    type, which is a different thing; `@` does not exist there at all.)
+RE_AT_SIZEOF = re.compile(r"@sizeof\b")
+
+
+def to_dollar_sizeof(src):
+    return RE_AT_SIZEOF.sub("$sizeof", src)
+
+
+# 12. bare enum constants -> `Enum.NAME`
+#     0.6.2 keeps enum constants out of the enclosing scope. This maps every
+#     constant declared by an `enum X : int { ... }` to its owner, then
+#     qualifies bare uses OUTSIDE the declaration bodies. Two guards matter:
+#     a use that already has a qualifier is left alone, and a name that is also
+#     a parameter or local is left alone -- qualifying that is a type error, and
+#     it is the mistake this rule made on its first run.
+def to_qualified_enums(files):
+    owners = {}
+    decls = {}
+    for path in files:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        decls[path] = text
+        for m in re.finditer(r"enum\s+(\w+)\s*:\s*\w+\s*\{([^}]*)\}", text, re.S):
+            for c in re.findall(r"\b([A-Z][A-Z0-9_]{3,})\b", m.group(2)):
+                owners[c] = m.group(1)
+    if not owners:
+        return 0
+    changed = 0
+    for path, text in decls.items():
+        parts = re.split(r"(enum\s+\w+\s*:\s*\w+\s*\{[^}]*\})", text)
+        out = []
+        for part in parts:
+            if part.startswith("enum "):
+                out.append(part)
+                continue
+            # a declared parameter/local name is never an enum constant use
+            local_names = set(re.findall(r"\b(?:[A-Za-z_]\w*)\s+([a-z_]\w*)\s*[,)=]", part))
+            def q(m):
+                nm = m.group(1)
+                if nm in local_names or nm not in owners:
+                    return nm
+                return owners[nm] + "." + nm
+            out.append(re.sub(r"(?<![.\w])([A-Z][A-Z0-9_]{3,})\b", q, part))
+        new = "".join(out)
+        if new != text:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new)
+            changed += 1
+    return changed
+
+
+
+# 13. `T a[N]` -> `T[N] a`
+#     0.6.2 predates the C-style array declaration form.
+RE_ARRAY_DECL = re.compile(r"\b([A-Za-z_]\w*(?:\s*\*)?) ([a-z_]\w*)\[([0-9]+)\]")
+
+
+def to_c3_array_decl(src):
+    return code_only(src, lambda code: RE_ARRAY_DECL.sub(
+        lambda m: "%s[%s] %s" % (m.group(1), m.group(3), m.group(2)), code))
+
+
+# 14. a dot-call omits the receiver
+#     0.8 accepts `s.f(&s, x)` and `s.f(x)`; 0.6.2 only the latter. Dropping the
+#     repeated receiver is what the newer call means, so this is a rewrite of
+#     spelling only.
+RE_DOT_CALL_RECV = re.compile(r"\b(\w+)\.(\w+)\(\s*\1\s*,\s*")
+
+
+def to_implicit_receiver(src):
+    return code_only(src, lambda code: RE_DOT_CALL_RECV.sub(
+        lambda m: "%s.%s(" % (m.group(1), m.group(2)), code))
+
+
+
+# 15. `String.ptr` -> the array itself
+#     0.6.2's `String` is `char[]`, so the slice IS the pointer; `.ptr` is the
+#     0.8 spelling. `.len` is a member of both, so only `.ptr` moves.
+RE_STRING_PTR = re.compile(r"\b(args\[\d+\])\.ptr\b")
+
+
+def to_bare_string(src):
+    return code_only(src, lambda code: RE_STRING_PTR.sub(r"\1", code))
+
+
+
+def _split_strings(src):
+    """Yield (kind, text) with kind in {"code", "lit", "comment"}.
+
+    Comments are separated out because an apostrophe in prose ("the reader's
+    job") otherwise opens a character literal and desynchronises the splitter
+    for the rest of the file. That is precisely what happened here: the second
+    half of air_c.c3 silently stopped being rewritten, and the build reported
+    the result as a type error instead of as a broken tool.
+    """
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        c = src[i]
+        if c == '"':
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == '"':
+                    break
+                j += 1
+            out.append(("lit", src[i:j + 1]))
+            i = j + 1
+        elif c == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            if j < 0:
+                j = n
+            out.append(("comment", src[i:j]))
+            i = j
+        elif c == "'":
+            # a character literal is one character or one escape
+            j = i + 1
+            if j < n and src[j] == "\\":
+                j += 2
+            else:
+                j += 1
+            if j < n and src[j] == "'":
+                out.append(("lit", src[i:j + 1]))
+                i = j + 1
+            else:
+                out.append(("code", c))
+                i += 1
+        else:
+            j = i
+            while j < n and src[j] not in ('"', "'") and not (src[j] == "/" and j + 1 < n and src[j + 1] == "/"):
+                j += 1
+            out.append(("code", src[i:j]))
+            i = j
+    return out
+
+
+def code_only(src, fn):
+    """Apply `fn` to code only; literals and comments pass through untouched."""
+    return "".join(t if k != "code" else fn(t) for k, t in _split_strings(src))
+
+
 STEPS = [
     ("alias -> def", to_def),
     ("Type::size -> Type.sizeof", to_prop),
     ("def identifier -> defn", to_defn),
     ("<* *> -> //", to_line_comments),
     ("negated long limit", to_cast_big),
+    ("@sizeof -> $sizeof", to_dollar_sizeof),
+    ("T a[N] -> T[N] a", to_c3_array_decl),
+    ("dot-call receiver", to_implicit_receiver),
+    ("String.ptr -> char[]", to_bare_string),
 ]
 
 
@@ -150,15 +313,21 @@ def main():
     if os.path.exists(dest):
         shutil.rmtree(dest)
     os.makedirs(dest)
-    for name in ("pfront", "Makefile"):
+    # pfront/ and Makefile are the compiler; tools/air holds the C-target driver
+    # that airc builds from. The rest of tools/ is unrelated analysis scripts and
+    # is deliberately not copied.
+    os.makedirs(os.path.join(dest, "tools", "air"), exist_ok=True)
+    for name in ("pfront", os.path.join("tools", "air", "airc.c3"), "Makefile"):
         s = os.path.join(src, name)
         d = os.path.join(dest, name)
         if os.path.isdir(s):
             shutil.copytree(s, d)
         elif os.path.isfile(s):
+            os.makedirs(os.path.dirname(d), exist_ok=True)
             shutil.copy2(s, d)
 
-    files = sorted(glob.glob(os.path.join(dest, "pfront", "**", "*.c3"), recursive=True))
+    files = sorted(glob.glob(os.path.join(dest, "pfront", "**", "*.c3"), recursive=True)
+                     + glob.glob(os.path.join(dest, "tools", "air", "airc.c3")))
     if not files:
         sys.exit("no .c3 files under %s/pfront" % dest)
 
@@ -173,6 +342,9 @@ def main():
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
             changed += 1
+
+    enum_files = to_qualified_enums(files)
+    print("qualified enum constants in %d files" % enum_files)
 
     # A shim that reports success without changing anything is the failure mode
     # this repository keeps finding: assert the work actually happened.
