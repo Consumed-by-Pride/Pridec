@@ -5,5 +5,5 @@
 #   suite<TAB>pass<TAB>fail<TAB>note
 subtype	47	0	semantic-subtyping spec cases
 exec	46	0	exec cases that must pass (xfail excluded)
-conformance	181	81	current pfront; see conformance/KNOWN_FAILURES.tsv and docs/dev/CONFORMANCE_GATE_REPAIR.md
+conformance	183	79
 pfront	181	0	triaged 2026-10-27 against pfrontc built from 4550225: raised 178->181. Both syntax/x10 and syntax/x11 fixtures were written by inspection with no binary and used C-style `fn f (x : T)` headers, which this language does not have (`fn f : T -> R`); they had never parsed. Fixed against the real parser. x10's cont_param_after additionally closed its continuation at the statement column, which hits the open multi-continuation ejection bug (tests/pfront/bug/known/multi_continuation_eject.pie).

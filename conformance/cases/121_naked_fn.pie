@@ -1,7 +1,11 @@
 -- EXPECT-CLEAN
-fn raw_fn #[naked] : () -> ()
+-- Declaration attributes go AFTER the signature (`fn f : T -> U #naked`) or on
+-- their own line before the clauses, as tests/pfront/syntax/x07_meta_attrs.pie:15
+-- uses `#inline`. The `fn f #[naked] : T -> U` spelling put the attribute between
+-- the name and the colon, which is a parse error (E1050).
+fn raw_fn : () -> () #[naked]
   | () -> ()
-fn g #[cold] : i32 -> i32
+fn g : i32 -> i32 #[cold]
   | n -> n
-fn h #[hot] : i32 -> i32
+fn h : i32 -> i32 #[hot]
   | n -> n

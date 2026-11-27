@@ -718,6 +718,9 @@ enum Severity : int { SEV_ERROR, SEV_WARNING, SEV_NOTE }
 
 enum Phase : int { PH_LEX, PH_PARSE, PH_RESOLVE, PH_MODULE }
 
+// Capacity of the owned copy of a diagnostic hint. See hint_buf in struct Diag.
+const usz DIAG_HINT_CAP = 256;
+
 struct Diag
 {
     Severity sev;
@@ -726,9 +729,27 @@ struct Diag
     int      line;
     int      col;
     char*    msg;
-    char*    hint;      // may be null
+    char*    hint;      // may be null; points into hint_buf when the caller
+                       // passed a buffer that does not outlive the call
     char*    file;      // owning file path, may be null
+
+    /*
+     Owned copy of `hint`.
+
+     `DiagBag.add` used to store the caller's pointer verbatim. That is fine
+     for the string literals most callers pass, but `Inferencer.report_mismatch`
+     renders the two types into STACK buffers and hands one to `advisory_hint`.
+     Those frames are long gone by the time diagnostics print, so the hint
+     rendered whatever later occupied that stack -- `08_mixed_numeric.pie`
+     printed `hint: \r\xd2\x8a/sU`, and those bytes are not valid UTF-8, which
+     crashed `conformance/run.py` on decode. `Diag` is heap-allocated (see the
+     malloc in pfront_main), so an inline buffer owns the text for as long as
+     the diagnostic lives, whatever the caller does. Truncated to the buffer;
+     a hint longer than this is almost certainly a bug in the caller.
+    */
+    char[DIAG_HINT_CAP] hint_buf;
 }
+
 
 const usz MAX_DIAGS = 4096;
 
@@ -769,7 +790,22 @@ fn void DiagBag.add(DiagBag* d, Severity sev, Phase ph, int code,
     it.line = line;
     it.col = col;
     it.msg = msg;
-    it.hint = hint;
+    if (hint == null)
+    {
+        it.hint = null;
+    }
+    else
+    {
+        // Copy, never alias: see the hint_buf comment on struct Diag.
+        usz i = 0;
+        while (hint[i] != 0 && i + 1 < DIAG_HINT_CAP)
+        {
+            it.hint_buf[i] = hint[i];
+            i = i + 1;
+        }
+        it.hint_buf[i] = 0;
+        it.hint = &it.hint_buf[0];
+    }
     it.file = file;
     d.count = d.count + 1;
 }
