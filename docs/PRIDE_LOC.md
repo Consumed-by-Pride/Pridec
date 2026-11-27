@@ -5,7 +5,9 @@ Every number below was produced by `tokei`, the multi-module Pride workload in
 matters: `main.pie` → AIR 3.0 low (1.8 MB) → `main.c` (852 KB) → `gcc -O1` →
 a binary that walks a directory and classifies each line.
 
-    $ bash scripts/pfrontc-build.sh          # c3c 0.8.6
+    # toolchain: c3-linux-static.tar.gz (0.8.6) lives in google_drive/ (gitignored)
+    $ tar xzf google_drive/c3-linux-static.tar.gz -C google_drive/
+    $ bash scripts/pfrontc-build.sh          # probes google_drive/c3/c3c
     $ ./pfrontc examples/tokei/main.pie -I examples -I stdlib --emit-c
     $ gcc -std=c11 -O2 -w examples/tokei/main.c -o tokei
     $ ./tokei .

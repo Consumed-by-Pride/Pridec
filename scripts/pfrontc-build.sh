@@ -27,7 +27,14 @@ set -eu -o pipefail
 if [ -n "${C3C:-}" ]; then
     [ -x "$C3C" ] || { echo "C3C=$C3C is not an executable" >&2; exit 2; }
 else
-    for c in /tmp/c3static/c3/c3c /tmp/c3drive/c3/c3c \
+    # google_drive/ is where the pinned 0.8.6 archive lands
+    # (c3-linux-static.tar.gz, extracted to google_drive/c3/c3c), so a stock
+    # checkout is expected to have the toolchain THERE and nowhere else --
+    # without this probe the build failed with "no c3c found" on a tree that
+    # had the compiler sitting in it. /tmp paths are volatile and cannot be
+    # relied on across a sandbox restart.
+    for c in google_drive/c3/c3c ./google_drive/c3/c3c \
+             /tmp/c3static/c3/c3c /tmp/c3drive/c3/c3c \
              "$HOME/c3bin/c3c" "$HOME/.cache/c3tool/c3c" \
              "$HOME/.cache/c3src/build-llvm23-clang/c3c"; do
         [ -x "$c" ] && { C3C=$c; break; }
