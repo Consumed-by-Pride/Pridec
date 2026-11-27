@@ -73,6 +73,12 @@ struct Lower
     int[32] lbl_parn;
     int[32] lbl_capn;
     int lbl_n;
+    // pointer pointee map (phase 4): ptr SSA name -> element type, recorded by
+    // alloca/gep so a later load knows what to read (pear2c's provenance, in
+    // miniature: LAIR pointers are opaque, so the pointee is tracked here)
+    char*[256] ptr_nm;
+    LTy[256] ptr_ty;
+    int ptr_n;
 }
 
 // ── diagnostics ────────────────────────────────────────────────────────────
@@ -226,6 +232,72 @@ fn LTy lair_to_lty(AirTyp* t)
     }
 }
 
+// Convert an AIR type to a LAIR type for a signature (parameter / return /
+// extern): scalars via lair_to_lty, aggregates interned into the module pool.
+// `atid` receives the pool index for an aggregate (-1 for a scalar). Returns
+// LT_INVALID for a type outside the slice (including nested aggregates).
+fn LTy Lower.decl_type(Lower* l, AirTyp* t, int* atid)
+{
+    *atid = -1;
+    if (t == null) { return LT_INVALID; }
+    LTy s = lair_to_lty(t);
+    if (s != LT_INVALID) { return s; }
+    if (t.tag == ATYP_TUPLE)
+    {
+        usz n = t.arg_count;
+        if (n > 8) { return LT_INVALID; }
+        LAtom[8] elems;
+        for (usz i = 0; i < n; i++)
+        {
+            LTy e = lair_to_lty(t.args[i]);
+            if (e == LT_INVALID) { return LT_INVALID; }
+            elems[i] = lair_ir::la_atom_int(0, e);
+        }
+        *atid = Lower.agg_type(l, LT_TUPLE, &elems[0], (int)n, null);
+        return *atid < 0 ? LT_INVALID : LT_TUPLE;
+    }
+    if (t.tag == ATYP_ARRAY)
+    {
+        usz n = t.arg_count;
+        if (n > 8) { return LT_INVALID; }
+        LAtom[8] elems;
+        for (usz i = 0; i < n; i++)
+        {
+            LTy e = lair_to_lty(t.args[i]);
+            if (e == LT_INVALID) { return LT_INVALID; }
+            elems[i] = lair_ir::la_atom_int(0, e);
+        }
+        *atid = Lower.agg_type(l, LT_ARRAY, &elems[0], (int)n, null);
+        return *atid < 0 ? LT_INVALID : LT_ARRAY;
+    }
+    if (t.tag == ATYP_RECORD)
+    {
+        usz n = t.rec_field_count;
+        if (n > 8) { return LT_INVALID; }
+        LAtom[8] elems;
+        char*[8] names;
+        for (usz i = 0; i < n; i++)
+        {
+            if (t.rec_fields[i] == null) { return LT_INVALID; }
+            LTy e = lair_to_lty(t.rec_fields[i].value != null ? t.rec_fields[i].value.ty : null);
+            if (e == LT_INVALID) { return LT_INVALID; }
+            elems[i] = lair_ir::la_atom_int(0, e);
+            names[i] = t.rec_fields[i].name;
+        }
+        *atid = Lower.agg_type(l, LT_RECORD, &elems[0], (int)n, &names[0]);
+        return *atid < 0 ? LT_INVALID : LT_RECORD;
+    }
+    return LT_INVALID;
+}
+
+// the pointee type of a pointer AIR type `ptr(T)`, or LT_INVALID if it is not
+// a typed pointer (an opaque ptr has no trackable pointee)
+fn LTy Lower.pointee_of(Lower* l, AirTyp* t)
+{
+    if (t == null || t.tag != ATYP_PTR || t.arg_count < 1) { return LT_INVALID; }
+    return lair_to_lty(t.args[0]);
+}
+
 // ── environment ────────────────────────────────────────────────────────────
 // Flat with shadowing: a `let` (or comu bind, or loop-carried phi) of a name
 // that is already in scope appends a new entry and hides the old one, exactly
@@ -276,6 +348,54 @@ fn void Lower.bind(Lower* l, char* nm, LAtom v)
 fn void Lower.env_mark_carried(Lower* l)
 {
     for (int i = 0; i < l.nv; i++) { l.carried[i] = true; }
+}
+
+// ── pointer pointee map (phase 4) ─────────────────────────────────────────
+fn void Lower.ptr_note(Lower* l, char* nm, LTy t)
+{
+    if (nm == null) { return; }
+    for (int i = 0; i < l.ptr_n; i++)
+    {
+        if (air_text::streq(l.ptr_nm[i], nm)) { l.ptr_ty[i] = t; return; }
+    }
+    if (l.ptr_n >= 256) { Lower.fail(l, "too many pointers in one function", nm); return; }
+    l.ptr_nm[l.ptr_n] = nm;
+    l.ptr_ty[l.ptr_n] = t;
+    l.ptr_n++;
+}
+
+// the element type a pointer names, or LT_INVALID if unknown (a pointer the
+// slice did not produce with alloca/gep has no tracked pointee)
+fn LTy Lower.ptr_elem(Lower* l, char* nm)
+{
+    if (nm == null) { return LT_INVALID; }
+    for (int i = 0; i < l.ptr_n; i++)
+    {
+        if (air_text::streq(l.ptr_nm[i], nm)) { return l.ptr_ty[i]; }
+    }
+    return LT_INVALID;
+}
+
+// ── aggregate types (phase 4) ─────────────────────────────────────────────
+// Build an interned LType for an aggregate whose elements are the given scalar
+// atoms' types, and return its pool index. Element types must be scalar in this
+// rung (nested aggregates fail closed).
+fn int Lower.agg_type(Lower* l, LTy k, LAtom* elems, int n, char** names)
+{
+    if (n < 0 || n > 8) { Lower.fail(l, "aggregate with an unsupported element count", null); return -1; }
+    LType t; t.k = k; t.n = n;
+    for (int i = 0; i < 8; i++) { t.elems[i] = LT_INVALID; t.names[i] = null; }
+    for (int i = 0; i < n; i++)
+    {
+        if (lair_ir::lty_is_agg(elems[i].ty))
+        {
+            Lower.fail(l, "nested aggregate types are not in the LAIR slice", null);
+            return -1;
+        }
+        t.elems[i] = elems[i].ty;
+    }
+    for (int i = 0; i < n; i++) { t.names[i] = names != null ? names[i] : null; }
+    return lair_ir::lair_type_intern(l.lm, t);
 }
 
 // watch lookup with the entry value as the fallback (pear2c's watch_lookup)
@@ -421,7 +541,8 @@ fn bool Lower.collect(Lower* l, AirCmd* c)
                 {
                     AirBinder* p = c.mbinders[i];
                     if (p == null) { continue; }
-                    LTy t = lair_to_lty(p.ty);
+                    int lat = -1;
+                    LTy t = Lower.decl_type(l, p.ty, &lat);
                     if (t == LT_INVALID || t == LT_SYM)
                     {
                         Lower.fail(l, "label parameter has no type in the LAIR slice", p.name);
@@ -430,6 +551,7 @@ fn bool Lower.collect(Lower* l, AirCmd* c)
                     b.params[b.np].name = p.name;
                     b.params[b.np].aname = p.name;
                     b.params[b.np].ty = t;
+                    b.params[b.np].atid = lat;
                     b.np++;
                 }
                 if (!Lower.label_reg(l, c.binder, b, c)) { return false; }
@@ -697,6 +819,167 @@ fn LAtom Lower.coerce(Lower* l, AirPrd* p)
     return dst;
 }
 
+// ── aggregates (phase 4): tuple / record / array construction + access ────
+fn LAtom Lower.agg_build(Lower* l, AirPrd** elems, int n, LTy k, char** names)
+{
+    LAtom z; z.k = LA_UNIT; z.ty = LT_INVALID; z.name = null; z.ival = 0; z.fval = 0.0; z.atid = 0;
+    if (n < 0 || n > 8) { Lower.fail(l, "aggregate with an unsupported element count", null); return z; }
+    LAtom[8] aelems;
+    for (int i = 0; i < n; i++)
+    {
+        aelems[i] = Lower.prd(l, elems[i]);
+        if (aelems[i].ty == LT_INVALID) { return z; }
+    }
+    int atid = Lower.agg_type(l, k, &aelems[0], n, names);
+    if (atid < 0) { return z; }
+    if (n == 0)
+    {
+        // an empty aggregate is the constant zeroinitializer: no instruction
+        LAtom c; c.k = LA_UNIT; c.ty = k; c.name = null; c.ival = 0; c.fval = 0.0; c.atid = atid;
+        return c;
+    }
+    LInstr in; in.op = (k == LT_TUPLE ? LI_TUPLE : (k == LT_ARRAY ? LI_ARRAY : LI_RECORD));
+    in.ty = k; in.bop = 0; in.uop = 0; in.from = LT_INVALID; in.callee = null; in.va = false;
+    in.atid = atid; in.ival = 0;
+    in.argc = n;
+    for (int i = 0; i < n; i++) { in.args[i] = aelems[i]; }
+    LAtom dst = Lower.fresh(l, k);
+    in.dst = dst.name;
+    in.atid = atid;
+    Lower.emit(l, in);
+    return lair_ir::la_atom_agg(dst.name, k, atid);
+}
+
+fn LAtom Lower.tuple(Lower* l, AirPrd* p) { return Lower.agg_build(l, p.subs, (int)p.sub_count, LT_TUPLE, null); }
+fn LAtom Lower.array(Lower* l, AirPrd* p) { return Lower.agg_build(l, p.subs, (int)p.sub_count, LT_ARRAY, null); }
+
+fn LAtom Lower.record(Lower* l, AirPrd* p)
+{
+    LAtom z; z.k = LA_UNIT; z.ty = LT_INVALID; z.name = null; z.ival = 0; z.fval = 0.0; z.atid = 0;
+    usz n = p.rec_init_count;
+    if (n > 8) { Lower.fail(l, "record with an unsupported field count", null); return z; }
+    // a record is built from its field inits (name + value), not subs
+    AirPrd*[8] vals;
+    char*[8] names;
+    for (usz i = 0; i < n; i++)
+    {
+        vals[i] = p.rec_inits[i].value;
+        names[i] = p.rec_inits[i].name;
+    }
+    return Lower.agg_build(l, &vals[0], (int)n, LT_RECORD, &names[0]);
+}
+
+// extract element `idx` from an aggregate-valued atom (fst/snd/proj/field)
+fn LAtom Lower.extract(Lower* l, LAtom val, long idx)
+{
+    LAtom z; z.k = LA_UNIT; z.ty = LT_INVALID; z.name = null; z.ival = 0; z.fval = 0.0; z.atid = 0;
+    if (!lair_ir::lty_is_agg(val.ty)) { Lower.fail(l, "extract from a non-aggregate value", null); return z; }
+    if (idx < 0 || idx >= l.lm.tp[val.atid].n) { Lower.fail(l, "aggregate element index out of range", null); return z; }
+    LTy et = l.lm.tp[val.atid].elems[idx];
+    LInstr in; in.op = LI_EXTRACT; in.ty = et; in.bop = 0; in.uop = 0; in.from = LT_INVALID;
+    in.callee = null; in.argc = 0; in.va = false; in.atid = 0; in.ival = idx;
+    in.a = val; in.b = val;
+    LAtom dst = Lower.fresh(l, et);
+    in.dst = dst.name;
+    Lower.emit(l, in);
+    return dst;
+}
+
+// ── memory (phase 4): alloca / load / gep producers, deref / store consumers
+fn LAtom Lower.alloca(Lower* l, AirPrd* p)
+{
+    LAtom z; z.k = LA_UNIT; z.ty = LT_INVALID; z.name = null; z.ival = 0; z.fval = 0.0; z.atid = 0;
+    if (p.ty_arg == null) { Lower.fail(l, "alloca without an element type", null); return z; }
+    LTy t = lair_to_lty(p.ty_arg);
+    if (t == LT_INVALID || lair_ir::lty_is_agg(t) || t == LT_PTR || t == LT_SYM)
+    {
+        Lower.fail(l, "alloca of a type outside the LAIR slice", null);
+        return z;
+    }
+    LInstr in; in.op = LI_ALLOCA; in.ty = LT_PTR; in.bop = 0; in.uop = 0; in.callee = null;
+    in.argc = 0; in.va = false; in.atid = 0; in.ival = 0;
+    in.a = lair_ir::la_atom_unit(); in.b = lair_ir::la_atom_unit(); in.from = t;
+    LAtom dst = Lower.fresh(l, LT_PTR);
+    in.dst = dst.name;
+    Lower.emit(l, in);
+    Lower.ptr_note(l, dst.name, t);
+    return dst;
+}
+
+fn LAtom Lower.loadprd(Lower* l, AirPrd* p)
+{
+    LAtom z; z.k = LA_UNIT; z.ty = LT_INVALID; z.name = null; z.ival = 0; z.fval = 0.0; z.atid = 0;
+    if (p.sub_count != 1 || p.subs[0] == null) { Lower.fail(l, "load without a pointer", null); return z; }
+    LAtom ptr = Lower.prd(l, p.subs[0]);
+    if (ptr.ty == LT_INVALID) { return z; }
+    if (ptr.ty != LT_PTR) { Lower.fail(l, "load of a non-pointer", null); return z; }
+    LTy t = Lower.ptr_elem(l, ptr.name);
+    if (t == LT_INVALID && p.ty != null) { t = lair_to_lty(p.ty); }   // annotation fallback
+    if (t == LT_INVALID || lair_ir::lty_is_agg(t) || t == LT_PTR)
+    {
+        Lower.fail(l, "load: pointee type is not known (allocate with alloca or annotate)", null);
+        return z;
+    }
+    LInstr in; in.op = LI_LOAD; in.ty = t; in.bop = 0; in.uop = 0; in.callee = null;
+    in.argc = 0; in.va = false; in.atid = 0; in.ival = 0;
+    in.a = ptr; in.b = ptr; in.from = LT_INVALID;
+    LAtom dst = Lower.fresh(l, t);
+    in.dst = dst.name;
+    Lower.emit(l, in);
+    return dst;
+}
+
+fn LAtom Lower.gep(Lower* l, AirPrd* p)
+{
+    LAtom z; z.k = LA_UNIT; z.ty = LT_INVALID; z.name = null; z.ival = 0; z.fval = 0.0; z.atid = 0;
+    if (p.sub_count < 2 || p.ty_arg == null) { Lower.fail(l, "gep without a base and element type", null); return z; }
+    LTy t = lair_to_lty(p.ty_arg);
+    if (t == LT_INVALID || lair_ir::lty_is_agg(t) || t == LT_PTR) { Lower.fail(l, "gep of a type outside the LAIR slice", null); return z; }
+    LAtom base = Lower.prd(l, p.subs[0]);
+    if (base.ty == LT_INVALID) { return z; }
+    if (base.ty != LT_PTR) { Lower.fail(l, "gep of a non-pointer", null); return z; }
+    LAtom idx = Lower.prd(l, p.subs[1]);
+    if (idx.ty == LT_INVALID) { return z; }
+    if (!lair_ir::lty_is_int(idx.ty) && idx.ty != LT_BOOL) { Lower.fail(l, "gep index is not an integer", null); return z; }
+    LInstr in; in.op = LI_GEP; in.ty = LT_PTR; in.bop = 0; in.uop = 0; in.callee = null;
+    in.argc = 0; in.va = false; in.atid = 0; in.ival = 0;
+    in.a = base; in.b = idx; in.from = t;
+    LAtom dst = Lower.fresh(l, LT_PTR);
+    in.dst = dst.name;
+    Lower.emit(l, in);
+    Lower.ptr_note(l, dst.name, t);
+    return dst;
+}
+
+// deref consumer: load through a pointer (AIR 2.x `deref · k`)
+fn LAtom Lower.deref(Lower* l, LAtom ptr)
+{
+    if (ptr.ty != LT_PTR) { Lower.fail(l, "deref of a non-pointer", null); return ptr; }
+    LTy t = Lower.ptr_elem(l, ptr.name);
+    if (t == LT_INVALID) { Lower.fail(l, "deref: pointee type is not known", null); return ptr; }
+    LInstr in; in.op = LI_LOAD; in.ty = t; in.bop = 0; in.uop = 0; in.callee = null;
+    in.argc = 0; in.va = false; in.atid = 0; in.ival = 0;
+    in.a = ptr; in.b = ptr; in.from = LT_INVALID;
+    LAtom dst = Lower.fresh(l, t);
+    in.dst = dst.name;
+    Lower.emit(l, in);
+    return dst;
+}
+
+// store consumer: write a value through a pointer (AIR 2.x `store(v;sz) · k`
+// and the AIR 3.0 `store(p, v)` command both land here)
+fn bool Lower.store(Lower* l, LAtom addr, LAtom val)
+{
+    if (addr.ty != LT_PTR) { Lower.fail(l, "store through a non-pointer", null); return false; }
+    if (lair_ir::lty_is_agg(val.ty)) { Lower.fail(l, "store of an aggregate is not in the LAIR slice", null); return false; }
+    LInstr in; in.op = LI_STORE; in.ty = val.ty; in.bop = 0; in.uop = 0; in.callee = null;
+    in.argc = 0; in.va = false; in.atid = 0; in.ival = 0;
+    in.a = val; in.b = addr; in.from = LT_INVALID;
+    in.dst = null;
+    Lower.emit(l, in);
+    return true;
+}
+
 fn LAtom Lower.prd(Lower* l, AirPrd* p)
 {
     LAtom z; z.k = LA_UNIT; z.ty = LT_INVALID; z.name = null; z.ival = 0; z.fval = 0.0;
@@ -741,6 +1024,12 @@ fn LAtom Lower.prd(Lower* l, AirPrd* p)
         case APRD_BINOP: return Lower.binop(l, p);
         case APRD_UNOP: return Lower.unop(l, p);
         case APRD_COERCE: return Lower.coerce(l, p);
+        case APRD_TUPLE: return Lower.tuple(l, p);
+        case APRD_ARRAY: return Lower.array(l, p);
+        case APRD_RECORD: return Lower.record(l, p);
+        case APRD_ALLOCA: return Lower.alloca(l, p);
+        case APRD_LOAD: return Lower.loadprd(l, p);
+        case APRD_GEP: return Lower.gep(l, p);
         default:
             Lower.fail(l, "producer not in the LAIR slice", lair_prd_name(p.tag));
             return z;
@@ -772,8 +1061,9 @@ fn AirCmd* Lower.call(Lower* l, AirPrd* callee, AirCns* k)
         return null;
     }
     // signature
-    LTy ret = lair_to_lty(d.ret_ty);
-    if (ret == LT_INVALID) { ret = LT_UNIT; }           // unannotated = unit for the slice
+    int ret_atid = -1;
+    LTy ret = Lower.decl_type(l, d.ret_ty, &ret_atid);
+    if (ret == LT_INVALID) { ret = LT_UNIT; ret_atid = -1; }   // unannotated = unit for the slice
     bool va = d.is_varargs;
     if (!va && na != (int)d.param_count)
     {
@@ -789,14 +1079,16 @@ fn AirCmd* Lower.call(Lower* l, AirPrd* callee, AirCns* k)
     for (int i = 0; i < na && i < (int)d.param_count; i++)
     {
         if (d.params[i] == null) { continue; }
-        LTy want = lair_to_lty(d.params[i].ty);
-        if (want != LT_INVALID && args[i].ty != want && !(want == LT_PTR && args[i].ty == LT_SYM))
+        int want_atid = -1;
+        LTy want = Lower.decl_type(l, d.params[i].ty, &want_atid);
+        if (want != LT_INVALID && !lair_ir::la_atom_ty_eq(args[i], want, want_atid) && !(want == LT_PTR && args[i].ty == LT_SYM))
         {
             Lower.fail(l, "argument has the wrong type", callee.name);
             return null;
         }
     }
     LInstr in; in.op = LI_CALL; in.ty = ret; in.bop = 0; in.uop = 0;
+    in.atid = ret_atid; in.ival = 0;
     in.a = lair_ir::la_atom_unit(); in.b = lair_ir::la_atom_unit(); in.from = LT_INVALID;
     in.callee = callee.name; in.va = va;
     in.argc = na;
@@ -819,6 +1111,7 @@ fn AirCmd* Lower.call(Lower* l, AirPrd* callee, AirCns* k)
     if (cur.tag == ACNS_COMU)
     {
         if (ret == LT_UNIT) { Lower.bind(l, cur.bind, lair_ir::la_atom_unit()); }
+        else if (lair_ir::lty_is_agg(ret)) { Lower.bind(l, cur.bind, lair_ir::la_atom_agg(dst_name, ret, ret_atid)); }
         else { Lower.bind(l, cur.bind, lair_ir::la_atom_var(dst_name, ret)); }
         return cur.body;
     }
@@ -830,10 +1123,79 @@ fn AirCmd* Lower.call(Lower* l, AirPrd* callee, AirCns* k)
     }
     LTerm t; t.k = LTM_RET;
     if (ret == LT_UNIT) { t.a = lair_ir::la_atom_unit(); }
+    else if (lair_ir::lty_is_agg(ret)) { t.a = lair_ir::la_atom_agg(dst_name, ret, ret_atid); }
     else { t.a = lair_ir::la_atom_var(dst_name, ret); }
     t.target = null; t.argc = 0; t.t1 = null; t.t2 = null; t.ncase = 0; t.def = null;
     Lower.term(l, t);
     return null;
+}
+
+// ── value-consuming consumers (phase 4) ───────────────────────────────────
+// Walk a consumer chain acting on a running value atom: field/proj/fst/snd
+// extract an aggregate element, deref loads through a pointer, store writes
+// through one. Each rewrites the running value and recurses on the tail, ending
+// at a terminal consumer (comu/covar). Returns the next command, or null if the
+// block was terminated.
+fn AirCmd* Lower.consume_val(Lower* l, LAtom val, AirCns* k)
+{
+    while (k != null && l.lm.errs == 0)
+    {
+        if (k.source_line != 0) { l.line = k.source_line; l.col = k.source_col; }
+        if (k.tag == ACNS_FIELD)
+        {
+            LAtom ex = Lower.extract(l, val, k.idx);
+            if (ex.ty == LT_INVALID) { return null; }
+            val = ex; k = k.tail; continue;
+        }
+        if (k.tag == ACNS_PROJ || k.tag == ACNS_FST || k.tag == ACNS_SND)
+        {
+            long ix = k.tag == ACNS_PROJ ? k.idx : (k.tag == ACNS_FST ? 0 : 1);
+            LAtom ex = Lower.extract(l, val, ix);
+            if (ex.ty == LT_INVALID) { return null; }
+            val = ex; k = k.tail; continue;
+        }
+        if (k.tag == ACNS_DEREF)
+        {
+            LAtom ex = Lower.deref(l, val);
+            if (ex.ty == LT_INVALID) { return null; }
+            val = ex; k = k.tail; continue;
+        }
+        if (k.tag == ACNS_STORE)
+        {
+            LAtom v = Lower.prd(l, k.prd);       // the running value is the address
+            if (v.ty == LT_INVALID) { return null; }
+            if (!Lower.store(l, val, v)) { return null; }
+            val = lair_ir::la_atom_unit();
+            k = k.tail; continue;
+        }
+        if (k.tag == ACNS_COMU)
+        {
+            Lower.bind(l, k.bind, val);
+            if (l.lm.errs != 0) { return null; }
+            return k.body;
+        }
+        if (k.tag == ACNS_COVAR)
+        {
+            if (l.ret_name == null || !air_text::streq(k.name, l.ret_name))
+            {
+                Lower.fail(l, "cut to a covariable other than the function's return", k.name);
+                return null;
+            }
+            Lower.emit_ret_atom(l, val);
+            return null;
+        }
+        Lower.fail(l, "consumer not in the LAIR slice", lair_cns_name(k.tag));
+        return null;
+    }
+    if (l.lm.errs == 0) { Lower.fail(l, "consumer chain with no continuation", null); }
+    return null;
+}
+
+fn AirCmd* Lower.consume(Lower* l, AirPrd* prd, AirCns* k)
+{
+    LAtom val = Lower.prd(l, prd);
+    if (val.ty == LT_INVALID) { return null; }
+    return Lower.consume_val(l, val, k);
 }
 
 // ── commands ───────────────────────────────────────────────────────────────
@@ -841,17 +1203,45 @@ fn void Lower.emit_ret(Lower* l, AirPrd* p)
 {
     LAtom v = lair_ir::la_atom_unit();
     if (p != null) { v = Lower.prd(l, p); }
+    Lower.emit_ret_atom(l, v);
+}
+
+// emit a `ret` for a value atom already lowered (the consume walk's exit)
+fn void Lower.emit_ret_atom(Lower* l, LAtom v)
+{
     if (v.ty == LT_INVALID) { return; }
-    if (l.cur_fn.ret == LT_INVALID) { l.cur_fn.ret = v.ty; }
+    if (l.cur_fn.ret == LT_INVALID)
+    {
+        l.cur_fn.ret = v.ty;
+        if (lair_ir::lty_is_agg(v.ty)) { l.cur_fn.retid = v.atid; }
+    }
     else if (l.cur_fn.ret != v.ty)
     {
-        Sb s; s.init();
-        s.put((char*)"return value is ");
-        s.put(lair_ir::lty_name(v.ty));
-        s.put((char*)", function returns ");
-        s.put(lair_ir::lty_name(l.cur_fn.ret));
-        Lower.fail(l, s.take(), null);
-        return;
+        // pear2c widens a narrower integer return value to the function's
+        // declared return width (sext/zext); mirror that for int/bool returns.
+        LTy ret = l.cur_fn.ret;
+        bool fi = lair_ir::lty_is_int(v.ty) || v.ty == LT_BOOL;
+        bool ti = lair_ir::lty_is_int(ret) || ret == LT_BOOL;
+        if (fi && ti && lair_ir::lty_bits(ret) > lair_ir::lty_bits(v.ty))
+        {
+            LInstr in; in.op = LI_COERCE; in.ty = ret; in.bop = 0; in.uop = 0;
+            in.a = v; in.b = v; in.from = v.ty; in.callee = null; in.argc = 0; in.va = false;
+            in.ival = 0;
+            LAtom w = Lower.fresh(l, ret);
+            in.dst = w.name;
+            Lower.emit(l, in);
+            v = w;
+        }
+        else
+        {
+            Sb s; s.init();
+            s.put((char*)"return value is ");
+            s.put(lair_ir::lty_name(v.ty));
+            s.put((char*)", function returns ");
+            s.put(lair_ir::lty_name(l.cur_fn.ret));
+            Lower.fail(l, s.take(), null);
+            return;
+        }
     }
     LTerm t; t.k = LTM_RET; t.a = v; t.target = null; t.argc = 0; t.t1 = null; t.t2 = null; t.ncase = 0; t.def = null;
     Lower.term(l, t);
@@ -999,6 +1389,15 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
                 AirCns* k = c.cns;
                 if (k == null) { Lower.fail(l, "cut without a consumer", null); return; }
                 if (k.source_line != 0) { l.line = k.source_line; l.col = k.source_col; }
+                // value-consuming consumers (phase 4) act on the producer directly
+                if (k.tag == ACNS_FIELD || k.tag == ACNS_PROJ || k.tag == ACNS_FST ||
+                    k.tag == ACNS_SND || k.tag == ACNS_DEREF || k.tag == ACNS_STORE)
+                {
+                    AirCmd* nx = Lower.consume(l, c.prd, k);
+                    if (nx == null) { return; }
+                    c = nx;
+                    continue;
+                }
                 if (k.tag == ACNS_COMU)
                 {
                     LAtom v = Lower.prd(l, c.prd);
@@ -1031,6 +1430,22 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
             case ACMD_RET:
             {
                 Lower.emit_ret(l, c.prd);
+                return;
+            }
+            case ACMD_STORE:
+            {
+                // AIR 3.0 typed store: store(address, value). prds[0] = address,
+                // prds[1] = value. Lower both, then emit a store instruction.
+                if (c.prd_count != 2 || c.prds[0] == null || c.prds[1] == null)
+                {
+                    Lower.fail(l, "malformed typed store", null);
+                    return;
+                }
+                LAtom addr = Lower.prd(l, c.prds[0]);
+                if (addr.ty == LT_INVALID) { return; }
+                LAtom val = Lower.prd(l, c.prds[1]);
+                if (val.ty == LT_INVALID) { return; }
+                if (!Lower.store(l, addr, val)) { return; }
                 return;
             }
             case ACMD_TRAP:
@@ -1212,6 +1627,7 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
                 {
                     char* nm = i < np0 ? l.lbl_par[(usz)ix * 16 + (usz)i] : cap_names[i - np0];
                     LAtom pa = Lower.fresh(l, lb.params[i].ty);
+                    if (lair_ir::lty_is_agg(lb.params[i].ty)) { pa = lair_ir::la_atom_agg(pa.name, lb.params[i].ty, lb.params[i].atid); }
                     lb.params[i].name = pa.name;
                     lb.params[i].aname = nm;
                     Lower.bind(l, nm, pa);
@@ -1246,7 +1662,7 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
                         Lower.fail(l, "jump argument is not a bound name", c.jump_args[i]);
                         return;
                     }
-                    if (v.ty != lb.params[n].ty)
+                    if (!lair_ir::la_atom_ty_eq(v, lb.params[n].ty, lb.params[n].atid))
                     {
                         Lower.fail(l, "jump argument has the wrong type", c.jump_args[i]);
                         return;
@@ -1263,7 +1679,7 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
                         Lower.fail(l, "label environment changed since capture", l.lbl_cap[(usz)ix * 16 + (usz)k]);
                         return;
                     }
-                    if (v.ty != lb.params[np0 + k].ty)
+                    if (!lair_ir::la_atom_ty_eq(v, lb.params[np0 + k].ty, lb.params[np0 + k].atid))
                     {
                         Lower.fail(l, "label environment changed since capture", l.lbl_cap[(usz)ix * 16 + (usz)k]);
                         return;
@@ -1293,7 +1709,7 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
                         Lower.fail(l, "label environment changed since capture", l.lbl_cap[(usz)ix * 16 + (usz)k]);
                         return;
                     }
-                    if (v.ty != lb.params[k].ty)
+                    if (!lair_ir::la_atom_ty_eq(v, lb.params[k].ty, lb.params[k].atid))
                     {
                         Lower.fail(l, "label environment changed since capture", l.lbl_cap[(usz)ix * 16 + (usz)k]);
                         return;
@@ -1359,7 +1775,8 @@ fn bool Lower.func(Lower* l, AirDecl* d)
     {
         AirBinder* p = d.params[i];
         if (p == null) { continue; }
-        LTy t = lair_to_lty(p.ty);
+        int atid = -1;
+        LTy t = Lower.decl_type(l, p.ty, &atid);
         if (t == LT_INVALID || t == LT_SYM)
         {
             Lower.fail(l, "parameter has no type in the LAIR slice (the slice needs annotations)", p.name);
@@ -1367,10 +1784,13 @@ fn bool Lower.func(Lower* l, AirDecl* d)
         }
         f.params[f.np].name = p.name;
         f.params[f.np].ty = t;
+        f.params[f.np].atid = atid;
         f.np++;
         if (p.name != null && !(p.name[0] == '_' && p.name[1] == 0))
         {
-            Lower.bind(l, p.name, lair_ir::la_atom_var(p.name, t));
+            if (lair_ir::lty_is_agg(t)) { Lower.bind(l, p.name, lair_ir::la_atom_agg(p.name, t, atid)); }
+            else { Lower.bind(l, p.name, lair_ir::la_atom_var(p.name, t)); }
+            if (t == LT_PTR) { Lower.ptr_note(l, p.name, Lower.pointee_of(l, p.ty)); }
         }
     }
     LBlock* entry = lair_ir::lair_new_block(l.a, (char*)"entry");
@@ -1437,16 +1857,20 @@ fn int lower_module(AirModule* am, LModule* lm)
                 if (e == null) { Lower.fail(&l, "out of memory", null); continue; }
                 e.name = d.name;
                 e.va = d.is_varargs;
-                e.ret = lair_to_lty(d.ret_ty);
-                if (e.ret == LT_INVALID) { e.ret = LT_UNIT; }
+                int ret_atid = -1;
+                e.ret = Lower.decl_type(&l, d.ret_ty, &ret_atid);
+                if (e.ret == LT_INVALID) { e.ret = LT_UNIT; ret_atid = -1; }
+                e.retid = ret_atid;
                 bool bad = false;
                 for (usz p2 = 0; p2 < d.param_count; p2++)
                 {
                     if (p2 >= 16) { bad = true; break; }
                     AirBinder* pb = d.params[p2];
-                    LTy t = pb == null ? LT_INVALID : lair_to_lty(pb.ty);
+                    int p_atid = -1;
+                    LTy t = pb == null ? LT_INVALID : Lower.decl_type(&l, pb.ty, &p_atid);
                     if (t == LT_INVALID || t == LT_SYM) { bad = true; break; }
                     e.params[e.np] = t;
+                    e.p_atid[e.np] = p_atid;
                     e.np++;
                 }
                 if (bad)

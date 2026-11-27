@@ -7,11 +7,12 @@
 // closed opcode set (air_ll's producer switch collapses to LI_BINOP /
 // LI_UNOP / LI_COERCE / LI_CALL because N1 already made the operands atoms).
 //
-// The only structurally new thing versus air_ll is the phi: block parameters
-// are phis, filled from jump edge arguments (`jump %ret(x)` -> `%x = phi T
-// [ x, pred ]`). The slice reifies no parameterized blocks yet (N3 keeps
-// `ret` for every exit), so the phi path is exercised by the verifier's
-// L1/L5 and sits ready for phase 2's labels.
+// The phi path (block parameters -> phis filled from jump edge arguments) is
+// exercised by phase 2's labels. Phase 4 adds aggregate construction/access
+// (LI_TUPLE/LI_RECORD/LI_ARRAY/LI_EXTRACT) and memory (LI_ALLOCA/LI_LOAD/
+// LI_STORE/LI_GEP); aggregate types are resolved through the module's interned
+// LType pool, so the module pointer is threaded through every type-printing
+// helper.
 //
 // `trap` is a real instruction, not a label: `call void @llvm.trap()` +
 // `unreachable`, which matches how pear2c's M1Gen lowers ACMD_TRAP.
@@ -33,6 +34,7 @@ fn char* ll_datalayout()
 }
 fn char* ll_triple() { return (char*)"x86_64-unknown-linux-gnu"; }
 
+// scalar type spelling
 fn char* ll_lty(LTy t)
 {
     switch (t)
@@ -49,10 +51,43 @@ fn char* ll_lty(LTy t)
         case LT_CHAR: return (char*)"i32";
         case LT_F32: return (char*)"float";
         case LT_F64: return (char*)"double";
-        case LT_UNIT: return (char*)"void";
+        case LT_UNIT: return (char*)"{}";
         case LT_PTR: return (char*)"ptr";
         default: return (char*)"i64";
     }
+}
+
+// full type spelling: scalars directly, aggregates via the module's pool
+fn void ll_ty(Sb* s, LModule* lm, LTy t, int atid)
+{
+    if (!lair_ir::lty_is_agg(t)) { s.put(ll_lty(t)); return; }
+    LType* ag = lm.tp + atid;
+    if (ag.k == LT_TUPLE || ag.k == LT_RECORD)
+    {
+        s.put((char*)"{");
+        for (int i = 0; i < ag.n; i++)
+        {
+            if (i > 0) { s.put((char*)", "); }
+            s.put(ll_elem(ag.elems[i]));
+        }
+        s.put((char*)"}");
+    }
+    else // LT_ARRAY
+    {
+        s.put((char*)"[");
+        s.put(ll_elem(ag.elems[0]));
+        s.put((char*)" x ");
+        s.int_((long)ag.n);
+        s.put((char*)"]");
+    }
+}
+
+// element type inside an aggregate: a unit field is `{}` (LLVM's empty
+// struct), never `void`, which is only valid as a function result.
+fn char* ll_elem(LTy t)
+{
+    if (t == LT_UNIT) { return (char*)"{}"; }
+    return ll_lty(t);
 }
 
 fn void ll_atom(Sb* s, LAtom a)
@@ -87,8 +122,8 @@ fn void ll_atom(Sb* s, LAtom a)
     }
 }
 
-// typed operand: `i64 %x` / `double 4.5`
-fn void ll_typed(Sb* s, LAtom a)
+// typed operand: `i64 %x` / `double 4.5` / `{i64, i64} %t`
+fn void ll_typed(Sb* s, LModule* lm, LAtom a)
 {
     if (a.k == LA_SYM)
     {
@@ -96,12 +131,12 @@ fn void ll_typed(Sb* s, LAtom a)
         ll_atom(s, a);
         return;
     }
-    s.put(ll_lty(a.ty));
+    ll_ty(s, lm, a.ty, a.atid);
     s.put((char*)" ");
     ll_atom(s, a);
 }
 
-fn void ll_binop(Sb* s, LInstr* in)
+fn void ll_binop(Sb* s, LModule* lm, LInstr* in)
 {
     LTy t = in.a.ty;                                 // operand type == result type (cmp -> i1)
     bool flt = lair_ir::lty_is_float(t);
@@ -127,10 +162,9 @@ fn void ll_binop(Sb* s, LInstr* in)
         case ABIN_LT: op = flt ? (char*)"olt" : (sgn ? (char*)"slt" : (char*)"ult"); cmp = true; break;
         case ABIN_GT: op = flt ? (char*)"ogt" : (sgn ? (char*)"sgt" : (char*)"ugt"); cmp = true; break;
         case ABIN_LE: op = flt ? (char*)"ole" : (sgn ? (char*)"sle" : (char*)"ule"); cmp = true; break;
-        case ABIN_GE: op = flt ? (char*)"oge" : (char*)"uge"; cmp = true; break;
+        case ABIN_GE: op = flt ? (char*)"oge" : (sgn ? (char*)"sge" : (char*)"uge"); cmp = true; break;
         default: op = (char*)"add"; break;
     }
-    // fresh result, then either the compare form or the operator form
     s.put((char*)"%");
     s.put(in.dst);
     s.put((char*)" = ");
@@ -155,13 +189,13 @@ fn void ll_binop(Sb* s, LInstr* in)
     ll_atom(s, in.b);
 }
 
-fn void ll_instr(Sb* s, LInstr* in)
+fn void ll_instr(Sb* s, LModule* lm, LInstr* in)
 {
     s.put((char*)"  ");
     switch (in.op)
     {
         case LI_BINOP:
-            ll_binop(s, in);
+            ll_binop(s, lm, in);
             break;
         case LI_UNOP:
         {
@@ -280,17 +314,110 @@ fn void ll_instr(Sb* s, LInstr* in)
                 s.put((char*)" = ");
             }
             s.put((char*)"call ");
-            s.put(ll_lty(in.ty));
+            ll_ty(s, lm, in.ty, in.atid);
             s.put((char*)" @");
             s.put(in.callee);
             s.put((char*)"(");
             for (int i = 0; i < in.argc; i++)
             {
                 if (i > 0) { s.put((char*)", "); }
-                ll_typed(s, in.args[i]);
+                ll_typed(s, lm, in.args[i]);
             }
             if (in.va) { if (in.argc > 0) { s.put((char*)", "); } s.put((char*)"..."); }
             s.put((char*)")");
+            break;
+        }
+        // ── aggregates (phase 4) ──────────────────────────────────────────
+        case LI_TUPLE:
+        case LI_RECORD:
+        case LI_ARRAY:
+        {
+            // LLVM has no aggregate-literal instruction: an aggregate value is
+            // built with a chain of insertvalue from zeroinitializer, one field
+            // at a time (this is how pear2c materializes a let-bound tuple).
+            // Each insertvalue step gets its own name: LLVM rejects a chain
+            // that redefines the same local value, so intermediates are named
+            // dst.i and only the final step binds dst.
+            if (in.argc == 0)
+            {
+                // an empty aggregate is just zeroinitializer
+                s.put((char*)"%");
+                s.put(in.dst);
+                s.put((char*)" = ");
+                ll_ty(s, lm, in.ty, in.atid);
+                s.put((char*)" zeroinitializer");
+                break;
+            }
+            for (int i = 0; i < in.argc; i++)
+            {
+                bool last = (i + 1 == in.argc);
+                s.put((char*)"%");
+                s.put(in.dst);
+                if (!last) { s.put((char*)"."); s.int_((long)i); }
+                s.put((char*)" = insertvalue ");
+                ll_ty(s, lm, in.ty, in.atid);
+                s.put((char*)" ");
+                if (i == 0) { s.put((char*)"zeroinitializer"); }
+                else { s.put((char*)"%"); s.put(in.dst); s.put((char*)"."); s.int_((long)(i - 1)); }
+                s.put((char*)", ");
+                ll_typed(s, lm, in.args[i]);
+                s.put((char*)", ");
+                s.int_((long)i);
+                if (!last) { s.put((char*)"\n  "); }
+            }
+            break;
+        }
+        case LI_EXTRACT:
+        {
+            s.put((char*)"%");
+            s.put(in.dst);
+            s.put((char*)" = extractvalue ");
+            ll_ty(s, lm, in.a.ty, in.a.atid);
+            s.put((char*)" ");
+            ll_atom(s, in.a);
+            s.put((char*)", ");
+            s.int_(in.ival);
+            break;
+        }
+        // ── memory (phase 4) ──────────────────────────────────────────────
+        case LI_ALLOCA:
+        {
+            s.put((char*)"%");
+            s.put(in.dst);
+            s.put((char*)" = alloca ");
+            s.put(ll_lty(in.from));
+            break;
+        }
+        case LI_LOAD:
+        {
+            s.put((char*)"%");
+            s.put(in.dst);
+            s.put((char*)" = load ");
+            s.put(ll_lty(in.ty));
+            s.put((char*)", ptr ");
+            ll_atom(s, in.a);
+            break;
+        }
+        case LI_STORE:
+        {
+            s.put((char*)"store ");
+            s.put(ll_lty(in.ty));
+            s.put((char*)" ");
+            ll_atom(s, in.a);
+            s.put((char*)", ptr ");
+            ll_atom(s, in.b);
+            break;
+        }
+        case LI_GEP:
+        {
+            s.put((char*)"%");
+            s.put(in.dst);
+            s.put((char*)" = getelementptr ");
+            s.put(ll_lty(in.from));
+            s.put((char*)", ptr ");
+            ll_atom(s, in.a);
+            s.put((char*)", i64 ");
+            ll_atom(s, in.b);
             break;
         }
     }
@@ -298,7 +425,7 @@ fn void ll_instr(Sb* s, LInstr* in)
 }
 
 // phi for a parameterized block: one incoming per predecessor edge.
-fn void ll_phis(Sb* s, LFunc* f, LBlock* b)
+fn void ll_phis(Sb* s, LModule* lm, LFunc* f, LBlock* b)
 {
     if (b.np == 0) { return; }
     for (int p = 0; p < b.np; p++)
@@ -306,7 +433,7 @@ fn void ll_phis(Sb* s, LFunc* f, LBlock* b)
         s.put((char*)"  %");
         s.put(b.params[p].name);
         s.put((char*)" = phi ");
-        s.put(ll_lty(b.params[p].ty));
+        ll_ty(s, lm, b.params[p].ty, b.params[p].atid);
         bool first = true;
         for (int oi = 0; oi < f.nb; oi++)
         {
@@ -337,15 +464,14 @@ fn void ll_phis(Sb* s, LFunc* f, LBlock* b)
     }
 }
 
-fn void ll_term(Sb* s, LTerm* t)
+fn void ll_term(Sb* s, LModule* lm, LTerm* t)
 {
     s.put((char*)"  ");
     switch (t.k)
     {
         case LTM_RET:
             s.put((char*)"ret ");
-            if (t.a.ty == LT_UNIT || t.a.k == LA_UNIT) { s.put((char*)"void"); }
-            else { ll_typed(s, t.a); }
+            ll_typed(s, lm, t.a);
             break;
         case LTM_JUMP:
             // LLVM has no `jump`: a parameterless jump is `br label`, and an
@@ -394,17 +520,17 @@ fn void ll_term(Sb* s, LTerm* t)
     s.put((char*)"\n");
 }
 
-fn void ll_func(Sb* s, LFunc* f)
+fn void ll_func(Sb* s, LModule* lm, LFunc* f)
 {
     s.put((char*)"define ");
-    s.put(ll_lty(f.ret));
+    ll_ty(s, lm, f.ret, f.retid);
     s.put((char*)" @");
     s.put(f.name);
     s.put((char*)"(");
     for (int i = 0; i < f.np; i++)
     {
         if (i > 0) { s.put((char*)", "); }
-        s.put(ll_lty(f.params[i].ty));
+        ll_ty(s, lm, f.params[i].ty, f.params[i].atid);
         s.put((char*)" %");
         s.put(f.params[i].name);
     }
@@ -414,9 +540,9 @@ fn void ll_func(Sb* s, LFunc* f)
         LBlock* blk = f.blocks[b];
         s.put(blk.name);
         s.put((char*)":\n");
-        ll_phis(s, f, blk);
-        for (int k = 0; k < blk.ni; k++) { ll_instr(s, blk.instrs + k); }
-        ll_term(s, &blk.term);
+        ll_phis(s, lm, f, blk);
+        for (int k = 0; k < blk.ni; k++) { ll_instr(s, lm, blk.instrs + k); }
+        ll_term(s, lm, &blk.term);
     }
     s.put((char*)"}\n\n");
 }
@@ -440,21 +566,21 @@ fn bool write_ll(LModule* lm, void* out)
     {
         LExtern* e = lm.externs[i];
         s.put((char*)"declare ");
-        s.put(ll_lty(e.ret));
+        ll_ty(&s, lm, e.ret, e.retid);
         s.put((char*)" @");
         s.put(e.name);
         s.put((char*)"(");
         for (int k = 0; k < e.np; k++)
         {
             if (k > 0) { s.put((char*)", "); }
-            s.put(ll_lty(e.params[k]));
+            ll_ty(&s, lm, e.params[k], e.p_atid[k]);
         }
         if (e.va) { if (e.np > 0) { s.put((char*)", "); } s.put((char*)"..."); }
         s.put((char*)")\n");
     }
     if (lm.next_ > 0) { s.put((char*)"\n"); }
     s.put((char*)"declare void @llvm.trap()\n\n");
-    for (int i = 0; i < lm.nf; i++) { ll_func(&s, lm.funcs[i]); }
+    for (int i = 0; i < lm.nf; i++) { ll_func(&s, lm, lm.funcs[i]); }
     s.put((char*)"!llvm.module.flags = !{!0, !1, !2}\n");
     s.put((char*)"!llvm.ident = !{!3}\n\n");
     s.put((char*)"!0 = !{i32 1, !\"wchar_size\", i32 4}\n");

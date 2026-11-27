@@ -57,6 +57,11 @@ phi_while_carried_main:42
 phi_nested_while_main:42
 phi_label_ladder_main:20
 phi_diamond_join_main:42
+tuple_label_main:42
+unit_aggregate_main:42
+memory_i64_main:0
+memory_bool_main:0
+memory_widths_main:0
 "
 
 [ -x "$LAIRC" ] || { echo "gate: $LAIRC missing (run make lairc)"; exit 1; }
@@ -85,6 +90,9 @@ expect_rc() { # expect_rc <rc-wanted> <label> <cmd...>
 expect_rc 3 "closures (slice)"       "$LAIRC" tests/pear2/closure_scalar_capture_main.air --check
 expect_rc 3 "pointer edge values"    "$LAIRC" tests/pear2/label_pointer_main.air --check
 expect_rc 3 "for/arrays (slice)"     "$LAIRC" tests/pear2/phi_for_index_main.air --check
+expect_rc 3 "nested aggregates"      "$LAIRC" tests/pear2/tuple_local_main.air --check
+expect_rc 3 "dynamic index"          "$LAIRC" tests/pear2/array_local_main.air --check
+expect_rc 3 "alloca outside slice"   "$LAIRC" tests/pear2/typed_memory_main.air --check
 expect_rc 1 "invalid AIR (read)"     "$LAIRC" tests/air/bad/missing_semicolon.air --check
 
 # ── 3. shape of the emitted forms (one fixture, cheap and strict) ───────────
@@ -102,6 +110,22 @@ else
     grep -q 'define i64 @main()' "$WORK/arithmetic_main.ll" || bad ".ll: missing define i64 @main"
     grep -q 'add i64 40' "$WORK/arithmetic_main.ll" || bad ".ll: missing add i64"
     grep -q 'ret i64' "$WORK/arithmetic_main.ll" || bad ".ll: missing ret i64"
+fi
+
+# step 4 shape: aggregate literals and memory forms appear in the .ll
+cp tests/pear2/tuple_label_main.air "$WORK/"
+if ! "$LAIRC" "$WORK/tuple_label_main.air" --emit-ll >/dev/null 2>&1; then
+    bad "emit-ll (tuple) failed"
+else
+    grep -q 'insertvalue' "$WORK/tuple_label_main.ll" || bad ".ll: missing insertvalue (aggregate literal)"
+    grep -q 'extractvalue' "$WORK/tuple_label_main.ll" || bad ".ll: missing extractvalue (aggregate access)"
+fi
+cp tests/pear2/memory_i64_main.air "$WORK/"
+if ! "$LAIRC" "$WORK/memory_i64_main.air" --emit-ll >/dev/null 2>&1; then
+    bad "emit-ll (memory) failed"
+else
+    grep -q 'store i64' "$WORK/memory_i64_main.ll" || bad ".ll: missing store (memory form)"
+    grep -q 'load i64' "$WORK/memory_i64_main.ll" || bad ".ll: missing load (memory form)"
 fi
 
 [ "$MODE" = check ] && { [ "$fail" = 0 ] && echo "gate --check: OK" || echo "gate --check: FAILED"; exit "$fail"; }

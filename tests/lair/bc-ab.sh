@@ -51,6 +51,11 @@ phi_while_carried_main:42
 phi_nested_while_main:42
 phi_label_ladder_main:20
 phi_diamond_join_main:42
+tuple_label_main:42
+unit_aggregate_main:42
+memory_i64_main:0
+memory_bool_main:0
+memory_widths_main:0
 "
 
 [ -x "$LAIRC" ]  || { echo "bc-ab: $LAIRC missing (run make lairc)";  exit 1; }

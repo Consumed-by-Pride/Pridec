@@ -16,7 +16,9 @@
 // It is round-trippable in principle (that is the point of a text form) but
 // the slice's reader is not built yet -- phase 2 feeds lair_lower from AIR,
 // never from .lair. Names print exactly as LLVM will see them, so a .lair
-// diff and a .ll diff of the same compile tell the same story.
+// diff and a .ll diff of the same compile tell the same story. Phase 4 adds
+// aggregate construction/access and memory instructions; aggregate types print
+// their element types, resolved through the module's interned pool.
 // ============================================================================
 module lair_write;
 import air_text;
@@ -59,9 +61,43 @@ fn void w_atom(Sb* s, LAtom a)
     }
 }
 
-fn void w_ty(Sb* s, LTy t) { s.put(lair_ir::lty_name(t)); }
+fn void w_ty(Sb* s, LModule* lm, LTy t, int atid)
+{
+    if (!lair_ir::lty_is_agg(t)) { s.put(lair_ir::lty_name(t)); return; }
+    LType* ag = lm.tp + atid;
+    if (ag.k == LT_TUPLE)
+    {
+        s.put((char*)"tuple(");
+        for (int i = 0; i < ag.n; i++)
+        {
+            if (i > 0) { s.put((char*)", "); }
+            s.put(lair_ir::lty_name(ag.elems[i]));
+        }
+        s.put((char*)")");
+    }
+    else if (ag.k == LT_ARRAY)
+    {
+        s.put((char*)"array[");
+        s.put(lair_ir::lty_name(ag.elems[0]));
+        s.put((char*)", ");
+        s.int_((long)ag.n);
+        s.put((char*)"]");
+    }
+    else // LT_RECORD
+    {
+        s.put((char*)"record{");
+        for (int i = 0; i < ag.n; i++)
+        {
+            if (i > 0) { s.put((char*)", "); }
+            s.put(ag.names[i] != null ? ag.names[i] : (char*)"?");
+            s.put((char*)": ");
+            s.put(lair_ir::lty_name(ag.elems[i]));
+        }
+        s.put((char*)"}");
+    }
+}
 
-fn void w_instr(Sb* s, LInstr* in)
+fn void w_instr(Sb* s, LModule* lm, LInstr* in)
 {
     s.put((char*)"  ");
     if (in.dst != null)
@@ -80,7 +116,7 @@ fn void w_instr(Sb* s, LInstr* in)
             s.put((char*)", ");
             w_atom(s, in.b);
             s.put((char*)") : ");
-            w_ty(s, in.ty);
+            w_ty(s, lm, in.ty, in.atid);
             break;
         case LI_UNOP:
             s.put((char*)"cut ");
@@ -88,15 +124,15 @@ fn void w_instr(Sb* s, LInstr* in)
             s.put((char*)"(");
             w_atom(s, in.a);
             s.put((char*)") : ");
-            w_ty(s, in.ty);
+            w_ty(s, lm, in.ty, in.atid);
             break;
         case LI_COERCE:
             s.put((char*)"cut coerce(");
             w_atom(s, in.a);
             s.put((char*)", ");
-            w_ty(s, in.ty);
+            w_ty(s, lm, in.ty, in.atid);
             s.put((char*)") : ");
-            w_ty(s, in.ty);
+            w_ty(s, lm, in.ty, in.atid);
             break;
         case LI_CALL:
             s.put((char*)"cut call ");
@@ -109,13 +145,77 @@ fn void w_instr(Sb* s, LInstr* in)
             }
             if (in.va) { if (in.argc > 0) { s.put((char*)", "); } s.put((char*)"..."); }
             s.put((char*)") : ");
-            w_ty(s, in.ty);
+            w_ty(s, lm, in.ty, in.atid);
+            break;
+        // ── aggregates (phase 4) ──────────────────────────────────────────
+        case LI_TUPLE:
+            s.put((char*)"cut tuple(");
+            for (int i = 0; i < in.argc; i++)
+            {
+                if (i > 0) { s.put((char*)", "); }
+                w_atom(s, in.args[i]);
+            }
+            s.put((char*)") : ");
+            w_ty(s, lm, in.ty, in.atid);
+            break;
+        case LI_ARRAY:
+            s.put((char*)"cut array(");
+            for (int i = 0; i < in.argc; i++)
+            {
+                if (i > 0) { s.put((char*)", "); }
+                w_atom(s, in.args[i]);
+            }
+            s.put((char*)") : ");
+            w_ty(s, lm, in.ty, in.atid);
+            break;
+        case LI_RECORD:
+            s.put((char*)"cut record(");
+            for (int i = 0; i < in.argc; i++)
+            {
+                if (i > 0) { s.put((char*)", "); }
+                w_atom(s, in.args[i]);
+            }
+            s.put((char*)") : ");
+            w_ty(s, lm, in.ty, in.atid);
+            break;
+        case LI_EXTRACT:
+            s.put((char*)"cut extract(");
+            w_atom(s, in.a);
+            s.put((char*)", ");
+            s.int_(in.ival);
+            s.put((char*)") : ");
+            w_ty(s, lm, in.ty, in.atid);
+            break;
+        // ── memory (phase 4) ──────────────────────────────────────────────
+        case LI_ALLOCA:
+            s.put((char*)"alloca ");
+            w_ty(s, lm, in.from, -1);
+            break;
+        case LI_LOAD:
+            s.put((char*)"load ");
+            w_atom(s, in.a);
+            s.put((char*)") : ");
+            w_ty(s, lm, in.ty, in.atid);
+            break;
+        case LI_STORE:
+            s.put((char*)"store ");
+            w_atom(s, in.a);
+            s.put((char*)", ");
+            w_atom(s, in.b);
+            s.put((char*)") : unit");
+            break;
+        case LI_GEP:
+            s.put((char*)"gep ");
+            w_atom(s, in.a);
+            s.put((char*)", ");
+            w_atom(s, in.b);
+            s.put((char*)") : ptr");
             break;
     }
     s.put((char*)"\n");
 }
 
-fn void w_term(Sb* s, LTerm* t)
+fn void w_term(Sb* s, LModule* lm, LTerm* t)
 {
     s.put((char*)"  ");
     switch (t.k)
@@ -149,7 +249,7 @@ fn void w_term(Sb* s, LTerm* t)
             break;
         case LTM_SWITCH:
             s.put((char*)"switch ");
-            w_ty(s, t.a.ty);
+            w_ty(s, lm, t.a.ty, t.a.atid);
             s.put((char*)" ");
             w_atom(s, t.a);
             s.put((char*)" [");
@@ -174,7 +274,7 @@ fn void w_term(Sb* s, LTerm* t)
     s.put((char*)"\n");
 }
 
-fn void w_func(Sb* s, LFunc* f)
+fn void w_func(Sb* s, LModule* lm, LFunc* f)
 {
     s.put((char*)"def ");
     s.put(f.name);
@@ -184,10 +284,10 @@ fn void w_func(Sb* s, LFunc* f)
         if (i > 0) { s.put((char*)", "); }
         s.put(f.params[i].name);
         s.put((char*)" : ");
-        w_ty(s, f.params[i].ty);
+        w_ty(s, lm, f.params[i].ty, f.params[i].atid);
     }
     s.put((char*)") -> ");
-    w_ty(s, f.ret);
+    w_ty(s, lm, f.ret, f.retid);
     s.put((char*)" {\n");
     for (int b = 0; b < f.nb; b++)
     {
@@ -203,12 +303,12 @@ fn void w_func(Sb* s, LFunc* f)
                 s.put((char*)"%");
                 s.put(blk.params[i].name);
                 s.put((char*)" : ");
-                w_ty(s, blk.params[i].ty);
+                w_ty(s, lm, blk.params[i].ty, blk.params[i].atid);
             }
             s.put((char*)"\n");
         }
-        for (int k = 0; k < blk.ni; k++) { w_instr(s, blk.instrs + k); }
-        w_term(s, &blk.term);
+        for (int k = 0; k < blk.ni; k++) { w_instr(s, lm, blk.instrs + k); }
+        w_term(s, lm, &blk.term);
     }
     s.put((char*)"}\n\n");
 }
@@ -236,15 +336,15 @@ fn bool write_lair(LModule* lm, void* out)
         for (int k = 0; k < e.np; k++)
         {
             if (k > 0) { s.put((char*)", "); }
-            w_ty(&s, e.params[k]);
+            w_ty(&s, lm, e.params[k], e.p_atid[k]);
         }
         if (e.va) { if (e.np > 0) { s.put((char*)", "); } s.put((char*)"..."); }
         s.put((char*)") -> ");
-        w_ty(&s, e.ret);
+        w_ty(&s, lm, e.ret, e.retid);
         s.put((char*)";\n");
     }
     if (lm.next_ > 0) { s.put((char*)"\n"); }
-    for (int i = 0; i < lm.nf; i++) { w_func(&s, lm.funcs[i]); }
+    for (int i = 0; i < lm.nf; i++) { w_func(&s, lm, lm.funcs[i]); }
     char* txt = s.take();
     bool ok = fputs(txt, out) >= 0;
     free(txt);

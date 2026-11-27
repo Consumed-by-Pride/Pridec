@@ -277,8 +277,15 @@ reader bug outside this slice, to be reconciled separately.
    — the comparison is behavioral, bytes only where deterministic. Forward
    jumps are settled: invalid AIR for both pear2c (V2) and lairc, so no
    work here.
-4. Memory forms + aggregates; the coverage ladder of `BACKENDS.md` §3
-   re-run with `lairc` as a third row.
+4. **(done)** Memory forms + aggregates: tuple/array/record literals,
+   `extractvalue` element access, `alloca`/`load`/`store`/`getelementptr`,
+   empty aggregates, and integer return widening (sext/zext) — all
+   lowered, emitted and A/B-verified. The gate now runs 24 fixtures
+   (19 base + 5 memory/aggregate), `make test-lair-bc` matches 24/24
+   behaviorally, and the fail-closed negatives cover nested aggregates,
+   dynamic index and out-of-slice alloca. The `BACKENDS.md` §3 coverage
+   ladder is re-run with `lairc` as a third row; step 5 (the 48
+   `tests/exec/pear` fixtures at parity, then stdlib) is next.
 5. The 48 `tests/exec/pear` fixtures at parity, then stdlib.
 
 ## 7. Layout

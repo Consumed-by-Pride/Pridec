@@ -313,6 +313,27 @@ fn int verify_func(VState* v)
                 case LI_CALL:
                     for (int a = 0; a < in.argc; a++) { v_atom(v, &env, &doms, in.args[a], i); }
                     break;
+                case LI_TUPLE:
+                case LI_RECORD:
+                case LI_ARRAY:
+                    for (int a = 0; a < in.argc; a++) { v_atom(v, &env, &doms, in.args[a], i); }
+                    break;
+                case LI_EXTRACT:
+                    v_atom(v, &env, &doms, in.a, i);
+                    break;
+                case LI_LOAD:
+                    v_atom(v, &env, &doms, in.a, i);
+                    break;
+                case LI_STORE:
+                    v_atom(v, &env, &doms, in.a, i);
+                    v_atom(v, &env, &doms, in.b, i);
+                    break;
+                case LI_GEP:
+                    v_atom(v, &env, &doms, in.a, i);
+                    v_atom(v, &env, &doms, in.b, i);
+                    break;
+                case LI_ALLOCA:
+                    break;
             }
             if (in.dst != null) { v_set(&env, in.dst, in.ty, i); }
         }
