@@ -157,6 +157,8 @@ struct Ctx
     AirTyp*    cur_ret;
     AirTyp*    ret_seen;   // the type infer_ret settled on
     bool       quiet;      // a prescan pass: a partial answer is not an error
+    char**     tup; // tuple shapes already defined (module level)
+    usz        ntup;
 
     // module level
     Sb         types_out;  // structs, one per distinct shape
@@ -648,8 +650,10 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
     // two consumers cannot disagree about layout.
     Sb acc; acc.init();
     AirTyp* step = cur;
-    // Index 1 scales: `base + i` IS the element address (see the note below).
-    bool acc_is_ptr = p.sub_count > 1;
+    // Index 1 scales: `base + i` IS the element address. Every later step
+    // (a field `->f`, an element `[i]`) appends to the expression and leaves an
+    // lvalue instead, which is what decides whether the result needs `&`.
+    bool acc_is_ptr = true;
     if (p.sub_count <= 1) { acc.put(b.op); }
     else
     {
@@ -657,7 +661,7 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
         for (usz i = 2; i < p.sub_count && i < 16; i++)
         {
             if (step == null) { c.err((char*)"gep indexes past a scalar", null); break; }
-            if (step.tag == ATYP_ARRAY) { acc.putc('['); acc.put(idx[i].op); acc.putc(']'); step = step.args[0]; acc_is_ptr = true; continue; }
+            if (step.tag == ATYP_ARRAY) { acc.putc('['); acc.put(idx[i].op); acc.putc(']'); step = step.args[0]; acc_is_ptr = false; continue; }
             if (step.tag == ATYP_TUPLE || step.tag == ATYP_NOMINAL)
             {
                 AirPrd* ip = p.subs[i];
@@ -676,6 +680,7 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
                     if (acc_is_ptr) { acc.put((char*)"->"); }
                     else { acc.putc('.'); }
                     c.name(&acc, dd.ctors[0].fields[(usz)ip.ival].name, false);
+                    acc_is_ptr = false;
                 }
                 step = ft;
                 continue;
@@ -689,7 +694,15 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
     // `&` produced `&(base + i)` -- type T**, one indirection too many, so `store`
     // wrote through the wrong level. An aggregate gep needs `&(base.field)`.
     char* accs = acc.take();
-    s.put((char*)"("); s.put(accs); s.putc(')');
+    // Two forms, and they are not interchangeable:
+    //   * a field or element step ends in an lvalue (`(base+i)->f`, `a[i]`), so
+    //     the address the consumer wants is `&lvalue`;
+    //   * a bare scaled pointer (`base + i`) is already that address.
+    // Emitting the second where the first belongs made `store` assign to the
+    // expression and gcc said "assignment to expression with array type"; using
+    // the first everywhere gave `&(base+i)`, one indirection too many.
+    if (acc_is_ptr) { s.put((char*)"("); s.put(accs); s.putc(')'); }
+    else { s.putc('&'); s.put((char*)"("); s.put(accs); s.putc(')'); }
     v.op = s.take();
     v.ty = (step != null && p.ty != null) ? p.ty : null;
     return v;
@@ -914,7 +927,20 @@ fn void Ctx.call(Ctx* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
     }
     Sb s; s.init();
     c.pad(o);
-    if (cur.bind != null && rty != null && !ty_is_void(rty)) { c.ty_decl(&s, rty, cur.bind); s.put((char*)" = "); }
+    // A call result is read from another branch as often as from its own (a
+    // `parse` in one arm, tested in the next), so it belongs at function scope
+    // for the same reason a `let` does. Declared where C can see it, assigned here.
+    if (cur.bind != null && rty != null && !ty_is_void(rty))
+    {
+        if (!c.declared(cur.bind))
+        {
+            c.decls.put((char*)"    ");
+            c.ty_decl(&c.decls, rty, cur.bind);
+            c.decls.put((char*)";\n");
+            c.mark_declared(cur.bind);
+        }
+        c.name(&s, cur.bind, false); s.put((char*)" = ");
+    }
     else if (cur.bind != null && rty == null) { c.err((char*)"call result has no known type", callee != null ? callee.name : null); }
     s.putc('('); s.put(f.op); s.put((char*)")(");
     for (usz i = 0; i < na; i++) { if (i > 0) { s.put((char*)", "); } s.put(args[i].op); }
@@ -1033,9 +1059,20 @@ fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
                     c.decls.put((char*)";\n");
                     c.mark_declared(x.binder);
                 }
-                c.pad(o);
-                c.name(o, x.binder, false);
-                o.put((char*)" = "); o.put(v.op); o.put((char*)";\n");
+                // An array-typed binding is a value copy: C cannot assign one,
+                // so the declaration is the slot and memcpy fills it.
+                if (v.ty != null && v.ty.tag == ATYP_ARRAY)
+                {
+                    c.pad(o);
+                    o.put((char*)"memcpy((void *)(&"); c.name(o, x.binder, false); o.put((char*)"), (const void *)(&"); o.put(v.op);
+                    o.put((char*)"), sizeof("); c.ty(o, v.ty); o.put((char*)"));\n");
+                }
+                else
+                {
+                    c.pad(o);
+                    c.name(o, x.binder, false);
+                    o.put((char*)" = "); o.put(v.op); o.put((char*)";\n");
+                }
                 c.bind(x.binder, x.binder, v.ty);
                 x = x.body; continue;
             }
@@ -1046,9 +1083,17 @@ fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
                 if (v.ty != null && !air_util::ty_eq(p.ty.args[0], v.ty)) { c.err((char*)"stored value type differs from the pointee type", null); }
                 if (ty_is_void(v.ty)) { x = x.next; continue; }
                 c.pad(o);
-                if (x.vol) { o.put((char*)"(*(volatile "); c.ty(o, p.ty.args[0]); o.put((char*)" *)("); o.put(p.op); o.put((char*)"))"); }
-                else { o.putc('*'); o.put((char*)"("); o.put(p.op); o.put((char*)")"); }
-                o.put((char*)" = "); o.put(v.op); o.put((char*)";\n");
+                // C has no aggregate assignment: an array is not assignable at all,
+                // and a struct assignment is legal only between identical types.
+                // AIR store is a byte copy of the pointee, so say exactly that.
+                AirTyp* spt = p.ty.args[0];
+                if (spt != null && spt.tag == ATYP_ARRAY)
+                {
+                    o.put((char*)"memcpy((void *)("); o.put(p.op); o.put((char*)"), (const void *)(&"); o.put(v.op);
+                    o.put((char*)"), sizeof("); c.ty(o, spt); o.put((char*)"));\n");
+                }
+                else if (x.vol) { o.put((char*)"(*(volatile "); c.ty(o, spt); o.put((char*)" *)("); o.put(p.op); o.put((char*)")"); o.put((char*)" = "); o.put(v.op); o.put((char*)";\n"); }
+                else { o.putc('*'); o.put((char*)"("); o.put(p.op); o.put((char*)")"); o.put((char*)" = "); o.put(v.op); o.put((char*)";\n"); }
                 x = x.next; continue;
             }
             case ACMD_FENCE:
@@ -1510,14 +1555,28 @@ fn void Ctx.function(Ctx* c, AirDecl* d, Sb* out)
     if (wrap)
     {
         // the C ABI entry point, the same wrapper air_ll emits (§4.5)
-        out.put((char*)"int main(void)\n{\n");
+        // The AIR `main` takes whatever parameters the program declares (tokei's
+        // takes argc/argv), so the C entry point must forward real ones -- a
+        // wrapper that called `pride_main()` for a two-parameter main did not
+        // compile at all.
+        out.put((char*)"int main(int argc, char **argv)\n{\n");
+        Sb al; al.init();
+        for (usz i = 0; i < d.param_count; i++)
+        {
+            if (i > 0) { al.put((char*)", "); }
+            // The AIR entry signature is the program's own; supply the C runtime's
+            // argc/argv where the shapes line up and a zero otherwise.
+            if (i == 0 && air_util::ty_is_int(d.params[i].ty)) { al.put((char*)"(int64_t)argc"); }
+            else if (i == 1 && d.params[i].ty != null && d.params[i].ty.tag == ATYP_PTR) { al.put((char*)"((uint8_t *)argv)"); }
+            else { al.put((char*)"0"); }
+        }
         if (ty_is_void(d.ret_ty))
         {
-            out.put((char*)"    pride_main();\n    return 0;\n}\n\n");
+            out.put((char*)"    pride_main("); out.put(al.take()); out.put((char*)(");\n    return 0;\n}\n\n"));
         }
         else
         {
-            out.put((char*)"    return (int)pride_main();\n}\n\n");
+            out.put((char*)"    return (int)pride_main("); out.put(al.take()); out.put((char*)(");\n}\n\n"));
         }
     }
 }
@@ -1565,6 +1624,42 @@ fn bool data_mentions(AirDecl* d, char* nm)
     AirCtorDecl* ct = d.ctors[0];
     for (usz j = 0; j < ct.field_count; j++) { if (typ_mentions(ct.fields[j].ty, nm, 0)) { return true; } }
     return false;
+}
+
+// A tuple has no `data` declaration in AIR -- air_low synthesizes the type, so
+// nothing tells the emitter to define it, and `struct __tup_i64_i64` was used as a
+// value type with no definition anywhere ("initializer but incomplete type").
+// Define each distinct shape the first time it is written, members deepest-first
+// so a tuple of tuples is complete before the tuple that holds it.
+fn void Ctx.tuple_defs(Ctx* c, AirTyp* t, int depth)
+{
+    if (t == null || depth > 8) { return; }
+    for (usz i = 0; i < t.arg_count; i++) { c.tuple_defs(t.args[i], depth + 1); }
+    if (t.tag != ATYP_TUPLE) { return; }
+    Sb nm; nm.init(); c.ty(&nm, t);
+    char* name = nm.take();
+    for (usz i = 0; i < c.ntup; i++) { if (air_text::streq(c.tup[i], name)) { return; } }
+    if (c.ntup >= 512) { return; }
+    c.tup[c.ntup] = name; c.ntup++;
+    if (t.arg_count == 0) { return; }
+    // `ty()` writes `struct __tup_...`, so the definition needs the whole name.
+    c.types_out.put(name); c.types_out.put((char*)" {\n");
+    for (usz i = 0; i < t.arg_count; i++)
+    {
+        c.types_out.put((char*)"    ");
+        // The gep path writes `-` followed by the literal index, so the member
+        // is `_N`; naming these `fN` made every tuple projection a missing field.
+        char[16] mn; mn[0] = '_';
+        usz di = 1; usz v = i;
+        if (v == 0) { mn[di] = '0'; di = di + 1; }
+        char[8] dg; usz dl = 0;
+        while (v > 0) { dg[dl] = (char)('0' + (char)(v % 10)); dl = dl + 1; v = v / 10; }
+        usz k = dl; while (k > 0) { k = k - 1; mn[di] = dg[k]; di = di + 1; }
+        mn[di] = 0;
+        c.declarator(&c.types_out, t.args[i], &mn[0]);
+        c.types_out.put((char*)";\n");
+    }
+    c.types_out.put((char*)"};\n\n");
 }
 
 fn void Ctx.data_type(Ctx* c, AirDecl* d, Sb* o)
@@ -1618,13 +1713,12 @@ fn void Ctx.global_decl(Ctx* c, AirDecl* d, Sb* o)
 fn bool libc_declares(char* nm)
 {
     if (nm == null) { return false; }
-    static char*[22] names = {
-        "malloc", "calloc", "realloc", "free", "strlen", "strcmp", "strncmp",
-        "memcpy", "memmove", "memset", "printf", "fprintf", "snprintf",
-        "sprintf", "puts", "putchar", "write", "read", "open", "close",
-        "exit", "abort"
-    };
-    for (usz i = 0; i < 22; i++) { if (air_text::streq(names[i], nm)) { return true; } }
+    // ONLY <string.h>: that is the one header the prelude includes besides
+    // <stdint.h>/<stdbool.h>/<stdatomic.h>, and none of those declare a function.
+    // Listing `printf` here without including <stdio.h> left every call to an
+    // undeclared function -- the skip and the include have to agree.
+    static char*[8] names = { "strlen", "strcmp", "strncmp", "memcpy", "memmove", "memset", "strchr", "strcpy" };
+    for (usz i = 0; i < 8; i++) { if (air_text::streq(names[i], nm)) { return true; } }
     return false;
 }
 
@@ -1703,6 +1797,7 @@ fn int to_c(AirModule* m, char** result, bool want_text)
     c.m = m; c.errs = 0; c.fn_name = null; c.emit = want_text; c.quiet = false;
     c.vn = (char**)malloc(8 * MAXV); c.vv = (Val*)malloc(Val::size * MAXV);
     c.dn = (char**)malloc(8 * MAXV); c.ndn = 0;
+    c.tup = (char**)malloc(8 * 512); c.ntup = 0;
     c.lbls = (Lbl*)malloc(Lbl::size * MAXL);
     c.nv = 0; c.nl = 0; c.tmp = 0; c.nstr = 0;
     c.decls.init(); c.types_out.init(); c.pre.init();
@@ -1790,6 +1885,8 @@ fn int to_c(AirModule* m, char** result, bool want_text)
         }
         c.fn_name = d.name;
         c.decls.n = 0;
+        c.tuple_defs(d.ret_ty, 0);
+        for (usz pi = 0; pi < d.param_count; pi++) { if (d.params[pi] != null) { c.tuple_defs(d.params[pi].ty, 0); } }
         if (!air_text::streq(d.name, "main")) { c.header(d, &c.pre, false); }
         else { c.header(d, &c.pre, true); }
         c.pre.put((char*)";\n");
@@ -1808,8 +1905,14 @@ fn int to_c(AirModule* m, char** result, bool want_text)
             {
                 bool defd = false;
                 for (usz j = 0; j < m.decl_count; j++) { AirDecl* e = m.decls[j]; if (e != null && e.tag == ADECL_DEF && air_text::streq(e.name, d.name)) { defd = true; } }
+                // Already emitted by the hoisting pass above (and skipped there
+                // when the C library declares the name). Emitting again here put
+                // glibc's strcmp/strlen back into the file with AIR's types.
+                // Every declare was emitted by the hoisting pass, which is the
+                // only place that applies the libc rule. Re-emitting here put
+                // glibc's strcmp/strlen back with AIR's types.
                 if (defd) { break; }
-                c.fn_name = d.name; c.declare(d, &body); c.fn_name = null; break;
+                break;
             }
             case ADECL_DEF: c.function(d, &body); break;
             case ADECL_MODULE: case ADECL_IMPORT: case ADECL_DATA: break;
