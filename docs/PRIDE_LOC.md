@@ -79,6 +79,37 @@ Two defects were found this way and fixed in `air_c`, not worked around:
   (`T[N] x`) rather than C's (`T x[N]`).
 
 Reproduce with `bash scripts/pfrontc-build.sh` then the four commands at the top.
+(No `-o`: the emitter writes `examples/tokei/main.c`, which is gitignored along
+with `*.low.air`. The build is 3.1 s and needs `-msse4.1` for
+`runtime/compiler_rt.c`.)
+
+## Executed coverage after this round
+
+`bash scripts/exec-c-check.sh` compiles every `tests/exec/*.pie` and
+`tests/bounty/b*.pie` through `--emit-c`, links `runtime/compiler_rt.c` and
+`runtime/compiler_rt_arch.c`, runs the binary and checks the test's own
+`-- EXPECT:` / `-- EXIT:` / `-- BOUNTY:` header:
+
+| | before | after |
+|---|---:|---:|
+| pass | 72 | **78** |
+| fail | 9 | **3** |
+
+The last three are `b09_cmp`, `b17_call_cond`, `b18_chain_eq`, and they never
+reach the C emitter: `air_low` refuses them upstream (`bool given, i64 wanted`;
+`if condition is not a bool`; `operands have different types: bool vs i64`).
+That is one `air_low` defect, not a C-target one.
+
+The round's real defect was aggregate parts of array type. C decays an array to
+a pointer inside an initializer, so `(Grid){.cells = arr}` stored a *pointer*
+where the elements belonged and every struct-with-array-field program printed
+garbage -- five tests plus the 46th were wrong for that reason alone. AIR means
+a byte copy and a compound literal has nowhere to put a statement, so `air_c`
+now emits a static builder per shape that takes the parts as arguments and
+`memcpy`s the array ones. Nested array aggregates need an out-parameter (C
+cannot return an array), so their builder fills a slot and returns it, and the
+value is the dereference of that pointer -- a comma expression and a call are
+both unaddressable, and callers take the producer's address.
 
 ---
 
