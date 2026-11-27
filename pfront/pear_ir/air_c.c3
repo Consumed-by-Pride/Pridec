@@ -215,9 +215,18 @@ fn long decl_attr_int(AirDecl* d, char* nm)
     return 0;
 }
 
+// `op` is the C spelling to substitute for `nm`. Callers pass the AIR name for
+// both, which is right only while the two coincide: a quoted AIR identifier
+// (`x.122`, `wh.head4`) needs the injective spelling, and binding the raw bytes
+// made `prd` return `x.122` -- a C float literal inside an expression. Resolve
+// it here, once, so no caller can forget.
 fn void Ctx.bind(Ctx* c, char* nm, char* op, AirTyp* ty)
 {
     if (nm == null) { return; }
+    if (op != null && air_text::streq(op, nm) && !c_ident_ok(nm))
+    {
+        Sb m; m.init(); c.mangle(&m, nm); op = m.take();
+    }
     for (usz i = 0; i < c.nv; i++) { if (air_text::streq(c.vn[i], nm)) { c.vv[i].op = op; c.vv[i].ty = ty; return; } }
     if (c.nv >= MAXV) { c.err((char*)"too many names", nm); return; }
     c.vn[c.nv] = nm; c.vv[c.nv].op = op; c.vv[c.nv].ty = ty; c.nv++;
@@ -229,10 +238,28 @@ fn bool Ctx.lookup(Ctx* c, char* nm, Val* out)
     return false;
 }
 
+// A name no AIR binder can already hold. The counter alone is not enough: AIR
+// names its own binders `a2`, `_t7`, `v1`, so a synthesized `a2` collided with a
+// parameter and C reported "redeclared as different kind of symbol". A stem that
+// begins with the double underscore the emitter reserves cannot collide with a
+// mangled AIR name, and the lookup below is the backstop for the rest.
 fn char* Ctx.fresh(Ctx* c, char* stem)
 {
-    Sb s; s.init(); s.put(stem); s.int_((long)c.tmp); c.tmp++;
-    return s.take();
+    for (int tries = 0; tries < 100000; tries++)
+    {
+        Sb s; s.init(); s.put((char*)"__"); s.put(stem); s.int_((long)c.tmp); c.tmp++;
+        char* cand = s.take();
+        if (!c.declared(cand) && !c.bound(cand)) { return cand; }
+    }
+    c.err((char*)"could not find a fresh name", stem);
+    return (char*)"__dup";
+}
+
+// Is this name already bound in the current function's environment?
+fn bool Ctx.bound(Ctx* c, char* nm)
+{
+    for (usz i = 0; i < c.nv; i++) { if (air_text::streq(c.vn[i], nm)) { return true; } }
+    return false;
 }
 
 // C has no quoted-identifier escape, while AIR names may be any bytes (the spec's
@@ -579,7 +606,11 @@ fn Val Ctx.prd(Ctx* c, AirPrd* p)
         case APRD_ALLOCA:
         {
             if (!ty_low(p.ty_arg, 0)) { c.err((char*)"alloca of a non-low type", null); }
-            char* t = c.fresh((char*)"v");
+            // `a` for an alloca slot, `v` for the synthesized type it needs.
+            // Both drawings used to come from one counter, so the second alloca
+            // in a function named its SLOT `v1` and its TYPE `v1` -- two
+            // declarations of one identifier, which gcc reports as a conflict.
+            char* t = c.fresh((char*)"__alloca");
             // Hoisted with every other declaration (§3.4): a jump must never cross
             // a declaration, and the slot is addressed on more than one path.
             c.decls.put((char*)"    ");
@@ -1074,6 +1105,10 @@ fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
                 // gives an alloca, applied to every binding.
                 if (!c.declared(x.binder))
                 {
+                    // A tuple-typed local needs its struct defined; this is the
+                    // point where the type is certain, because it came from the
+                    // value that will be assigned.
+                    c.tuple_defs(v.ty, 0);
                     c.decls.put((char*)"    ");
                     c.ty_decl(&c.decls, v.ty, x.binder);
                     c.decls.put((char*)";\n");
@@ -1149,7 +1184,21 @@ fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
                 if (k.tag == ACNS_COMU)
                 {
                     Val v = c.prd(x.prd);
-                    c.pad(o); c.ty_decl(o, v.ty, k.bind); o.put((char*)" = "); o.put(v.op); o.put((char*)";\n");
+                    // Same rule as a `let`: a bound name is declared at function
+                    // scope and assigned here, because the arm that reads it is
+                    // not always the arm that binds it. Declaring it inside this
+                    // nesting made `_c40` use `_f31` from a sibling `if` arm --
+                    // an undeclared identifier in C, a well-scoped name in AIR.
+                    if (k.bind != null && v.ty != null && !ty_is_void(v.ty) && !c.declared(k.bind))
+                    {
+                        c.decls.put((char*)"    ");
+                        c.ty_decl(&c.decls, v.ty, k.bind);
+                        c.decls.put((char*)";\n");
+                        c.mark_declared(k.bind);
+                    }
+                    c.pad(o);
+                    if (k.bind != null && v.ty != null && !ty_is_void(v.ty)) { c.name(o, k.bind, false); o.put((char*)" = "); }
+                    o.put(v.op); o.put((char*)";\n");
                     c.bind(k.bind, k.bind, v.ty);
                     x = k.body; continue;
                 }
@@ -1184,9 +1233,32 @@ fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
                     Sb s; s.init(); s.putc('('); s.put(a.op); s.put((char*)")");
                     if (k.tag == ACNS_PROJ) { s.put((char*)"._"); s.int_(ix); }
                     else { s.putc('.'); c.name(&s, k.name, false); }
+                    // A projection's result is a bound name like any other, so it
+                    // is declared at function scope. Declaring it inline made the
+                    // NEXT `if` arm fail with "_f31 undeclared": AIR scopes it to
+                    // the function, C scoped it to the branch.
+                    if (k.tail.bind != null && ft != null && !ty_is_void(ft) && !c.declared(k.tail.bind))
+                    {
+                        c.decls.put((char*)"    ");
+                        c.ty_decl(&c.decls, ft, k.tail.bind);
+                        c.decls.put((char*)";\n");
+                        c.mark_declared(k.tail.bind);
+                    }
                     c.pad(o);
-                    c.ty_decl(o, ft, k.tail.bind);
-                    o.put((char*)" = "); o.put(s.take()); o.put((char*)";\n");
+                    char* rhs = s.take();
+                    if (ft != null && ft.tag == ATYP_ARRAY)
+                    {
+                        // A field of array type is a value AIR copies; C cannot
+                        // assign an array, so this is the same memcpy the `let`
+                        // and `store` arms use for an aggregate.
+                        o.put((char*)"memcpy((void *)(&"); c.name(o, k.tail.bind, false); o.put((char*)"), (const void *)(&");
+                        o.put(rhs); o.put((char*)"), sizeof("); c.ty(o, ft); o.put((char*)"));\n");
+                    }
+                    else
+                    {
+                        if (k.tail.bind != null && ft != null && !ty_is_void(ft)) { c.name(o, k.tail.bind, false); o.put((char*)" = "); }
+                        o.put(rhs); o.put((char*)";\n");
+                    }
                     c.bind(k.tail.bind, k.tail.bind, ft);
                     x = k.tail.body; continue;
                 }
@@ -1416,7 +1488,14 @@ fn void Ctx.prescan_let(Ctx* c, AirCmd* x)
         if (x.tag == ACMD_LET && x.binder != null && x.prd != null)
         {
             Val v = c.prd_ty(x.prd);
-            if (v.ty != null && !c.has_type(x.binder)) { c.bind(x.binder, v.op, v.ty); }
+            if (v.ty != null && !c.has_type(x.binder))
+            {
+                c.bind(x.binder, v.op, v.ty);
+                // A local of tuple type needs its struct defined before the
+                // function body mentions it: `struct __tup_i64_i64 _tu99;` with no
+                // definition anywhere is "storage size isn't known".
+                c.tuple_defs(v.ty, 0);
+            }
         }
         if (x.tag == ACMD_SEQ && x.body != null) { c.prescan_let(x.body); }
         if (x.tag == ACMD_LETREC && x.body != null) { c.prescan_let(x.body); }
@@ -1475,6 +1554,14 @@ fn Val Ctx.prd_ty(Ctx* c, AirPrd* p)
     if (p.tag == APRD_SIZEOF || p.tag == APRD_ALIGNOF || p.tag == APRD_OFFSETOF) { v.ty = c.m.t_usz; return v; }
     if (p.tag == APRD_GEP) { v.ty = p.ty; return v; }
     if (p.tag == APRD_ALLOCA) { v.ty = p.ty; return v; }
+    // A tuple literal carries its type as the annotation, and the members are
+    // typed individually, but the constructor itself may be unannotated in an
+    // unevaluated position -- so build the shape from the members.
+    if (p.tag == APRD_TUPLE)
+    {
+        v.ty = p.ty;
+        return v;
+    }
     if (p.tag == APRD_STRING || p.tag == APRD_BYTES) { v.ty = null; return v; }
     return v;
 }
@@ -1653,6 +1740,8 @@ fn bool data_mentions(AirDecl* d, char* nm)
 // so a tuple of tuples is complete before the tuple that holds it.
 fn void Ctx.tuple_defs(Ctx* c, AirTyp* t, int depth)
 {
+    // Runs in the quiet prescan too: suppressing DIAGNOSTICS must not suppress
+    // DECLARATIONS, and gating this on `quiet` left the struct undefined.
     if (t == null || depth > 8) { return; }
     for (usz i = 0; i < t.arg_count; i++) { c.tuple_defs(t.args[i], depth + 1); }
     if (t.tag != ATYP_TUPLE) { return; }
