@@ -4361,14 +4361,14 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     if (cl == null || cl.kind != Nk.N_CLAUSE) continue;
                     usz arity = 0;
                     bool irrefutable = true;
-                    bool has_guard = false;
+                    Node* guard_n = null;
                     Node* body_n = null;
                     usz bcnt = 0;
                     for (usz j = 0; j < cl.child_count; j++)
                     {
                         Node* cp = cl.children[j];
                         if (cp == null) continue;
-                        if (cp.kind == Nk.N_GUARD) { has_guard = true; continue; }
+                        if (cp.kind == Nk.N_GUARD) { guard_n = cp; continue; }
                         if (pfront_core::is_pattern(cp.kind))
                         {
                             if (!clause_bindings_arity(cp, &arity)) irrefutable = false;
@@ -4383,9 +4383,27 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                             || body_n.kind == Nk.N_STMT_COMPOUND_ASSIGN || body_n.kind == Nk.N_STMT_RETURN
                             || body_n.kind == Nk.N_STMT_BREAK || body_n.kind == Nk.N_STMT_CONTINUE
                             || body_n.kind == Nk.N_STMT_DEFER);
-                    if (irrefutable && !has_guard && arity == d.param_count
-                        && bcnt == 1 && supported_body)
+                    /*
+                     A GUARD is not a reason to refuse the clause. `| (a, b) if a > b -> a`
+                     is a single-clause function whose pattern is an irrefutable tuple of
+                     binders: there is nothing to dispatch on, so the clause lowers to
+                     `if !guard { poison }` -- exactly the shape the match-arm path below
+                     already builds with the %guard covariable (air_lower.c3:4484). This
+                     path used to mark has_guard and then refuse the whole clause, so
+                     tests/lowering/c08_match_guard.pie came out with an UNLOWERED guard
+                     subtree and a poison body.
+                    */
+                    if (irrefutable && arity == d.param_count && bcnt == 1 && supported_body)
                     {
+                        AirPrd* gcond = null;
+                        if (guard_n != null && guard_n.child_count > 0 && guard_n.children[0] != null)
+                        {
+                            air_audit::mark(guard_n);
+                            // No branch here to hang a Br.guard on, so the guard is the
+                            // condition of a real if. (The match path cuts to %guard
+                            // because AIR branches carry their guard that way.)
+                            gcond = lr.prd(guard_n.children[0]);
+                        }
                         if (pfront_core::is_expr(body_n.kind))
                         {
                             body = lr.expr_to_cns(body_n, lr.cns_k(ret));
@@ -4393,6 +4411,13 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                         else
                         {
                             body = lr.cmd(body_n, ret);
+                        }
+                        if (gcond != null)
+                        {
+                            // A false guard reaches the poison, so a body whose guard did
+                            // not hold can never run silently.
+                            AirCmd* fallback = lr.poison_cmd(lr.dup("clause guard was false and no later clause matched"));
+                            body = air_ir::air_mk_if(lr.arena, gcond, body, fallback);
                         }
                     }
                     else
@@ -4402,13 +4427,16 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     break;
                 }
             }
-            if (body == null && d.param_count > 1)
-            {
-                // Fail closed: the legacy match below has one scrutinee and
-                // cannot implement positional multi-argument clause dispatch.
-                // Never let it prune unmatched parameters into a dummy return.
-                body = lr.poison_cmd(lr.dup("multi-parameter clause dispatch requires tuple-pattern lowering; unsupported clause form"));
-            }
+            /*
+             Multi-parameter clause sets used to be refused here outright, on the
+             grounds that the match below has one scrutinee. That is true of the
+             legacy positional dispatch, but the match arms built below match a
+             TUPLE pattern (pc > 1 becomes air_mk_pat_tuple), which is exactly
+             tuple-pattern dispatch. Refusing left tests/lowering/c08_match_guard.pie
+             -- `| (a, b) if a > b -> a` over `| (a, _) -> 0` -- with a poison body
+             in the .air, and the audit reported the guard and clause subtrees as
+             unlowered. Let the tuple-pattern match below build it.
+            */
             if (body == null)
             {
                 AirBranch*[64] bs; usz bc = 0;
@@ -4484,7 +4512,16 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     AirCmd* gcmd = null;
                     if (guard_n != null && guard_n.child_count > 0 && guard_n.children[0] != null)
                     {
+                        /*
+                         Mark the guard's whole SUBTREE, not just the guard node.
+                         expr_to_cns lowers the condition, but the audit reports any
+                         audited descendant it has not seen marked, so `if a > b`
+                         showed up as "UNLOWERED binary 3:17 under guard" even though
+                         the guard was lowered and the program ran correctly. A count
+                         of unlowered nodes must mean what it says.
+                        */
                         air_audit::mark(guard_n);
+                        air_audit::mark_tree(guard_n);
                         gcmd = lr.expr_to_cns(guard_n.children[0], air_ir::air_mk_covar(lr.arena, "%guard"));
                     }
                     lr.scope.leave();
