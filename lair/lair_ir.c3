@@ -165,7 +165,8 @@ struct LTerm
     LTermK k;
     LAtom a;                    // LTM_RET value / LTM_SWITCH scrutinee
     char* target;               // LTM_JUMP target block
-    LAtom[8] args;              // LTM_JUMP edge arguments (block parameters)
+    LAtom[24] args;             // LTM_JUMP edge arguments (block parameters:
+                                // declared label params + captured environment)
     int argc;
     char* t1; char* t2;         // LTM_BR true / false targets
     long[64] vals;              // LTM_SWITCH case values
@@ -175,13 +176,21 @@ struct LTerm
 }
 
 // ── blocks (materialized covariables) ──────────────────────────────────────
-struct LParam { char* name; LTy ty; }
+struct LParam { char* name; char* aname; LTy ty; }
+// `name` is the SSA name the printers emit (unique per function); `aname` is
+// the AIR binder name the verifier's environment is keyed by (labels can
+// shadow, and a phi's SSA name must be unique even when the AIR name repeats
+// across blocks).
 
 struct LBlock
 {
     char* name;
-    LParam[8] params;
+    LParam[24] params;          // declared label parameters, then the captured
+                                // environment (N3: one param per captured name)
     int np;
+    bool lbl;                   // a source label block: its parameters are
+                                // scope-local (the verifier unsets them after
+                                // the block; while-header phis persist)
     LInstr* instrs;
     int ni;
     int cap;

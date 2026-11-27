@@ -15,7 +15,11 @@
 // Dominators are the textbook iterative intersection over the block graph;
 // the entry block dominates itself, and every use must be defined in a block
 // whose dom-set contains the use's block. Block parameters are defined at
-// the top of their block (N3), function parameters at entry.
+// the top of their block (N3), function parameters at entry. The environment
+// is flat with shadowing (the lowerer's scopes): lookups take the innermost
+// binding, and a source label block's parameters are unset again after the
+// block -- they are scope-local, while a while-header phi persists (the
+// lowerer rebinds the carried names to it after the loop).
 // ============================================================================
 module lair_verify;
 extern fn int fprintf(void* f, char* fmt, ...);
@@ -66,11 +70,19 @@ struct VEnv
 fn int v_find(VEnv* e, char* nm)
 {
     if (nm == null) { return -1; }
-    for (int i = 0; i < e.n; i++)
+    for (int i = e.n - 1; i >= 0; i--)
     {
         if (air_text::streq(e.names[i], nm)) { return i; }
     }
     return -1;
+}
+
+// remove the innermost entry with this name (scope exit)
+fn void v_unset(VEnv* e, char* nm)
+{
+    int idx = v_find(e, nm);
+    if (idx < 0 || idx != e.n - 1) { return; }
+    e.n--;
 }
 
 fn void v_set(VEnv* e, char* nm, LTy t, int blk)
@@ -175,7 +187,7 @@ fn int verify_func(VState* v)
     {
         LBlock* b = f.blocks[i];
         if (!b.has_term) { continue; }
-        int[8] t;
+        int[72] t;
         int nt = 0;
         switch (b.term.k)
         {
@@ -378,6 +390,12 @@ fn int verify_func(VState* v)
             case LTM_TRAP:
             case LTM_UNREACH:
                 break;
+        }
+        // a source label's parameters are scope-local: leave the environment
+        // exactly as the lowerer left it after the label body
+        if (b.lbl)
+        {
+            for (int p = 0; p < b.np; p++) { v_unset(&env, b.params[p].aname != null ? b.params[p].aname : b.params[p].name); }
         }
     }
     return v.errs;

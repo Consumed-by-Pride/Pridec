@@ -210,28 +210,44 @@ itself depends on LLVM.)
 * producers: integer/bool/char/float/unit literals, variable references,
   `binop`, `unop`, `coerce` (integer width/signedness, bool↔int);
 * commands: `mu~` (function exit binding), `let`, `seq`, block sugar,
-  `if`, `while` (no carried label params yet), `match` with
-  bind/wildcard/tuple-unit/integer/boolean/char arms, `nop`, `trap`;
+  `if`, `while` (with loop-carried phi promotion, see below), `match` with
+  bind/wildcard/tuple-unit/integer/boolean/char arms, `nop`, `trap`,
+  `label … . …`, `jump`, `break`, `continue`;
 * consumers: cut to covariable (`⟨v | %ret⟩`), direct/extern calls through
   `call · … · comu x. …` chains, `comu` value bindings;
 * types: `i1/i8/i16/i32/i64`, `u8…u64`, `bool`, `char`, `unit`, `f32`, `f64`.
 
-**Explicitly out of the slice** (phase 2+): labels/jumps/`break`/`continue`
-(edge-argument machinery exists in the grammar from day one and is verified,
-but the lowerer does not synthesize them yet), closures/`letrec`/`lambda`,
-memory (`alloca`/`load`/`store`/`gep`), aggregates, strings, atomics/`asm`/
-`syscall`, globals, multi-input merge.
+**Label semantics** (the phi mechanism, mirroring pear2c's M9 promotion): a
+`label l(params). body` is a block whose parameters are the declared params
+plus one per name the label *captures* from its environment; the captured
+names become loop-carried. Every `jump l(args)`, `break l` and `continue l`
+is an edge whose arguments are the declared args plus the *current* values of
+the captured names at the edge. A `while` whose body rebinds carried names
+gets a parameterized header: the entry edge carries the entry values, the
+back edge the body's final bindings, and after the loop the names are bound
+to the header phis. A jump may only target a label already declared on the
+spine — forward jumps fail closed (pear2c's order-independent edge
+collection is phase 3).
 
-**Fixtures**: the arithmetic/control subset of `tests/pear2/*.air` — ten of
-them: `arithmetic_main`, `bindings_main`, `integer_let_chain`,
-`if_compare_main`, `direct_call`, `bool_function_main`, `while_main`,
-`char_main`, `coerce_integer_main`, `assert_trap_main` — driven by
+**Explicitly out of the slice** (phase 3+): closures/`letrec`/`lambda`,
+memory (`alloca`/`load`/`store`/`gep`), pointer-typed edge values (`null`,
+`ptr` eq — `label_pointer_main` fails closed), `for`/arrays, aggregates,
+strings, atomics/`asm`/`syscall`, globals, multi-input merge, forward
+jumps.
+
+**Fixtures**: nineteen of `tests/pear2/*.air` — the arithmetic/control
+subset plus the label/phi set: `arithmetic_main`, `bindings_main`,
+`integer_let_chain`, `if_compare_main`, `direct_call`, `bool_function_main`,
+`while_main`, `char_main`, `coerce_integer_main`, `assert_trap_main`,
+`label_main`, `label_arg_main`, `label_bool_main`, `label_loop_main`,
+`break_main`, `phi_while_carried_main`, `phi_nested_while_main`,
+`phi_label_ladder_main`, `phi_diamond_join_main` — driven by
 `tests/lair/gate.sh`:
 
 * `--check` on every fixture (parse → lower → verify, no LLVM needed);
 * fail-closed negatives with exit codes and source positions per
-  `CONTRACT.md` §2: exit 3 for AIR outside the slice (labels, closures,
-  letrec), exit 1 for AIR the reader itself rejects;
+  `CONTRACT.md` §2: exit 3 for AIR outside the slice (closures, pointer
+  edge values, `for`/arrays), exit 1 for AIR the reader itself rejects;
 * `--emit-lair` / `--emit-ll` shape assertions on one fixture;
 * default mode: `.ll` → `scripts/ll-exe.py -O1` → run → exit status compared
   against the same expectation pear2's gate uses, then `scripts/ll-bc.py`
@@ -243,13 +259,15 @@ reader bug outside this slice, to be reconciled separately.
 
 ## 6. Ladder
 
-1. **(this slice)** `make check-lair` green: lower + verify the subset above;
-   `make test-lair` green: `.ll` executes with the right exit status.
-2. Labels/jumps/break/continue through the edge-argument path; `phi` fixtures
-   (`phi_while_carried`, `phi_nested_while`) run.
+1. **(done)** the arithmetic/control slice: `make check-lair` /
+   `make test-lair` green over the ten base fixtures.
+2. **(done)** labels/jumps/break/continue through the edge-argument path,
+   with loop-carried phi promotion: the nine label/`phi` fixtures run with
+   the same exit statuses pear2c produces at the same optimization level.
 3. Bitcode from `scripts/ll-bc.py` A/B-compared against `pear2c --emit-bc`
    on the shared subset (behind the future `--emit-bc=lair` flag; identical
-   *behavior* first, identical bytes only where deterministic).
+   *behavior* first, identical bytes only where deterministic); forward
+   jumps (order-independent label edge collection, as pear2c does).
 4. Memory forms + aggregates; the coverage ladder of `BACKENDS.md` §3
    re-run with `lairc` as a third row.
 5. The 48 `tests/exec/pear` fixtures at parity, then stdlib.

@@ -12,10 +12,17 @@
 // N1: every compound producer becomes an instruction with atom operands.
 // N2: consumer stacks (call chains) are walked once, into one LI_CALL; the
 //     continuation is either a comu (bind + continue) or a cut to %ret.
-// N3: the only covariable the slice binds is the function's return; a single
-//     cut site prints `ret`, multiple sites would print `jump %ret(v)` -- the
-//     lowerer picks `ret` per site (an exit is not a join, LAIR.md §1 N3) and
-//     labels/joins arrive in phase 2.
+// N3: a covariable whose code must exist in more than one place is a block
+//     with parameters. The function's return is one covariable (a cut site
+//     prints `ret`); labels are the others: `label l(params). body` is a
+//     block whose parameters are the declared params plus one per name the
+//     label captures from its environment, and every `jump l(args)`,
+//     `break l` and `continue l` is an edge whose arguments are the declared
+//     args plus the *current* values of the captured names -- the block
+//     parameters are the phi nodes, exactly as pear2c's M9 promotion does.
+//     A `while` whose body rebinds captured names gets the same treatment:
+//     the header is a parameterized join, the entry edge carries the entry
+//     values, the back edge the body's final bindings.
 //
 // Everything outside the slice fails closed with an AIR source position:
 // a LAIR bug that reaches LLVM is a LLVM diagnostic with no file attached.
@@ -41,11 +48,31 @@ struct Lower
     int anon;
     char*[256] vn;
     LAtom[256] vv;
+    bool[256] carried;          // env entry was captured by a label: rebinding
+                                // it inside a loop makes it loop-carried
     int nv;
     char* ret_name;             // the covariable bound by the def's `mu~`
     int line;
     int col;
     char* fn_name;
+    // loop-carried watch: the last value bound to each tracked name during
+    // a while body (pear2c's watch_*), read for the back-edge arguments
+    char*[32] wl_names;
+    LAtom[32] wl_vals;
+    int wl_n;
+    bool watch_on;
+    int watch_base;             // branch depth the watch records at
+    int bdepth;                 // branch depth (arms increment it)
+    // label table (phase 2): name -> block, in first-encounter order
+    char*[32] lbl_names;
+    LBlock*[32] lbl_blocks;
+    int[32] lbl_np;             // declared parameter count (captured params
+                                // are appended when the label is lowered)
+    char*[512] lbl_par;         // declared parameter AIR names (per label)
+    char*[512] lbl_cap;         // captured environment AIR names (per label)
+    int[32] lbl_parn;
+    int[32] lbl_capn;
+    int lbl_n;
 }
 
 // ── diagnostics ────────────────────────────────────────────────────────────
@@ -200,25 +227,250 @@ fn LTy lair_to_lty(AirTyp* t)
 }
 
 // ── environment ────────────────────────────────────────────────────────────
+// Flat with shadowing: a `let` (or comu bind, or loop-carried phi) of a name
+// that is already in scope appends a new entry and hides the old one, exactly
+// like AIR's lexical scopes. Lookup takes the innermost binding. Scopes are
+// saved/restored around every construct whose bindings must not escape.
 fn bool Lower.lookup(Lower* l, char* nm, LAtom* out)
 {
     if (nm == null) { return false; }
-    for (int i = 0; i < l.nv; i++)
+    for (int i = l.nv - 1; i >= 0; i--)
     {
         if (air_text::streq(l.vn[i], nm)) { *out = l.vv[i]; return true; }
     }
     return false;
 }
 
+fn int Lower.env_index(Lower* l, char* nm)
+{
+    if (nm == null) { return -1; }
+    for (int i = l.nv - 1; i >= 0; i--)
+    {
+        if (air_text::streq(l.vn[i], nm)) { return i; }
+    }
+    return -1;
+}
+
 fn void Lower.bind(Lower* l, char* nm, LAtom v)
 {
     if (nm == null || (nm[0] == '_' && nm[1] == 0)) { return; }
-    LAtom old;
-    if (Lower.lookup(l, nm, &old)) { Lower.fail(l, "name bound twice (LAIR is single-assignment)", nm); return; }
     if (l.nv >= 256) { Lower.fail(l, "too many names in one function", nm); return; }
+    // a rebinding inherits carried-ness from the binding it shadows (pear2c's
+    // env_carried chain): a captured name rebound to a loop phi stays carried
+    int prev = Lower.env_index(l, nm);
     l.vn[l.nv] = nm;
     l.vv[l.nv] = v;
+    l.carried[l.nv] = prev >= 0 && l.carried[prev];
     l.nv++;
+    // loop-carried watch: the last value bound to a tracked name during a
+    // while body becomes that loop's back-edge argument
+    if (l.watch_on && l.bdepth == l.watch_base)
+    {
+        for (int i = 0; i < l.wl_n; i++)
+        {
+            if (air_text::streq(l.wl_names[i], nm)) { l.wl_vals[i] = v; return; }
+        }
+    }
+}
+
+fn void Lower.env_mark_carried(Lower* l)
+{
+    for (int i = 0; i < l.nv; i++) { l.carried[i] = true; }
+}
+
+// watch lookup with the entry value as the fallback (pear2c's watch_lookup)
+fn LAtom Lower.watch_get(Lower* l, char* nm, LAtom fallback)
+{
+    for (int i = 0; i < l.wl_n; i++)
+    {
+        if (air_text::streq(l.wl_names[i], nm)) { return l.wl_vals[i]; }
+    }
+    return fallback;
+}
+
+fn void Lower.watch_reg(Lower* l, char* nm)
+{
+    for (int i = 0; i < l.wl_n; i++)
+    {
+        if (air_text::streq(l.wl_names[i], nm)) { return; }
+    }
+    if (l.wl_n >= 32) { Lower.fail(l, "loop carries more mutable locals than supported", null); return; }
+    l.wl_names[l.wl_n] = nm;
+    l.wl_vals[l.wl_n] = lair_ir::la_atom_unit();
+    l.wl_n++;
+}
+
+// ── label table ────────────────────────────────────────────────────────────
+fn int Lower.label_index(Lower* l, char* nm)
+{
+    if (nm == null) { return -1; }
+    for (int i = 0; i < l.lbl_n; i++)
+    {
+        if (air_text::streq(l.lbl_names[i], nm)) { return i; }
+    }
+    return -1;
+}
+
+fn bool Lower.label_reg(Lower* l, char* nm, LBlock* b, AirCmd* c)
+{
+    if (Lower.label_index(l, nm) >= 0)
+    {
+        Lower.fail(l, "label declared twice", nm);
+        return false;
+    }
+    if (l.lbl_n >= 32) { Lower.fail(l, "too many labels in one function", nm); return false; }
+    l.lbl_names[l.lbl_n] = nm;
+    l.lbl_blocks[l.lbl_n] = b;
+    l.lbl_np[l.lbl_n] = (int)c.mbinder_count;
+    l.lbl_parn[l.lbl_n] = (int)c.mbinder_count;
+    for (usz i = 0; i < c.mbinder_count && i < 16; i++)
+    {
+        l.lbl_par[(usz)l.lbl_n * 16 + (usz)i] = c.mbinders[i] != null ? c.mbinders[i].name : null;
+    }
+    l.lbl_capn[l.lbl_n] = 0;
+    l.lbl_n++;
+    return true;
+}
+
+// ── pre-pass: register labels and validate jump targets, in walk order ──────
+// A jump may only target a label already declared on the spine (forward
+// jumps fail closed -- pear2c's order-independent edge collection is phase 3).
+fn bool Lower.collect_cns(Lower* l, AirCns* k)
+{
+    if (k == null) { return true; }
+    if (k.tag == ACNS_COMU && k.body != null && !Lower.collect(l, k.body)) { return false; }
+    for (usz i = 0; i < k.branch_count; i++)
+    {
+        if (k.branches[i] != null && k.branches[i].body != null && !Lower.collect(l, k.branches[i].body)) { return false; }
+    }
+    if (k.tail != null && !Lower.collect_cns(l, k.tail)) { return false; }
+    return true;
+}
+
+fn bool Lower.collect(Lower* l, AirCmd* c)
+{
+    while (c != null)
+    {
+        if (c.source_line != 0) { l.line = c.source_line; l.col = c.source_col; }
+        switch (c.tag)
+        {
+            case ACMD_NOP:
+                return true;
+            case ACMD_BLOCK:
+                c = c.body;
+                continue;
+            case ACMD_LET:
+                c = c.body;
+                continue;
+            case ACMD_SEQ:
+                if (!Lower.collect(l, c.body)) { return false; }
+                c = c.next;
+                continue;
+            case ACMD_CUT:
+            {
+                AirCns* k = c.cns;
+                if (k == null) { return true; }
+                if (k.tag == ACNS_COMU)
+                {
+                    if (k.body != null && !Lower.collect(l, k.body)) { return false; }
+                    return true;
+                }
+                if (k.tag == ACNS_CALL || k.tag == ACNS_STACK)
+                {
+                    AirCns* cur = k.tag == ACNS_CALL ? k.tail : k;
+                    while (cur != null && cur.tag == ACNS_STACK) { cur = cur.tail; }
+                    if (cur != null && cur.tag == ACNS_COMU && cur.body != null)
+                    {
+                        return Lower.collect(l, cur.body);
+                    }
+                    return true;
+                }
+                return true;
+            }
+            case ACMD_RET:
+            case ACMD_TRAP:
+            case ACMD_UB:
+            case ACMD_ASSERT:
+            case ACMD_ASSUME:
+                return true;
+            case ACMD_IF:
+            {
+                if (!Lower.collect(l, c.then_c)) { return false; }
+                return Lower.collect(l, c.else_c);
+            }
+            case ACMD_WHILE:
+                return Lower.collect(l, c.body);
+            case ACMD_MATCH:
+            {
+                for (usz i = 0; i < c.branch_count; i++)
+                {
+                    if (c.branches[i] != null && c.branches[i].body != null && !Lower.collect(l, c.branches[i].body)) { return false; }
+                }
+                return true;
+            }
+            case ACMD_LABEL:
+            {
+                if (c.mbinder_count > 16) { Lower.fail(l, "label has more than 16 parameters", c.binder); return false; }
+                LBlock* b = lair_ir::lair_new_block(l.a, c.binder);
+                if (b == null) { Lower.fail(l, "out of memory", null); return false; }
+                b.lbl = true;
+                if (l.cur_fn.nb >= 128) { Lower.fail(l, "too many blocks in one function", null); return false; }
+                l.cur_fn.blocks[l.cur_fn.nb] = b;
+                l.cur_fn.nb++;
+                for (usz i = 0; i < c.mbinder_count; i++)
+                {
+                    AirBinder* p = c.mbinders[i];
+                    if (p == null) { continue; }
+                    LTy t = lair_to_lty(p.ty);
+                    if (t == LT_INVALID || t == LT_SYM)
+                    {
+                        Lower.fail(l, "label parameter has no type in the LAIR slice", p.name);
+                        return false;
+                    }
+                    b.params[b.np].name = p.name;
+                    b.params[b.np].aname = p.name;
+                    b.params[b.np].ty = t;
+                    b.np++;
+                }
+                if (!Lower.label_reg(l, c.binder, b, c)) { return false; }
+                return Lower.collect(l, c.body);
+            }
+            case ACMD_JUMP:
+            {
+                int ix = Lower.label_index(l, c.target_label);
+                if (ix < 0)
+                {
+                    Lower.fail(l, "jump to a label declared later (forward jumps are not in the LAIR slice)", c.target_label);
+                    return false;
+                }
+                if (c.jump_arg_count != (usz)l.lbl_np[ix])
+                {
+                    Lower.fail(l, "jump passes the wrong number of arguments", c.target_label);
+                    return false;
+                }
+                return true;
+            }
+            case ACMD_BREAK:
+            case ACMD_CONTINUE:
+            {
+                int ix = Lower.label_index(l, c.target_label);
+                if (ix < 0)
+                {
+                    Lower.fail(l, "break/continue to a label declared later (forward jumps are not in the LAIR slice)", c.target_label);
+                    return false;
+                }
+                if (l.lbl_np[ix] != 0)
+                {
+                    Lower.fail(l, "break/continue targets a label with parameters", c.target_label);
+                    return false;
+                }
+                return true;
+            }
+            default:
+                return true;                   // the lowerer fails closed on these
+        }
+    }
+    return true;
 }
 
 fn LAtom Lower.fresh(Lower* l, LTy t)
@@ -271,6 +523,64 @@ fn AirDecl* lair_find_decl(AirModule* am, char* nm)
         if (d != null && d.name != null && air_text::streq(d.name, nm)) { return d; }
     }
     return null;
+}
+
+// ── carried-mutation scan (pear2c's scan_carried_mutation) ─────────────────
+// Collects the names a loop body rebinds that are in scope *and* captured by
+// a label (carried). These become the header's phi parameters. The scan walks
+// the sequential spine (body/next, comu continuations, nested loops) but not
+// if/match arms: branching constructs are terminal in AIR, so scope-local
+// shadowing inside them cannot escape. The watch arrays are the scratch list.
+fn bool Lower.scan_carried_cns(Lower* l, AirCns* k, char*[] names, int* count, int depth)
+{
+    if (k == null || depth >= 64) { return true; }
+    if (k.tag == ACNS_COMU && k.bind != null && !(k.bind[0] == '_' && k.bind[1] == 0))
+    {
+        int ix = Lower.env_index(l, k.bind);
+        if (ix >= 0 && l.carried[ix])
+        {
+            bool seen = false;
+            for (int i = 0; i < *count; i++) { if (air_text::streq(names[(usz)i], k.bind)) { seen = true; break; } }
+            if (!seen)
+            {
+                if (*count >= 32) { Lower.fail(l, "loop carries more mutable locals than supported", null); return false; }
+                names[(usz)(*count)] = k.bind;
+                (*count)++;
+            }
+        }
+        if (k.body != null && !Lower.scan_carried(l, k.body, names, count, depth + 1)) { return false; }
+    }
+    for (usz i = 0; i < k.branch_count; i++)
+    {
+        if (k.branches[i] != null && k.branches[i].body != null && !Lower.scan_carried(l, k.branches[i].body, names, count, depth + 1)) { return false; }
+    }
+    for (usz i = 0; i < k.cobranch_count; i++)
+    {
+        if (k.cobranches[i] != null && k.cobranches[i].body != null && !Lower.scan_carried(l, k.cobranches[i].body, names, count, depth + 1)) { return false; }
+    }
+    return Lower.scan_carried_cns(l, k.tail, names, count, depth + 1);
+}
+
+fn bool Lower.scan_carried(Lower* l, AirCmd* c, char*[] names, int* count, int depth)
+{
+    if (c == null || depth >= 64) { return true; }
+    if (c.tag == ACMD_LET && c.binder != null && !(c.binder[0] == '_' && c.binder[1] == 0))
+    {
+        int ix = Lower.env_index(l, c.binder);
+        if (ix >= 0 && l.carried[ix])
+        {
+            bool seen = false;
+            for (int i = 0; i < *count; i++) { if (air_text::streq(names[(usz)i], c.binder)) { seen = true; break; } }
+            if (!seen)
+            {
+                if (*count >= 32) { Lower.fail(l, "loop carries more mutable locals than supported", null); return false; }
+                names[(usz)(*count)] = c.binder;
+                (*count)++;
+            }
+        }
+    }
+    if (!Lower.scan_carried_cns(l, c.cns, names, count, depth + 1)) { return false; }
+    return Lower.scan_carried(l, c.body, names, count, depth + 1) && Lower.scan_carried(l, c.next, names, count, depth + 1);
 }
 
 // ── producers (N1) ─────────────────────────────────────────────────────────
@@ -632,10 +942,15 @@ fn void Lower.match(Lower* l, AirCmd* c)
             }
         }
         if (tgt == null) { continue; }
+        // arms are isolated scopes, like if-arms
+        int saved = l.nv;
+        l.bdepth++;
         l.cur = tgt;
         if (is_def && bind_name != null) { Lower.bind(l, bind_name, s); }
         Lower.cmd(l, b.body);
+        l.bdepth--;
         if (!l.cur.has_term) { Lower.fail(l, "match arm falls off its block", null); return; }
+        l.nv = saved;
     }
     if (!defb.has_term)
     {
@@ -664,10 +979,13 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
             {
                 LAtom v = Lower.prd(l, c.prd);
                 if (v.ty == LT_INVALID) { return; }
+                int saved = l.nv;
                 Lower.bind(l, c.binder, v);
                 if (l.lm.errs != 0) { return; }
-                c = c.body;
-                continue;
+                Lower.cmd(l, c.body);
+                l.nv = saved;                 // the let's binding does not escape
+                if (l.lm.errs != 0 || l.cur.has_term) { return; }
+                return;                      // the let's scope ends here
             }
             case ACMD_SEQ:
             {
@@ -755,14 +1073,24 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
                 LTerm b; b.k = LTM_BR; b.a = cv; b.t1 = th.name; b.t2 = el.name;
                 b.target = null; b.argc = 0; b.ncase = 0; b.def = null;
                 Lower.term(l, b);
+                // arms are isolated scopes (pear2c's branch_enter/leave): their
+                // bindings must not leak into siblings or the watch
+                int saved = l.nv;
+                l.bdepth++;
                 l.cur = th;
                 Lower.cmd(l, c.then_c);
+                l.bdepth--;
                 if (l.lm.errs != 0) { return; }
                 if (!l.cur.has_term) { Lower.fail(l, "then-branch falls off its block", null); return; }
+                l.nv = saved;
+                saved = l.nv;
+                l.bdepth++;
                 l.cur = el;
                 Lower.cmd(l, c.else_c);
+                l.bdepth--;
                 if (l.lm.errs != 0) { return; }
                 if (!l.cur.has_term) { Lower.fail(l, "else-branch falls off its block", null); return; }
+                l.nv = saved;
                 l.cur = el;                 // terminal; cursor kept on the else arm
                 return;
             }
@@ -770,15 +1098,51 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
             {
                 // N3: the header is a join (entry edge + back edge), the body
                 // falls back into it, and the exit block is where the sequence
-                // continues. No parameters: the condition is re-evaluated.
+                // continues. When the body rebinds names captured by a label,
+                // the header is parameterized: one phi per carried name, the
+                // entry edge carrying the entry values, the back edge the
+                // body's final bindings (the watch).
+                int saved_wl = l.wl_n;
+                int saved_env = l.nv;
+                bool started = !l.watch_on;      // did this loop start the watch?
+                char*[32] tracked_names;
+                int tracked = 0;
+                if (!Lower.scan_carried(l, c.body, &tracked_names, &tracked, 0)) { return; }
                 LBlock* hdr = Lower.new_block(l);
                 LBlock* body = Lower.new_block(l);
                 LBlock* exitb = Lower.new_block(l);
                 if (hdr == null || body == null || exitb == null) { return; }
-                LTerm j; j.k = LTM_JUMP; j.target = hdr.name; j.argc = 0;
-                j.a = lair_ir::la_atom_unit(); j.t1 = null; j.t2 = null; j.ncase = 0; j.def = null;
+                LAtom[32] entry_vals;
+                if (tracked > 0)
+                {
+                    if (tracked > 24) { Lower.fail(l, "loop carries more mutable locals than supported", null); return; }
+                    for (int k = 0; k < tracked; k++)
+                    {
+                        Lower.watch_reg(l, tracked_names[(usz)k]);
+                        LAtom pa = Lower.fresh(l, l.vv[Lower.env_index(l, tracked_names[(usz)k])].ty);
+                        hdr.params[hdr.np].name = pa.name;
+                        hdr.params[hdr.np].aname = tracked_names[(usz)k];
+                        hdr.params[hdr.np].ty = pa.ty;
+                        hdr.np++;
+                        LAtom cur;
+                        if (!Lower.lookup(l, tracked_names[(usz)k], &cur))
+                        {
+                            Lower.fail(l, "carried name vanished from the environment", tracked_names[(usz)k]);
+                            return;
+                        }
+                        entry_vals[k] = cur;
+                    }
+                }
+                LTerm j; j.k = LTM_JUMP; j.target = hdr.name; j.a = lair_ir::la_atom_unit();
+                j.t1 = null; j.t2 = null; j.ncase = 0; j.def = null;
+                j.argc = tracked;
+                for (int k = 0; k < tracked; k++) { j.args[k] = entry_vals[k]; }
                 Lower.term(l, j);
                 l.cur = hdr;
+                for (int k = 0; k < tracked; k++)
+                {
+                    Lower.bind(l, tracked_names[(usz)k], lair_ir::la_atom_var(hdr.params[k].name, hdr.params[k].ty));
+                }
                 LAtom cv = Lower.prd(l, c.prd);
                 if (cv.ty == LT_INVALID) { return; }
                 if (cv.ty != LT_BOOL) { Lower.fail(l, "while condition is not a bool", null); return; }
@@ -786,17 +1150,160 @@ fn void Lower.cmd(Lower* l, AirCmd* c)
                 b.target = null; b.argc = 0; b.ncase = 0; b.def = null;
                 Lower.term(l, b);
                 l.cur = body;
+                l.watch_on = true;
+                l.watch_base = l.bdepth;
                 Lower.cmd(l, c.body);
                 if (l.lm.errs != 0) { return; }
                 if (!l.cur.has_term)
                 {
-                    // the body's last open block falls into the back edge
-                    LTerm jb; jb.k = LTM_JUMP; jb.target = hdr.name; jb.argc = 0;
+                    // the body's last open block falls into the back edge,
+                    // carrying each tracked name's final binding
+                    LTerm jb; jb.k = LTM_JUMP; jb.target = hdr.name;
                     jb.a = lair_ir::la_atom_unit(); jb.t1 = null; jb.t2 = null; jb.ncase = 0; jb.def = null;
+                    jb.argc = tracked;
+                    for (int k = 0; k < tracked; k++)
+                    {
+                        jb.args[k] = Lower.watch_get(l, tracked_names[(usz)k], entry_vals[k]);
+                    }
                     Lower.term(l, jb);
                 }
+                // the loop body's bindings do not leak; the carried names
+                // surface as the header phis. The binds still hit the watch
+                // (an outer loop is recording): a nested loop's completion
+                // carries its header phis out, exactly as pear2c's
+                // note_carried_bind does -- the phis dominate the exit, the
+                // raw body instructions do not.
+                l.nv = saved_env;
+                for (int k = 0; k < tracked; k++)
+                {
+                    Lower.bind(l, tracked_names[(usz)k], lair_ir::la_atom_var(hdr.params[k].name, hdr.params[k].ty));
+                }
+                if (started) { l.watch_on = false; l.wl_n = saved_wl; }
                 l.cur = exitb;
                 return;                     // sequence continues in the exit block
+            }
+            case ACMD_LABEL:
+            {
+                int ix = Lower.label_index(l, c.binder);
+                if (ix < 0) { Lower.fail(l, "label not registered", c.binder); return; }
+                LBlock* lb = l.lbl_blocks[ix];
+                // capture: one block parameter per environment name, in env
+                // order; the names become loop-carried
+                Lower.env_mark_carried(l);
+                if (l.nv > 16) { Lower.fail(l, "label captures more than 16 environment names", c.binder); return; }
+                char*[16] cap_names;
+                for (int i = 0; i < l.nv; i++) { cap_names[i] = l.vn[i]; }
+                int np0 = lb.np;
+                if (lb.np + l.nv > 24) { Lower.fail(l, "label block has too many parameters", c.binder); return; }
+                for (int i = 0; i < l.nv; i++)
+                {
+                    lb.params[lb.np].name = cap_names[i];
+                    lb.params[lb.np].aname = cap_names[i];
+                    lb.params[lb.np].ty = l.vv[i].ty;
+                    lb.np++;
+                }
+                l.lbl_capn[ix] = l.nv;
+                for (int i = 0; i < l.nv; i++) { l.lbl_cap[(usz)ix * 16 + (usz)i] = cap_names[i]; }
+                // lower the label body in the label block: declared params and
+                // captured names bind to fresh phi atoms
+                int saved = l.nv;
+                LBlock* save_cur = l.cur;
+                for (int i = 0; i < lb.np; i++)
+                {
+                    char* nm = i < np0 ? l.lbl_par[(usz)ix * 16 + (usz)i] : cap_names[i - np0];
+                    LAtom pa = Lower.fresh(l, lb.params[i].ty);
+                    lb.params[i].name = pa.name;
+                    lb.params[i].aname = nm;
+                    Lower.bind(l, nm, pa);
+                }
+                l.cur = lb;
+                Lower.cmd(l, c.body);
+                if (l.lm.errs != 0) { return; }
+                if (!l.cur.has_term)
+                {
+                    Lower.fail(l, "label body does not end in a terminator", c.binder);
+                    return;
+                }
+                l.nv = saved;
+                l.cur = save_cur;
+                return;                     // the label emitted nothing on the spine
+            }
+            case ACMD_JUMP:
+            {
+                int ix = Lower.label_index(l, c.target_label);
+                if (ix < 0) { Lower.fail(l, "jump to an unknown label", c.target_label); return; }
+                LBlock* lb = l.lbl_blocks[ix];
+                int np0 = l.lbl_np[ix];
+                LTerm t; t.k = LTM_JUMP; t.target = lb.name; t.a = lair_ir::la_atom_unit();
+                t.t1 = null; t.t2 = null; t.ncase = 0; t.def = null;
+                int n = 0;
+                for (usz i = 0; i < c.jump_arg_count; i++)
+                {
+                    if (n >= 24) { Lower.fail(l, "jump passes too many arguments", c.target_label); return; }
+                    LAtom v;
+                    if (!Lower.lookup(l, c.jump_args[i], &v))
+                    {
+                        Lower.fail(l, "jump argument is not a bound name", c.jump_args[i]);
+                        return;
+                    }
+                    if (v.ty != lb.params[n].ty)
+                    {
+                        Lower.fail(l, "jump argument has the wrong type", c.jump_args[i]);
+                        return;
+                    }
+                    t.args[n] = v;
+                    n++;
+                }
+                for (int k = 0; k < l.lbl_capn[ix]; k++)
+                {
+                    if (n >= 24) { Lower.fail(l, "jump passes too many arguments", c.target_label); return; }
+                    LAtom v;
+                    if (!Lower.lookup(l, l.lbl_cap[(usz)ix * 16 + (usz)k], &v))
+                    {
+                        Lower.fail(l, "label environment changed since capture", l.lbl_cap[(usz)ix * 16 + (usz)k]);
+                        return;
+                    }
+                    if (v.ty != lb.params[np0 + k].ty)
+                    {
+                        Lower.fail(l, "label environment changed since capture", l.lbl_cap[(usz)ix * 16 + (usz)k]);
+                        return;
+                    }
+                    t.args[n] = v;
+                    n++;
+                }
+                t.argc = n;
+                Lower.term(l, t);
+                return;
+            }
+            case ACMD_BREAK:
+            case ACMD_CONTINUE:
+            {
+                int ix = Lower.label_index(l, c.target_label);
+                if (ix < 0) { Lower.fail(l, "break/continue to an unknown label", c.target_label); return; }
+                LBlock* lb = l.lbl_blocks[ix];
+                LTerm t; t.k = LTM_JUMP; t.target = lb.name; t.a = lair_ir::la_atom_unit();
+                t.t1 = null; t.t2 = null; t.ncase = 0; t.def = null;
+                int n = 0;
+                for (int k = 0; k < l.lbl_capn[ix]; k++)
+                {
+                    if (n >= 24) { Lower.fail(l, "break/continue passes too many arguments", c.target_label); return; }
+                    LAtom v;
+                    if (!Lower.lookup(l, l.lbl_cap[(usz)ix * 16 + (usz)k], &v))
+                    {
+                        Lower.fail(l, "label environment changed since capture", l.lbl_cap[(usz)ix * 16 + (usz)k]);
+                        return;
+                    }
+                    if (v.ty != lb.params[k].ty)
+                    {
+                        Lower.fail(l, "label environment changed since capture", l.lbl_cap[(usz)ix * 16 + (usz)k]);
+                        return;
+                    }
+                    t.args[n] = v;
+                    n++;
+                }
+                t.argc = n;
+                Lower.term(l, t);
+                return;
             }
             case ACMD_MATCH:
             {
@@ -823,6 +1330,11 @@ fn bool Lower.func(Lower* l, AirDecl* d)
     l.anon = 0;
     l.nv = 0;
     l.ret_name = null;
+    l.wl_n = 0;
+    l.watch_on = false;
+    l.watch_base = 0;
+    l.bdepth = 0;
+    l.lbl_n = 0;
     LFunc* f = (LFunc*)lair_ir::lair_alloc(l.a, LFunc::size);
     if (f == null) { Lower.fail(l, "out of memory", null); return false; }
     f.name = d.name;
@@ -866,6 +1378,9 @@ fn bool Lower.func(Lower* l, AirDecl* d)
     f.blocks[f.nb] = entry;
     f.nb++;
     l.cur = entry;
+    // pre-pass: register labels and validate jump targets before lowering
+    if (!Lower.collect(l, body)) { return false; }
+    if (l.lm.errs != 0) { return false; }
     Lower.cmd(l, body);
     if (l.lm.errs != 0) { return false; }
     if (!l.cur.has_term)
@@ -893,6 +1408,11 @@ fn int lower_module(AirModule* am, LModule* lm)
     l.anon = 0;
     l.nv = 0;
     l.ret_name = null;
+    l.wl_n = 0;
+    l.watch_on = false;
+    l.watch_base = 0;
+    l.bdepth = 0;
+    l.lbl_n = 0;
     l.line = 1;
     l.col = 1;
     l.fn_name = null;
