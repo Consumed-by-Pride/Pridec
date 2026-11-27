@@ -111,7 +111,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c air-boundary air-pass lint-pride probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
+.PHONY: all c3c air-boundary air-pass lint-pride probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c lairc check-lair test-lair legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -259,6 +259,27 @@ PEAR2_OPT_TEST_SRC := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2
 $(PEAR2_OPT_TEST): $(PEAR2_OPT_TEST_SRC) | c3c
 	mkdir -p tmp
 	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(PEAR2_OPT_TEST_SRC) --max-stack-object-size 262144 -o $(PEAR2_OPT_TEST)
+
+# ── LAIR driver (docs/pear2/LAIR.md) ────────────────────────────────────────
+# `lairc` is the standalone AIR -> LAIR -> .ll/.bc driver behind a flag. It
+# links the AIR reader half plus the LAIR files and NOTHING else: no LLVM, no
+# pear2 -- so `make check-lair` survives a machine with only c3c. The .bc step
+# is scripts/ll-bc.py (ctypes over libLLVM), mirroring scripts/ll-exe.py.
+LAIR_SRC := pfront/pear_ir/air_util.c3 lair/lair_ir.c3 lair/lair_lower.c3 \
+            lair/lair_verify.c3 lair/lair_write.c3 lair/lair_ll.c3 lair/lairc_main.c3
+LAIRC := lair/lairc
+lairc: $(LAIRC)
+	ln -sf $(LAIRC) lairc
+$(LAIRC): $(LAIR_SRC) $(AIR_READ_CORE) | c3c
+	$(C3C) compile --stdlib $(C3C_LIB) $(AIR_READ_CORE) $(LAIR_SRC) --max-stack-object-size 262144 -o $(LAIRC)
+
+# Parse -> lower -> verify: the slice gate, no LLVM involved.
+check-lair: $(LAIRC)
+	bash tests/lair/gate.sh --check
+
+# The same gate plus .ll execution: exit status through ll-exe.py.
+test-lair: $(LAIRC)
+	bash tests/lair/gate.sh
 
 test-pear2: $(PEAR2_BIN) $(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
