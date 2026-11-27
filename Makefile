@@ -8,7 +8,7 @@
 # by default.)
 #
 # Requirements:
-#   c3c 0.8.4     — C3 compiler (https://c3-lang.org)
+#   c3c 0.8.6     — C3 compiler (https://c3-lang.org)
 #                   Auto-fetched to ~/c3bin/c3c by `make c3c` if missing.
 #
 # Targets:
@@ -21,7 +21,7 @@
 
 C3C       ?= $(if $(wildcard $(HOME)/.cache/c3src/build-llvm23-clang/c3c),$(HOME)/.cache/c3src/build-llvm23-clang/c3c,$(HOME)/c3bin/c3c)
 C3C_LIB   ?= $(if $(wildcard $(HOME)/.cache/c3src/src/lib/std),$(HOME)/.cache/c3src/src/lib,$(HOME)/c3lib)
-C3C_VER   := v0.8.4
+C3C_VER   := v0.8.6
 C3C_URL   := https://github.com/c3lang/c3c/releases/download/$(C3C_VER)/c3-linux-static.tar.gz
 
 BINARY    := pfrontc
@@ -319,7 +319,7 @@ check-pear2: | c3c
 #   * every tag either handles is a tag air_ll handles too (the consumers may not
 #     disagree about what the low profile is);
 #   * C3: no emitted template contains `goto`, and the type names printed exist in
-#     c3c v0.8.4, the tag pinned above;
+#     c3c v0.8.6, the tag pinned above;
 #   * C: the emitted prelude declares every __pride_ name the emitter prints.
 check-targets: | c3c
 	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(CONSUMER_SRC) --max-stack-object-size 262144

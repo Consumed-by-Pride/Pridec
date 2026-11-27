@@ -16,7 +16,7 @@ every language feature works at runtime.
 
 ### Prerequisites
 
-* **c3c 0.8.4** — the C3 compiler (Pridec is implemented in C3).
+* **c3c 0.8.6** — the C3 compiler (Pridec is implemented in C3).
   `make c3c` will fetch a static build to `~/c3bin/c3c` for you.
 * **libLLVM 23** — PEAR uses the LLVM-C API and LLVM-23 attribute IDs. LLVM 19
   is not a supported substitute for optimized native-code testing.
@@ -26,7 +26,7 @@ every language feature works at runtime.
 ### Build the compiler
 
 ```bash
-bash scripts/agent3-env.sh    # restore c3c 0.8.4 + C3 stdlib + libLLVM 23
+bash scripts/agent3-env.sh    # restore c3c + C3 stdlib + libLLVM 23
 make                         # builds ./pfrontc
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 ```
