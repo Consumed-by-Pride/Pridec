@@ -139,7 +139,10 @@ fn void Sb.int_(Sb* s, long v)
     if (v == 0) { s.putc('0'); return; }
     char[24] tmp; usz k = 0; bool neg = v < 0;
     ulong u = neg ? (ulong)(0 - v) : (ulong)v;
-    while (u > 0) { tmp[k] = (char)('0' + (int)(u % 10)); u = u / 10; k++; }
+    // NB: u % 10 / u / 10 with an int-literal divisor compiles to SIGNED
+    // division in c3c 0.6.2 (wrong for values >= 2^63, e.g. the i64-min bit
+    // pattern) — the UL suffix forces the unsigned path.
+    while (u > 0) { tmp[k] = (char)('0' + (int)(u % 10UL)); u = u / 10UL; k++; }
     if (neg) { s.putc('-'); }
     while (k > 0) { k--; s.putc(tmp[k]); }
 }

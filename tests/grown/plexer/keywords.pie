@@ -1,0 +1,167 @@
+-- plexer.keywords -- the reserved-word table.
+--
+-- pfront_lex.c3 recognises 113 keywords through a span-comparison table; this
+-- self-hosted copy carries the subset the grown corpus actually uses, stored
+-- as a static array of borrowed string literals and looked up by length
+-- bucket first, then by byte comparison.
+
+mod plexer.keywords
+
+use plexer.tokens
+
+pub const KW_COUNT : i64 = 30i64
+
+-- longest keyword length in the table; the lookup bails out past it
+const KW_MAX_LEN : i64 = 9i64
+
+pub fn kw_at : i64 -> ptr
+  | i ->
+      if i == 0i64 then "fn"
+      else if i == 1i64 then "let"
+      else if i == 2i64 then "mut"
+      else if i == 3i64 then "type"
+      else if i == 4i64 then "struct"
+      else if i == 5i64 then "enum"
+      else if i == 6i64 then "interface"
+      else if i == 7i64 then "impl"
+      else if i == 8i64 then "match"
+      else if i == 9i64 then "if"
+      else if i == 10i64 then "else"
+      else if i == 11i64 then "while"
+      else if i == 12i64 then "for"
+      else if i == 13i64 then "in"
+      else if i == 14i64 then "return"
+      else if i == 15i64 then "break"
+      else if i == 16i64 then "continue"
+      else if i == 17i64 then "use"
+      else if i == 18i64 then "mod"
+      else if i == 19i64 then "pub"
+      else if i == 20i64 then "as"
+      else if i == 21i64 then "true"
+      else if i == 22i64 then "false"
+      else if i == 23i64 then "alloc"
+      else if i == 24i64 then "free"
+      else if i == 25i64 then "defer"
+      else if i == 26i64 then "handle"
+      else if i == 27i64 then "effect"
+      else if i == 28i64 then "const"
+      else if i == 29i64 then "static"
+      else "\0"
+
+pub fn kw_kind : i64 -> TokenKind
+  | i ->
+      if i == 0i64 then TkKwFn
+      else if i == 1i64 then TkKwLet
+      else if i == 2i64 then TkKwMut
+      else if i == 3i64 then TkKwType
+      else if i == 4i64 then TkKwStruct
+      else if i == 5i64 then TkKwEnum
+      else if i == 6i64 then TkKwInterface
+      else if i == 7i64 then TkKwImpl
+      else if i == 8i64 then TkKwMatch
+      else if i == 9i64 then TkKwIf
+      else if i == 10i64 then TkKwElse
+      else if i == 11i64 then TkKwWhile
+      else if i == 12i64 then TkKwFor
+      else if i == 13i64 then TkKwIn
+      else if i == 14i64 then TkKwReturn
+      else if i == 15i64 then TkKwBreak
+      else if i == 16i64 then TkKwContinue
+      else if i == 17i64 then TkKwUse
+      else if i == 18i64 then TkKwMod
+      else if i == 19i64 then TkKwPub
+      else if i == 20i64 then TkKwAs
+      else if i == 21i64 then TkKwTrue
+      else if i == 22i64 then TkKwFalse
+      else if i == 23i64 then TkKwAlloc
+      else if i == 24i64 then TkKwFree
+      else if i == 25i64 then TkKwDefer
+      else if i == 26i64 then TkKwHandle
+      else if i == 27i64 then TkKwEffect
+      else if i == 28i64 then TkKwConst
+      else if i == 29i64 then TkKwStatic
+      else TkInvalid
+
+pub fn str_len_at : ptr -> i64
+  | p ->
+      let b = p as *u8
+      let mut n : i64 = 0i64
+      while b[n] != 0
+        n = n + 1i64
+      n
+
+-- byte equality against a keyword entry; both are NUL-terminated literals or
+-- a source span that is not NUL-terminated, hence the explicit length
+pub fn bytes_eq : (ptr, i64, ptr, i64) -> bool
+  | (a, alen, b, blen) ->
+      if alen != blen
+        false
+      else
+        let pa = a as *u8
+        let pb = b as *u8
+        let mut i : i64 = 0i64
+        let mut same = true
+        while i < alen
+          if pa[i] != pb[i]
+            same = false
+          i = i + 1i64
+        same
+
+-- the keyword lookup: returns the token kind for the word at (p, len), or
+-- TkInvalid when the word is not reserved (the caller then emits an ident)
+pub fn lookup : (ptr, i64) -> TokenKind
+  | (p, len) ->
+      if len <= 0i64 || len > KW_MAX_LEN
+        TkInvalid
+      else
+        lookup_from(p, len, 0i64)
+
+fn lookup_from : (ptr, i64, i64) -> TokenKind
+  | (p, len, i) ->
+      if i >= KW_COUNT
+        TkInvalid
+      else
+        let w = kw_at(i)
+        let wlen = str_len_at(w)
+        if bytes_eq(p, len, w, wlen)
+          kw_kind(i)
+        else
+          lookup_from(p, len, i + 1i64)
+
+-- a small FNV-1a over the word, used by the self-test to assert that the
+-- keyword set stays distinct (no two entries share a hash)
+pub fn fnv1a : (ptr, i64) -> i64
+  | (p, len) ->
+      let pb = p as *u8
+      let mut h : i64 = 2166136261i64
+      let mut i : i64 = 0i64
+      while i < len
+        h = (h ^ pb[i] as i64) * 16777619i64
+        i = i + 1i64
+      h
+
+-- the count of distinct hashes across the table; the self-test asserts it
+-- equals KW_COUNT, so a typo that duplicates an entry is caught
+pub fn distinct_hashes : () -> i64
+  | () ->
+      let mut seen : i64 = 0i64
+      let mut i : i64 = 0i64
+      while i < KW_COUNT
+        let w = kw_at(i)
+        let wl = str_len_at(w)
+        let h = fnv1a(w, wl)
+        let mut j : i64 = 0i64
+        let mut dup = false
+        while j < i
+          let w2 = kw_at(j)
+          let wl2 = str_len_at(w2)
+          let h2 = fnv1a(w2, wl2)
+          if h2 == h
+            dup = true
+          j = j + 1i64
+        if dup
+          seen = seen
+        else
+          seen = seen + 1i64
+        i = i + 1i64
+      seen

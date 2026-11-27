@@ -1,0 +1,376 @@
+-- plexer.tokens -- token kinds and the token record for the self-hosted
+-- Pride lexer. This mirrors the shape of pfront/pfront_lex.c3: a flat kind
+-- enum, a flat token record, and a name table for diagnostics.
+--
+-- Everything here is plain data + pure functions; the scanner lives in
+-- plexer.lex, the entry in plexer.main.
+
+mod plexer.tokens
+
+-- ── token kinds ─────────────────────────────────────────────────────────────
+
+enum TokenKind
+  TkEof
+  TkInvalid
+  TkNewline
+  TkIndent
+  TkDedent
+  TkIdent
+  TkTypeVar
+  TkWildcard
+  TkInt
+  TkFloat
+  TkBool
+  TkChar
+  TkString
+  TkNull
+  TkKwFn
+  TkKwLet
+  TkKwMut
+  TkKwType
+  TkKwStruct
+  TkKwEnum
+  TkKwInterface
+  TkKwImpl
+  TkKwMatch
+  TkKwIf
+  TkKwElse
+  TkKwWhile
+  TkKwFor
+  TkKwIn
+  TkKwReturn
+  TkKwBreak
+  TkKwContinue
+  TkKwUse
+  TkKwMod
+  TkKwPub
+  TkKwAs
+  TkKwTrue
+  TkKwFalse
+  TkKwAlloc
+  TkKwFree
+  TkKwDefer
+  TkKwHandle
+  TkKwEffect
+  TkKwConst
+  TkKwStatic
+  TkPlus
+  TkMinus
+  TkStar
+  TkSlash
+  TkPercent
+  TkCaret
+  TkTilde
+  TkBang
+  TkAmp
+  TkPipe
+  TkDoubleAmp
+  TkDoublePipe
+  TkEq
+  TkEqEq
+  TkBangEq
+  TkLt
+  TkLe
+  TkGt
+  TkGe
+  TkLShift
+  TkRShift
+  TkPlusEq
+  TkMinusEq
+  TkStarEq
+  TkSlashEq
+  TkPercentEq
+  TkAmpEq
+  TkPipeEq
+  TkCaretEq
+  TkLShiftEq
+  TkRShiftEq
+  TkArrow
+  TkFatArrow
+  TkDot
+  TkDotDot
+  TkDotDotEq
+  TkColon
+  TkComma
+  TkSemicolon
+  TkLParen
+  TkRParen
+  TkLBrack
+  TkRBrack
+  TkLBrace
+  TkRBrace
+  TkBangBracket
+  TkQuestion
+
+-- ── the token record ────────────────────────────────────────────────────────
+
+struct Token
+  kind : TokenKind
+  start : i64
+  len : i64
+  line : i64
+  col : i64
+  ival : i64
+  dval : f64
+  str_ptr : ptr
+  str_len : i64
+
+struct LexError
+  line : i64
+  col : i64
+  code : i64
+
+-- ── names ───────────────────────────────────────────────────────────────────
+
+const KIND_NAME_COUNT : i64 = 89i64
+
+pub fn kind_is_literal : TokenKind -> bool
+  | k ->
+      match k
+        | TkInt -> true
+        | TkFloat -> true
+        | TkBool -> true
+        | TkChar -> true
+        | TkString -> true
+        | TkNull -> true
+        | _ -> false
+
+pub fn kind_is_layout : TokenKind -> bool
+  | k ->
+      match k
+        | TkNewline -> true
+        | TkIndent -> true
+        | TkDedent -> true
+        | _ -> false
+
+pub fn kind_is_keyword : TokenKind -> bool
+  | k ->
+      match k
+        | TkKwFn -> true
+        | TkKwLet -> true
+        | TkKwMut -> true
+        | TkKwType -> true
+        | TkKwStruct -> true
+        | TkKwEnum -> true
+        | TkKwInterface -> true
+        | TkKwImpl -> true
+        | TkKwMatch -> true
+        | TkKwIf -> true
+        | TkKwElse -> true
+        | TkKwWhile -> true
+        | TkKwFor -> true
+        | TkKwIn -> true
+        | TkKwReturn -> true
+        | TkKwBreak -> true
+        | TkKwContinue -> true
+        | TkKwUse -> true
+        | TkKwMod -> true
+        | TkKwPub -> true
+        | TkKwAs -> true
+        | TkKwTrue -> true
+        | TkKwFalse -> true
+        | TkKwAlloc -> true
+        | TkKwFree -> true
+        | TkKwDefer -> true
+        | TkKwHandle -> true
+        | TkKwEffect -> true
+        | TkKwConst -> true
+        | TkKwStatic -> true
+        | _ -> false
+
+pub fn kind_name : TokenKind -> ptr ! [Alloc]
+  | k ->
+      let idx = kind_index(k)
+      if idx < 0i64 || idx >= KIND_NAME_COUNT
+        "??"
+      else
+        kind_table(idx)
+
+-- index of a kind in the canonical order; -1 when out of range
+pub fn kind_index : TokenKind -> i64
+  | k ->
+      match k
+        | TkEof -> 0i64
+        | TkInvalid -> 1i64
+        | TkNewline -> 2i64
+        | TkIndent -> 3i64
+        | TkDedent -> 4i64
+        | TkIdent -> 5i64
+        | TkTypeVar -> 6i64
+        | TkWildcard -> 7i64
+        | TkInt -> 8i64
+        | TkFloat -> 9i64
+        | TkBool -> 10i64
+        | TkChar -> 11i64
+        | TkString -> 12i64
+        | TkNull -> 13i64
+        | TkKwFn -> 14i64
+        | TkKwLet -> 15i64
+        | TkKwMut -> 16i64
+        | TkKwType -> 17i64
+        | TkKwStruct -> 18i64
+        | TkKwEnum -> 19i64
+        | TkKwInterface -> 20i64
+        | TkKwImpl -> 21i64
+        | TkKwMatch -> 22i64
+        | TkKwIf -> 23i64
+        | TkKwElse -> 24i64
+        | TkKwWhile -> 25i64
+        | TkKwFor -> 26i64
+        | TkKwIn -> 27i64
+        | TkKwReturn -> 28i64
+        | TkKwBreak -> 29i64
+        | TkKwContinue -> 30i64
+        | TkKwUse -> 31i64
+        | TkKwMod -> 32i64
+        | TkKwPub -> 33i64
+        | TkKwAs -> 34i64
+        | TkKwTrue -> 35i64
+        | TkKwFalse -> 36i64
+        | TkKwAlloc -> 37i64
+        | TkKwFree -> 38i64
+        | TkKwDefer -> 39i64
+        | TkKwHandle -> 40i64
+        | TkKwEffect -> 41i64
+        | TkKwConst -> 42i64
+        | TkKwStatic -> 43i64
+        | TkPlus -> 44i64
+        | TkMinus -> 45i64
+        | TkStar -> 46i64
+        | TkSlash -> 47i64
+        | TkPercent -> 48i64
+        | TkCaret -> 49i64
+        | TkTilde -> 50i64
+        | TkBang -> 51i64
+        | TkAmp -> 52i64
+        | TkPipe -> 53i64
+        | TkDoubleAmp -> 54i64
+        | TkDoublePipe -> 55i64
+        | TkEq -> 56i64
+        | TkEqEq -> 57i64
+        | TkBangEq -> 58i64
+        | TkLt -> 59i64
+        | TkLe -> 60i64
+        | TkGt -> 61i64
+        | TkGe -> 62i64
+        | TkLShift -> 63i64
+        | TkRShift -> 64i64
+        | TkPlusEq -> 65i64
+        | TkMinusEq -> 66i64
+        | TkStarEq -> 67i64
+        | TkSlashEq -> 68i64
+        | TkPercentEq -> 69i64
+        | TkAmpEq -> 70i64
+        | TkPipeEq -> 71i64
+        | TkCaretEq -> 72i64
+        | TkLShiftEq -> 73i64
+        | TkRShiftEq -> 74i64
+        | TkArrow -> 75i64
+        | TkFatArrow -> 76i64
+        | TkDot -> 77i64
+        | TkDotDot -> 78i64
+        | TkDotDotEq -> 79i64
+        | TkColon -> 80i64
+        | TkComma -> 81i64
+        | TkSemicolon -> 82i64
+        | TkLParen -> 83i64
+        | TkRParen -> 84i64
+        | TkLBrack -> 85i64
+        | TkRBrack -> 86i64
+        | TkLBrace -> 87i64
+        | TkRBrace -> 88i64
+
+-- borrowed pointers into constant storage; the count of entries matches the
+-- largest index above (TkRBrace at 88) plus one
+fn kind_table : i64 -> ptr
+  | i ->
+      if i == 0i64 then "eof"
+      else if i == 1i64 then "invalid"
+      else if i == 2i64 then "newline"
+      else if i == 3i64 then "indent"
+      else if i == 4i64 then "dedent"
+      else if i == 5i64 then "ident"
+      else if i == 6i64 then "typevar"
+      else if i == 7i64 then "wildcard"
+      else if i == 8i64 then "int"
+      else if i == 9i64 then "float"
+      else if i == 10i64 then "bool"
+      else if i == 11i64 then "char"
+      else if i == 12i64 then "string"
+      else if i == 13i64 then "null"
+      else if i == 14i64 then "kw.fn"
+      else if i == 15i64 then "kw.let"
+      else if i == 16i64 then "kw.mut"
+      else if i == 17i64 then "kw.type"
+      else if i == 18i64 then "kw.struct"
+      else if i == 19i64 then "kw.enum"
+      else if i == 20i64 then "kw.interface"
+      else if i == 21i64 then "kw.impl"
+      else if i == 22i64 then "kw.match"
+      else if i == 23i64 then "kw.if"
+      else if i == 24i64 then "kw.else"
+      else if i == 25i64 then "kw.while"
+      else if i == 26i64 then "kw.for"
+      else if i == 27i64 then "kw.in"
+      else if i == 28i64 then "kw.return"
+      else if i == 29i64 then "kw.break"
+      else if i == 30i64 then "kw.continue"
+      else if i == 31i64 then "kw.use"
+      else if i == 32i64 then "kw.mod"
+      else if i == 33i64 then "kw.pub"
+      else if i == 34i64 then "kw.as"
+      else if i == 35i64 then "kw.true"
+      else if i == 36i64 then "kw.false"
+      else if i == 37i64 then "kw.alloc"
+      else if i == 38i64 then "kw.free"
+      else if i == 39i64 then "kw.defer"
+      else if i == 40i64 then "kw.handle"
+      else if i == 41i64 then "kw.effect"
+      else if i == 42i64 then "kw.const"
+      else if i == 43i64 then "kw.static"
+      else if i == 44i64 then "+"
+      else if i == 45i64 then "-"
+      else if i == 46i64 then "*"
+      else if i == 47i64 then "/"
+      else if i == 48i64 then "%"
+      else if i == 49i64 then "^"
+      else if i == 50i64 then "~"
+      else if i == 51i64 then "!"
+      else if i == 52i64 then "&"
+      else if i == 53i64 then "|"
+      else if i == 54i64 then "&&"
+      else if i == 55i64 then "||"
+      else if i == 56i64 then "="
+      else if i == 57i64 then "=="
+      else if i == 58i64 then "!="
+      else if i == 59i64 then "<"
+      else if i == 60i64 then "<="
+      else if i == 61i64 then ">"
+      else if i == 62i64 then ">="
+      else if i == 63i64 then "<<"
+      else if i == 64i64 then ">>"
+      else if i == 65i64 then "+="
+      else if i == 66i64 then "-="
+      else if i == 67i64 then "*="
+      else if i == 68i64 then "/="
+      else if i == 69i64 then "%="
+      else if i == 70i64 then "&="
+      else if i == 71i64 then "|="
+      else if i == 72i64 then "^="
+      else if i == 73i64 then "<<="
+      else if i == 74i64 then ">>="
+      else if i == 75i64 then "->"
+      else if i == 76i64 then "=>"
+      else if i == 77i64 then "."
+      else if i == 78i64 then ".."
+      else if i == 79i64 then "..="
+      else if i == 80i64 then ":"
+      else if i == 81i64 then ","
+      else if i == 82i64 then ";"
+      else if i == 83i64 then "("
+      else if i == 84i64 then ")"
+      else if i == 85i64 then "["
+      else if i == 86i64 then "]"
+      else if i == 87i64 then "{"
+      else if i == 88i64 then "}"
+      else "??"

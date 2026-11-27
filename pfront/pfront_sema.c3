@@ -1136,7 +1136,11 @@ fn ConstValue ConstEval.eval(ConstEval* c, Node* e, int depth)
             if (inner.is_float) { return inner; }
             int bits = 0;
             bool sg = true;
-            if (!c.int_type_of(e.type_ann, &bits, &sg)) { return inner; }
+            // NB: an unrecognised cast target must NOT fold to the untruncated
+            // value: `(-1) as u8 != 255u8` folded TRUE (cast kept -1) and baked
+            // a wrong branch into the AIR. Leave it for the runtime cast, which
+            // truncates correctly.
+            if (!c.int_type_of(e.type_ann, &bits, &sg)) { return const_err(ConstStatus.CONST_NOT_CONST); }
             return const_int(truncate_to(inner.ival, bits, sg));
         }
         default:

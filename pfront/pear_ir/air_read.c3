@@ -181,14 +181,20 @@ fn void Rd.next(Rd* r)
         }
         r.tb[n] = 0; r.tlen = n;
         if (is_float) { r.kind = T_FLOAT; r.fval = strtod(r.tb, (char**)null); return; }
-        // decimal i64 with overflow check
+        // decimal i64 with overflow check.
+        // NB: do NOT use the constant 9223372036854775808UL here (or any other
+        // literal >= 2^63): c3c 0.6.2 constant propagation mis-types it as a
+        // signed i64 (i64-min), silently making every comparison signed — the
+        // then-valid check failed for any negative literal containing a '0'
+        // digit. Keep every constant below 2^63 and guard quotient/remainder.
         bool neg = (r.tb[0] == '-');
         ulong acc = 0; usz i = neg ? 1 : 0;
-        ulong lim = neg ? 9223372036854775808UL : 9223372036854775807UL;
+        ulong maxq = 922337203685477580UL; // floor(i64_max / 10)
+        ulong maxr = neg ? 8UL : 7UL;      // neg allows one extra (i64_min)
         while (i < n)
         {
             ulong dgt = (ulong)(r.tb[i] - '0');
-            if (acc > (lim - dgt) / 10) { r.fail("integer literal out of range"); r.kind = T_ERR; return; }
+            if (acc > maxq || (acc == maxq && dgt > maxr)) { r.fail("integer literal out of range"); r.kind = T_ERR; return; }
             acc = acc * 10 + dgt; i++;
         }
         r.kind = T_INT;

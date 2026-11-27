@@ -1,0 +1,295 @@
+-- plexer.main -- the driver.
+--
+-- Part 1 runs the selftest suite (embedded snippets, exact expectations).
+--
+-- Part 2 is the self-hosting step: it reads this project's own .pie sources
+-- from disk, lexes each with the scanner built from those same sources, and
+-- asserts scanner-level invariants on real Pride code:
+--   * zero lexical errors,
+--   * brackets balance to zero depth and never go negative,
+--   * every INDENT is eventually matched by a DEDENT,
+--   * the stream ends with exactly one EOF row,
+--   * re-lexing produces an identical stream (the scanner is a pure function
+--     of the bytes).
+--
+-- The exit status is the only test harness: it is the total number of failed
+-- checks, so 0 means everything held.
+
+mod plexer.main
+
+use plexer.tokens
+use plexer.lex
+use plexer.report
+use plexer.selftest
+
+const BUF_CAP : i64 = 60000i64
+
+-- the files the driver lexes, relative to the directory the driver runs in
+const FILE_COUNT : i64 = 6i64
+
+fn file_at : i64 -> ptr
+  | i ->
+      if i == 0i64 then "plexer/tokens.pie"
+      else if i == 1i64 then "plexer/chars.pie"
+      else if i == 2i64 then "plexer/keywords.pie"
+      else if i == 3i64 then "plexer/lex.pie"
+      else if i == 4i64 then "plexer/report.pie"
+      else if i == 5i64 then "plexer/selftest.pie"
+      else "plexer/main.pie"
+
+struct LexOut
+  st : ptr
+  buf : ptr
+  n : i64
+
+-- read a file into a heap buffer; returns null on any failure
+fn slurp : ptr -> *LexOut
+  | path ->
+      let buf : *u8 = alloc [u8; 60000]
+      let n = report.read_file_into(path, cstr_len(path), buf as ptr, BUF_CAP)
+      if n < 0i64
+        free buf
+        null
+      else
+        buf[n] = 0u8
+        let out : *LexOut = alloc [LexOut; 1]
+        out.buf = buf as ptr
+        out.n = n
+        out.st = null
+        out
+
+fn drop_out : *LexOut -> ()
+  | o ->
+      free o.buf
+      free o.st
+      free o
+
+-- byte length of a NUL-terminated string
+pub fn cstr_len : ptr -> i64
+  | p ->
+      let b = p as *u8
+      let mut n : i64 = 0i64
+      while b[n] != 0
+        n = n + 1i64
+      n
+
+-- ── per-file checks ─────────────────────────────────────────────────────────
+
+fn check_file : (ptr, *i64) -> ()
+  | (path, fails) ->
+      let out = slurp(path)
+      if out == null
+        report.print_cstr("plexer: could not read ")
+        report.print_cstr(path)
+        report.print_nl()
+        fails[0] = fails[0] + 1i64
+      else
+        let st : *LexState = alloc [LexState; 1]
+        let toks : *i64 = alloc [i64; 12000]
+        let tstart : *i64 = alloc [i64; 12000]
+        let tlen : *i64 = alloc [i64; 12000]
+        let tline : *i64 = alloc [i64; 12000]
+        let tcol : *i64 = alloc [i64; 12000]
+        let tival : *i64 = alloc [i64; 12000]
+        let indents : *i64 = alloc [i64; 256]
+        let el : *i64 = alloc [i64; 64]
+        let ec : *i64 = alloc [i64; 64]
+        let ecod : *i64 = alloc [i64; 64]
+        st.src = out.buf
+        st.len = out.n
+        st.pos = 0i64
+        st.line = 1i64
+        st.bol = 0i64
+        st.depth = 0i64
+        st.errors = 0i64
+        st.tk = toks
+        st.tstart = tstart
+        st.tlen = tlen
+        st.tline = tline
+        st.tcol = tcol
+        st.tival = tival
+        st.tcount = 0i64
+        st.tcap = 12000i64
+        st.indents = indents
+        st.nind = 0i64
+        st.err_line = el
+        st.err_col = ec
+        st.err_code = ecod
+        st.nerr = 0i64
+        st.last_float = 0.0
+        let rc = lex.lex_all(st)
+        let mut bad : i64 = 0i64
+        if rc != lex.LEX_OK
+          bad = bad + 1i64
+          report.print_cstr("  lexical errors: ")
+          report.print_i64(st.errors)
+          report.print_nl()
+        let mut depth : i64 = 0i64
+        let mut min_depth : i64 = 0i64
+        let mut open_indents : i64 = 0i64
+        let mut eof_rows : i64 = 0i64
+        let mut ident_rows : i64 = 0i64
+        let mut kw_rows : i64 = 0i64
+        let mut i : i64 = 0i64
+        while i < st.tcount
+          let k = report.row_kind(st, i)
+          if k == TkLParen || k == TkLBrack || k == TkLBrace
+            depth = depth + 1i64
+          else if k == TkRParen || k == TkRBrack || k == TkRBrace
+            depth = depth - 1i64
+            if depth < min_depth
+              min_depth = depth
+          else if k == TkIndent
+            open_indents = open_indents + 1i64
+          else if k == TkDedent
+            open_indents = open_indents - 1i64
+          else if k == TkEof
+            eof_rows = eof_rows + 1i64
+          else if k == TkIdent
+            ident_rows = ident_rows + 1i64
+          else
+            if tokens.kind_is_keyword(k)
+              kw_rows = kw_rows + 1i64
+          i = i + 1i64
+        if depth != 0i64
+          bad = bad + 10i64
+          report.print_cstr("  bracket depth: ")
+          report.print_i64(depth)
+          report.print_nl()
+        if min_depth < 0i64
+          bad = bad + 100i64
+        if open_indents != 0i64
+          bad = bad + 1000i64
+          report.print_cstr("  unbalanced indents: ")
+          report.print_i64(open_indents)
+          report.print_nl()
+        if eof_rows != 1i64
+          bad = bad + 10000i64
+          report.print_cstr("  eof rows: ")
+          report.print_i64(eof_rows)
+          report.print_nl()
+        -- determinism: lex the same bytes again and compare every row
+        let st2 : *LexState = alloc [LexState; 1]
+        let toks2 : *i64 = alloc [i64; 12000]
+        let ts2 : *i64 = alloc [i64; 12000]
+        let tl2 : *i64 = alloc [i64; 12000]
+        let tn2 : *i64 = alloc [i64; 12000]
+        let tc2 : *i64 = alloc [i64; 12000]
+        let ti2 : *i64 = alloc [i64; 12000]
+        let in2 : *i64 = alloc [i64; 256]
+        let el2 : *i64 = alloc [i64; 64]
+        let ec2 : *i64 = alloc [i64; 64]
+        let ecod2 : *i64 = alloc [i64; 64]
+        st2.src = out.buf
+        st2.len = out.n
+        st2.pos = 0i64
+        st2.line = 1i64
+        st2.bol = 0i64
+        st2.depth = 0i64
+        st2.errors = 0i64
+        st2.tk = toks2
+        st2.tstart = ts2
+        st2.tlen = tl2
+        st2.tline = tn2
+        st2.tcol = tc2
+        st2.tival = ti2
+        st2.tcount = 0i64
+        st2.tcap = 12000i64
+        st2.indents = in2
+        st2.nind = 0i64
+        st2.err_line = el2
+        st2.err_col = ec2
+        st2.err_code = ecod2
+        st2.nerr = 0i64
+        st2.last_float = 0.0
+        lex.lex_all(st2)
+        if st2.tcount != st.tcount
+          bad = bad + 100000i64
+          report.print_cstr("  rerun token count differs: ")
+          report.print_i64(st2.tcount)
+          report.print_cstr(" vs ")
+          report.print_i64(st.tcount)
+          report.print_nl()
+        else
+          let mut j : i64 = 0i64
+          let mut same = true
+          while j < st.tcount
+            let a = toks[j]
+            let b = toks2[j]
+            let as = tstart[j]
+            let bs = ts2[j]
+            let al = tlen[j]
+            let bl = tl2[j]
+            if a != b || as != bs || al != bl
+              same = false
+              j = st.tcount
+            else
+              j = j + 1i64
+          if !same
+            bad = bad + 1000000i64
+            report.print_cstr("  rerun stream differs")
+            report.print_nl()
+        report.print_cstr("  tokens=")
+        report.print_i64(st.tcount)
+        report.print_cstr(" idents=")
+        report.print_i64(ident_rows)
+        report.print_cstr(" keywords=")
+        report.print_i64(kw_rows)
+        report.print_cstr(" bad=")
+        report.print_i64(bad)
+        report.print_nl()
+        fails[0] = fails[0] + bad
+        free toks
+        free tstart
+        free tlen
+        free tline
+        free tcol
+        free tival
+        free indents
+        free el
+        free ec
+        free ecod
+        free toks2
+        free ts2
+        free tl2
+        free tn2
+        free tc2
+        free ti2
+        free in2
+        free el2
+        free ec2
+        free ecod2
+        free st
+        free st2
+        drop_out(out)
+
+-- ── entry ───────────────────────────────────────────────────────────────────
+
+fn main : () -> i64 ! [IO, Alloc]
+  | () ->
+      report.print_cstr("== plexer: self-hosted Pride scanner ==\n")
+      report.print_cstr("-- part 1: embedded selftest\n")
+      let t1 = selftest.run_all()
+      report.print_cstr("selftest fails: ")
+      report.print_i64(t1)
+      report.print_nl()
+      report.print_cstr("-- part 2: lexing the project's own sources\n")
+      let fails : *i64 = alloc [i64; 1]
+      fails[0] = t1
+      let mut i : i64 = 0i64
+      while i < FILE_COUNT
+        let p = file_at(i)
+        report.print_cstr(p)
+        report.print_char(':')
+        report.print_nl()
+        check_file(p, fails)
+        i = i + 1i64
+      let total = fails[0]
+      free fails
+      if total == 0i64
+        report.print_cstr("plexer: OK\n")
+      else
+        report.print_cstr("plexer: FAILURES: ")
+        report.print_i64(total)
+        report.print_nl()
+      total

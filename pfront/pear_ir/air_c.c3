@@ -153,6 +153,8 @@ struct Ctx
     Lbl*       lbls; usz nl;
     Sb         decls;      // every local declaration, hoisted to the top (§3.4)
     char**     dn; usz ndn; // names already declared in this function
+    char*[64]  pnames; // array-typed fn params: in C they decay to pointers,
+    usz        npn;    // so an aggregate copy FROM them must not take &name
     usz        tmp;
     AirTyp*    cur_ret;
     AirTyp*    ret_seen;   // the type infer_ret settled on
@@ -404,6 +406,91 @@ fn void Ctx.ty(Ctx* c, Sb* o, AirTyp* t)
 }
 
 fn bool ty_is_void(AirTyp* t) { return t == null || t.tag == ATYP_UNIT || t.tag == ATYP_BOTTOM; }
+
+// An array-typed PARAMETER decays to a pointer in C (`T a[N]` param), so an
+// aggregate copy FROM it must pass the pointer itself; `&name` would copy the
+// pointer's own bytes. Locals of array type are real arrays and need `&name`.
+fn bool Ctx.decayed_param(Ctx* c, Val v)
+{
+    if (v.ty == null || v.ty.tag != ATYP_ARRAY) { return false; }
+    for (usz i = 0; i < c.npn; i++) { if (air_text::streq(c.pnames[i], v.op)) { return true; } }
+    return false;
+}
+
+// `(const void *)(&src)` for an aggregate copy, except a decayed array param.
+fn void Ctx.agg_src(Ctx* c, Sb* o, Val v)
+{
+    o.put((char*)"(const void *)(");
+    if (Ctx.decayed_param(c, v)) { o.put(v.op); }
+    else { o.putc('&'); o.put(v.op); }
+    o.putc(')');
+}
+
+// Same decision for a raw operand text (the cut path has no Val handy).
+fn bool Ctx.decayed_param_op(Ctx* c, char* op)
+{
+    if (op == null) { return false; }
+    for (usz i = 0; i < c.npn; i++) { if (air_text::streq(c.pnames[i], op)) { return true; } }
+    return false;
+}
+
+// ── array returns ──────────────────────────────────────────────────────────
+// C has no array rvalues: `int64_t[8] f()` is not C. Pride arrays are values,
+// so a function returning one is lowered as a struct with a single array
+// member; `ret` copies through it and call sites read the `.v` member. The
+// struct is named from the element+shape so two functions returning the same
+// array type share one definition (emitted by tuple_defs, deduped like tuples).
+fn void Ctx.ret_type_part(Ctx* c, Sb* o, AirTyp* t)
+{
+    if (t == null) { o.put((char*)"nil"); return; }
+    switch (t.tag)
+    {
+        case ATYP_ARRAY:
+        {
+            if (t.arg_count > 0 && t.args[0] != null) { Ctx.ret_type_part(c, o, t.args[0]); }
+            else { o.put((char*)"nil"); }
+            o.putc('_'); o.int_(t.ival);
+            return;
+        }
+        case ATYP_PTR:
+        {
+            o.put((char*)"p");
+            if (t.arg_count > 0 && t.args[0] != null) { Ctx.ret_type_part(c, o, t.args[0]); }
+            return;
+        }
+        case ATYP_NOMINAL:
+        {
+            c.name(o, t.name, false);
+            return;
+        }
+        case ATYP_TUPLE:
+        {
+            // reuse the tuple struct's own name (already shape-unique)
+            Sb tn; tn.init(); c.ty(&tn, t);
+            char* s = tn.take();
+            o.put(((char*)s) + (s[0] == 's' && s[1] == 't' ? 7 : 0));
+            return;
+        }
+        case ATYP_ARROW:
+        {
+            o.put((char*)"fn");
+            if (t.arg_count > 1 && t.args[1] != null) { Ctx.ret_type_part(c, o, t.args[1]); }
+            return;
+        }
+        default:
+        {
+            o.put(ty_slug(t));
+            return;
+        }
+    }
+}
+
+// `struct __ret_<elem>_<N>` for an ATYP_ARRAY, e.g. `struct __ret_i64_8`.
+fn void Ctx.ret_wrap_name(Ctx* c, Sb* o, AirTyp* t)
+{
+    o.put((char*)"struct __ret_");
+    Ctx.ret_type_part(c, o, t);
+}
 
 // Does an AIR fact license an alias qualifier on this parameter?
 // `no_capture` means the pointee does not escape the callee, which is exactly
@@ -1147,6 +1234,20 @@ fn void Ctx.stmt_ret(Ctx* c, Sb* o, AirPrd* p)
     }
     Val v = c.prd(p);
     if (v.ty != null && !air_util::ty_eq(v.ty, c.cur_ret)) { c.err((char*)"ret value type differs from the function's return type", null); }
+    if (c.cur_ret != null && c.cur_ret.tag == ATYP_ARRAY)
+    {
+        // C cannot return arrays: copy the array through the wrapper struct
+        // (see ret_wrap_name) and return that.
+        Sb wn; wn.init(); Ctx.ret_wrap_name(c, &wn, c.cur_ret);
+        Sb tn; tn.init(); tn.put((char*)"__rv"); tn.int_((long)c.tmp); c.tmp++;
+        o.put(wn.d); o.putc(' '); o.put(tn.d); o.put((char*)";\n");
+        c.pad(o);
+        o.put((char*)"memcpy((void *)(&("); o.put(tn.d); o.put((char*)".v)), (const void *)(&(");
+        o.put(v.op); o.put((char*)")), sizeof("); o.put(tn.d); o.put((char*)".v));\n");
+        c.pad(o);
+        o.put((char*)"return "); o.put(tn.d); o.put((char*)";\n");
+        return;
+    }
     o.put((char*)"return "); o.put(v.op); o.put((char*)";\n");
 }
 
@@ -1189,7 +1290,14 @@ fn void Ctx.call(Ctx* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
         if (!c.declared(cur.bind))
         {
             c.decls.put((char*)"    ");
-            c.ty_decl(&c.decls, rty, cur.bind);
+            if (rty.tag == ATYP_ARRAY)
+            {
+                // The call returns the ret-wrapper struct; the binder's VALUE is
+                // the array inside it, so the bind's op text becomes `<n>.v`.
+                Ctx.ret_wrap_name(c, &c.decls, rty); c.decls.putc(' ');
+                c.name(&c.decls, cur.bind, false);
+            }
+            else { c.ty_decl(&c.decls, rty, cur.bind); }
             c.decls.put((char*)";\n");
             c.mark_declared(cur.bind);
         }
@@ -1200,7 +1308,15 @@ fn void Ctx.call(Ctx* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
     for (usz i = 0; i < na; i++) { if (i > 0) { s.put((char*)", "); } s.put(args[i].op); }
     s.put((char*)")"); s.put((char*)";\n");
     o.put(s.take());
-    if (cur.bind != null) { c.bind(cur.bind, cur.bind, rty); }
+    if (cur.bind != null)
+    {
+        if (rty != null && rty.tag == ATYP_ARRAY)
+        {
+            Sb bv; bv.init(); c.name(&bv, cur.bind, false); bv.put((char*)".v");
+            c.bind(cur.bind, bv.take(), rty);
+        }
+        else { c.bind(cur.bind, cur.bind, rty); }
+    }
     *next_out = cur.body;
 }
 
@@ -1251,6 +1367,8 @@ fn void Ctx.jump(Ctx* c, AirCmd* x, Sb* o)
     if (tb == null) { c.err((char*)"jump to an unknown label", x.target_label); return; }
     if (tb.np != n) { c.err((char*)"jump has the wrong number of arguments", x.target_label); }
 
+    // A label param of array type is a real C array: C cannot assign one, so the
+    // parallel copy goes through memcpy exactly like the `let`/`store` arms.
     if (n > 1)
     {
         char*[16] tmps;
@@ -1260,23 +1378,51 @@ fn void Ctx.jump(Ctx* c, AirCmd* x, Sb* o)
             c.pad(o);
             if (tb.params[i] != null)
             {
+                bool is_arr = tb.params[i].ty != null && tb.params[i].ty.tag == ATYP_ARRAY;
                 c.ty_decl(o, tb.params[i].ty, tmps[i]);
-                o.put((char*)" = "); o.put(src[i].op); o.put((char*)";\n");
+                if (is_arr)
+                {
+                    o.put((char*)"\n");
+                    c.pad(o);
+                    o.put((char*)"memcpy((void *)(&"); c.name(o, tmps[i], false); o.put((char*)"), ");
+                    Ctx.agg_src(c, o, src[i]);
+                    o.put((char*)", sizeof("); c.ty(o, tb.params[i].ty); o.put((char*)"));\n");
+                }
+                else { o.put((char*)" = "); o.put(src[i].op); o.put((char*)";\n"); }
             }
         }
         for (usz i = 0; i < n; i++)
         {
             if (tb.params[i] == null) { continue; }
             c.pad(o);
-            c.name(o, tb.params[i].name, false);
-            o.put((char*)" = "); o.put(tmps[i]); o.put((char*)";\n");
+            if (tb.params[i].ty != null && tb.params[i].ty.tag == ATYP_ARRAY)
+            {
+                o.put((char*)"memcpy((void *)(&"); c.name(o, tb.params[i].name, false);
+                o.put((char*)"), (const void *)(&"); o.put(tmps[i]);
+                o.put((char*)"), sizeof("); c.ty(o, tb.params[i].ty); o.put((char*)"));\n");
+            }
+            else
+            {
+                c.name(o, tb.params[i].name, false);
+                o.put((char*)" = "); o.put(tmps[i]); o.put((char*)";\n");
+            }
         }
     }
     else if (n == 1 && tb.params[0] != null)
     {
         c.pad(o);
-        c.name(o, tb.params[0].name, false);
-        o.put((char*)" = "); o.put(src[0].op); o.put((char*)";\n");
+        if (tb.params[0].ty != null && tb.params[0].ty.tag == ATYP_ARRAY)
+        {
+            o.put((char*)"memcpy((void *)(&"); c.name(o, tb.params[0].name, false);
+            o.put((char*)"), ");
+            Ctx.agg_src(c, o, src[0]);
+            o.put((char*)", sizeof("); c.ty(o, tb.params[0].ty); o.put((char*)"));\n");
+        }
+        else
+        {
+            c.name(o, tb.params[0].name, false);
+            o.put((char*)" = "); o.put(src[0].op); o.put((char*)";\n");
+        }
     }
     c.pad(o); o.put((char*)"goto ");
     // Through Ctx.name, not the raw bytes: the label definition was spelled by
@@ -1322,8 +1468,9 @@ fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
                 if (v.ty != null && v.ty.tag == ATYP_ARRAY)
                 {
                     c.pad(o);
-                    o.put((char*)"memcpy((void *)(&"); c.name(o, x.binder, false); o.put((char*)"), (const void *)(&"); o.put(v.op);
-                    o.put((char*)"), sizeof("); c.ty(o, v.ty); o.put((char*)"));\n");
+                    o.put((char*)"memcpy((void *)(&"); c.name(o, x.binder, false); o.put((char*)"), ");
+                    Ctx.agg_src(c, o, v);
+                    o.put((char*)", sizeof("); c.ty(o, v.ty); o.put((char*)"));\n");
                 }
                 else
                 {
@@ -1347,10 +1494,11 @@ fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
                 AirTyp* spt = p.ty.args[0];
                 if (spt != null && spt.tag == ATYP_ARRAY)
                 {
-                    o.put((char*)"memcpy((void *)("); o.put(p.op); o.put((char*)"), (const void *)(&"); o.put(v.op);
-                    o.put((char*)"), sizeof("); c.ty(o, spt); o.put((char*)"));\n");
+                    o.put((char*)"memcpy((void *)("); o.put(p.op); o.put((char*)"), ");
+                    Ctx.agg_src(c, o, v);
+                    o.put((char*)", sizeof("); c.ty(o, spt); o.put((char*)"));\n");
                 }
-                else if (x.vol) { o.put((char*)"(*(volatile "); c.ty(o, spt); o.put((char*)" *)("); o.put(p.op); o.put((char*)")"); o.put((char*)" = "); o.put(v.op); o.put((char*)";\n"); }
+                else if (x.vol) { o.put((char*)"(*(volatile "); c.ty(o, spt); o.put((char*)" *)("); o.put(p.op); o.put((char*)"))"); o.put((char*)" = "); o.put(v.op); o.put((char*)";\n"); }
                 else { o.putc('*'); o.put((char*)"("); o.put(p.op); o.put((char*)")"); o.put((char*)" = "); o.put(v.op); o.put((char*)";\n"); }
                 x = x.next; continue;
             }
@@ -1454,8 +1602,9 @@ fn void Ctx.cmd(Ctx* c, AirCmd* cmd, Sb* o)
                         // A field of array type is a value AIR copies; C cannot
                         // assign an array, so this is the same memcpy the `let`
                         // and `store` arms use for an aggregate.
-                        o.put((char*)"memcpy((void *)(&"); c.name(o, k.tail.bind, false); o.put((char*)"), (const void *)(&");
-                        o.put(rhs); o.put((char*)"), sizeof("); c.ty(o, ft); o.put((char*)"));\n");
+                        o.put((char*)"memcpy((void *)(&"); c.name(o, k.tail.bind, false); o.put((char*)"), ");
+                        if (Ctx.decayed_param_op(c, rhs)) { o.put(rhs); } else { o.putc('&'); o.put(rhs); }
+                        o.put((char*)"), sizeof("); c.ty(o, ft); o.put((char*)"));\n");
                     }
                     else
                     {
@@ -1613,7 +1762,9 @@ fn void Ctx.fn_attrs(Ctx* c, AirDecl* d, Sb* o)
 
 fn void Ctx.header(Ctx* c, AirDecl* d, Sb* o, bool as_main_wrapper)
 {
-    if (ty_is_void(d.ret_ty)) { o.put((char*)"void "); } else { c.ty(o, d.ret_ty); o.putc(' '); }
+    if (ty_is_void(d.ret_ty)) { o.put((char*)"void "); }
+    else if (d.ret_ty.tag == ATYP_ARRAY) { Ctx.ret_wrap_name(c, o, d.ret_ty); o.putc(' '); }
+    else { c.ty(o, d.ret_ty); o.putc(' '); }
     // When a wrapper `int main(void)` is emitted below, this function must not be
     // called `main` -- two distinct definitions of one name is not C.
     if (as_main_wrapper) { o.put((char*)"pride_main"); } else { c.name(o, d.name, false); }
@@ -1811,7 +1962,14 @@ fn void Ctx.function(Ctx* c, AirDecl* d, Sb* out)
     // every binding the tail performs -- the loop-carried allocas among them.
     AirCmd* tail = x;
 
-    for (usz i = 0; i < d.param_count; i++) { AirBinder* b = d.params[i]; if (b != null) { c.bind(b.name, b.name, b.ty); } }
+    c.npn = 0;
+    for (usz i = 0; i < d.param_count; i++)
+    {
+        AirBinder* b = d.params[i];
+        if (b == null) { continue; }
+        if (b.ty != null && b.ty.tag == ATYP_ARRAY && c.npn < 64) { c.pnames[c.npn] = b.name; c.npn++; }
+        c.bind(b.name, b.name, b.ty);
+    }
     // Types of every binder in the body, before emitting a single instruction.
     c.prescan_let(d.def_body);
 
@@ -1947,6 +2105,24 @@ fn void Ctx.tuple_defs(Ctx* c, AirTyp* t, int depth)
     // DECLARATIONS, and gating this on `quiet` left the struct undefined.
     if (t == null || depth > 8) { return; }
     for (usz i = 0; i < t.arg_count; i++) { c.tuple_defs(t.args[i], depth + 1); }
+    if (t.tag == ATYP_ARRAY)
+    {
+        // A function returning an array is lowered to `struct __ret_... { T v[N]; }`
+        // (see ret_wrap_name). Define the shape the first time it appears.
+        Sb nm; nm.init(); Ctx.ret_wrap_name(c, &nm, t);
+        char* name = nm.take();
+        for (usz i = 0; i < c.ntup; i++) { if (air_text::streq(c.tup[i], name)) { return; } }
+        if (c.ntup >= 512) { return; }
+        c.tup[c.ntup] = name; c.ntup++;
+        AirTyp* el = t.arg_count > 0 ? t.args[0] : null;
+        c.types_out.put(name); c.types_out.put((char*)" {\n    ");
+        if (el != null && el.tag == ATYP_ARRAY) { Ctx.ret_wrap_name(c, &c.types_out, el); c.types_out.putc(' '); }
+        else { c.ty(&c.types_out, el); c.types_out.putc(' '); }
+        c.types_out.put((char*)"v[");
+        c.types_out.int_(t.ival);
+        c.types_out.put((char*)"];\n};\n\n");
+        return;
+    }
     if (t.tag != ATYP_TUPLE) { return; }
     Sb nm; nm.init(); c.ty(&nm, t);
     char* name = nm.take();

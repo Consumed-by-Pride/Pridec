@@ -468,8 +468,43 @@ fn Value PartialEvaluator.eval(PartialEvaluator* pe, Node* e, int depth)
         }
 
         case N_EXPR_CAST:
+        {
             if (e.type_ann != null && e.type_ann.kind != Nk.N_TY_NAME) { return v_error(); }
-            return pe.eval(e.child(0), depth + 1);
+            Value c = pe.eval(e.child(0), depth + 1);
+            if (!v_is_static(&c)) { return v_code(e); }
+            if (c.kind == V_BOOL) { c.kind = V_INT; c.ival = c.ival != 0 ? 1 : 0; }
+            if (c.kind != V_INT) { return v_code(e); }
+            // A cast is a VALUE conversion, not a re-annotation: the PE used to
+            // return the child's value untruncated, so `(-1) as u8 == 255u8`
+            // PE-folded to `(-1) == 255` = false and baked a wrong branch into
+            // the tree. Narrow to the target width, signed or unsigned.
+            if (e.type_ann != null)
+            {
+                char* ts = e.type_ann.p.sptr;
+                usz tn = e.type_ann.p.slen;
+                if (ts != null && tn >= 2 && tn <= 4 && (ts[0] == 'i' || ts[0] == 'u'))
+                {
+                    int w = 0; bool ok = true;
+                    for (usz k = 1; k < tn; k++)
+                    {
+                        if (ts[k] < '0' || ts[k] > '9') { ok = false; break; }
+                        w = w * 10 + ((int)ts[k] - '0');
+                    }
+                    if (ok && (w == 8 || w == 16 || w == 32) && w < 64)
+                    {
+                        ulong mask = ((ulong)1 << (ulong)w) - 1;
+                        ulong raw = (ulong)c.ival & mask;
+                        if (ts[0] == 'u') { c.ival = (long)raw; }
+                        else
+                        {
+                            ulong sb = (ulong)1 << (ulong)(w - 1);
+                            c.ival = (raw & sb) != 0 ? (long)(raw | ~mask) : (long)raw;
+                        }
+                    }
+                }
+            }
+            return c;
+        }
 
         case N_EXPR_COMPTIME:
         {

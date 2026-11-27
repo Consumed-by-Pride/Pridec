@@ -1,0 +1,122 @@
+-- plexer.chars -- character classification for the scanner.
+--
+-- The upstream lexer (pfront/pfront_lex.c3) classifies through a small set of
+-- predicates over the byte. This module reproduces them as pure functions with
+-- exhaustive matches, which is exactly the shape that stresses the pattern
+-- compiler: one enum-free but heavily-branched decision per byte.
+
+mod plexer.chars
+
+pub fn is_ident_start : i64 -> bool
+  | c ->
+      if c >= 'a' && c <= 'z'
+        true
+      else if c >= 'A' && c <= 'Z'
+        true
+      else if c == '_'
+        true
+      else
+        false
+
+pub fn is_ident_cont : i64 -> bool
+  | c ->
+      if is_ident_start(c)
+        true
+      else if c >= '0' && c <= '9'
+        true
+      else
+        false
+
+pub fn is_digit : i64 -> bool
+  | c -> c >= '0' && c <= '9'
+
+pub fn is_hex_digit : i64 -> bool
+  | c ->
+      if is_digit(c)
+        true
+      else if c >= 'a' && c <= 'f'
+        true
+      else if c >= 'A' && c <= 'F'
+        true
+      else
+        false
+
+pub fn is_bin_digit : i64 -> bool
+  | c -> c == '0' || c == '1'
+
+pub fn is_oct_digit : i64 -> bool
+  | c -> c >= '0' && c <= '7'
+
+pub fn is_space_byte : u8 -> bool
+  | b ->
+      match b
+        | ' ' -> true
+        | '\t' -> true
+        | '\r' -> true
+        | 11 -> true
+        | 12 -> true
+        | _ -> false
+
+pub fn is_newline_byte : u8 -> bool
+  | b -> b == '\n' || b == '\r'
+
+pub fn is_layout_ignorable : u8 -> bool
+  | b -> is_space_byte(b) && b != '\n'
+
+pub fn hex_value : i64 -> i64
+  | c ->
+      if c >= '0' && c <= '9'
+        c - '0'
+      else if c >= 'a' && c <= 'f'
+        c - 'a' + 10
+      else if c >= 'A' && c <= 'F'
+        c - 'A' + 10
+      else
+        -1i64
+
+pub fn digit_value : i64 -> i64
+  | c ->
+      if is_digit(c)
+        c - '0'
+      else
+        -1i64
+
+-- how many bytes the UTF-8 sequence starting with `b` occupies; 1 for ASCII
+-- and for invalid lead bytes (the scanner counts bytes, columns count runs)
+pub fn utf8_width : u8 -> i64
+  | b ->
+      if b < 128
+        1i64
+      else if b < 192
+        1i64
+      else if b < 224
+        2i64
+      else if b < 240
+        3i64
+      else if b < 248
+        4i64
+      else
+        1i64
+
+-- escape-name lookup shared by the scanner and the report printer
+pub fn escape_byte : i64 -> i64
+  | c ->
+      if c == 'n'
+        10i64
+      else if c == 'r'
+        13i64
+      else if c == 't'
+        9i64
+      else if c == '0'
+        0i64
+      else if c == '\\'
+        92i64
+      else if c == '\"'
+        34i64
+      else if c == '\''
+        39i64
+      else
+        -1i64
+
+pub fn is_escape_name : i64 -> bool
+  | c -> escape_byte(c) >= 0i64

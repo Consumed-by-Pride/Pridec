@@ -1,0 +1,825 @@
+-- plexer.lex -- the self-hosted Pride scanner.
+--
+-- This is a byte-oriented, single-pass scanner in the shape of
+-- pfront/pfront_lex.c3: layout tokens (NEWLINE/INDENT/DEDENT) are emitted
+-- outside brackets, identifiers split into lowercase-start / uppercase-start /
+-- lone underscore, numeric literals carry decimal/hex/binary/octal bases with
+-- underscores and width suffixes, strings process escapes, and punctuation is
+-- resolved by longest match.
+--
+-- Differences from the upstream lexer, all deliberate for this corpus:
+--   * no trailing-operator continuation handling (the corpus avoids that
+--     shape; upstream's continuation bookkeeping is its known-fragile area),
+--   * tab stops count as 4 columns,
+--   * UTF-8 runs advance the column by one, not by byte count.
+--
+-- Output is structure-of-arrays: the caller owns parallel i64 arrays and the
+-- state only writes through them. A Token record (plexer.tokens) is used for
+-- single-token handoff, never for array stores.
+
+mod plexer.lex
+
+use plexer.tokens
+use plexer.chars
+use plexer.keywords
+
+-- ── error codes ─────────────────────────────────────────────────────────────
+
+const LEX_OK : i64 = 0i64
+const LEX_BAD_CHAR : i64 = 1i64
+const LEX_BAD_STRING : i64 = 2i64
+const LEX_BAD_NUMBER : i64 = 3i64
+const LEX_BAD_ESCAPE : i64 = 4i64
+const LEX_BAD_DEDENT : i64 = 5i64
+const LEX_UNTERMINATED : i64 = 6i64
+const LEX_FULL : i64 = 7i64
+
+struct LexState
+  src : ptr
+  len : i64
+  pos : i64
+  line : i64
+  bol : i64
+  depth : i64
+  errors : i64
+  tk : ptr
+  tstart : ptr
+  tlen : ptr
+  tline : ptr
+  tcol : ptr
+  tival : ptr
+  tcount : i64
+  tcap : i64
+  indents : ptr
+  nind : i64
+  err_line : ptr
+  err_col : ptr
+  err_code : ptr
+  nerr : i64
+  last_float : f64
+
+-- ── byte access ─────────────────────────────────────────────────────────────
+
+fn byte_at : (*LexState, i64) -> i64
+  | (st, i) ->
+      if i < 0i64 || i >= st.len
+        0i64
+      else
+        let p = st.src as *u8
+        p[i] as i64
+
+fn peek : *LexState -> i64
+  | st -> byte_at(st, st.pos)
+
+fn peek_at : (*LexState, i64) -> i64
+  | (st, k) -> byte_at(st, st.pos + k)
+
+fn at_end : *LexState -> bool
+  | st -> st.pos >= st.len
+
+fn advance : *LexState -> ()
+  | st ->
+      if !at_end(st)
+        let c = byte_at(st, st.pos)
+        st.pos = st.pos + 1i64
+        if c == '\n'
+          st.line = st.line + 1i64
+          st.bol = st.pos
+
+-- ── output ──────────────────────────────────────────────────────────────────
+
+fn emit : (*LexState, TokenKind, i64, i64, i64) -> ()
+  | (st, kind, start, len, ival) ->
+      if st.tcount < st.tcap
+        let n = st.tcount
+        store_kind(st, n, kind)
+        store_i64_at(st.tstart, n, start)
+        store_i64_at(st.tlen, n, len)
+        store_i64_at(st.tline, n, st.line)
+        store_i64_at(st.tcol, n, start - st.bol + 1i64)
+        store_i64_at(st.tival, n, ival)
+        st.tcount = st.tcount + 1i64
+      else
+        record_error(st, st.line, 1i64, LEX_FULL)
+
+fn store_kind : (*LexState, i64, TokenKind) -> ()
+  | (st, i, k) ->
+      let kinds = st.tk as *i64
+      kinds[i] = kind_index(k)
+
+fn store_i64_at : (ptr, i64, i64) -> ()
+  | (base, i, v) ->
+      let p = base as *i64
+      p[i] = v
+
+pub fn read_i64_at : (ptr, i64) -> i64
+  | (base, i) ->
+      let p = base as *i64
+      p[i]
+
+fn record_error : (*LexState, i64, i64, i64) -> ()
+  | (st, line, col, code) ->
+      st.errors = st.errors + 1i64
+      store_i64_at(st.err_line, st.nerr, line)
+      store_i64_at(st.err_col, st.nerr, col)
+      store_i64_at(st.err_code, st.nerr, code)
+      st.nerr = st.nerr + 1i64
+
+-- ── bracket depth ───────────────────────────────────────────────────────────
+
+fn depth_delta : TokenKind -> i64
+  | k ->
+      match k
+        | TkLParen -> 1i64
+        | TkLBrack -> 1i64
+        | TkLBrace -> 1i64
+        | TkRParen -> -1i64
+        | TkRBrack -> -1i64
+        | TkRBrace -> -1i64
+        | _ -> 0i64
+
+-- ── trivia: spaces, comments ────────────────────────────────────────────────
+
+fn skip_spaces : *LexState -> ()
+  | st ->
+      while byte_at(st, st.pos) == ' ' || byte_at(st, st.pos) == '\t' || byte_at(st, st.pos) == '\r'
+        advance(st)
+
+fn skip_comment : *LexState -> ()
+  | st ->
+      -- `--` to end of line; a lone `-` is an operator, not a comment start
+      while !at_end(st) && byte_at(st, st.pos) != '\n'
+        advance(st)
+
+-- is a comment line (only spaces then `--`) at byte offset i?
+fn comment_line_at : (*LexState, i64) -> bool
+  | (st, i) ->
+      let mut j : i64 = i
+      let mut saw_dash = false
+      while j < st.len
+        let c = byte_at(st, j)
+        if c == ' ' || c == '\t' || c == '\r'
+          j = j + 1i64
+        else if c == '-' && byte_at(st, j + 1i64) == '-'
+          saw_dash = true
+          j = st.len
+        else
+          j = st.len
+      saw_dash
+
+-- ── layout ──────────────────────────────────────────────────────────────────
+
+fn indent_top : *LexState -> i64
+  | st ->
+      if st.nind <= 0i64
+        0i64
+      else
+        read_i64_at(st.indents, st.nind - 1i64)
+
+fn push_indent : (*LexState, i64) -> ()
+  | (st, w) ->
+      store_i64_at(st.indents, st.nind, w)
+      st.nind = st.nind + 1i64
+
+fn pop_indent : *LexState -> i64
+  | st ->
+      if st.nind <= 0i64
+        0i64
+      else
+        st.nind = st.nind - 1i64
+        read_i64_at(st.indents, st.nind)
+
+-- measure the indentation width of the line starting at byte i
+fn measure_indent : (*LexState, i64) -> i64
+  | (st, i) ->
+      let mut j : i64 = i
+      let mut w : i64 = 0i64
+      while j < st.len
+        let c = byte_at(st, j)
+        if c == ' '
+          w = w + 1i64
+          j = j + 1i64
+        else if c == '\t'
+          w = w + 4i64
+          j = j + 1i64
+        else if c == '\r'
+          j = j + 1i64
+        else
+          j = st.len
+      w
+
+-- handle one line break at depth 0: emit NEWLINE, then INDENT/DEDENTs for the
+-- next line that carries code. A line at the same width emits nothing extra:
+-- one NEWLINE per break, one INDENT/DEDENT per width change.
+fn handle_newline : *LexState -> ()
+  | st ->
+      if st.depth > 0i64
+        advance(st)
+      else
+        emit(st, TkNewline, st.pos, 1i64, 0i64)
+        advance(st)
+        skip_blank_lines(st)
+        if at_end(st)
+          dedent_all(st)
+        else
+          let w = measure_indent(st, st.pos)
+          let top = indent_top(st)
+          if w > top
+            push_indent(st, w)
+            emit(st, TkIndent, st.pos, w, w)
+          else if w < top
+            dedent_to(st, w)
+
+-- skip blank and comment-only lines, staying positioned at the first byte of
+-- the next code line (or EOF)
+fn skip_blank_lines : *LexState -> ()
+  | st ->
+      let mut scanning = true
+      while scanning
+        if at_end(st)
+          scanning = false
+        else
+          let w = measure_indent(st, st.pos)
+          let mut j = st.pos + w
+          let c = byte_at(st, j)
+          if c == '\n'
+            st.line = st.line + 1i64
+            st.pos = j + 1i64
+            st.bol = st.pos
+          else if c == '-' && byte_at(st, j + 1i64) == '-'
+            skip_comment(st)
+            if !at_end(st)
+              st.line = st.line + 1i64
+              advance(st)
+              st.bol = st.pos
+          else
+            scanning = false
+
+fn dedent_to : (*LexState, i64) -> ()
+  | (st, w) ->
+      let top = indent_top(st)
+      if w < top
+        let gone = pop_indent(st)
+        emit(st, TkDedent, st.pos, 1i64, gone)
+        dedent_to(st, w)
+      else if w > top
+        record_error(st, st.line, 1i64, LEX_BAD_DEDENT)
+
+fn dedent_all : *LexState -> ()
+  | st ->
+      if st.nind > 0i64
+        let gone = pop_indent(st)
+        emit(st, TkDedent, st.len, 1i64, gone)
+        dedent_all(st)
+
+-- ── words ───────────────────────────────────────────────────────────────────
+
+fn lex_word : *LexState -> ()
+  | st ->
+      let start = st.pos
+      let c0 = peek(st)
+      let upper = c0 >= 'A' && c0 <= 'Z'
+      while is_ident_cont(peek(st))
+        advance(st)
+      let len = st.pos - start
+      if len == 1i64 && c0 == '_'
+        emit(st, TkWildcard, start, len, 0i64)
+      else
+        let kw = keywords.lookup(st.src + start, len)
+        if kind_is_keyword(kw)
+          emit(st, kw, start, len, 0i64)
+        else if upper
+          emit(st, TkTypeVar, start, len, 0i64)
+        else
+          emit(st, TkIdent, start, len, 0i64)
+
+-- ── numbers ─────────────────────────────────────────────────────────────────
+
+fn suffix_len : (*LexState, i64) -> i64
+  | (st, at) ->
+      let c = byte_at(st, at)
+      if c == 'i'
+        match byte_at(st, at + 1i64)
+          | '8' -> 2i64
+          | '1' -> 3i64
+          | '3' -> 3i64
+          | '6' -> 3i64
+          | 's' -> 3i64
+          | _ -> 0i64
+      else if c == 'u'
+        match byte_at(st, at + 1i64)
+          | '8' -> 2i64
+          | '1' -> 3i64
+          | '3' -> 3i64
+          | '6' -> 3i64
+          | 's' -> 3i64
+          | _ -> 0i64
+      else if c == 'f'
+        match byte_at(st, at + 1i64)
+          | '3' -> 3i64
+          | '6' -> 3i64
+          | _ -> 0i64
+      else
+        0i64
+
+fn lex_number : *LexState -> ()
+  | st ->
+      let start = st.pos
+      let mut base : i64 = 10i64
+      let mut is_float = false
+      if peek(st) == '0' && (peek_at(st, 1i64) == 'x' || peek_at(st, 1i64) == 'X')
+        base = 16i64
+        advance(st)
+        advance(st)
+      else if peek(st) == '0' && (peek_at(st, 1i64) == 'b' || peek_at(st, 1i64) == 'B')
+        base = 2i64
+        advance(st)
+        advance(st)
+      else if peek(st) == '0' && (peek_at(st, 1i64) == 'o' || peek_at(st, 1i64) == 'O')
+        base = 8i64
+        advance(st)
+        advance(st)
+      let mut value : i64 = 0i64
+      let mut digits : i64 = 0i64
+      let mut bad = false
+      let mut scanning = true
+      while scanning
+        let c = peek(st)
+        if c == '_'
+          advance(st)
+        else if base == 16i64 && is_hex_digit(c)
+          value = value * 16i64 + hex_value(c)
+          digits = digits + 1i64
+          advance(st)
+        else if base == 2i64 && is_bin_digit(c)
+          value = value * 2i64 + digit_value(c)
+          digits = digits + 1i64
+          advance(st)
+        else if base == 8i64 && is_oct_digit(c)
+          value = value * 8i64 + digit_value(c)
+          digits = digits + 1i64
+          advance(st)
+        else if base == 10i64 && is_digit(c)
+          value = value * 10i64 + digit_value(c)
+          digits = digits + 1i64
+          advance(st)
+        else
+          scanning = false
+      if base == 10i64 && digits > 0i64 && peek(st) == '.' && is_digit(peek_at(st, 1i64))
+        is_float = true
+        advance(st)
+        let mut frac : i64 = 0i64
+        let mut scale : f64 = 1.0
+        let mut fval : f64 = value as f64
+        while is_digit(peek(st)) || peek(st) == '_'
+          if peek(st) != '_'
+            frac = digit_value(peek(st))
+            scale = scale * 10.0
+            fval = fval * 10.0 + frac as f64
+          advance(st)
+        fval = fval / scale
+        fval = finish_float(st, fval)
+        let sl = suffix_len(st, st.pos)
+        if sl > 0i64
+          st.pos = st.pos + sl
+        emit_float(st, start, st.pos - start, fval)
+        return
+      if base == 10i64 && digits > 0i64 && has_exponent(st)
+        is_float = true
+        let fval2 = finish_float(st, value as f64)
+        let sl1 = suffix_len(st, st.pos)
+        if sl1 > 0i64
+          st.pos = st.pos + sl1
+        emit_float(st, start, st.pos - start, fval2)
+        return
+      let sl2 = suffix_len(st, st.pos)
+      if sl2 > 0i64
+        st.pos = st.pos + sl2
+      if digits == 0i64 || bad
+        record_error(st, st.line, 1i64, LEX_BAD_NUMBER)
+      emit(st, TkInt, start, st.pos - start, value)
+
+-- does an exponent follow? `e`/`E` with a digit, or a sign then a digit
+fn has_exponent : *LexState -> bool
+  | st ->
+      let c = peek(st)
+      if c == 'e' || c == 'E'
+        let n1 = peek_at(st, 1i64)
+        if is_digit(n1)
+          true
+        else if n1 == '+' || n1 == '-'
+          is_digit(peek_at(st, 2i64))
+        else
+          false
+      else
+        false
+
+-- consume `e[+-]digits`, apply the exponent, return the scaled value
+fn finish_float : (*LexState, f64) -> f64
+  | (st, mantissa) ->
+      let mut v : f64 = mantissa
+      if peek(st) == 'e' || peek(st) == 'E'
+        advance(st)
+        let mut esign : i64 = 1i64
+        if peek(st) == '+'
+          advance(st)
+        else if peek(st) == '-'
+          esign = -1i64
+          advance(st)
+        let mut eexp : i64 = 0i64
+        while is_digit(peek(st))
+          eexp = eexp * 10i64 + digit_value(peek(st))
+          advance(st)
+        let mag = scale_of(eexp)
+        if esign < 0i64
+          v = v / mag
+        else
+          v = v * mag
+      v
+
+-- 10^n as f64, used to apply a negative exponent after scaling
+fn scale_of : i64 -> f64
+  | n ->
+      let mut r : f64 = 1.0
+      let mut k : i64 = 0i64
+      while k < n
+        r = r * 10.0
+        k = k + 1i64
+      r
+
+fn emit_float : (*LexState, i64, i64, f64) -> ()
+  | (st, start, len, v) ->
+      if st.tcount < st.tcap
+        let n = st.tcount
+        store_kind(st, n, TkFloat)
+        store_i64_at(st.tstart, n, start)
+        store_i64_at(st.tlen, n, len)
+        store_i64_at(st.tline, n, st.line)
+        store_i64_at(st.tcol, n, start - st.bol + 1i64)
+        store_i64_at(st.tival, n, 0i64)
+        st.tcount = st.tcount + 1i64
+        st.last_float = v
+      else
+        record_error(st, st.line, 1i64, LEX_FULL)
+
+-- ── strings ─────────────────────────────────────────────────────────────────
+
+fn lex_string : *LexState -> ()
+  | st ->
+      let start = st.pos
+      advance(st)
+      let mut decoded : i64 = 0i64
+      let mut closed = false
+      let mut ok = true
+      while !at_end(st) && !closed
+        let c = peek(st)
+        if c == '\"'
+          closed = true
+          advance(st)
+        else if c == '\n'
+          closed = true
+          ok = false
+        else if c == '\\'
+          advance(st)
+          let e = peek(st)
+          if e == 'x'
+            advance(st)
+            let h1 = peek(st)
+            let h2 = peek_at(st, 1i64)
+            if is_hex_digit(h1) && is_hex_digit(h2)
+              decoded = decoded + 1i64
+              advance(st)
+              advance(st)
+            else
+              ok = false
+              decoded = decoded + 1i64
+          else if is_escape_name(e)
+            decoded = decoded + 1i64
+            advance(st)
+          else
+            ok = false
+            decoded = decoded + 1i64
+            advance(st)
+        else
+          decoded = decoded + utf8_width(c as u8)
+          advance(st)
+      if !closed
+        ok = false
+      if !ok
+        record_error(st, st.line, 1i64, LEX_BAD_STRING)
+      emit(st, TkString, start, st.pos - start, decoded)
+
+-- ── char literals ───────────────────────────────────────────────────────────
+
+fn lex_char : *LexState -> ()
+  | st ->
+      let start = st.pos
+      advance(st)
+      let mut v : i64 = 0i64
+      let mut ok = true
+      if peek(st) == '\\'
+        advance(st)
+        let e = peek(st)
+        if e == 'x'
+          advance(st)
+          let h1 = peek(st)
+          let h2 = peek_at(st, 1i64)
+          if is_hex_digit(h1) && is_hex_digit(h2)
+            v = hex_value(h1) * 16i64 + hex_value(h2)
+            advance(st)
+            advance(st)
+          else
+            ok = false
+            advance(st)
+        else if is_escape_name(e)
+          v = escape_byte(e)
+          advance(st)
+        else
+          ok = false
+          advance(st)
+      else if !at_end(st) && peek(st) != '\''
+        v = peek(st)
+        advance(st)
+      else
+        ok = false
+      if peek(st) == '\''
+        advance(st)
+      else
+        ok = false
+      if !ok
+        record_error(st, st.line, 1i64, LEX_BAD_ESCAPE)
+      emit(st, TkChar, start, st.pos - start, v)
+
+-- ── punctuation ─────────────────────────────────────────────────────────────
+
+fn lex_punct : *LexState -> ()
+  | st ->
+      let start = st.pos
+      let c = peek(st)
+      advance(st)
+      let c2 = peek(st)
+      if c == '+'
+        finish_two(st, start, c2, '=', TkPlusEq, TkPlus)
+      else if c == '-'
+        if c2 == '>'
+          advance(st)
+          emit(st, TkArrow, start, 2i64, 0i64)
+        else
+          finish_two(st, start, c2, '=', TkMinusEq, TkMinus)
+      else if c == '*'
+        finish_two(st, start, c2, '=', TkStarEq, TkStar)
+      else if c == '/'
+        finish_two(st, start, c2, '=', TkSlashEq, TkSlash)
+      else if c == '%'
+        finish_two(st, start, c2, '=', TkPercentEq, TkPercent)
+      else if c == '^'
+        finish_two(st, start, c2, '=', TkCaretEq, TkCaret)
+      else if c == '~'
+        emit(st, TkTilde, start, 1i64, 0i64)
+      else if c == '!'
+        if c2 == '='
+          advance(st)
+          emit(st, TkBangEq, start, 2i64, 0i64)
+        else
+          emit(st, TkBang, start, 1i64, 0i64)
+      else if c == '&'
+        if c2 == '&'
+          advance(st)
+          emit(st, TkDoubleAmp, start, 2i64, 0i64)
+        else
+          finish_two(st, start, c2, '=', TkAmpEq, TkAmp)
+      else if c == '|'
+        if c2 == '|'
+          advance(st)
+          emit(st, TkDoublePipe, start, 2i64, 0i64)
+        else
+          finish_two(st, start, c2, '=', TkPipeEq, TkPipe)
+      else if c == '<'
+        if c2 == '<'
+          advance(st)
+          if peek(st) == '='
+            advance(st)
+            emit(st, TkLShiftEq, start, 3i64, 0i64)
+          else
+            emit(st, TkLShift, start, 2i64, 0i64)
+        else
+          finish_two(st, start, c2, '=', TkLe, TkLt)
+      else if c == '>'
+        if c2 == '>'
+          advance(st)
+          if peek(st) == '='
+            advance(st)
+            emit(st, TkRShiftEq, start, 3i64, 0i64)
+          else
+            emit(st, TkRShift, start, 2i64, 0i64)
+        else
+          finish_two(st, start, c2, '=', TkGe, TkGt)
+      else if c == '='
+        if c2 == '='
+          advance(st)
+          emit(st, TkEqEq, start, 2i64, 0i64)
+        else if c2 == '>'
+          advance(st)
+          emit(st, TkFatArrow, start, 2i64, 0i64)
+        else
+          emit(st, TkEq, start, 1i64, 0i64)
+      else if c == '.'
+        if c2 == '.'
+          advance(st)
+          if peek(st) == '='
+            advance(st)
+            emit(st, TkDotDotEq, start, 3i64, 0i64)
+          else
+            emit(st, TkDotDot, start, 2i64, 0i64)
+        else
+          emit(st, TkDot, start, 1i64, 0i64)
+      else if c == ':'
+        emit(st, TkColon, start, 1i64, 0i64)
+      else if c == ','
+        emit(st, TkComma, start, 1i64, 0i64)
+      else if c == ';'
+        emit(st, TkSemicolon, start, 1i64, 0i64)
+      else if c == '('
+        open_bracket(st, start, TkLParen)
+      else if c == ')'
+        close_bracket(st, start, TkRParen)
+      else if c == '['
+        open_bracket(st, start, TkLBrack)
+      else if c == ']'
+        close_bracket(st, start, TkRBrack)
+      else if c == '{'
+        open_bracket(st, start, TkLBrace)
+      else if c == '}'
+        close_bracket(st, start, TkRBrace)
+      else if c == '?'
+        emit(st, TkQuestion, start, 1i64, 0i64)
+      else
+        record_error(st, st.line, 1i64, LEX_BAD_CHAR)
+        emit(st, TkInvalid, start, 1i64, c)
+
+fn finish_two : (*LexState, i64, i64, i64, TokenKind, TokenKind) -> ()
+  | (st, start, c2, want, with_eq, plain) ->
+      if c2 == want
+        advance(st)
+        emit(st, with_eq, start, 2i64, 0i64)
+      else
+        emit(st, plain, start, 1i64, 0i64)
+
+fn open_bracket : (*LexState, i64, TokenKind) -> ()
+  | (st, start, k) ->
+      st.depth = st.depth + 1i64
+      emit(st, k, start, 1i64, 0i64)
+
+fn close_bracket : (*LexState, i64, TokenKind) -> ()
+  | (st, start, k) ->
+      if st.depth > 0i64
+        st.depth = st.depth - 1i64
+      emit(st, k, start, 1i64, 0i64)
+
+-- ── the main loop ───────────────────────────────────────────────────────────
+
+pub fn lex_all : *LexState -> i64
+  | st ->
+      let mut running = true
+      while running
+        if at_end(st)
+          running = false
+        else
+          skip_spaces(st)
+          if at_end(st)
+            running = false
+          else
+            let c = peek(st)
+            if c == '\n'
+              handle_newline(st)
+            else if c == '-' && peek_at(st, 1i64) == '-'
+              skip_comment(st)
+            else
+              dispatch(st)
+      dedent_all(st)
+      emit(st, TkEof, st.len, 0i64, 0i64)
+      if st.errors > 0i64
+        1i64
+      else
+        0i64
+
+fn dispatch : *LexState -> ()
+  | st ->
+      let c = peek(st)
+      if is_digit(c)
+        lex_number(st)
+      else if is_ident_start(c)
+        lex_word(st)
+      else if c == '\"'
+        lex_string(st)
+      else if c == '\''
+        lex_char(st)
+      else
+        lex_punct(st)
+      let k = last_kind(st)
+      let dd = depth_delta(k)
+      st.depth = st.depth + dd
+      if st.depth < 0i64
+        st.depth = 0i64
+
+-- the kind of the most recently emitted token
+pub fn last_kind : *LexState -> TokenKind
+  | st ->
+      if st.tcount <= 0i64
+        TkEof
+      else
+        let idx = read_i64_at(st.tk, st.tcount - 1i64)
+        kind_from_index(idx)
+
+fn kind_from_index : i64 -> TokenKind
+  | i ->
+      if i == 0i64 then TkEof
+      else if i == 1i64 then TkInvalid
+      else if i == 2i64 then TkNewline
+      else if i == 3i64 then TkIndent
+      else if i == 4i64 then TkDedent
+      else if i == 5i64 then TkIdent
+      else if i == 6i64 then TkTypeVar
+      else if i == 7i64 then TkWildcard
+      else if i == 8i64 then TkInt
+      else if i == 9i64 then TkFloat
+      else if i == 10i64 then TkBool
+      else if i == 11i64 then TkChar
+      else if i == 12i64 then TkString
+      else if i == 13i64 then TkNull
+      else if i == 14i64 then TkKwFn
+      else if i == 15i64 then TkKwLet
+      else if i == 16i64 then TkKwMut
+      else if i == 17i64 then TkKwType
+      else if i == 18i64 then TkKwStruct
+      else if i == 19i64 then TkKwEnum
+      else if i == 20i64 then TkKwInterface
+      else if i == 21i64 then TkKwImpl
+      else if i == 22i64 then TkKwMatch
+      else if i == 23i64 then TkKwIf
+      else if i == 24i64 then TkKwElse
+      else if i == 25i64 then TkKwWhile
+      else if i == 26i64 then TkKwFor
+      else if i == 27i64 then TkKwIn
+      else if i == 28i64 then TkKwReturn
+      else if i == 29i64 then TkKwBreak
+      else if i == 30i64 then TkKwContinue
+      else if i == 31i64 then TkKwUse
+      else if i == 32i64 then TkKwMod
+      else if i == 33i64 then TkKwPub
+      else if i == 34i64 then TkKwAs
+      else if i == 35i64 then TkKwTrue
+      else if i == 36i64 then TkKwFalse
+      else if i == 37i64 then TkKwAlloc
+      else if i == 38i64 then TkKwFree
+      else if i == 39i64 then TkKwDefer
+      else if i == 40i64 then TkKwHandle
+      else if i == 41i64 then TkKwEffect
+      else if i == 42i64 then TkKwConst
+      else if i == 43i64 then TkKwStatic
+      else if i == 44i64 then TkPlus
+      else if i == 45i64 then TkMinus
+      else if i == 46i64 then TkStar
+      else if i == 47i64 then TkSlash
+      else if i == 48i64 then TkPercent
+      else if i == 49i64 then TkCaret
+      else if i == 50i64 then TkTilde
+      else if i == 51i64 then TkBang
+      else if i == 52i64 then TkAmp
+      else if i == 53i64 then TkPipe
+      else if i == 54i64 then TkDoubleAmp
+      else if i == 55i64 then TkDoublePipe
+      else if i == 56i64 then TkEq
+      else if i == 57i64 then TkEqEq
+      else if i == 58i64 then TkBangEq
+      else if i == 59i64 then TkLt
+      else if i == 60i64 then TkLe
+      else if i == 61i64 then TkGt
+      else if i == 62i64 then TkGe
+      else if i == 63i64 then TkLShift
+      else if i == 64i64 then TkRShift
+      else if i == 65i64 then TkPlusEq
+      else if i == 66i64 then TkMinusEq
+      else if i == 67i64 then TkStarEq
+      else if i == 68i64 then TkSlashEq
+      else if i == 69i64 then TkPercentEq
+      else if i == 70i64 then TkAmpEq
+      else if i == 71i64 then TkPipeEq
+      else if i == 72i64 then TkCaretEq
+      else if i == 73i64 then TkLShiftEq
+      else if i == 74i64 then TkRShiftEq
+      else if i == 75i64 then TkArrow
+      else if i == 76i64 then TkFatArrow
+      else if i == 77i64 then TkDot
+      else if i == 78i64 then TkDotDot
+      else if i == 79i64 then TkDotDotEq
+      else if i == 80i64 then TkColon
+      else if i == 81i64 then TkComma
+      else if i == 82i64 then TkSemicolon
+      else if i == 83i64 then TkLParen
+      else if i == 84i64 then TkRParen
+      else if i == 85i64 then TkLBrack
+      else if i == 86i64 then TkRBrack
+      else if i == 87i64 then TkLBrace
+      else if i == 88i64 then TkRBrace
+      else TkInvalid

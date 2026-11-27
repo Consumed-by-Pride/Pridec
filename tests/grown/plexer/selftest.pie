@@ -1,0 +1,430 @@
+-- plexer.selftest -- assertions over embedded snippets.
+--
+-- Each case lexes a small source string and asserts the token stream's shape:
+-- counts, kinds at positions, decoded literal values, layout structure, and
+-- error reporting. The driver (plexer.main) additionally lexes this project's
+-- real sources from disk; the snippets here pin down the scanner's decisions
+-- independent of whatever file the driver is pointed at.
+--
+-- Convention: every failed check adds a distinct power of ten to the module
+-- counter, so a nonzero exit status names the failing case.
+
+mod plexer.selftest
+
+use plexer.tokens
+use plexer.chars
+use plexer.lex
+use plexer.keywords
+use plexer.report
+
+let mut FAILS : i64 = 0i64
+
+const TOK_CAP : i64 = 4096i64
+const IND_CAP : i64 = 64i64
+const ERR_CAP : i64 = 64i64
+
+pub struct Fixture
+  st : *LexState
+  buf : ptr
+  toks : ptr
+  tstart : ptr
+  tlen : ptr
+  tline : ptr
+  tcol : ptr
+  tival : ptr
+  indents : ptr
+  err_line : ptr
+  err_col : ptr
+  err_code : ptr
+
+pub fn make_fixture : ptr -> Fixture
+  | src ->
+      let st : *LexState = alloc [LexState; 1]
+      let toks : *i64 = alloc [i64; 4096]
+      let tstart : *i64 = alloc [i64; 4096]
+      let tlen : *i64 = alloc [i64; 4096]
+      let tline : *i64 = alloc [i64; 4096]
+      let tcol : *i64 = alloc [i64; 4096]
+      let tival : *i64 = alloc [i64; 4096]
+      let indents : *i64 = alloc [i64; 64]
+      let err_line : *i64 = alloc [i64; 64]
+      let err_col : *i64 = alloc [i64; 64]
+      let err_code : *i64 = alloc [i64; 64]
+      let f = Fixture {
+        st: st,
+        buf: toks,
+        toks: toks,
+        tstart: tstart,
+        tlen: tlen,
+        tline: tline,
+        tcol: tcol,
+        tival: tival,
+        indents: indents,
+        err_line: err_line,
+        err_col: err_col,
+        err_code: err_code
+      }
+      setup_state(f.st, src, src_len(src), toks, tstart, tlen, tline, tcol, tival, indents, err_line, err_col, err_code)
+      f
+
+pub fn drop_fixture : Fixture -> ()
+  | f ->
+      free f.st
+      free f.toks
+      free f.tstart
+      free f.tlen
+      free f.tline
+      free f.tcol
+      free f.tival
+      free f.indents
+      free f.err_line
+      free f.err_col
+      free f.err_code
+
+fn setup_state : (*LexState, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr) -> ()
+  | (st, src, len, toks, tstart, tlen, tline, tcol, tival, indents, el, ec, ecod) ->
+      st.src = src
+      st.len = len
+      st.pos = 0i64
+      st.line = 1i64
+      st.bol = 0i64
+      st.depth = 0i64
+      st.errors = 0i64
+      st.tk = toks
+      st.tstart = tstart
+      st.tlen = tlen
+      st.tline = tline
+      st.tcol = tcol
+      st.tival = tival
+      st.tcount = 0i64
+      st.tcap = TOK_CAP
+      st.indents = indents
+      st.nind = 0i64
+      st.err_line = el
+      st.err_col = ec
+      st.err_code = ecod
+      st.nerr = 0i64
+      st.last_float = 0.0
+
+pub fn src_len : ptr -> i64
+  | p ->
+      let b = p as *u8
+      let mut n : i64 = 0i64
+      while b[n] != 0
+        n = n + 1i64
+      n
+
+pub fn run_fixture : Fixture -> i64
+  | f -> lex.lex_all(f.st)
+
+fn bump : (i64, ptr) -> ()
+  | (code, what) ->
+      FAILS = FAILS + code
+      report.print_cstr("selftest: case failed: ")
+      report.print_cstr(what)
+      report.print_nl()
+
+fn expect_count : (Fixture, i64, ptr) -> ()
+  | (f, want, what) ->
+      if f.st.tcount != want
+        bump(1i64, what)
+        report.print_cstr("  token count: ")
+        report.print_i64(f.st.tcount)
+        report.print_cstr(" want ")
+        report.print_i64(want)
+        report.print_nl()
+
+fn expect_kind : (Fixture, i64, TokenKind, ptr) -> ()
+  | (f, i, want, what) ->
+      if i < 0i64 || i >= f.st.tcount
+        bump(1i64, what)
+        report.print_cstr("  row out of range: ")
+        report.print_i64(i)
+        report.print_nl()
+      else
+        let got = report.row_kind(f.st, i)
+        if got != want
+          bump(1i64, what)
+          report.print_cstr("  row ")
+          report.print_i64(i)
+          report.print_cstr(" kind ")
+          report.print_cstr(tokens.kind_name(got))
+          report.print_cstr(" want ")
+          report.print_cstr(tokens.kind_name(want))
+          report.print_nl()
+
+fn expect_ival : (Fixture, i64, i64, ptr) -> ()
+  | (f, i, want, what) ->
+      if i < 0i64 || i >= f.st.tcount
+        bump(1i64, what)
+      else
+        let got = report.row_ival(f.st, i)
+        if got != want
+          bump(1i64, what)
+          report.print_cstr("  row ")
+          report.print_i64(i)
+          report.print_cstr(" ival ")
+          report.print_i64(got)
+          report.print_cstr(" want ")
+          report.print_i64(want)
+          report.print_nl()
+
+fn expect_errors : (Fixture, i64, ptr) -> ()
+  | (f, want, what) ->
+      if f.st.errors != want
+        bump(1i64, what)
+        report.print_cstr("  errors: ")
+        report.print_i64(f.st.errors)
+        report.print_cstr(" want ")
+        report.print_i64(want)
+        report.print_nl()
+
+-- ── the cases ───────────────────────────────────────────────────────────────
+
+pub fn case_clauses : () -> ()
+  | () ->
+      let f = make_fixture("fn main : () -> i64\n  | () -> 0\n")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(1i64, "clauses lex status")
+      expect_count(f, 17i64, "clauses count")
+      expect_kind(f, 0i64, TkKwFn, "clauses fn")
+      expect_kind(f, 1i64, TkIdent, "clauses main")
+      expect_kind(f, 2i64, TkColon, "clauses colon")
+      expect_kind(f, 6i64, TkIdent, "clauses i64 is an ident")
+      expect_kind(f, 7i64, TkNewline, "clauses newline")
+      expect_kind(f, 8i64, TkIndent, "clauses indent")
+      expect_kind(f, 9i64, TkPipe, "clauses pipe")
+      expect_kind(f, 13i64, TkInt, "clauses zero")
+      expect_kind(f, 15i64, TkDedent, "clauses dedent at eof")
+      drop_fixture(f)
+
+pub fn case_numbers : () -> ()
+  | () ->
+      let f = make_fixture("0xFF 0b1010 0o17 42i64 1_000_000 0")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(2i64, "numbers lex status")
+      expect_count(f, 7i64, "numbers count")
+      expect_kind(f, 0i64, TkInt, "numbers hex kind")
+      expect_ival(f, 0i64, 255i64, "numbers hex value")
+      expect_ival(f, 1i64, 10i64, "numbers binary value")
+      expect_ival(f, 2i64, 15i64, "numbers octal value")
+      expect_ival(f, 3i64, 42i64, "numbers suffixed value")
+      expect_ival(f, 4i64, 1000000i64, "numbers underscored value")
+      expect_ival(f, 5i64, 0i64, "numbers zero value")
+      drop_fixture(f)
+
+pub fn case_floats : () -> ()
+  | () ->
+      let f = make_fixture("3.14 1e3 2.5f32")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(4i64, "floats lex status")
+      expect_count(f, 4i64, "floats count")
+      expect_kind(f, 0i64, TkFloat, "floats pi kind")
+      expect_kind(f, 1i64, TkFloat, "floats exp kind")
+      expect_kind(f, 2i64, TkFloat, "floats suffixed kind")
+      if f.st.last_float != 2.5
+        bump(1i64, "floats last value")
+        report.print_cstr("  last float: ")
+        report.print_i64(f.st.last_float as i64)
+        report.print_nl()
+      drop_fixture(f)
+
+pub fn case_strings : () -> ()
+  | () ->
+      let f = make_fixture("\"hi\\n\" \"\\x41\" \"\"")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(8i64, "strings lex status")
+      expect_count(f, 4i64, "strings count")
+      expect_ival(f, 0i64, 3i64, "strings escape decode")
+      expect_ival(f, 1i64, 1i64, "strings hex decode")
+      expect_ival(f, 2i64, 0i64, "strings empty decode")
+      drop_fixture(f)
+
+pub fn case_chars : () -> ()
+  | () ->
+      let f = make_fixture("'a' '\\n' '\\x7f'")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(16i64, "chars lex status")
+      expect_count(f, 4i64, "chars count")
+      expect_ival(f, 0i64, 97i64, "chars plain value")
+      expect_ival(f, 1i64, 10i64, "chars newline value")
+      expect_ival(f, 2i64, 127i64, "chars hex value")
+      drop_fixture(f)
+
+pub fn case_operators : () -> ()
+  | () ->
+      let f = make_fixture("a + b == c && d != e | f")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(32i64, "operators lex status")
+      expect_kind(f, 1i64, TkPlus, "operators plus")
+      expect_kind(f, 3i64, TkEqEq, "operators eqeq")
+      expect_kind(f, 5i64, TkDoubleAmp, "operators andand")
+      expect_kind(f, 7i64, TkBangEq, "operators neq")
+      expect_kind(f, 9i64, TkPipe, "operators pipe")
+      drop_fixture(f)
+
+pub fn case_compound : () -> ()
+  | () ->
+      let f = make_fixture("x += 1 << 2 >>= 3 |= 4")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(64i64, "compound lex status")
+      expect_kind(f, 1i64, TkPlusEq, "compound pluseq")
+      expect_kind(f, 3i64, TkLShift, "compound lshift")
+      expect_kind(f, 5i64, TkRShiftEq, "compound rshift-eq")
+      expect_kind(f, 7i64, TkPipeEq, "compound pipe-eq")
+      drop_fixture(f)
+
+pub fn case_ranges : () -> ()
+  | () ->
+      let f = make_fixture("for i in 0..10 let y = 0..=9 let z = 1.5")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(128i64, "ranges lex status")
+      expect_kind(f, 4i64, TkDotDot, "ranges exclusive")
+      expect_kind(f, 10i64, TkDotDotEq, "ranges inclusive")
+      expect_kind(f, 15i64, TkFloat, "ranges float not range")
+      drop_fixture(f)
+
+pub fn case_layout : () -> ()
+  | () ->
+      let f = make_fixture("let a = 1\nlet b =\n  a + 1\nlet c = 2\n")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(256i64, "layout lex status")
+      let nl = report.count_kind(f.st, TkNewline)
+      let ind = report.count_kind(f.st, TkIndent)
+      let ded = report.count_kind(f.st, TkDedent)
+      if nl != 4i64
+        bump(1i64, "layout newlines")
+        report.print_cstr("  newlines: ")
+        report.print_i64(nl)
+        report.print_nl()
+      if ind != 1i64
+        bump(1i64, "layout indent")
+      if ded != 1i64
+        bump(1i64, "layout dedent")
+      drop_fixture(f)
+
+pub fn case_layout_nested : () -> ()
+  | () ->
+      let f = make_fixture("fn f : i64 -> i64\n  | n ->\n      if n > 0\n        1\n      else\n        2\n")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(512i64, "nested layout status")
+      let ind = report.count_kind(f.st, TkIndent)
+      let ded = report.count_kind(f.st, TkDedent)
+      if ind != 4i64
+        bump(1i64, "nested indent count")
+        report.print_cstr("  indents: ")
+        report.print_i64(ind)
+        report.print_nl()
+      if ded != 4i64
+        bump(1i64, "nested dedent count")
+      drop_fixture(f)
+
+pub fn case_brackets : () -> ()
+  | () ->
+      let f = make_fixture("let t = (a,\n     b)\nlet u = 3\n")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(1024i64, "brackets lex status")
+      let nl = report.count_kind(f.st, TkNewline)
+      -- one newline between the two `let` lines plus the trailing one; the
+      -- break inside the parens emits none
+      if nl != 2i64
+        bump(1i64, "bracket newlines")
+        report.print_cstr("  newlines: ")
+        report.print_i64(nl)
+        report.print_nl()
+      drop_fixture(f)
+
+pub fn case_comments : () -> ()
+  | () ->
+      let f = make_fixture("a - b\n-- a comment\nlet c = 2 -- trailing\n")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(2048i64, "comments lex status")
+      expect_kind(f, 1i64, TkMinus, "comments minus not dash")
+      let kw = report.count_kind(f.st, TkKwLet)
+      if kw != 1i64
+        bump(1i64, "comments skipped comment line")
+      drop_fixture(f)
+
+pub fn case_words : () -> ()
+  | () ->
+      let f = make_fixture("fn Foo _bar _ Baz fizz_buzz")
+      let rc = run_fixture(f)
+      if rc != lex.LEX_OK
+        bump(4096i64, "words lex status")
+      expect_kind(f, 0i64, TkKwFn, "words fn")
+      expect_kind(f, 1i64, TkTypeVar, "words typevar")
+      expect_kind(f, 2i64, TkIdent, "words underscore-prefixed ident")
+      expect_kind(f, 3i64, TkWildcard, "words wildcard")
+      expect_kind(f, 4i64, TkTypeVar, "words Baz")
+      expect_kind(f, 5i64, TkIdent, "words snake ident")
+      drop_fixture(f)
+
+pub fn case_bad_string : () -> ()
+  | () ->
+      let f = make_fixture("\"never ends")
+      let rc = run_fixture(f)
+      if rc == lex.LEX_OK
+        bump(1i64, "bad string reported")
+      expect_errors(f, 1i64, "bad string error count")
+      drop_fixture(f)
+
+pub fn case_bad_char : () -> ()
+  | () ->
+      let f = make_fixture("'\\q'")
+      let rc = run_fixture(f)
+      if rc == lex.LEX_OK
+        bump(1i64, "bad char escape reported")
+      expect_errors(f, 1i64, "bad char error count")
+      drop_fixture(f)
+
+pub fn case_bad_dedent : () -> ()
+  | () ->
+      let f = make_fixture("let a = 1\n    let b = 2\n  let c = 3\n")
+      let rc = run_fixture(f)
+      if rc == lex.LEX_OK
+        bump(1i64, "bad dedent reported")
+      drop_fixture(f)
+
+pub fn case_keywords_hash : () -> ()
+  | () ->
+      let d = keywords.distinct_hashes()
+      if d != keywords.KW_COUNT
+        bump(1i64, "keyword hashes distinct")
+        report.print_cstr("  distinct: ")
+        report.print_i64(d)
+        report.print_cstr(" of ")
+        report.print_i64(keywords.KW_COUNT)
+        report.print_nl()
+
+pub fn run_all : () -> i64
+  | () ->
+      case_clauses()
+      case_numbers()
+      case_floats()
+      case_strings()
+      case_chars()
+      case_operators()
+      case_compound()
+      case_ranges()
+      case_layout()
+      case_layout_nested()
+      case_brackets()
+      case_comments()
+      case_words()
+      case_bad_string()
+      case_bad_char()
+      case_bad_dedent()
+      case_keywords_hash()
+      FAILS

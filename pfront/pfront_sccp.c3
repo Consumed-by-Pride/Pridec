@@ -233,6 +233,12 @@ fn Lval Sccp.eval(Sccp* s, Node* n)
             if (n.child_count < 1) { return lv_bot(); }
             if (n.type_ann == null || n.type_ann.kind != Nk.N_TY_NAME) { return lv_bot(); }   // `0 as *T`: SCCP is untyped, a pointer is not the integer
             {
+                // NB: SCCP is untyped; `n.p.width` is only ever set on int
+                // LITERALS, never on cast nodes, so the width below defaults
+                // to 64 and the value propagated UNTRUNCATED -- `(-1) as u8`
+                // folded as -1 and `!= 255u8` became a baked-in TRUE branch.
+                // Without a known width a cast is overdefined.
+                if (n.p.width == 0 || (int)n.p.width < 0) { return lv_bot(); }
                 Lval* a = s.get(n.children[0]);
                 if (a == null) { return lv_bot(); }
                 // Narrowing/widening int casts preserve constant value (but

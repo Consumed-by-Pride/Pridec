@@ -1,0 +1,165 @@
+-- plexer.report -- output helpers and token rendering.
+--
+-- There is no print builtin in Pride: everything goes through the write
+-- syscall, and every integer goes through a hand-rolled decimal formatter.
+-- The file reader wraps open/read/close so the driver can lex real sources.
+
+mod plexer.report
+
+use plexer.tokens
+use plexer.lex
+
+-- ── raw output ──────────────────────────────────────────────────────────────
+
+pub fn write_bytes : (i64, ptr, i64) -> i64
+  | (fd, buf, count) -> syscall(1, fd, buf, count) as i64
+
+pub fn print_span : (ptr, i64) -> ()
+  | (p, n) ->
+      let b = p as *u8
+      let mut i : i64 = 0i64
+      while i < n
+        syscall(1, 1, (b + i) as i64, 1i64)
+        i = i + 1i64
+
+pub fn print_cstr : ptr -> ()
+  | p ->
+      let b = p as *u8
+      let mut n : i64 = 0i64
+      while b[n] != 0
+        n = n + 1i64
+      syscall(1, 1, p as i64, n)
+
+pub fn print_char : i64 -> ()
+  | c ->
+      let b : *u8 = alloc [u8; 1]
+      b[0] = c as u8
+      syscall(1, 1, b as i64, 1i64)
+      free b
+
+pub fn print_i64 : i64 -> ()
+  | v ->
+      let buf : *u8 = alloc [u8; 24]
+      let mut pos : i64 = 0i64
+      let mut x : i64 = v
+      if x < 0i64
+        buf[pos] = 45u8
+        pos = pos + 1i64
+        x = 0i64 - x
+      if x == 0i64
+        buf[pos] = 48u8
+        pos = pos + 1i64
+      else
+        let tmp : *u8 = alloc [u8; 21]
+        let mut tlen : i64 = 0i64
+        while x > 0i64
+          tmp[tlen] = (x % 10i64 + 48i64) as u8
+          x = x / 10i64
+          tlen = tlen + 1i64
+        let mut k : i64 = tlen - 1i64
+        while k >= 0i64
+          buf[pos] = tmp[k]
+          pos = pos + 1i64
+          k = k - 1i64
+        free tmp
+      syscall(1, 1, buf as i64, pos)
+      free buf
+
+pub fn print_nl : () -> ()
+  | () ->
+      syscall(1, 1, "\n" as i64, 1i64)
+
+pub fn print_two : (ptr, i64) -> ()
+  | (msg, code) ->
+      print_cstr(msg)
+      print_i64(code)
+      print_nl()
+
+-- ── file reading ────────────────────────────────────────────────────────────
+
+-- returns byte count read, or -1 on any failure; the buffer is the caller's
+pub fn read_file_into : (ptr, i64, ptr, i64) -> i64
+  | (path, path_len, buf, cap) ->
+      let fd = syscall(2, path as i64, 0i64, 0i64) as i64
+      let mut res : i64 = -1i64
+      if fd >= 0i64
+        let n = syscall(0, fd, buf as i64, cap) as i64
+        syscall(3, fd)
+        res = n
+      res
+
+-- ── token rendering ─────────────────────────────────────────────────────────
+
+pub fn row_kind : (*LexState, i64) -> TokenKind
+  | (st, i) -> lex.kind_from_index(read_i64_at(st.tk, i))
+
+pub fn row_ival : (*LexState, i64) -> i64
+  | (st, i) -> read_i64_at(st.tival, i)
+
+pub fn row_len : (*LexState, i64) -> i64
+  | (st, i) -> read_i64_at(st.tlen, i)
+
+pub fn row_start : (*LexState, i64) -> i64
+  | (st, i) -> read_i64_at(st.tstart, i)
+
+pub fn row_line : (*LexState, i64) -> i64
+  | (st, i) -> read_i64_at(st.tline, i)
+
+-- render one token row: KIND(line,col) [len] = ival
+pub fn print_row : (*LexState, i64) -> ()
+  | (st, i) ->
+      let k = row_kind(st, i)
+      print_cstr(tokens.kind_name(k))
+      print_char('(')
+      print_i64(row_line(st, i))
+      print_char(',')
+      print_i64(read_i64_at(st.tcol, i))
+      print_char(')')
+      print_cstr(" [")
+      print_i64(row_len(st, i))
+      print_cstr("] = ")
+      print_i64(row_ival(st, i))
+      print_nl()
+
+-- dump every non-trivia row
+pub fn print_rows : *LexState -> ()
+  | st ->
+      let mut i : i64 = 0i64
+      while i < st.tcount
+        let k = row_kind(st, i)
+        if tokens.kind_is_layout(k)
+          i = i + 1i64
+        else
+          print_row(st, i)
+          i = i + 1i64
+
+-- the count of rows whose kind matches
+pub fn count_kind : (*LexState, TokenKind) -> i64
+  | (st, want) ->
+      let mut n : i64 = 0i64
+      let mut i : i64 = 0i64
+      while i < st.tcount
+        if row_kind(st, i) == want
+          n = n + 1i64
+        i = i + 1i64
+      n
+
+-- the source span of row i as a kind check plus byte equality against a
+-- literal; used by the self-test so a mistyped expectation fails loudly
+pub fn row_matches : (*LexState, i64, TokenKind, ptr, i64) -> bool
+  | (st, i, want, text, tlen) ->
+      if row_kind(st, i) != want
+        false
+      else if row_len(st, i) != tlen
+        false
+      else
+        let s = st.src as *u8
+        let start = row_start(st, i)
+        let t = text as *u8
+        let mut j : i64 = 0i64
+        let mut same = true
+        while j < tlen
+          if s[start + j] != t[j]
+            same = false
+          j = j + 1i64
+        same

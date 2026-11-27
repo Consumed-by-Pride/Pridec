@@ -1,0 +1,172 @@
+-- probe of every feature shape the grown projects rely on
+mod grown.probe
+
+struct Pt
+  x : i64
+  y : i64
+
+enum Shape
+  Circle(i64)
+  Rect(i64, i64)
+  Dot
+
+type Name = struct
+  len : i64
+  cap : i64
+
+interface Area
+  fn area : Self -> i64
+
+impl Area for Pt
+  fn area : Self -> i64 | p -> p.x * p.y
+
+const TABLE : [i64; 4] = [10, 20, 30, 40]
+
+let mut COUNTER : i64 = 0i64
+
+fn apply : (fn(i64) -> i64, i64) -> i64
+  | (f, v) -> f(v)
+
+fn make_adder : i64 -> (fn(i64) -> i64)
+  | k ->
+      fn (d: i64) -> i64 { k + d }
+
+fn pairify<T> : (T, T) -> (T, T)
+  | (a, b) -> (b, a)
+
+fn classify : Shape -> i64
+  | Circle(r) -> 3 * r * r
+  | Rect(w, h) -> w * h
+  | Dot -> 0
+
+fn sum_slice : ([i64], i64) -> i64
+  | (xs, n) ->
+      let mut s : i64 = 0
+      let mut i : i64 = 0
+      while i < n
+        s = s + xs[i]
+        i = i + 1
+      s
+
+fn loops : () -> i64
+  | () ->
+      let mut acc : i64 = 0
+      for i in 0..10
+        if i % 2 == 0
+          continue
+        acc = acc + i
+      for v in TABLE
+        acc = acc + v
+      let mut k : i64 = 0
+      while k < 3
+        k = k + 1
+      acc
+
+fn wide : Pt -> Pt
+  | p ->
+      let q = Pt { x: p.x + 1, y: p.y + 2 }
+      q
+
+fn bytes_work : () -> i64
+  | () ->
+      let buf : *u8 = alloc [u8; 8]
+      let mut i : i64 = 0
+      while i < 8
+        buf[i] = (65 + i) as u8
+        i = i + 1
+      let mut acc : i64 = 0
+      i = 0
+      while i < 8
+        acc = acc + buf[i] as i64
+        i = i + 1
+      free buf
+      acc
+
+fn bits : () -> i64
+  | () ->
+      let a : i64 = 0xFF00FF
+      let b : i64 = 0x0F0F0F
+      let mut r : i64 = (a & b) | (a ^ a)
+      r = r << 2
+      r = r >> 1
+      r = r + (1 << 10)
+      r
+
+fn strings_len : () -> i64
+  | () ->
+      let s = "hello"
+      let mut n : i64 = 0
+      while s[n] != 0
+        n = n + 1
+      n
+
+fn main : () -> i64
+  | () ->
+      let mut fails : i64 = 0
+      print_i64(1)
+      if classify(Shape.Circle(2)) != 12
+        fails = fails + 1
+      print_i64(2)
+      let (a, b) = pairify(1, 2)
+      if a != 2 || b != 1
+        fails = fails + 10
+      print_i64(3)
+      let ad = make_adder(40)
+      if apply(ad, 2) != 42
+        fails = fails + 100
+      print_i64(4)
+      if loops() != 125
+        fails = fails + 1000
+      print_i64(5)
+      if (wide(Pt { x: 3, y: 4 })).y != 6
+        fails = fails + 10000
+      print_i64(6)
+      if bytes_work() != 548
+        fails = fails + 100000
+      print_i64(7)
+      if bits() != 1967134
+        fails = fails + 1000000
+      print_i64(8)
+      if strings_len() != 5
+        fails = fails + 10000000
+      print_i64(9)
+      let xs : [i64; 4] = [1, 2, 3, 4]
+      if sum_slice(xs[0..4], 4) != 10
+        fails = fails + 100000000
+      print_i64(10)
+      if (Area.area(Pt { x: 6, y: 7 })) != 42
+        fails = fails + 1000000000
+      print_i64(11)
+      COUNTER = COUNTER + 1
+      if COUNTER != 1
+        fails = fails + 10000000000
+      fails
+
+fn print_i64 : i64 -> () ! [IO, Alloc]
+  | v ->
+      let buf : *u8 = alloc [u8; 24]
+      let mut pos : i64 = 0
+      let mut x : i64 = v
+      if x < 0
+        buf[pos] = 45u8
+        pos = pos + 1
+        x = 0 - x
+      if x == 0
+        buf[pos] = 48u8
+        pos = pos + 1
+      else
+        let tmp : *u8 = alloc [u8; 21]
+        let mut tlen : i64 = 0
+        while x > 0
+          tmp[tlen] = (x % 10 + 48) as u8
+          x = x / 10
+          tlen = tlen + 1
+        let mut k : i64 = tlen - 1
+        while k >= 0
+          buf[pos] = tmp[k]
+          pos = pos + 1
+          k = k - 1
+        free tmp
+      buf[pos] = 10u8
+      syscall(1, 1, buf as i64, pos + 1)
+      free buf

@@ -89,7 +89,7 @@ struct DynI { Node* iface; AirTyp* ty; }
 // an enum is the explicit record { tag: i64, payload: [words x i64] }; every payload field sits at its own
 // 8-byte word offset and is stored/loaded through a typed pointer (the layout is decided HERE, not by the consumer)
 struct VarI { char* name; Node* decl; AirTyp*[8] ft; usz nf; usz[8] off; }
-struct Enm { Node* decl; char* name; AirTyp* ty; VarI[32] v; usz nv; usz words; AirTyp*[8] um; usz nm; }   // nm > 0: a set-theoretic union `A ∪ B` (variants are its members)
+struct Enm { Node* decl; char* name; AirTyp* ty; VarI[96] v; usz nv; usz words; AirTyp*[8] um; usz nm; }   // nm > 0: a set-theoretic union `A ∪ B` (variants are its members)
 // effect handlers: a handler arm is a closure installed in the per-operation global `hop.E.op` for the dynamic
 // extent of the `handle` body.  A `perform` calls the installed closure.  An arm that resumes in tail position
 // returns the resumption value to the perform site; an arm that does not resume ABORTS: it stores its value into
@@ -745,6 +745,13 @@ fn Ins* Low.push(Low* lw, InsK k)
     }
     Ins* r = &b.ins[b.ni]; b.ni++;
     r.k = k; r.name = null; r.a = null; r.b = null; r.nargs = 0; r.fld = null; r.idx = 0;
+    // `realloc` does not zero: every field push does not itself assign is heap
+    // garbage, and `I_STORE.vol` garbage made ordinary `let mut` initialisers
+    // emit `store volatile` on one build and plain stores on another (the C
+    // target then refused to compile its own output). Initialize the rest.
+    r.aop = 0; r.aord = 0; r.vol = false; r.rty = null; r.text = null;
+    r.cons = null; r.dialect = 0;
+    for (usz zi = 0; zi < MAXA; zi++) { r.args[zi] = null; }
     return r;
 }
 fn Vx Low.unit(Low* lw) { Vx v; v.p = lw.m.p_unit; v.t = lw.m.t_unit; return v; }
@@ -785,6 +792,17 @@ fn Vx Low.lit_bool(Low* lw, bool b) { Vx r; r.p = air_ir::air_mk_prd_bool(lw.a, 
 fn Vx Low.binop(Low* lw, AirBinop op, Vx a, Vx b)
 {
     bool cmp = op == ABIN_EQ || op == ABIN_NEQ || op == ABIN_LT || op == ABIN_GT || op == ABIN_LE || op == ABIN_GE;
+    // enum equality compares the variant TAG, not the packed value: the low
+    // profile stores an enum as { tag, payload }, a variant value is a whole
+    // struct slot, and the C target has no struct `==` (a raw binop on the
+    // packed values was refused there and meaningless for the payload words).
+    if ((op == ABIN_EQ || op == ABIN_NEQ) && lw.enum_of_ty(a.t) != null && lw.enum_of_ty(b.t) != null)
+    {
+        Vx ta = lw.field_of(a, "tag", 0, lw.m.t_i64);
+        Vx tb = lw.field_of(b, "tag", 0, lw.m.t_i64);
+        AirPrd* tp = air_ir::air_mk_binop(lw.a, op, ta.p, tb.p);
+        return lw.let_(tp, lw.m.t_bool, "_t");
+    }
     AirPrd* p = air_ir::air_mk_binop(lw.a, op, a.p, b.p);
     return lw.let_(p, cmp ? lw.m.t_bool : a.t, "_t");
 }
@@ -1495,7 +1513,7 @@ fn Enm* Low.enum_for(Low* lw, Node* decl)
     {
         Node* vn = decl.children[i];
         if (vn == null || vn.kind != Nk.N_DECL_VARIANT) { continue; }
-        if (e.nv >= 32) { lw.unsup(decl, "enum with more than 32 variants"); return null; }
+        if (e.nv >= 96) { lw.unsup(decl, "enum with more than 96 variants"); return null; }
         VarI* vi = &e.v[e.nv]; e.nv++;
         vi.name = lw.dname(vn); vi.decl = vn; vi.nf = 0;
         usz off = 0;
@@ -1638,6 +1656,20 @@ fn Enm* Low.enum_ctor_base(Low* lw, Node* base, char* name, long* vi)
     long k = lw.variant_index(e, name, null);
     if (k < 0) { return null; }
     *vi = k; return e;
+}
+// the enum that declares a variant NODE: used for module-qualified variant
+// values (`m.lib.Color.Red`), which the resolver binds as a whole chain to the
+// variant declaration (try_resolve_module_chain), not as `enum` + `variant`.
+fn Enm* Low.enum_of_variant_decl(Low* lw, Node* vd)
+{
+    for (usz i = 0; i < lw.nen; i++)
+    {
+        for (usz k = 0; k < lw.ens[i].nv; k++)
+        {
+            if (lw.ens[i].v[k].decl == vd) { return &lw.ens[i]; }
+        }
+    }
+    return null;
 }
 // pattern on an enum scrutinee: test the tag, then match the payload fields
 fn bool Low.pat_variant(Low* lw, Enm* e, usz vi, Node** subs, usz nsub, Vx v, usz fail)
@@ -2753,6 +2785,17 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
             {
                 long evi = -1; Enm* ee = lw.enum_ctor_base(n.children[0], lw.dname(n), &evi);   // `E.B`
                 if (ee != null) { return lw.variant_value(ee, (usz)evi, null, 0, n); }
+                // a module-qualified variant (`x.lib.Color.Red`): the resolver
+                // bound the whole chain to the variant declaration
+                if (n.resolved != null && n.resolved.kind == Nk.N_DECL_VARIANT)
+                {
+                    Enm* ev = lw.enum_of_variant_decl(n.resolved);
+                    if (ev != null)
+                    {
+                        long vi2 = lw.variant_index(ev, null, n.resolved);
+                        if (vi2 >= 0) { return lw.variant_value(ev, (usz)vi2, null, 0, n); }
+                    }
+                }
                 AirTyp* abt = lw.hint(n.children[0]); char* af = lw.text(n);
                 if (abt != null && abt.tag == ATYP_ARRAY && af != null && seq(af, "len")) { return lw.lit_int(abt.ival, lw.m.t_i64); }
                 if (abt != null && af != null && seq(af, "len") && lw.fat_elem(abt) != null)   // the stored length is `usz`; the language-level `.len` is `i64`
@@ -3994,7 +4037,7 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
     char* pn = null; AirTyp* jt = null; bool carry_known = false; bool carry = false;
     usz jb = lw.blk("m.join");
     // results are collected while arms are lowered; the join parameter is added once the type is known
-    usz[64] end_blk; Vx[64] end_val; usz nend = 0;
+    usz[128] end_blk; Vx[128] end_val; usz nend = 0;
     bool exhaustive = false;
     for (usz ai = 0; ai < narms; ai++)
     {
@@ -4044,7 +4087,7 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
         if (lw.fn_errors > 0) { return lw.unit(); }
         if (lw.live())
         {
-            if (nend >= 64) { lw.unsup(arm, "more than 64 arms"); return lw.unit(); }
+            if (nend >= 128) { lw.unsup(arm, "more than 128 arms"); return lw.unit(); }
             end_blk[nend] = lw.cur; end_val[nend] = bv; nend++;
             if (!carry_known) { carry_known = true; jt = bv.t; carry = lw.carries(bv.t); }
             lw.cur = NOBLK;
