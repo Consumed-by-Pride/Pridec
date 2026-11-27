@@ -7,7 +7,7 @@ struct Arena
 fn bump : (*Arena, u64) -> *u8 ! [UB]
   | (a, size) ->
       if a.cursor + size > a.cap
-        ub! "arena exhausted"
+        unsafe { ub! "arena exhausted" }
       else
         let p = a.base
         a.cursor = a.cursor + size

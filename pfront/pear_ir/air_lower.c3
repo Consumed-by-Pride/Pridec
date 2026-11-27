@@ -247,6 +247,7 @@ import pfront_lex;
 import air_ir;
 import air_scope;
 import air_types;
+import air_text;
 import air_audit;
 
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
@@ -642,6 +643,47 @@ fn AirPat* AirLower.pat(AirLower* lr, Node* p)
     return lr.pat_node(p);
 }
 
+/*
+ `{ A: a }` / `{ B }` naming an ENUM VARIANT -> ctor A(a) / ctor B.
+
+ Returns null when no data declaration in the module has a constructor of that
+ name, so the caller keeps its refusal for structs and unions. Looking the
+ variant up by NAME across the module is enough and avoids inferring the
+ scrutinee's type here: the enclosing match already typed it, and a struct
+ pattern's field name is a lowercase member, which no enum ctor shares.
+*/
+fn AirPat* AirLower.enum_struct_pat(AirLower* lr, Node* p)
+{
+    Node* fe = null;
+    for (usz i = 0; i < p.child_count; i++)
+    {
+        Node* f = p.children[i];
+        if (f != null && f.kind == Nk.N_PAT_FIELD) { fe = f; break; }
+    }
+    if (fe == null) { return null; }
+    char* vnm = node_text(fe, lr.it);
+    if (vnm == null || vnm[0] == 0) { return null; }
+    bool found = false;
+    for (usz i = 0; i < lr.mod.decl_count && !found; i++)
+    {
+        AirDecl* dd = lr.mod.decls[i];
+        if (dd == null || dd.tag != ADECL_DATA) { continue; }
+        for (usz c = 0; c < dd.ctor_count; c++)
+        {
+            AirCtorDecl* ct = dd.ctors[c];
+            if (ct != null && ct.name != null && air_text::streq(ct.name, vnm)) { found = true; break; }
+        }
+    }
+    if (!found) { return null; }
+    AirPat*[1] subs; usz n = 0;
+    if (fe.child_count > 0 && fe.children[0] != null && pfront_core::is_pattern(fe.children[0].kind))
+    {
+        subs[0] = lr.pat_node(fe.children[0]);
+        n = 1;
+    }
+    return air_ir::air_mk_pat_variant(lr.arena, lr.dup(vnm), &subs[0], n);
+}
+
 fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
 {
     air_audit::mark(p);
@@ -710,10 +752,21 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
         {
             char* vnm = node_text(p, lr.it);
             if (vnm == null) vnm = (char*)"_V";
+            /*
+             child[0] is the MODULE-PATH that names the variant, not a payload.
+             Lowering every child (which is what this did) passed that path node
+             to pat_node, which has no case for it and refused the whole program
+             -- so an `enum` variant could not be matched with a payload at all,
+             while the identical `type X = ..` form worked. air_low.c3:3926
+             already filters to `pfront_core::is_pattern(c.kind)`, which is the
+             right rule and skips the path by construction.
+            */
             AirPat*[64] subs; usz n = 0;
             for (usz i = 0; i < p.child_count && i < 64; i++)
             {
-                subs[n] = lr.pat_node(p.children[i]);
+                Node* c = p.children[i];
+                if (c == null || !pfront_core::is_pattern(c.kind)) { continue; }
+                subs[n] = lr.pat_node(c);
                 n = n + 1;
             }
             return air_ir::air_mk_pat_variant(lr.arena, lr.dup(vnm), &subs[0], n);
@@ -795,7 +848,25 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
             */
             if (p.kind == Nk.N_PAT_STRUCT)
             {
-                lr.note_bad((char*)"struct patterns are not lowered by this lowerer yet (air_low.c3 does); refusing rather than matching everything");
+                /*
+                 `{ A: a }` / `{ B }` on an ENUM names a variant, and that is a
+                 straight translation to APAT_VARIANT once the field is known --
+                 air_low.c3:3934 does exactly this. It is the form the conformance
+                 corpus uses (253_enum_clause_patterns, 63_union_exhaustive), and
+                 it was refused here while air_low accepted it, so the same
+                 program compiled or not depending on which lowerer ran.
+
+                 A pattern against a STRUCT or a UNION is NOT this case and stays
+                 refused below: APAT_RECORD is name-only and rejects a payload
+                 (air_write.c3 errors on one), and a union member is a
+                 discriminant test over a flattened member set, which this
+                 lowerer does not model at all. Guessing there would match
+                 everything, which is the failure mode this whole branch exists
+                 to avoid.
+                */
+                AirPat* vp = lr.enum_struct_pat(p);
+                if (vp != null) { return vp; }
+                lr.note_bad((char*)"a struct or union pattern is not lowered by this lowerer (enum variant patterns are; see AirLower.enum_struct_pat). A struct field payload cannot be APAT_RECORD, which is name-only, and a union member needs a discriminant test this lowerer has no representation for -- refusing rather than matching everything");
             }
             else if (p.kind == Nk.N_PAT_RANGE)
             {

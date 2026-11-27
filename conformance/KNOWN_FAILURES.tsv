@@ -9,11 +9,8 @@
 06_arity_too_many.pie	missing type-warn at 5:11
 07_arith_nonnumeric.pie	missing type-warn at 3:12
 08_mixed_numeric.pie	count type-warn want=1 got=0
-103_newtype.pie	expected CLEAN, got 2 errors/warnings; 1 unexpected compile errors
 106_multi_return.pie	expected CLEAN, got 1 errors/warnings
-107_closure_capture.pie	2 unexpected compile errors
 10_field_nonstruct.pie	count type-warn want=1 got=0
-112_bitops.pie	1 unexpected compile errors
 114_generic_identity.pie	4 unexpected compile errors
 115_module_path.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
 11_logical_nonbool.pie	missing type-warn at 3:10
@@ -25,9 +22,7 @@
 127_match_int_ranges.pie	expected CLEAN, got 1 errors/warnings
 129_effect_compose.pie	expected CLEAN, got 1 errors/warnings
 12_index_nonindex.pie	count type-warn want=1 got=0
-130_newtype_wrapper.pie	2 unexpected compile errors
 131_module_type_use.pie	expected CLEAN, got 1 errors/warnings; 1 unexpected compile errors
-132_newtype_arith.pie	expected CLEAN, got 7 errors/warnings; 3 unexpected compile errors
 134_ub_divide.pie	expected CLEAN, got 4 errors/warnings; 2 unexpected compile errors
 142_ring_buffer.pie	expected CLEAN, got 1 errors/warnings
 143_number_theory.pie	expected CLEAN, got 4 errors/warnings
@@ -40,7 +35,6 @@
 170_extern_math.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
 171_extern_stdio.pie	expected CLEAN, got 9 errors/warnings; 9 unexpected compile errors
 175_pattern_guards.pie	expected CLEAN, got 3 errors/warnings
-17_ub_bang.pie	count effect-err want=0 got=1; 1 unexpected compile errors
 188_channel_ops.pie	expected CLEAN, got 3 errors/warnings
 18_match_nonexhaustive.pie	count lint-warn want=1 got=2
 194_compression.pie	expected CLEAN, got 1 errors/warnings
@@ -80,7 +74,6 @@
 41_matmul_mismatch.pie	missing type-warn at 6:18; 3 unexpected compile errors
 44_if_typed_branch_warns.pie	missing type-warn at 3:10
 47_class_guidance.pie	missing parse at 2:1; 4 unexpected compile errors
-50_realistic_kernel.pie	1 unexpected compile errors
 56_concrete_field_still_warns.pie	missing type-warn at 6:22
 58_use_alias.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
 59_cross_module_collision.pie	expected CLEAN, got 2 errors/warnings

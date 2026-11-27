@@ -1,3 +1,7 @@
 -- Test: closure capturing local variable
-fn make_adder : i64 -> (i64 -> i64)
-  | n -> | x -> x + n
+-- The arrow return type is spelled `fn(A) -> B` and a lambda is `fn (x: T) -> T { .. }`;
+-- `(i64 -> i64)` in return position and a bare `| x -> ..` are not the language's
+-- syntax, so this case was recorded as a parse failure of the compiler rather than
+-- of the fixture.
+fn make_adder : i64 -> fn(i64) -> i64
+  | n -> fn (x: i64) -> i64 { x + n }

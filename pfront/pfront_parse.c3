@@ -1938,6 +1938,27 @@ fn Node* Parser.parse_expr_prec(Parser* p, int min_prec)
             t = p.ct();
         }
 
+        /*
+         `xor` is a word operator (docs/pride/SYNTAX.md:629 lists it beside `^`)
+         but is NOT a reserved word -- stdlib/hash/auto_hash.pie:194 binds
+         `let xor = h ^ base`. Reserving it in the lexer therefore broke the whole
+         stdlib, so the reading is decided POSITIONALLY here instead: an ident
+         spelling `xor` in infix position, i.e. with a left operand already
+         parsed, is the operator. In every other position -- `let xor = ..`, a
+         binder, the head of an expression -- it stays a name.
+
+         This has to happen before the juxtaposition rule in the postfix loop,
+         which would otherwise read `v xor mask` as `v(xor)(mask)`: that is what
+         made the AST a CALL with an unresolved `xor` inside.
+        */
+        if (t == Tk.TOKEN_IDENT)
+        {
+            Tok w = p.cur();
+            if (w.len == 3 && w.start != null && w.start[0] == 'x' && w.start[1] == 'o' && w.start[2] == 'r')
+            {
+                t = Tk.TOKEN_XOR;
+            }
+        }
         int prec = infix_prec(t);
         /*
          Inside a handler's computation a `|` opens an ARM, not a bitwise
@@ -1945,8 +1966,26 @@ fn Node* Parser.parse_expr_prec(Parser* p, int min_prec)
          infix_prec so the table stays a pure function of the token.
         */
         if (t == Tk.TOKEN_PIPE && p.no_pipe_infix) { break; }
+        /*
+         `xor` is a word operator (docs/pride/SYNTAX.md:629 lists it beside `^`),
+         and unlike `and`/`or`/`not` it is NOT a reserved word: stdlib/hash/
+         auto_hash.pie:194 binds `let xor = h ^ base`, so making the lexer emit
+         TOKEN_XOR broke the whole stdlib (megaload: 2 errors over 261 modules).
+
+         The disambiguation is positional and unambiguous: a bare `xor` standing
+         BETWEEN two operands is the operator, and anywhere else -- after `let`,
+         in binder position, at the head of an expression -- it is a name. Re-read
+         it as the operator here so both spellings work.
+        */
         if (prec == 0 || prec < min_prec) { break; }
         Tok op = p.advance();
+        /*
+         The word operator `xor` lexes as TOKEN_IDENT, so `op` carries the wrong
+         type; the node records `op.type` and the lowerers dispatch on it. Retag
+         before anything consumes it, or `v xor mask` reaches the lowering as an
+         operator PRIDE has no case for ("not lowered yet (binary operator)").
+        */
+        if (op.type == Tk.TOKEN_IDENT && tok_is_word_xor(op)) { op.type = Tk.TOKEN_XOR; }
         // Symmetric case: the operator is at END of line and the operand is on
         // the next. `x ||\n  y` — skip the layout run before the right side.
         p.skip_continuation_layout();
@@ -2285,6 +2324,14 @@ fn bool tok_is_member_name(Tk t)
  ordinary call, and anything operator-shaped is excluded because `k - 1`
  is subtraction, not application to a negative literal.
 */
+// `xor` is a word operator that is also a legal identifier; see the positional
+// note in parse_expr_prec. Shared so the juxtaposition rule can exclude it.
+fn bool tok_is_word_xor(Tok t)
+{
+    return t.type == Tk.TOKEN_IDENT && t.len == 3 && t.start != null
+        && t.start[0] == 'x' && t.start[1] == 'o' && t.start[2] == 'r';
+}
+
 fn bool tok_is_juxta_arg(Tk t)
 {
     switch (t)
@@ -2325,6 +2372,7 @@ fn Node* Parser.parse_postfix(Parser* p)
         */
         if (p.juxta_apply && tok_is_juxta_arg(t) && e != null
             && !tok_is_then(p.cur())
+            && !tok_is_word_xor(p.cur())
             && p.cur().line == e.line)
         {
             Node* call = p.mk_at(Nk.N_EXPR_CALL, p.cur());
