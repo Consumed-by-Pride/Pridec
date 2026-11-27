@@ -1391,6 +1391,34 @@ fn int PgenCompiler.build_from_clauses(PgenCompiler* c, Node* owner)
         Node* cl = owner.children[i];
         if (cl == null) { continue; }
         if (cl.kind != Nk.N_CLAUSE && cl.kind != Nk.N_MATCH_ARM) { continue; }
+        /*
+         A GUARDED clause can never be an unconditional match.
+
+         Layout is `pattern [guard] body`, so `| n, n > 0` parses as
+         pat-ident, guard, body. Taking child(0) as the pattern and the last
+         child as the action made a guarded clause look like a bare
+         catch-all: `row_all_wildcards` was true for `| n, n > 0`, the tree
+         emitted its leaf and marked every later clause shadowed. Every
+         guarded clause set in the suite then reported a dead arm:
+
+             fn sign : i32 -> i32
+               | n, n > 0  -> 1i32      <- guard ignored, looked like `| _`
+               | n, n < 0  -> -1i32     <- reported "can never match"
+               | _         -> 0i32
+
+         Redundancy is a claim that a clause cannot fire on ANY path. A
+         guard is a condition the decision tree does not model, so a guarded
+         row must not be reported as shadowing anything, and must not itself
+         be proven redundant by this analysis. Skip it: fewer warnings is
+         correct here, a false "dead code" claim is not.
+        */
+        bool guarded = false;
+        for (usz k = 1; k + 1 < cl.child_count; k++)
+        {
+            Node* mid = cl.children[k];
+            if (mid != null && mid.kind == Nk.N_GUARD) { guarded = true; break; }
+        }
+        if (guarded) { continue; }
         Node* pat = cl.child(0);
         Node* action = cl.child_count > 1 ? cl.children[cl.child_count - 1] : null;
         Node*[PG_MAX_COLS] cols;
