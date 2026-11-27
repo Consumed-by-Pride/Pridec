@@ -38,7 +38,12 @@ if [ ! -f "$W/crt_arch.o" ] || [ runtime/compiler_rt_arch.c -nt "$W/crt_arch.o" 
 fi
 
 pass=0 fail=0 skip=0
-for pie in tests/exec/*.pie tests/bounty/b*.pie; do
+# tests/exec/pear/ holds 48 programs that only the legacy PEAR-1 suite
+# (tests/exec/pear/run.sh) drove, so the C target silently never ran them --
+# including two (p127/p128) still listed in XFAIL.tsv as failing when the C
+# target builds and passes both. Cover the directory here; the header contract
+# (-- EXPECT: / -- EXIT:) is the same, so the loop below needs no other change.
+for pie in tests/exec/*.pie tests/exec/pear/*.pie tests/bounty/b*.pie; do
     [ -e "$pie" ] || continue
     name=$(basename "$pie" .pie)
     case "$name" in *$PAT*) ;; *) continue ;; esac
