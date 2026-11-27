@@ -198,7 +198,7 @@ struct Lbl
 // One jump edge, so a phi can be printed as the assignment a jump makes.
 struct Edge { usz to; char*[16] args; usz nargs; }
 
-struct C3
+struct C3Target
 {
     AirModule* m;
     int        errs;
@@ -222,7 +222,7 @@ struct C3
     usz        nstr;
 }
 
-fn void C3.err(C3* c, char* what, char* who)
+fn void C3Target.err(C3Target* c, char* what, char* who)
 {
     c.errs++;
     void* se = fdopen(2, "w");
@@ -230,7 +230,7 @@ fn void C3.err(C3* c, char* what, char* who)
     fflush(se);
 }
 
-fn AirDecl* C3.find(C3* c, char* nm)
+fn AirDecl* C3Target.find(C3Target* c, char* nm)
 {
     if (nm == null) { return null; }
     for (usz i = 0; i < c.m.decl_count; i++)
@@ -241,7 +241,7 @@ fn AirDecl* C3.find(C3* c, char* nm)
     return null;
 }
 
-fn AirDecl* C3.find_data(C3* c, char* nm)
+fn AirDecl* C3Target.find_data(C3Target* c, char* nm)
 {
     for (usz i = 0; i < c.m.decl_count; i++)
     {
@@ -270,7 +270,7 @@ fn long decl_attr_int(AirDecl* d, char* nm)
     return 0;
 }
 
-fn void C3.bind(C3* c, char* nm, char* op, AirTyp* ty)
+fn void C3Target.bind(C3Target* c, char* nm, char* op, AirTyp* ty)
 {
     if (nm == null) { return; }
     for (usz i = 0; i < c.nv; i++) { if (air_text::streq(c.vn[i], nm)) { c.vv[i].op = op; c.vv[i].ty = ty; return; } }
@@ -278,13 +278,13 @@ fn void C3.bind(C3* c, char* nm, char* op, AirTyp* ty)
     c.vn[c.nv] = nm; c.vv[c.nv].op = op; c.vv[c.nv].ty = ty; c.nv++;
 }
 
-fn bool C3.lookup(C3* c, char* nm, Val* out)
+fn bool C3Target.lookup(C3Target* c, char* nm, Val* out)
 {
     for (usz i = 0; i < c.nv; i++) { if (air_text::streq(c.vn[i], nm)) { *out = c.vv[i]; return true; } }
     return false;
 }
 
-fn char* C3.fresh(C3* c)
+fn char* C3Target.fresh(C3Target* c)
 {
     Sb s; s.init(); s.put((char*)"_t"); s.int_((long)c.tmp); c.tmp++;
     return s.take();
@@ -293,14 +293,14 @@ fn char* C3.fresh(C3* c)
 // An AIR name as a C3 identifier. Every emitted name goes through here, so an
 // unrepresentable name is reported once, at the place it is used, instead of
 // producing a .c3 file that does not parse.
-fn void C3.name(C3* c, Sb* o, char* nm, bool qualified)
+fn void C3Target.name(C3Target* c, Sb* o, char* nm, bool qualified)
 {
     if (!c3_ident_ok(nm)) { c.err((char*)"name is not a legal C3 identifier", nm); o.put((char*)"__bad_name"); return; }
     if (qualified) { o.put((char*)"pear_out::"); }
     o.put(nm);
 }
 
-fn void C3.ty(C3* c, Sb* o, AirTyp* t)
+fn void C3Target.ty(C3Target* c, Sb* o, AirTyp* t)
 {
     if (t == null) { c.err((char*)"missing type", null); o.put((char*)"long"); return; }
     switch (t.tag)
@@ -383,7 +383,7 @@ fn void C3.ty(C3* c, Sb* o, AirTyp* t)
     }
 }
 
-fn void C3.ty_decl(C3* c, Sb* o, AirTyp* t, char* nm)
+fn void C3Target.ty_decl(C3Target* c, Sb* o, AirTyp* t, char* nm)
 {
     c.ty(o, t); o.putc(' '); c.name(o, nm, false);
 }
@@ -391,7 +391,7 @@ fn void C3.ty_decl(C3* c, Sb* o, AirTyp* t, char* nm)
 fn bool ty_is_void(AirTyp* t) { return t == null || t.tag == ATYP_UNIT || t.tag == ATYP_BOTTOM; }
 
 // ── producers ──────────────────────────────────────────────────────────────
-fn char* C3.str_const(C3* c, AirPrd* p)
+fn char* C3Target.str_const(C3Target* c, AirPrd* p)
 {
     Sb nm; nm.init(); nm.put((char*)"__s"); nm.int_((long)c.nstr);
     char* name = nm.take();
@@ -402,7 +402,7 @@ fn char* C3.str_const(C3* c, AirPrd* p)
     o.put((char*)" = \"");
     for (usz i = 0; i < p.bytes_len; i++)
     {
-        ubyte b = (ubyte)p.bytes[i];
+        char b = (char)p.bytes[i];
         if (b == 34) { o.put((char*)"\\\""); }
         else if (b == 92) { o.put((char*)"\\\\"); }
         else if (b == 10) { o.put((char*)"\\n"); }
@@ -417,7 +417,7 @@ fn char* C3.str_const(C3* c, AirPrd* p)
 
 // A C3 literal for a constant producer. Integers carry the suffix of their AIR
 // type: an unsuffixed literal in C3 is `int`, which would narrow at i64.
-fn void C3.scalar(C3* c, Sb* o, AirPrd* p, AirTyp* typed)
+fn void C3Target.scalar(C3Target* c, Sb* o, AirPrd* p, AirTyp* typed)
 {
     switch (p.tag)
     {
@@ -475,7 +475,7 @@ fn void C3.scalar(C3* c, Sb* o, AirPrd* p, AirTyp* typed)
     }
 }
 
-fn Val C3.prd(C3* c, AirPrd* p)
+fn Val C3Target.prd(C3Target* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = null;
     if (p == null) { c.err((char*)"missing producer", null); return v; }
@@ -500,10 +500,10 @@ fn Val C3.prd(C3* c, AirPrd* p)
             Sb s; s.init(); c.scalar(&s, p, p.ty); v.op = s.take(); v.ty = p.ty; return v;
         }
         case APRD_UNIT: v.ty = p.ty; v.op = (char*)"/*unit*/"; return v;
-        case APRD_STRING: case APRD_BYTES: v.ty = p.ty; v.op = c.str_const(c, p); return v;
-        case APRD_BINOP:  return c.binop(c, p);
-        case APRD_UNOP:   return c.unop(c, p);
-        case APRD_COERCE: return c.coerce(c, p);
+        case APRD_STRING: case APRD_BYTES: v.ty = p.ty; v.op = c.str_const( p); return v;
+        case APRD_BINOP:  return c.binop( p);
+        case APRD_UNOP:   return c.unop( p);
+        case APRD_COERCE: return c.coerce( p);
         case APRD_ALLOCA:
         {
             if (!ty_low(p.ty_arg, 0)) { c.err((char*)"alloca of a non-low type", null); }
@@ -512,7 +512,7 @@ fn Val C3.prd(C3* c, AirPrd* p)
             // paths has exactly one declaration. docs/pear2/C3_TARGET.md §3.4
             // refuses an alloca whose slot would escape its iteration.
             c.locals.put((char*)"    ");
-            c.ty_decl(c, &c.locals, p.ty_arg, t);
+            c.ty_decl( &c.locals, p.ty_arg, t);
             c.locals.put((char*)"\n");
             Sb s; s.init(); s.putc('&'); s.put(t); v.op = s.take();
             v.ty = p.ty; return v;
@@ -528,8 +528,8 @@ fn Val C3.prd(C3* c, AirPrd* p)
             else { s.putc('*'); s.put(a.op); }
             v.op = s.take(); v.ty = et; return v;
         }
-        case APRD_GEP: return c.gep(c, p);
-        case APRD_TUPLE: case APRD_RECORD: case APRD_ARRAY: return c.aggregate(c, p);
+        case APRD_GEP: return c.gep( p);
+        case APRD_TUPLE: case APRD_RECORD: case APRD_ARRAY: return c.aggregate( p);
         case APRD_SIZEOF:
         {
             Sb s; s.init(); s.put((char*)"(usz)("); c.ty(&s, p.ty); s.put((char*)").sizeof");
@@ -542,7 +542,7 @@ fn Val C3.prd(C3* c, AirPrd* p)
 
 // The field at index `ix` of an aggregate type, following the same walk air_ll's
 // Ll.gep does, so the two consumers cannot disagree about layout.
-fn bool field_at(C3* c, AirTyp* cur, long ix, AirTyp** out)
+fn bool field_at(C3Target* c, AirTyp* cur, long ix, AirTyp** out)
 {
     *out = null;
     if (cur == null || ix < 0) { return false; }
@@ -559,7 +559,7 @@ fn bool field_at(C3* c, AirTyp* cur, long ix, AirTyp** out)
     return false;
 }
 
-fn Val C3.gep(C3* c, AirPrd* p)
+fn Val C3Target.gep(C3Target* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = null;
     Val b = c.prd(p.sub_count > 0 ? p.subs[0] : null);
@@ -568,7 +568,7 @@ fn Val C3.gep(C3* c, AirPrd* p)
     if (!ty_low(cur, 0)) { c.err((char*)"gep over a non-low type", null); return v; }
     if (!air_util::ty_eq(b.ty.args[0], cur)) { c.err((char*)"gep source element type differs from the base pointee", null); return v; }
 
-    Val idx[16];
+    Val[16] idx;
     for (usz i = 1; i < p.sub_count && i < 16; i++) { idx[i] = c.prd(p.subs[i]); }
     for (usz i = 1; i < p.sub_count && i < 16; i++) { if (!air_util::ty_is_int(idx[i].ty)) { c.err((char*)"gep index is not an integer", null); } }
     if (p.sub_count > 16) { c.err((char*)"gep with more than 15 indices", null); }
@@ -613,7 +613,7 @@ fn Val C3.gep(C3* c, AirPrd* p)
     // The printed pointer is a real C3 pointer, so its type is the pointee the
     // walk landed on -- which is what AIR's own annotation must already be.
     if (step == null) { v.ty = null; }
-    else { v.ty = p.ty != null ? p.ty : c.mk_ptr_to(c, step); }
+    else { v.ty = p.ty != null ? p.ty : c.mk_ptr_to( step); }
     return v;
 }
 
@@ -621,7 +621,7 @@ fn Val C3.gep(C3* c, AirPrd* p)
 // assignment from a dereference (`*p = *q`) is not used anywhere else in this
 // tree, and an emitter that cannot be compiled here has no business relying on a
 // form it has not seen.
-fn AirTyp* C3.mk_ptr_to(C3* c, AirTyp* t)
+fn AirTyp* C3Target.mk_ptr_to(C3Target* c, AirTyp* t)
 {
     AirTyp* p = (AirTyp*)malloc(AirTyp::size);
     p.id = 0; p.tag = ATYP_PTR;
@@ -634,7 +634,7 @@ fn AirTyp* C3.mk_ptr_to(C3* c, AirTyp* t)
     return p;
 }
 
-fn Val C3.aggregate(C3* c, AirPrd* p)
+fn Val C3Target.aggregate(C3Target* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = p.ty;
     if (p.ty == null) { c.err((char*)"aggregate without a type", null); return v; }
@@ -693,7 +693,7 @@ fn Val C3.aggregate(C3* c, AirPrd* p)
     return v;
 }
 
-fn Val C3.binop(C3* c, AirPrd* p)
+fn Val C3Target.binop(C3Target* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = null;
     Val a = c.prd(p.sub_count > 0 ? p.subs[0] : null);
@@ -739,7 +739,7 @@ fn Val C3.binop(C3* c, AirPrd* p)
     return v;
 }
 
-fn Val C3.unop(C3* c, AirPrd* p)
+fn Val C3Target.unop(C3Target* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = null;
     Val a = c.prd(p.sub_count > 0 ? p.subs[0] : null);
@@ -764,7 +764,7 @@ fn Val C3.unop(C3* c, AirPrd* p)
     return v;
 }
 
-fn Val C3.coerce(C3* c, AirPrd* p)
+fn Val C3Target.coerce(C3Target* c, AirPrd* p)
 {
     Val v; v.op = (char*)"/*undef*/"; v.ty = p.ty;
     Val a = c.prd(p.sub_count > 0 ? p.subs[0] : null);
@@ -794,11 +794,11 @@ fn Val C3.coerce(C3* c, AirPrd* p)
 }
 
 // ── statements ─────────────────────────────────────────────────────────────
-fn void C3.pad(C3* c, Sb* o) { for (usz i = 0; i < c.ind; i++) { o.putc(' '); } }
+fn void C3Target.pad(C3Target* c, Sb* o) { for (usz i = 0; i < c.ind; i++) { o.putc(' '); } }
 
-fn void C3.stmt_ret(C3* c, Sb* o, AirPrd* p)
+fn void C3Target.stmt_ret(C3Target* c, Sb* o, AirPrd* p)
 {
-    c.pad(c, o);
+    c.pad( o);
     if (ty_is_void(c.cur_ret))
     {
         if (p != null)
@@ -814,7 +814,7 @@ fn void C3.stmt_ret(C3* c, Sb* o, AirPrd* p)
     o.put((char*)"return "); o.put(v.op); o.put((char*)";"); o.putc('\n');
 }
 
-fn void C3.call(C3* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
+fn void C3Target.call(C3Target* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
 {
     Val f = c.prd(callee);
     Val[64] args; usz na = 0;
@@ -827,8 +827,8 @@ fn void C3.call(C3* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
     }
     if (cur == null || cur.tag != ACNS_COMU) { c.err((char*)"call continuation is not `comu`", null); *next_out = null; return; }
     Sb s; s.init();
-    c.pad(c, o);
-    if (cur.bind != null) { c.ty_decl(c, &s, cur.ty, cur.bind); s.put((char*)" = "); }
+    c.pad( o);
+    if (cur.bind != null) { c.ty_decl( &s, cur.ty, cur.bind); s.put((char*)" = "); }
     s.put(f.op); s.putc('(');
     for (usz i = 0; i < na; i++) { if (i > 0) { s.put((char*)", "); } s.put(args[i].op); }
     s.put((char*)")"); s.putc(';'); s.putc('\n');
@@ -862,7 +862,7 @@ fn char* atomic_op_c3(int op)
     }
 }
 
-fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
+fn void C3Target.cmd(C3Target* c, AirCmd* cmd, Sb* o)
 {
     AirCmd* x = cmd;
     int guard = 0;
@@ -876,8 +876,8 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
             case ACMD_LET:
             {
                 Val v = c.prd(x.prd);
-                c.pad(c, o);
-                c.ty_decl(c, o, v.ty, x.binder);
+                c.pad( o);
+                c.ty_decl( o, v.ty, x.binder);
                 o.put((char*)" = "); o.put(v.op); o.put((char*)";"); o.putc('\n');
                 c.bind(x.binder, x.binder, v.ty);
                 x = x.body; continue;
@@ -888,7 +888,7 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
                 if (p.ty == null || p.ty.tag != ATYP_PTR) { c.err((char*)"store to a non-pointer", null); return; }
                 if (v.ty != null && !air_util::ty_eq(p.ty.args[0], v.ty)) { c.err((char*)"stored value type differs from the pointee type", null); }
                 if (ty_is_void(v.ty)) { x = x.next; continue; }
-                c.pad(c, o);
+                c.pad( o);
                 if (x.vol) { o.put((char*)"volatile_store("); o.put(p.op); o.put((char*)", "); o.put(v.op); o.putc(')'); }
                 else { o.putc('*'); o.put(p.op); o.put((char*)" = "); o.put(v.op); }
                 o.put((char*)";"); o.putc('\n');
@@ -897,28 +897,28 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
             case ACMD_FENCE:
             {
                 if (x.atomic_order < 1 || x.atomic_order > 4) { c.err((char*)"a fence needs acquire, release, acq_rel or seq_cst ordering", null); return; }
-                c.pad(c, o); o.put((char*)"fence("); o.put(atomic_order_c3(x.atomic_order)); o.put((char*)")"); o.put((char*)";"); o.putc('\n');
+                c.pad( o); o.put((char*)"fence("); o.put(atomic_order_c3(x.atomic_order)); o.put((char*)")"); o.put((char*)";"); o.putc('\n');
                 x = x.next; continue;
             }
-            case ACMD_RET: c.stmt_ret(c, o, x.prd); return;
-            case ACMD_TRAP: c.pad(c, o); o.put((char*)"unreachable(\"trap\")"); o.put((char*)";"); o.putc('\n'); return;
-            case ACMD_UB:   c.pad(c, o); o.put((char*)"unreachable(\"ub\")"); o.put((char*)";"); o.putc('\n'); return;
-            case ACMD_JUMP: c.jump_transfer(c, x, o); return;
+            case ACMD_RET: c.stmt_ret( o, x.prd); return;
+            case ACMD_TRAP: c.pad( o); o.put((char*)"unreachable(\"trap\")"); o.put((char*)";"); o.putc('\n'); return;
+            case ACMD_UB:   c.pad( o); o.put((char*)"unreachable(\"ub\")"); o.put((char*)";"); o.putc('\n'); return;
+            case ACMD_JUMP: c.jump_transfer( x, o); return;
             case ACMD_IF:
             {
                 Val cv = c.prd(x.prd);
                 if (cv.ty != null && !air_util::ty_is_bool(cv.ty)) { c.err((char*)"if condition is not a bool", null); }
-                c.pad(c, o); o.put((char*)"if ("); o.put(cv.op); o.put((char*)") {"); o.putc('\n');
+                c.pad( o); o.put((char*)"if ("); o.put(cv.op); o.put((char*)") {"); o.putc('\n');
                 c.ind += 4; c.cmd(x.then_c, o); c.ind -= 4;
                 if (x.else_c != null)
                 {
-                    c.pad(c, o); o.put((char*)"} else {"); o.putc('\n');
+                    c.pad( o); o.put((char*)"} else {"); o.putc('\n');
                     c.ind += 4; c.cmd(x.else_c, o); c.ind -= 4;
                 }
-                c.pad(c, o); o.put((char*)"}"); o.putc('\n');
+                c.pad( o); o.put((char*)"}"); o.putc('\n');
                 x = x.next; continue;
             }
-            case ACMD_MATCH: c.emit_switch(c, x, o); return;
+            case ACMD_MATCH: c.emit_switch( x, o); return;
             case ACMD_CUT:
             {
                 AirCns* k = x.cns;
@@ -926,11 +926,11 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
                 if (k.tag == ACNS_COMU)
                 {
                     Val v = c.prd(x.prd);
-                    c.pad(c, o); c.ty_decl(c, o, v.ty, k.bind); o.put((char*)" = "); o.put(v.op); o.put((char*)";"); o.putc('\n');
+                    c.pad( o); c.ty_decl( o, v.ty, k.bind); o.put((char*)" = "); o.put(v.op); o.put((char*)";"); o.putc('\n');
                     c.bind(k.bind, k.bind, v.ty);
                     x = k.body; continue;
                 }
-                if (k.tag == ACNS_COVAR) { c.stmt_ret(c, o, x.prd); return; }
+                if (k.tag == ACNS_COVAR) { c.stmt_ret( o, x.prd); return; }
                 if (k.tag == ACNS_CALL)
                 {
                     AirCmd* nx = null;
@@ -961,8 +961,8 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
                     Sb s; s.init(); s.putc('('); s.put(a.op); s.put((char*)")");
                     if (k.tag == ACNS_PROJ) { s.putc('.'); s.putc('_'); s.int_(ix); }
                     else { s.putc('.'); c.name(&s, k.name, false); }
-                    c.pad(c, o);
-                    c.ty_decl(c, o, ft, k.tail.bind);
+                    c.pad( o);
+                    c.ty_decl( o, ft, k.tail.bind);
                     o.put((char*)" = "); o.put(s.take()); o.put((char*)";"); o.putc('\n');
                     c.bind(k.tail.bind, k.tail.bind, ft);
                     x = k.tail.body; continue;
@@ -979,7 +979,7 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
                 if (x.cns == null || x.cns.tag != ACNS_COMU) { c.err((char*)"syscall result must be bound with `comu`", null); return; }
                 char* r = c.fresh();
                 Sb s; s.init();
-                c.pad(c, o);
+                c.pad( o);
                 s.put((char*)"long "); s.put(r); s.put((char*)" = __pride_syscall"); s.int_((long)na); s.putc('(');
                 for (usz i = 0; i < na; i++) { if (i > 0) { s.put((char*)", "); } s.put(a[i].op); }
                 s.putc(')'); s.put((char*)";"); s.putc('\n');
@@ -999,7 +999,7 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
                 AirTyp* et = p.ty.args[0];
                 char* r = c.fresh();
                 Sb s; s.init();
-                c.pad(c, o);
+                c.pad( o);
                 if (op == 0)
                 {
                     s.put((char*)"long "); s.put(r); s.put((char*)" = atomic_load("); s.put(p.op); s.put((char*)", "); s.put(atomic_order_c3(ord)); s.putc(')');
@@ -1012,9 +1012,9 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
                 else
                 {
                     if (x.prd_count < 1) { c.err((char*)"atomic read-modify-write needs an operand", null); return; }
-                    char* fn = atomic_op_c3(op);
-                    if (fn == null) { c.err((char*)"atomic operation is not part of the low profile", null); return; }
-                    s.put((char*)"long "); s.put(r); s.put((char*)" = "); s.put(fn); s.putc('('); s.put(p.op); s.put((char*)", "); s.put(c.prd(x.prds[0]).op); s.put((char*)", "); s.put(atomic_order_c3(ord)); s.putc(')');
+                    char* fnname = atomic_op_c3(op);
+                    if (fnname == null) { c.err((char*)"atomic operation is not part of the low profile", null); return; }
+                    s.put((char*)"long "); s.put(r); s.put((char*)" = "); s.put(fnname); s.putc('('); s.put(p.op); s.put((char*)", "); s.put(c.prd(x.prds[0]).op); s.put((char*)", "); s.put(atomic_order_c3(ord)); s.putc(')');
                 }
                 s.put((char*)";"); s.putc('\n');
                 o.put(s.take());
@@ -1037,18 +1037,18 @@ fn void C3.cmd(C3* c, AirCmd* cmd, Sb* o)
     }
 }
 
-fn void C3.emit_switch(C3* c, AirCmd* x, Sb* o)
+fn void C3Target.emit_switch(C3Target* c, AirCmd* x, Sb* o)
 {
     Val s = c.prd(x.prd);
     if (!(air_util::ty_is_int(s.ty) || air_util::ty_is_bool(s.ty))) { c.err((char*)"match scrutinee is not an integer or bool", null); return; }
-    c.pad(c, o); o.put((char*)"switch ("); o.put(s.op); o.put((char*)") {"); o.putc('\n');
+    c.pad( o); o.put((char*)"switch ("); o.put(s.op); o.put((char*)") {"); o.putc('\n');
     c.ind += 4;
     for (usz i = 0; i < x.branch_count; i++)
     {
         AirBranch* b = x.branches[i];
         if (b == null || b.pat == null) { continue; }
         if (b.guard != null) { c.err((char*)"match guard in the low profile", null); }
-        c.pad(c, o);
+        c.pad( o);
         if (b.pat.tag == APAT_WILD || b.pat.tag == APAT_BIND)
         {
             if (b.pat.tag == APAT_BIND) { c.bind(b.pat.name, s.op, s.ty); }
@@ -1061,12 +1061,12 @@ fn void C3.emit_switch(C3* c, AirCmd* x, Sb* o)
         else
         {
             c.err((char*)"pattern is not part of the low profile", null);
-            c.ind -= 4; c.pad(c, o); o.put((char*)"}"); o.putc('\n'); return;
+            c.ind -= 4; c.pad( o); o.put((char*)"}"); o.putc('\n'); return;
         }
         c.ind += 4; c.cmd(b.body, o); c.ind -= 4;
     }
     c.ind -= 4;
-    c.pad(c, o); o.put((char*)"}"); o.putc('\n');
+    c.pad( o); o.put((char*)"}"); o.putc('\n');
 }
 
 // ── the control-flow strategy ──────────────────────────────────────────────
@@ -1074,25 +1074,25 @@ fn void C3.emit_switch(C3* c, AirCmd* x, Sb* o)
 // one assignment per jump is a PLAIN block; a label that is the target of a back
 // edge is a LOOP head; everything else is DISPATCH, the driven switch. The
 // classification is made once, from the whole function, before anything prints.
-fn usz C3.find_label(C3* c, char* nm)
+fn usz C3Target.find_label(C3Target* c, char* nm)
 {
     if (nm == null) { return MAXL; }
     for (usz i = 0; i < c.nl; i++) { if (air_text::streq(c.lbls[i].name, nm)) { return i; } }
     return MAXL;
 }
 
-fn void C3.jump_transfer(C3* c, AirCmd* x, Sb* o)
+fn void C3Target.jump_transfer(C3Target* c, AirCmd* x, Sb* o)
 {
-    usz ti = c.find_label(c.target_label);
-    if (ti == MAXL) { c.err((char*)"jump to an unknown label", c.target_label); return; }
+    usz ti = c.find_label(x.target_label);
+    if (ti == MAXL) { c.err((char*)"jump to an unknown label", x.target_label); return; }
     Lbl* tb = &c.lbls[ti];
-    if (tb.np != x.jump_arg_count) { c.err((char*)"jump has the wrong number of arguments", c.target_label); }
+    if (tb.np != x.jump_arg_count) { c.err((char*)"jump has the wrong number of arguments", x.target_label); }
     for (usz i = 0; i < x.jump_arg_count && i < tb.np; i++)
     {
         Val a;
         if (!c.lookup(x.jump_args[i], &a)) { c.err((char*)"jump argument is unbound", x.jump_args[i]); continue; }
         if (a.ty != null && tb.params[i] != null && tb.params[i].ty != null && !air_util::ty_eq(a.ty, tb.params[i].ty)) { c.err((char*)"jump argument has the wrong type", x.jump_args[i]); }
-        c.pad(c, o);
+        c.pad( o);
         c.name(o, tb.params[i].name, false);
         o.put((char*)" = "); o.put(a.op); o.put((char*)";"); o.putc('\n');
     }
@@ -1102,14 +1102,14 @@ fn void C3.jump_transfer(C3* c, AirCmd* x, Sb* o)
     // to a later label, which the printer reaches by simply continuing.
     if (c.driven)
     {
-        c.pad(c, o); o.put((char*)"__pc = "); o.int_((long)ti); o.put((char*)";"); o.putc('\n');
-        c.pad(c, o); o.put((char*)"nextcase;"); o.putc('\n');
+        c.pad( o); o.put((char*)"__pc = "); o.int_((long)ti); o.put((char*)";"); o.putc('\n');
+        c.pad( o); o.put((char*)"nextcase;"); o.putc('\n');
         return;
     }
-    if (ti <= c.cur) { c.err((char*)"back edge in a function printed without a dispatch loop", c.target_label); return; }
+    if (ti <= c.cur) { c.err((char*)"back edge in a function printed without a dispatch loop", x.target_label); return; }
 }
 
-fn void C3.add_label(C3* c, AirCmd* lb)
+fn void C3Target.add_label(C3Target* c, AirCmd* lb)
 {
     if (c.nl >= MAXL) { c.err((char*)"too many labels", lb.binder); return; }
     Lbl* l = &c.lbls[c.nl];
@@ -1122,7 +1122,7 @@ fn void C3.add_label(C3* c, AirCmd* lb)
 // Incoming jumps and back edges over the whole function, before anything prints:
 // whether a function needs the dispatch loop is a property of the whole body, not
 // of one label.
-fn void C3.scan(C3* c, AirCmd* x, usz from)
+fn void C3Target.scan(C3Target* c, AirCmd* x, usz from)
 {
     while (x != null)
     {
@@ -1138,11 +1138,11 @@ fn void C3.scan(C3* c, AirCmd* x, usz from)
                 }
                 return;
             }
-            case ACMD_LET: if (x.prd != null) { c.scan(c, x.prd.body, from); } x = x.body; continue;
-            case ACMD_SEQ: c.scan(c, x.body, from); x = x.next; continue;
-            case ACMD_IF: c.scan(c, x.then_c, from); c.scan(c, x.else_c, from); x = x.next; continue;
+            case ACMD_LET: if (x.prd != null) { c.scan( x.prd.body, from); } x = x.body; continue;
+            case ACMD_SEQ: c.scan( x.body, from); x = x.next; continue;
+            case ACMD_IF: c.scan( x.then_c, from); c.scan( x.else_c, from); x = x.next; continue;
             case ACMD_MATCH:
-                for (usz i = 0; i < x.branch_count; i++) { AirBranch* b = x.branches[i]; if (b != null) { c.scan(c, b.body, from); } }
+                for (usz i = 0; i < x.branch_count; i++) { AirBranch* b = x.branches[i]; if (b != null) { c.scan( b.body, from); } }
                 return;
             case ACMD_CUT:
             {
@@ -1158,7 +1158,7 @@ fn void C3.scan(C3* c, AirCmd* x, usz from)
 // ── functions and module ───────────────────────────────────────────────────
 fn bool is_void_ty(AirTyp* t) { return t == null || t.tag == ATYP_UNIT || t.tag == ATYP_BOTTOM; }
 
-fn void C3.header(C3* c, AirDecl* d, Sb* o)
+fn void C3Target.header(C3Target* c, AirDecl* d, Sb* o)
 {
     o.put((char*)"fn ");
     if (is_void_ty(d.ret_ty)) { o.put((char*)"void "); } else { c.ty(o, d.ret_ty); o.putc(' '); }
@@ -1171,7 +1171,7 @@ fn void C3.header(C3* c, AirDecl* d, Sb* o)
         if (b == null) { continue; }
         if (!ty_low(b.ty, 0)) { c.err((char*)"parameter type is not part of the low profile", b.name); }
         if (wrote > 0) { o.put((char*)", "); }
-        c.ty_decl(c, o, b.ty, b.name);
+        c.ty_decl( o, b.ty, b.name);
         wrote++;
     }
     o.putc(')');
@@ -1181,7 +1181,7 @@ fn void C3.header(C3* c, AirDecl* d, Sb* o)
 // They cannot be declared inside the dispatch switch: a `case` body does not
 // share scope with the next one, and a phi written on one path is read on
 // another.
-fn void C3.label_body(C3* c, Sb* o)
+fn void C3Target.label_body(C3Target* c, Sb* o)
 {
     Lbl* lb = &c.lbls[c.cur];
     for (usz j = 0; j < lb.np; j++)
@@ -1189,14 +1189,14 @@ fn void C3.label_body(C3* c, Sb* o)
         if (lb.params[j] == null) { continue; }
         if (!c3_ident_ok(lb.params[j].name)) { c.err((char*)"label parameter is not a legal C3 identifier", lb.params[j].name); continue; }
         c.locals.put((char*)"    ");
-        c.ty_decl(c, &c.locals, lb.params[j].ty, lb.params[j].name);
+        c.ty_decl( &c.locals, lb.params[j].ty, lb.params[j].name);
         c.locals.putc('\n');
         c.bind(lb.params[j].name, lb.params[j].name, lb.params[j].ty);
     }
     c.cmd(lb.body, o);
 }
 
-fn void C3.function(C3* c, AirDecl* d, Sb* out)
+fn void C3Target.function(C3Target* c, AirDecl* d, Sb* out)
 {
     c.fn_name = d.name;
     c.nv = 0; c.nl = 0; c.cur = 0; c.tmp = 0; c.ind = 4; c.driven = false;
@@ -1208,17 +1208,17 @@ fn void C3.function(C3* c, AirDecl* d, Sb* out)
     AirCmd* x = d.def_body;
     while (x != null && x.tag == ACMD_SEQ && x.body != null && x.body.tag == ACMD_LABEL)
     {
-        c.add_label(c, x.body);
+        c.add_label( x.body);
         x = x.next;
     }
-    if (x != null && x.tag == ACMD_LABEL) { c.add_label(c, x); x = null; }
+    if (x != null && x.tag == ACMD_LABEL) { c.add_label( x); x = null; }
     if (x != null) { c.err((char*)"function body is not a label spine", null); }
 
     // 2. parameters are bound before any body prints
     for (usz i = 0; i < d.param_count; i++) { AirBinder* b = d.params[i]; if (b != null) { c.bind(b.name, b.name, b.ty); } }
 
     // 3. predecessors and back edges
-    for (usz i = 0; i < c.nl; i++) { c.scan(c, c.lbls[i].body, i); }
+    for (usz i = 0; i < c.nl; i++) { c.scan( c.lbls[i].body, i); }
     bool any_back = false;
     for (usz i = 0; i < c.nl; i++) { if (c.lbls[i].back_edge) { any_back = true; } }
 
@@ -1228,7 +1228,7 @@ fn void C3.function(C3* c, AirDecl* d, Sb* out)
     //    driven by the __pc switch: C3 cannot express an arbitrary transfer and
     //    splitting a function into a half-driven shape would be worse than
     //    driving all of it.
-    c.driven = any_back || c.has_forward_skips(c);
+    c.driven = any_back || c.has_forward_skips();
     if (c.driven) { c.dispatch_fns++; }
 
     Sb body; body.init();
@@ -1240,12 +1240,12 @@ fn void C3.function(C3* c, AirDecl* d, Sb* out)
         for (usz i = 0; i < c.nl; i++)
         {
             c.cur = i;
-            c.ind = 12; c.pad(c, &body);
+            c.ind = 12; c.pad( &body);
             body.put((char*)"case "); body.int_((long)i); body.put((char*)":"); body.putc('\n');
             c.ind = 16;
-            c.label_body(c, &body);
+            c.label_body( &body);
         }
-        c.ind = 12; c.pad(c, &body); body.put((char*)"default: return;"); body.putc('\n');
+        c.ind = 12; c.pad( &body); body.put((char*)"default: return;"); body.putc('\n');
         body.put((char*)"        }"); body.putc('\n');
         body.put((char*)"    }"); body.putc('\n');
         c.ind = 4;
@@ -1255,14 +1255,14 @@ fn void C3.function(C3* c, AirDecl* d, Sb* out)
         for (usz i = 0; i < c.nl; i++)
         {
             c.cur = i;
-            c.pad(c, &body);
+            c.pad( &body);
             body.put((char*)"// "); body.put((char*)(c.lbls[i].name == null ? (char*)"label" : c.lbls[i].name)); body.putc('\n');
-            c.label_body(c, &body);
+            c.label_body( &body);
         }
     }
 
     // 5. header, the hoisted declarations, the body
-    c.header(c, d, out);
+    c.header( d, out);
     out.putc('\n'); out.put((char*)"{"); out.putc('\n');
     if (c.locals.d != null) { out.put(c.locals.d); }
     if (body.d != null) { out.put(body.d); }
@@ -1271,7 +1271,7 @@ fn void C3.function(C3* c, AirDecl* d, Sb* out)
 
 // Does any jump skip forward past the next label? A straight spine reaches every
 // label by falling into it; a skip needs a transfer C3 does not have.
-fn bool C3.has_forward_skips(C3* c)
+fn bool C3Target.has_forward_skips(C3Target* c)
 {
     for (usz i = 0; i < c.nl; i++)
     {
@@ -1282,7 +1282,7 @@ fn bool C3.has_forward_skips(C3* c)
 }
 
 // ── module ─────────────────────────────────────────────────────────────────
-fn void C3.global_decl(C3* c, AirDecl* d, Sb* o)
+fn void C3Target.global_decl(C3Target* c, AirDecl* d, Sb* o)
 {
     // docs/pear2/C3_TARGET.md §4.5
     char* sec = decl_attr_str(d, "section");
@@ -1305,7 +1305,7 @@ fn void C3.global_decl(C3* c, AirDecl* d, Sb* o)
     o.putc(';'); o.putc('\n');
 }
 
-fn void C3.declare(C3* c, AirDecl* d, Sb* o)
+fn void C3Target.declare(C3Target* c, AirDecl* d, Sb* o)
 {
     o.put((char*)"extern fn ");
     if (is_void_ty(d.ret_ty)) { o.put((char*)"void "); } else { c.ty(o, d.ret_ty); o.putc(' '); }
@@ -1317,14 +1317,14 @@ fn void C3.declare(C3* c, AirDecl* d, Sb* o)
         AirBinder* b = d.params[i];
         if (b == null) { continue; }
         if (wrote > 0) { o.put((char*)", "); }
-        c.ty_decl(c, o, b.ty, b.name);
+        c.ty_decl( o, b.ty, b.name);
         wrote++;
     }
     if (d.is_varargs) { if (wrote > 0) { o.put((char*)", "); } o.put((char*)"..."); }
     o.put((char*)")"); o.put((char*)";"); o.putc('\n');
 }
 
-fn void C3.data_type(C3* c, AirDecl* d, Sb* o)
+fn void C3Target.data_type(C3Target* c, AirDecl* d, Sb* o)
 {
     if (d.ctor_count != 1) { c.err((char*)"data with several constructors (enum layout) is not part of this profile yet", d.name); return; }
     if (d.typaram_count > 0) { c.err((char*)"generic data is not part of the low profile", d.name); return; }
@@ -1337,7 +1337,7 @@ fn void C3.data_type(C3* c, AirDecl* d, Sb* o)
         if (!ty_low(ct.fields[j].ty, 0)) { c.err((char*)"field type is not part of the low profile", ct.fields[j].name); }
         // A zero-length field list cannot be spelled, so a marker keeps the
         // struct legal while using none of the AIR layout.
-        c.ty_decl(c, o, ct.fields[j].ty, ct.fields[j].name);
+        c.ty_decl( o, ct.fields[j].ty, ct.fields[j].name);
         o.putc(';'); o.putc('\n');
     }
     if (ct.field_count == 0) { o.put((char*)"    char __unit;"); o.putc('\n'); }
@@ -1346,7 +1346,7 @@ fn void C3.data_type(C3* c, AirDecl* d, Sb* o)
 
 fn int to_c3(AirModule* m, char** result, bool want_text)
 {
-    C3* c = (C3*)malloc(C3::size);
+    C3Target* c = (C3Target*)malloc(C3Target::size);
     c.m = m; c.errs = 0; c.fn_name = null; c.emit = want_text; c.dispatch_fns = 0;
     c.vn = (char**)malloc(8 * MAXV); c.vv = (Val*)malloc(Val::size * MAXV);
     c.lbls = (Lbl*)malloc(Lbl::size * MAXL);
@@ -1361,7 +1361,7 @@ fn int to_c3(AirModule* m, char** result, bool want_text)
         AirDecl* d = m.decls[i];
         if (d == null || d.tag != ADECL_DATA) { continue; }
         c.fn_name = d.name;
-        c.data_type(c, d, &c.types_out);
+        c.data_type( d, &c.types_out);
         c.fn_name = null;
     }
     for (usz i = 0; i < m.decl_count; i++)
@@ -1370,15 +1370,15 @@ fn int to_c3(AirModule* m, char** result, bool want_text)
         if (d == null) { continue; }
         switch (d.tag)
         {
-            case ADECL_GLOBAL: c.fn_name = d.name; c.global_decl(c, d, &body); c.fn_name = null; break;
+            case ADECL_GLOBAL: c.fn_name = d.name; c.global_decl( d, &body); c.fn_name = null; break;
             case ADECL_DECLARE:
             {
                 bool defd = false;
                 for (usz j = 0; j < m.decl_count; j++) { AirDecl* e = m.decls[j]; if (e != null && e.tag == ADECL_DEF && air_text::streq(e.name, d.name)) { defd = true; } }
                 if (defd) { break; }
-                c.fn_name = d.name; c.declare(c, d, &body); c.fn_name = null; break;
+                c.fn_name = d.name; c.declare( d, &body); c.fn_name = null; break;
             }
-            case ADECL_DEF: c.function(c, d, &body); break;
+            case ADECL_DEF: c.function( d, &body); break;
             case ADECL_MODULE: case ADECL_IMPORT: case ADECL_DATA: break;
             default: c.fn_name = d.name; c.err((char*)"declaration is not part of the low profile", d.name); c.fn_name = null; break;
         }
