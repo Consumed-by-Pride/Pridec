@@ -661,7 +661,27 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
         for (usz i = 2; i < p.sub_count && i < 16; i++)
         {
             if (step == null) { c.err((char*)"gep indexes past a scalar", null); break; }
-            if (step.tag == ATYP_ARRAY) { acc.putc('['); acc.put(idx[i].op); acc.putc(']'); step = step.args[0]; acc_is_ptr = false; continue; }
+            if (step.tag == ATYP_ARRAY)
+            {
+                // Index 1 gave a POINTER to the array (`gep[array#128(i64)]` is
+                // `int64_t (*)[128]`), so indexing it directly steps by 128
+                // elements -- `(_s4 + 0)[i]` -- and reads outside the object.
+                // Dereference first: `(*(_s4 + 0))[i]`. Only when the
+                // accumulator is already the array itself is `acc[i]` right.
+                if (acc_is_ptr)
+                {
+                    // Wrap what is already there: `(*(base + 0))[i]`. Putting the
+                    // star in front of the new bracket instead wrote `(*[i])`.
+                    Sb w; w.init(); w.put((char*)"(*("); w.put(acc.take()); w.put((char*)"))[");
+                    w.put(idx[i].op); w.putc(']');
+                    acc.put(w.take());
+                }
+                else
+                {
+                    acc.putc('['); acc.put(idx[i].op); acc.putc(']');
+                }
+                step = step.args[0]; acc_is_ptr = false; continue;
+            }
             if (step.tag == ATYP_TUPLE || step.tag == ATYP_NOMINAL)
             {
                 AirPrd* ip = p.subs[i];
