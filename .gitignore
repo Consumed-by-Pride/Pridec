@@ -9,6 +9,8 @@
 /pfrontc
 /pear2/pear2c
 /pear2c
+/lairc
+/lair/lairc
 /legacy/pear1/pear1c
 /pride
 /pride_new
@@ -27,6 +29,7 @@
 !/tests/air3/**/*.air
 !/tests/pear2/*.air
 *.low.air
+*.lair
 # ── Editor / tool detritus ──────────────────────────────────────────────
 .understand-anything/
 .vscode/
