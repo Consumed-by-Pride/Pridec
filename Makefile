@@ -8,20 +8,20 @@
 # by default.)
 #
 # Requirements:
-#   c3c 0.8.4     — C3 compiler (https://c3-lang.org)
+#   c3c 0.8.6     — C3 compiler (https://c3-lang.org)
 #                   Auto-fetched to ~/c3bin/c3c by `make c3c` if missing.
 #
 # Targets:
 #   make              build ./pfrontc
 #   make c3c          fetch c3c if missing (idempotent)
 #   make test         build + run all test suites
-#   make clean        remove build outputs + generated .air files
+#   make clean        remove build outputs + temporary AIR files in tmp/
 #   make legacy       build the legacy pride1 compiler under legacy/pride1/
 # ============================================================================
 
 C3C       ?= $(if $(wildcard $(HOME)/.cache/c3src/build-llvm23-clang/c3c),$(HOME)/.cache/c3src/build-llvm23-clang/c3c,$(HOME)/c3bin/c3c)
 C3C_LIB   ?= $(if $(wildcard $(HOME)/.cache/c3src/src/lib/std),$(HOME)/.cache/c3src/src/lib,$(HOME)/c3lib)
-C3C_VER   := v0.8.4
+C3C_VER   := v0.8.6
 C3C_URL   := https://github.com/c3lang/c3c/releases/download/$(C3C_VER)/c3-linux-static.tar.gz
 
 BINARY    := pfrontc
@@ -53,7 +53,46 @@ LDFLAGS     := -L $(LLVM_LIBDIR) -l $(LLVM_LIB)
 
 # ── Sources ──────────────────────────────────────────────────────────────
 PFRONT    := $(wildcard pfront/*.c3)
-PEAR_IR   := $(wildcard pfront/pear_ir/*.c3)
+# ── the AIR boundary ────────────────────────────────────────────────────────
+# The AIR layer is cut in two, and the two halves may not import each other:
+#
+#   AIR_EMIT  what PRODUCES an AirModule: the front end's lowerings, the pass
+#             driver, and the printer. `pfrontc` links exactly this half plus
+#             PFRONT/THEORY, so the compiler never contains a backend.
+#   AIR_USE   what READS an AirModule: the text reader, the verifier, the facts
+#             table, the LLVM text printer, the linter. `pear2c` and `airtool`
+#             link this half.
+#   AIR_CORE  the shared floor: IR types, text helpers, utilities. Both sides.
+#   AIR_MID   reads a module, rewrites it, writes it back. Only the tools link it.
+#
+# Files used to be swept in with a wildcard, which is how `pfrontc` came to
+# contain air_ll (a 68 KB LLVM IR printer it can never call) and how a new file
+# silently landed on whichever side happened to build it. Every file is now
+# named on exactly one side, and tests/air/boundary.sh fails the build when a
+# module on one side imports a module on the other.
+AIR_CORE  := pfront/pear_ir/air_ir.c3 pfront/pear_ir/air_text.c3 pfront/pear_ir/air_util.c3
+AIR_EMIT  := pfront/pear_ir/air_low.c3 pfront/pear_ir/air_lower.c3 pfront/pear_ir/air_emit.c3 \
+             pfront/pear_ir/air_scope.c3 pfront/pear_ir/air_types.c3 pfront/pear_ir/air_audit.c3 \
+             pfront/pear_ir/air_fold.c3 pfront/pear_ir/air_write.c3 pfront/pear_ir/air.c3
+AIR_USE   := pfront/pear_ir/air_read.c3 pfront/pear_ir/air_verify.c3 \
+             pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3 pfront/pear_ir/air_c3.c3 \
+             pfront/pear_ir/air_c.c3
+# MID is neither side: it reads a module, rewrites it, and writes it back, so it
+# needs both. It splits into three kinds, and the difference matters:
+#
+#   air_facts    analysis that WRITES facts into the module (memory_readonly,
+#                no_capture); every emitter reads them, so `pfrontc` links it.
+#   air_pass     the pass driver: reads AIR, rewrites AIR. Tools only today.
+#   air_roundtrip the write/read fidelity check. It lowers a program before it has
+#                anything to round-trip, so it needed the emitter AND the reader --
+#                which is why it left `pfrontc` entirely. `--air-roundtrip` is now
+#                `airtool roundtrip`.
+#
+# Adding a pass to the compiler (`pfrontc --opt=`) means putting air_pass in
+# PFRONT_SRC deliberately. That is the point of the list being explicit.
+AIR_MID   := pfront/pear_ir/air_pass.c3 pfront/pear_ir/air_facts.c3 \
+             pfront/pear_ir/air_roundtrip.c3
+PEAR_IR   := $(AIR_CORE) $(AIR_EMIT) $(AIR_MID) $(AIR_USE)
 THEORY    := $(wildcard pfront/theory/*.c3) \
              $(wildcard pfront/theory/types/*.c3) \
              $(wildcard pfront/theory/meta/*.c3) \
@@ -61,6 +100,10 @@ THEORY    := $(wildcard pfront/theory/*.c3) \
              $(wildcard pfront/theory/rewrite/*.c3) \
              $(wildcard pfront/theory/lower/*.c3) \
              $(wildcard pfront/theory/analysis/*.c3)
+# The union of both sides. Only the harness builds want this: they exercise the
+# emitter and the consumer in one process on purpose. The two shipped binaries do
+# NOT use it -- pfrontc is PFRONT_SRC, pear2c is PEAR2_SRC, and that difference is
+# the boundary.
 SOURCES   := $(PFRONT) $(PEAR_IR) $(THEORY)
 
 # The slice of pfront that reads AIR text: what a backend (pear1c, airtool) links.
@@ -68,21 +111,31 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c legacy-pear test-legacy clean legacy \
+.PHONY: all c3c air-boundary air-pass lint-pride probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c lairc check-lair test-lair test-lair-bc legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
 
 # pfrontc ends at .air: no LLVM, no backend. Native code is pear1c (legacy/pear1) or PEAR 2.
-$(BINARY): $(SOURCES) | c3c
-	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(SOURCES) --max-stack-object-size 262144 -o $(BINARY)
+# The compiler proper: front end + theory + the AIR it EMITS. No verifier, no LLVM
+# text printer. `air_roundtrip` is the single consumer-side module it links, and
+# only because --air-roundtrip is a self-test of the writer that has to read its
+# own output back.
+# air_read and air_c are here because pfrontc --emit-c reads back the .low.air it
+# just wrote and hands it to air_c -- the same contract the standalone airc obeys,
+# so a program that compiles here also compiles from the .air alone.
+PFRONT_SRC := $(PFRONT) $(THEORY) $(AIR_CORE) $(AIR_EMIT) pfront/pear_ir/air_facts.c3 \
+              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_c.c3
+$(BINARY): $(PFRONT_SRC) | c3c
+	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(PFRONT_SRC) --max-stack-object-size 262144 -o $(BINARY)
 
 # ── Bootstrap c3c if missing ────────────────────────────────────────────
 c3c:
-	@if [ ! -x "$(C3C)" ] || [ ! -d "$(C3C_LIB)/std" ]; then \
+	@set -eu; \
+	if [ ! -x "$(C3C)" ] || [ ! -d "$(C3C_LIB)/std" ]; then \
 	  echo "==> fetching c3c $(C3C_VER)"; \
 	  mkdir -p $$(dirname $(C3C)) $(C3C_LIB) /tmp/c3i; \
-	  cd /tmp/c3i && curl -sL $(C3C_URL) -o c3.tgz && tar -xzf c3.tgz; \
+	  (cd /tmp/c3i && curl -fsSL $(C3C_URL) -o c3.tgz && tar -xzf c3.tgz) || { echo "failed to download/extract c3c $(C3C_VER)" >&2; exit 1; }; \
 	  cp /tmp/c3i/c3/c3c $$(dirname $(C3C))/c3c; \
 	  cp /tmp/c3i/c3/c3fmt $$(dirname $(C3C))/cfmt 2>/dev/null || true; \
 	  chmod +x $$(dirname $(C3C))/c3c; \
@@ -91,7 +144,7 @@ c3c:
 	  rm -f $(C3C_LIB)/std/std; \
 	  rm -rf /tmp/c3i; \
 	fi
-	@$(C3C) --version | head -1
+	@$(C3C) --version >/dev/null && echo "c3c available: $(C3C)"
 
 # ── Tests ───────────────────────────────────────────────────────────────
 test: test-pfront test-conform test-pear test-pear2 test-exec test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering
@@ -102,6 +155,12 @@ test-harness: $(BINARY) $(PEAR1)
 	python3 -m unittest discover -s tests/harness -p 'test_*.py'
 
 test-pfront: $(BINARY)
+	@echo "==> tests/pfront harness self-test"
+	bash tests/pfront/selftest.sh
+	@echo "==> tests/pfront hardening"
+	bash tests/pfront/hardening.sh
+	@echo "==> tests/pfront lowering audit"
+	bash tests/pfront/audit.sh
 	@echo "==> tests/pfront regression"
 	bash tests/pfront/run.sh
 
@@ -163,21 +222,31 @@ $(PEAR1): $(PEAR1_SRC) $(AIR_READ_CORE) | c3c
 
 # AIR 2.0 text tools: `airtool check|fmt|verify FILE.air`. No LLVM, no theory layer:
 # only the IR, the text reader/writer and the validity rules.
-AIR_CORE  := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/air_text.c3 \
-             pfront/pear_ir/air_write.c3 pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3 \
-             pfront/pear_ir/air_verify.c3 pfront/pear_ir/air_lint.c3 pfront/pear_ir/air_ll.c3 tools/air/airtool.c3
+# The consumer side plus the tools that drive it. `airtool` reads and writes AIR
+# text and runs the pass pipeline; it needs both the printer (it can write) and
+# the reader (it can read), which is why it links AIR_CORE + AIR_EMIT + AIR_USE.
+# `airtool` is the one binary that lives on both sides: it reads AIR, runs passes
+# and writes AIR, and `air_roundtrip` lowers a program before it has anything to
+# round-trip. What the lowerings need from the front end is exactly pfront_core
+# and pfront_lex (they walk a PNode tree), not the parser, the theory layer or
+# the driver -- so the tool links those two and stays free of pfront_main.
+CONSUMER_SRC := pfront/pfront_core.c3 pfront/pfront_lex.c3 $(AIR_CORE) $(AIR_EMIT) $(AIR_MID) $(AIR_USE) tools/air/airtool.c3
 AIRTOOL   := tmp/airtool
 airtool: $(AIRTOOL)
-$(AIRTOOL): $(AIR_CORE) | c3c
+$(AIRTOOL): $(CONSUMER_SRC) | c3c
 	mkdir -p tmp
-	$(C3C) compile --stdlib $(C3C_LIB) $(AIR_CORE) --max-stack-object-size 262144 -o $(AIRTOOL)
+	$(C3C) compile --stdlib $(C3C_LIB) $(CONSUMER_SRC) --max-stack-object-size 262144 -o $(AIRTOOL)
 
 # PEAR 2 bootstrap backend. It is a separate executable and links the shared
 # AIR reader/verifier plus LLVM 23; it does not link PEAR 1 or pfrontc.
 PEAR2_BIN := pear2/pear2c
-PEAR2_SRC := $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_opt.c3 pear2/pear2c_main.c3
+PEAR2_SRC := pfront/pfront_core.c3 $(AIR_CORE) $(AIR_USE) pfront/pear_ir/air_facts.c3 pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3
 PEAR2_LDFLAGS ?= -L $(LLVM23_LIBDIR) -l LLVM-23
-LLVM23_BIN ?= $(LLVM23_DIR)/bin
+# The npm runtime layout and the apt layout differ: one puts the binaries in
+# `bin/` beside `lib/`, the other has `bin/` at the top. Resolving the directory
+# that actually contains clang is what makes `make test-pear2` runnable instead of
+# passing `PEAR2_CLANG=/clang` and failing with "LLVM clang not found".
+LLVM23_BIN ?= $(if $(wildcard $(LLVM23_DIR)/bin/clang),$(LLVM23_DIR)/bin,$(if $(wildcard $(LLVM23_DIR)/llvm-runtime-clang-linux-x64/bin/clang),$(LLVM23_DIR)/llvm-runtime-clang-linux-x64/bin,$(LLVM23_DIR)/bin))
 PEAR2_CLANG ?= $(LLVM23_BIN)/clang
 pear2c: $(PEAR2_BIN)
 	ln -sf $(PEAR2_BIN) pear2c
@@ -191,27 +260,136 @@ $(PEAR2_OPT_TEST): $(PEAR2_OPT_TEST_SRC) | c3c
 	mkdir -p tmp
 	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(PEAR2_OPT_TEST_SRC) --max-stack-object-size 262144 -o $(PEAR2_OPT_TEST)
 
+# ── LAIR driver (docs/pear2/LAIR.md) ────────────────────────────────────────
+# `lairc` is the standalone AIR -> LAIR -> .ll/.bc driver behind a flag. It
+# links the AIR reader half plus the LAIR files and NOTHING else: no LLVM, no
+# pear2 -- so `make check-lair` survives a machine with only c3c. The .bc step
+# is scripts/ll-bc.py (ctypes over libLLVM), mirroring scripts/ll-exe.py.
+LAIR_SRC := pfront/pear_ir/air_util.c3 lair/lair_ir.c3 lair/lair_lower.c3 \
+            lair/lair_verify.c3 lair/lair_write.c3 lair/lair_ll.c3 lair/lairc_main.c3
+LAIRC := lair/lairc
+lairc: $(LAIRC)
+	ln -sf $(LAIRC) lairc
+$(LAIRC): $(LAIR_SRC) $(AIR_READ_CORE) | c3c
+	$(C3C) compile --stdlib $(C3C_LIB) $(AIR_READ_CORE) $(LAIR_SRC) --max-stack-object-size 262144 -o $(LAIRC)
+
+# Parse -> lower -> verify: the slice gate, no LLVM involved.
+check-lair: $(LAIRC)
+	bash tests/lair/gate.sh --check
+
+# The same gate plus .ll execution: exit status through ll-exe.py.
+test-lair: $(LAIRC)
+	bash tests/lair/gate.sh
+
+# Bitcode A/B: lairc .bc (via scripts/ll-bc.py) vs pear2c --emit-bc -O0,
+# behavior-compared (exit status) over the shared slice. Needs pear2c + clang.
+test-lair-bc: $(LAIRC) $(PEAR2_BIN)
+	bash tests/lair/bc-ab.sh
+
 test-pear2: $(PEAR2_BIN) $(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) C3C="$(C3C)" LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" bash tests/pear2/run.sh ./$(PEAR2_BIN)
+	# The native backend needs no LLVM at all: object, ld, exit status.
+	bash tests/pear2/native.sh ./$(PEAR2_BIN)
 
 test-pear2-exec: $(BINARY) $(PEAR2_BIN) $(PEAR2_OPT_TEST) pear2c
 	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" BACKEND=./pear2c bash tests/exec/run.sh
 	$(C3_RUNTIME_ENV) LLVM23_BIN="$(LLVM23_BIN)" LLVM23_LIBDIR="$(LLVM23_LIBDIR)" PEAR2_CLANG="$(PEAR2_CLANG)" BACKEND=./pear2c bash tests/exec/pear/run.sh
 
+# The capability gate: ask the backend, fixture by fixture, which functions it
+# can actually lower. --probe runs the real emitter and creates no LLVM context,
+# so this answers "can the backend compile this program" without a toolchain at
+# run time.
+#
+# The gate fails when a *positive* fixture stops lowering. A `reject_*` fixture
+# that lowers is reported but does not fail the gate: those fixtures are pinned
+# in tests/pear2/run.sh, which also covers the rejects that only fire after
+# lowering (ABI and verifier checks), and duplicating that authority here would
+# turn this measurement into a second, weaker copy of run.sh.
+probe-pear2: $(PEAR2_BIN)
+	@log=$$(mktemp); ok=0; refused=0; leak=0; bad=0; \
+	for f in tests/pear2/*.air; do \
+	    case "$$f" in \
+	        */reject_*|*/unsupported_main.air) expect_refusal=1 ;; \
+	        *) expect_refusal=0 ;; \
+	    esac; \
+	    ./$(PEAR2_BIN) "$$f" --probe >"$$log" 2>&1; rc=$$?; \
+	    if [ "$$rc" = 0 ]; then \
+	        ok=$$((ok+1)); \
+	        if [ "$$expect_refusal" = 1 ]; then leak=$$((leak+1)); echo "NOTE: $$f lowers now (it was a refusal pin; run.sh is authoritative)"; fi; \
+	    elif [ "$$rc" = 3 ]; then \
+	        refused=$$((refused+1)); \
+	        if [ "$$expect_refusal" = 0 ]; then bad=$$((bad+1)); echo "FAIL: $$f does not lower"; cat "$$log"; fi; \
+	    else \
+	        bad=$$((bad+1)); echo "FAIL: $$f probe exited $$rc (expected 0 or 3)"; cat "$$log"; \
+	    fi; \
+	done; rm -f "$$log"; \
+	echo "probe-pear2: $$ok fixture(s) lower completely, $$refused refused, $$leak refusal pin(s) that now lower, $$bad regression(s)"; \
+	[ "$$bad" = 0 ]
+
 # Syntax/type-check PEAR2 and the structural optimizer harness without linking
 # LLVM, then run LLVM-independent arithmetic model tests. This does not replace
 # executing the optimizer or backend fixtures.
 check-pear2: | c3c
-	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(filter-out tools/air/airtool.c3,$(AIR_CORE)) pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_opt.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) pfront/pfront_core.c3 $(AIR_CORE) $(AIR_USE) pfront/pear_ir/air_facts.c3 pear2/pear2_types.c3 pear2/pear2_memory.c3 pear2/pear2_match.c3 pear2/pear2_control.c3 pear2/pear2_calls.c3 pear2/pear2_letrec.c3 pear2/pear2_opt.c3 pear2/pear2_cfg.c3 pear2/pear2_x64.c3 pear2/pear2_elf.c3 pear2/pear2_native.c3 pear2/pear2c_main.c3 --max-stack-object-size 262144
 	$(C3C) compile -C --stdlib $(C3C_LIB) pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pear2/pear2_opt.c3 tests/pear2/opt_test.c3 --max-stack-object-size 262144
 	bash -n tests/pear2/run.sh
+	bash -n tests/pear2/native.sh
 	python3 tests/pear2/signed_division_model_test.py
+
+# The transpilation targets. Both air_c3 (-> C3) and air_c (-> C) are consumers
+# of AIR, so they type-check in the same link as every other consumer
+# (CONSUMER_SRC already contains AIR_USE), and their textual contracts are checked
+# without a producer:
+#   * every tag either handles is a tag air_ll handles too (the consumers may not
+#     disagree about what the low profile is);
+#   * C3: no emitted template contains `goto`, and the type names printed exist in
+#     c3c v0.8.6, the tag pinned above;
+#   * C: the emitted prelude declares every __pride_ name the emitter prints.
+check-targets: | c3c
+	$(C3C) compile -C --no-entry --stdlib $(C3C_LIB) $(CONSUMER_SRC) --max-stack-object-size 262144
+	python3 tests/air3/test_c3_target.py
+	python3 tests/air3/test_c_target.py
+	python3 tests/air3/test_c_target.py --emit-prelude-check
+
+# The C target's OUTPUT is executed, not just inspected: the C text for every
+# awkward AIR form, plus the prelude extracted from the emitter's own literals,
+# compiled with gcc at -Werror, ASan and UBSan. Needs a C compiler and nothing
+# else -- no c3c, no pfrontc, no .air fixture.
+test-c-target:
+	bash tests/air3/c/run.sh
+	bash tests/air3/c/opt/run.sh
+
+# The documents a program is written from, checked by the rules they teach.
+# Static only: no compiler, no LLVM, so this runs anywhere.
+lint-pride:
+	python3 scripts/pride-lint.py --docs docs/pride
+	python3 scripts/pride-lint.py --no-compile examples/pride/template.pie
+
+# AIR middle end: the pass driver and its passes (no LLVM, no front end).
+air-boundary:
+	bash tests/air/boundary.sh
+
+air-pass: $(AIRTOOL)
+	bash tests/air/pass.sh
 
 # AIR 2.0 contract: hand-written good/bad .air, the corpus emitted by pfrontc
 # (canonical re-print, validity ledger) and the write->read round trip.
 test-air: $(BINARY) $(AIRTOOL)
+	@echo "==> AST->AIR dispatch coverage (source only; runs before anything is built)"
+	python3 tests/air/test_kind_coverage.py
+	python3 tests/air/test_pattern_fail_closed.py
+	python3 tests/air/test_write_result.py
+	python3 tests/air/test_clause_signature.py
+	python3 tests/air/test_shortcircuit_sharing.py
+	python3 tests/air/test_decl_cap.py
+	python3 tests/air/test_depth_limit.py
+	python3 tests/air/test_lambda_param_cap.py
+	python3 tests/air/test_variant_name.py
+	python3 tests/air/test_type_ann_plumbing.py
+	@echo "==> AIR boundary (emit side may not import consume side)"
+	bash tests/air/boundary.sh
 	@echo "==> AIR 2.0 text contract"
 	bash tests/air/run.sh ./$(BINARY) $(AIRTOOL)
 
@@ -219,6 +397,8 @@ test-air: $(BINARY) $(AIRTOOL)
 # with the known-failing cases recorded exactly (tests/lowering/KNOWN.tsv).
 # AIR 3.0 low profile: hand-written good/bad .air + the reference consumer (.air -> .ll -> executable)
 test-air3: $(BINARY) $(AIRTOOL)
+	@echo "==> AIR 3.0 -> C3 target (source only; no producer, no compiler)"
+	python3 tests/air3/test_c3_target.py
 	@echo "==> AIR 3.0 low profile (reference consumer)"
 	bash tests/air3/run.sh $(AIRTOOL)
 	@echo "==> AIR 3.0 lowering gate (pfrontc --emit-air-low -> LLVM -> run)"
@@ -227,6 +407,29 @@ test-air3: $(BINARY) $(AIRTOOL)
 test-lowering: $(BINARY) $(AIRTOOL) $(PEAR1)
 	@echo "==> AIR lowering table (audit, verify, native exit code)"
 	bash tests/lowering/run.sh ./$(BINARY)
+
+# PEAR 2 against the *real* corpus: every .pie program through pfrontc ->
+# pear2c -> LLVM -> run, with the same headers and the same status vocabulary as
+# tests/air3/low_corpus.sh. That script drives the same programs through
+# `airtool emit-ll` (the reference consumer); this one drives them through the
+# backend this repository is actually shipping. A program that passes there and
+# not here is a pear2c gap, and the run prints the list.
+test-pear2-corpus: $(PEAR2_BIN) $(BINARY) $(AIRTOOL)
+	@echo "==> PEAR 2 corpus (pfrontc -> pear2c -> LLVM -> run)"
+	bash tests/pear2/corpus.sh $(CORPUS_ARGS)
+
+# The same measurement without LLVM in the loop: does pear2c lower what the front
+# end produced? Needs only the binaries.
+probe-pear2-corpus: $(PEAR2_BIN) $(BINARY) $(AIRTOOL)
+	@echo "==> PEAR 2 corpus (lowering only)"
+	bash tests/pear2/corpus.sh --probe $(CORPUS_ARGS)
+
+# The scale half: all 260 stdlib modules as libraries (33,192 lines). The
+# reference consumer already does every one of them; this says how many pear2c
+# can, which is the number that decides whether a large program is possible.
+test-pear2-stdlib: $(PEAR2_BIN) $(BINARY) $(AIRTOOL)
+	@echo "==> PEAR 2 stdlib sweep (260 modules)"
+	bash tests/pear2/corpus.sh --lib
 
 # Quick smoke: build + emit AIR for everything.pie kitchen sink
 air-everything: $(BINARY)
@@ -239,5 +442,31 @@ legacy:
 # ── Clean ───────────────────────────────────────────────────────────────
 clean:
 	rm -f $(BINARY) $(PEAR2_BIN) pear2c
-	rm -f tmp/*.air
-	find . -name "*.air" -not -path "./docs/*" -not -path "./legacy/*" -not -path "./tests/pear2/*" -delete
+	# Generated AIR only. `find . -name "*.air" -delete` used to reach
+	# tests/air/ and tests/air3/, destroying 41 tracked fixtures -- after which
+	# `make test-air` and `make test-air3` could not run until the files were
+	# restored with git. Clean removes what the build produced, never a source:
+	# the check below refuses to finish if any tracked file is missing.
+	rm -f tmp/*.air tmp/*.low.air
+	find tmp -name "*.air" -delete 2>/dev/null || true
+	@missing=$$(git ls-files -d '*.air' 2>/dev/null); \
+	 if [ -n "$$missing" ]; then \
+	   echo "clean: refusing to report success -- tracked files are missing:"; \
+	   echo "$$missing" | sed 's/^/  /'; \
+	   echo "restore with: git checkout -- ."; exit 1; \
+	 fi
+	@echo "clean: tracked sources untouched"
+
+# A large multi-module Pride application and language-fixture stress workload.
+.PHONY: test-tokei gen-tokei-stress
+test-tokei: pfrontc
+	python3 tests/tokei/test_fixtures.py
+	./tests/tokei/run.sh
+
+# examples/tokei/stress.pie is generated: its value is the number of functions,
+# not their content. Regenerate and diff to prove the checked-in file is current
+# -- a stale one silently shrinks the workload without failing anything.
+gen-tokei-stress:
+	python3 tools/gen_tokei_stress.py
+	@git diff --quiet -- examples/tokei/stress.pie || \
+	  { echo "stress.pie was stale; regenerated. Commit it."; exit 1; }

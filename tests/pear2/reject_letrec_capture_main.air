@@ -1,0 +1,14 @@
+// PEAR 2 rejects a recursive binding that captures an enclosing local.
+//
+// A `letrec` member is lifted before its own closure value exists, so there is
+// no environment slot to load an outer binding from -- the group is deliberately
+// restricted to non-capturing members. `base` here is bound by the enclosing
+// `let`, so the group is refused with a positioned diagnostic instead of
+// silently capturing a value that would be read one frame too late.
+air 2.2 Main "reject_letrec_capture_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    let base = 1 : i64 in
+      letrec (add_base = lam (n : i64) -> <(add n base) : i64 | %ret>) in
+        <add_base | call · 41 : i64 · %ret>;

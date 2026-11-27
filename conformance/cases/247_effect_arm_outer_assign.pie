@@ -1,4 +1,21 @@
--- EXPECT-COUNT: type-err=1
+-- EXPECT-CLEAN
+--
+-- Writing an outer `let mut` from a handler arm is the DEFINED idiom, not an
+-- error: docs/pride/SYNTAX.md:495-500 shows the canonical state effect as
+--
+--     | St.put v k ->
+--         cell = v
+--         k(v)
+--
+-- so this fixture's `-- EXPECT-COUNT: type-err=1` asserted the opposite of the
+-- language. The arm is a closure over `sum` and a `let mut` capture is shared
+-- state by design (pfront/theory/lower/theory_defun.c3:22); only *escaping*
+-- shared mutable state warns (W4190), and this arm does not escape.
+--
+-- Formerly failed on `count type-err want=1 got=0`. Checking the same program
+-- turned up a genuine front-end bug: `()` in parameter position was mapped as
+-- a one-parameter signature taking unit, so `pusher()` reported a spurious
+-- W3102 arity mismatch (f(()) passed, f() did not). Fixed in the type mapper.
 effect Push
   push : i64 -> ()
 fn pusher : () -> i64 ! [Push]
@@ -8,10 +25,10 @@ fn pusher : () -> i64 ! [Push]
 fn main : () -> () ! [IO, Alloc]
   | () ->
       let mut sum : i64 = 0
-      let r : i64 = handle pusher()
+      let _r : i64 = handle pusher()
         | Push.push v k ->
             sum += v
             k ()
       print_i64_nl(sum)
 fn print_i64_nl : i64 -> () ! [IO]
-  | n -> syscall(231, 0)
+  | _n -> syscall(231, 0)

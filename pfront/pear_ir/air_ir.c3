@@ -62,6 +62,19 @@ enum AirFactState : int { AFACT_UNKNOWN, AFACT_AST_FINAL, AFACT_AIR_CHECKED }
 // ── Arena ─────────────────────────────────────────────────────────────────
 const usz AIR_SLAB_SIZE = 1024 * 1024;
 const usz AIR_MAX_SLABS = 256;
+// Exhaustion is a real failure mode (256 slabs of 1 MiB) but it needs a
+// quarter-gigabyte source to happen by accident, so the recovery path was
+// unreachable in every test. AIR_TEST_SLABS lowers the ceiling so a test can
+// drive the path in milliseconds; when it is unset the compiled limit is used.
+extern fn char* getenv(char* name);
+fn usz air_max_slabs() {
+    char* e = getenv((char*)"AIR_TEST_SLABS");
+    if (e == null || e[0] == 0) { return AIR_MAX_SLABS; }
+    usz v = 0; usz i = 0;
+    while (e[i] >= '0' && e[i] <= '9') { v = v * 10 + (usz)(e[i] - '0'); i++; }
+    if (v == 0) { return AIR_MAX_SLABS; }
+    return v < AIR_MAX_SLABS ? v : AIR_MAX_SLABS;
+}
 struct AirArena {
     char*[AIR_MAX_SLABS] slabs;
     usz slab_count, cursor, cur_cap;
@@ -74,7 +87,7 @@ fn bool AirArena.init(AirArena* a) {
     return a.grow(AIR_SLAB_SIZE);
 }
 fn bool AirArena.grow(AirArena* a, usz want) {
-    if (a.slab_count >= AIR_MAX_SLABS) { a.oom=true; return false; }
+    if (a.slab_count >= air_max_slabs()) { a.oom=true; return false; }
     usz cap = AIR_SLAB_SIZE; while (cap < want) cap = cap*2;
     char* s = (char*)malloc(cap); if (s == null) { a.oom=true; return false; }
     memset((void*)s, 0, cap);
@@ -83,8 +96,15 @@ fn bool AirArena.grow(AirArena* a, usz want) {
 }
 fn void* AirArena.alloc(AirArena* a, usz size_, usz align) {
     if (size_ == 0) size_ = 1;
+    // Exhaustion is latched here, at the one choke point every allocation goes
+    // through (air_new_raw and dup both land here), and the caller gets the
+    // static scratch block instead of null. Returning null let a caller store
+    // into it and segfault; a writable zeroed block lets construction finish
+    // into scratch, which is inert but harmless, and emit_low_program turns the
+    // latched flag into a diagnostic and refuses to write a .air.
+    if (a.oom) { return air_scratch(size_); }
     usz mask = align - 1; usz cur = (a.cursor + mask) & ~mask;
-    if (cur + size_ > a.cur_cap) { if (!a.grow(size_ + align)) return null; cur = 0; }
+    if (cur + size_ > a.cur_cap) { if (!a.grow(size_ + align)) { return air_scratch(size_); } cur = 0; }
     char* slab = a.slabs[a.slab_count - 1];
     a.cursor = cur + size_; a.bytes_used = a.bytes_used + size_;
     return (void*)(slab + cur);
@@ -98,8 +118,30 @@ fn char* AirArena.dup(AirArena* a, char* src, usz len) {
     for (usz i = 0; i < len; i++) d[i] = src[i];
     d[len] = 0; return d;
 }
+// Once the arena is exhausted every allocation fails, and the constructors
+// return null -- but most call sites write fields into the result immediately
+// (`AirCmd* c = air_new_AirCmd(a); c.tag = ...`), so a null propagates into a
+// store and the compiler segfaults. Recovering the flag after the fact is not
+// possible from a crash, so exhaustion is made non-fatal at the source: the
+// first failed allocation latches `oom`, and every allocation after it hands
+// back one static, zeroed, writable node. Construction then completes into
+// scratch memory, the tree is inert rather than null-dereferencing, and
+// emit_low_program turns `oom` into a diagnostic and refuses to write a .air.
+// The scratch block is sized for the largest node (AirCmd) with room to spare;
+// it is never freed and never escapes, because a .air is not written when oom
+// is set.
+const usz AIR_SCRATCH = 4096;
+char[AIR_SCRATCH] g_air_scratch;
+bool g_air_scratch_used = false;
+
+fn void* air_scratch(usz size_) {
+    g_air_scratch_used = true;
+    memset((void*)&g_air_scratch[0], 0, size_ < AIR_SCRATCH ? size_ : AIR_SCRATCH);
+    return (void*)&g_air_scratch[0];
+}
+
 fn void* air_new_raw(AirArena* a, usz size_) {
-    void* p = a.alloc(size_, 8); if (p == null) return null;
+    void* p = a.alloc(size_, 8); if (p == null) { a.oom = true; return air_scratch(size_); }
     memset(p, 0, size_);
     uint* idp = (uint*)p; *idp = a.next_id; a.next_id++; a.node_count++;
     return p;
@@ -210,6 +252,14 @@ struct AirModule {
     AirPrd* p_null;
     AirCns* c_ret; AirPat* pat_wild; AirCmd* nop;
     bool low;   // AIR 3.0 profile: the file claims to be low-level (typed, explicit memory, no high-level forms)
+    // Sticky overflow flag. `decls` is a fixed [4096] array, so a program that
+    // loads more decls than that silently lost the rest: add_decl returned
+    // false and every caller ignored it, so the artifact was written short and
+    // still reported errors=0 -- the same "success, truncated artifact" shape as
+    // the fmt and ENOSPC bugs. Tolerable at today's 2,430 decls, but silent
+    // truncation is exactly the failure mode this project keeps getting bitten
+    // by, so the drop is now recorded and the writer refuses.
+    bool decl_overflow;
 }
 
 // ── Allocators ────────────────────────────────────────────────────────────
@@ -245,6 +295,7 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
     m.name=a.dup(name,(usz)air_cstrlen(name));
     m.source_path = src_path==null?null:a.dup(src_path,(usz)air_cstrlen(src_path));
     m.decl_count=0;
+    m.decl_overflow=false;
     m.t_unit=air_mk_typ_simple(a,ATYP_UNIT); m.t_i8=air_mk_typ_simple(a,ATYP_I8);
     m.t_i16=air_mk_typ_simple(a,ATYP_I16); m.t_i32=air_mk_typ_simple(a,ATYP_I32);
     m.t_i64=air_mk_typ_simple(a,ATYP_I64); m.t_u8=air_mk_typ_simple(a,ATYP_U8);
@@ -259,6 +310,11 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
     m.pat_wild=air_mk_pat_wild(a); m.p_true=air_mk_prd_bool(a,true);
     m.p_false=air_mk_prd_bool(a,false); m.p_null=air_mk_prd_null(a);
     m.nop=air_mk_cmd_nop(a,m.p_unit,air_mk_cns_covar(a,a.dup("·",3)));
+    if (a.oom || m.name == null || m.t_unit == null || m.t_i64 == null
+        || m.t_usz == null || m.t_bool == null || m.t_infer == null
+        || m.p_unit == null || m.c_ret == null || m.p_true == null
+        || m.p_false == null || m.p_null == null || m.pat_wild == null
+        || m.nop == null) { return false; }
     // Pre-register libc intrinsics (malloc/free/write) as ADECL_DECLARE so
     // calls from `alloc [...]` / `write` / `free` resolve to external
     // declarations rather than letting the lowerer synthesize zero-return
@@ -267,33 +323,55 @@ fn bool AirModule.init(AirModule* m, AirArena* a, char* name, char* src_path) {
     {
         // malloc(i64) -> ptr (i8*)
         AirDecl* mal = air_mk_decl(a, ADECL_DECLARE, a.dup("malloc",6));
+        if (mal == null || a.oom) { return false; }
         mal.is_extern = true;
         mal.ret_ty = air_mk_typ_ptr(a, m.t_u8);
+        if (a.oom || mal.ret_ty == null) { return false; }
         AirBinder* mal_p0 = air_mk_binder(a, a.dup("_",1), m.t_i64, AMULT_UNR);
+        if (mal_p0 == null || a.oom) { return false; }
         mal.add_param(mal_p0);
         m.add_decl(mal);
         // free(ptr) -> void
         AirDecl* fr = air_mk_decl(a, ADECL_DECLARE, a.dup("free",4));
+        if (fr == null || a.oom) { return false; }
         fr.is_extern = true;
         fr.ret_ty = m.t_unit;
-        AirBinder* fr_p0 = air_mk_binder(a, a.dup("_",1), air_mk_typ_ptr(a, m.t_u8), AMULT_UNR);
+        AirTyp* free_ptr = air_mk_typ_ptr(a, m.t_u8);
+        if (a.oom || free_ptr == null) { return false; }
+        AirBinder* fr_p0 = air_mk_binder(a, a.dup("_",1), free_ptr, AMULT_UNR);
+        if (fr_p0 == null || a.oom) { return false; }
         fr.add_param(fr_p0);
         m.add_decl(fr);
         // write(i32, ptr, i64) -> i64
         AirDecl* wr = air_mk_decl(a, ADECL_DECLARE, a.dup("write",5));
+        if (wr == null || a.oom) { return false; }
         wr.is_extern = true;
         wr.ret_ty = m.t_i64;
+        AirTyp* write_ptr = air_mk_typ_ptr(a, m.t_u8);
+        if (a.oom || write_ptr == null) { return false; }
         AirBinder* wr_p0 = air_mk_binder(a, a.dup("_",1), m.t_i32, AMULT_UNR);
-        AirBinder* wr_p1 = air_mk_binder(a, a.dup("_",1), air_mk_typ_ptr(a, m.t_u8), AMULT_UNR);
+        AirBinder* wr_p1 = air_mk_binder(a, a.dup("_",1), write_ptr, AMULT_UNR);
         AirBinder* wr_p2 = air_mk_binder(a, a.dup("_",1), m.t_i64, AMULT_UNR);
+        if (a.oom || wr_p0 == null || wr_p1 == null || wr_p2 == null) { return false; }
         wr.add_param(wr_p0); wr.add_param(wr_p1); wr.add_param(wr_p2);
         m.add_decl(wr);
     }
-    return (m.t_unit!=null)&&(m.p_unit!=null)&&(m.c_ret!=null);
+    return !a.oom && (m.t_unit!=null)&&(m.p_unit!=null)&&(m.c_ret!=null)
+        && (m.t_i8!=null)&&(m.t_i16!=null)&&(m.t_i32!=null)&&(m.t_i64!=null)
+        && (m.t_u8!=null)&&(m.t_u16!=null)&&(m.t_u32!=null)&&(m.t_u64!=null)
+        && (m.t_isz!=null)&&(m.t_usz!=null)&&(m.t_f32!=null)&&(m.t_f64!=null)
+        && (m.t_bool!=null)&&(m.t_char!=null)&&(m.t_str!=null)&&(m.t_bytes!=null)
+        && (m.t_bottom!=null)&&(m.t_infer!=null)&&(m.p_true!=null)
+        && (m.p_false!=null)&&(m.p_null!=null)&&(m.pat_wild!=null)&&(m.nop!=null);
 }
 
 // ── Append helpers ───────────────────────────────────────────────────────
-fn bool AirModule.add_decl(AirModule* m, AirDecl* d){ if(d==null)return false; if(m.decl_count>=4096)return false; m.decls[m.decl_count]=d; m.decl_count++; return true; }
+fn bool AirModule.add_decl(AirModule* m, AirDecl* d)
+{
+    if (d == null) return false;
+    if (m.decl_count >= 4096) { m.decl_overflow = true; return false; }
+    m.decls[m.decl_count] = d; m.decl_count++; return true;
+}
 fn void AirTyp.add_arg(AirTyp* t, AirTyp* a){ if(t==null||a==null)return; if(t.arg_count>=64)return; t.args[t.arg_count]=a; t.arg_count++; }
 fn void AirPrd.push_sub(AirPrd* p, AirPrd* s)   // like add_sub, but a null operand keeps its slot
 {

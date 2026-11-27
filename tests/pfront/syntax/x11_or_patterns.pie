@@ -1,0 +1,49 @@
+-- x11 — or-patterns must lower, not be refused.
+--
+-- `| A | B -> ...` parses into an n-ary N_PAT_OR (pfront_parse.c3), and `sema`
+-- classifies it as CtorKind.CTOR_OR for exhaustiveness. But neither AIR
+-- lowerer dispatched on the kind, so it fell to the `default:` arm and was
+-- refused with "pattern (not lowered yet)".
+--
+-- That was not a backend gap. AIR has carried APAT_OR the whole time --
+-- air_ir.c3 declares it, air_write prints `or(a, b)`, air_read parses it back,
+-- air_emit handles it. The producer was simply missing. A construct the IR can
+-- express and the front end refuses is an unfinished lowering, so it is
+-- lowered now (air_low.c3, Low.pat).
+--
+-- The semantics that matter: each alternative matches the SAME scrutinee, only
+-- one runs, and a binding made inside an alternative must not be promised after
+-- the match.
+
+enum Colour
+  Red
+  Green
+  Blue
+  Unknown
+
+-- Two alternatives, distinct nullary variants.
+fn or_two : Colour -> i64
+  | c ->
+      match c
+        | Red | Green -> 1i64
+        | Blue -> 2i64
+        | Unknown -> 3i64
+
+-- Three alternatives in one arm, plus a literal alternative on an integer.
+fn or_three : i64 -> i64
+  | n ->
+      match n
+        | 0i64 | 1i64 | 2i64 -> 10i64
+        | 3i64 -> 20i64
+        | _ -> 30i64
+
+-- An or-pattern whose alternatives carry payloads. Only the binding from the
+-- alternative that matched is live; the arm body must not assume both.
+enum Shape
+  Circle(i64)
+  Square(i64)
+
+fn or_payload : Shape -> i64
+  | s ->
+      match s
+        | Circle(r) | Square(r) -> r

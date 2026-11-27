@@ -98,10 +98,11 @@
 //      m.pat_wild, m.nop are preallocated in AirModule.init() so we never
 //      allocate a fresh `unit` or `_` or `%ret` node per use site.
 //
-//  12. Error recovery: if allocation fails mid-lowering, the AirArena.oom
-//      flag is set, and all air_new_* functions return null. The lowering
-//      pass null-checks every allocation and substitutes nop / unit /
-//      wild as needed so we don't crash even if OOM strikes.
+//  12. Allocation failure is fail-closed, not recovered: AirArena.oom is
+//      checked before facts or text emission, and direct node allocations in
+//      this lowerer are null-checked. The compiler refuses to publish partial
+//      AIR and returns a non-zero status; keep adding local checks alongside
+//      any new direct allocation site.
 //
 //  13. All strings emitted into AIR are duplicated into the AirArena via
 //      AirArena.dup(), so freeing the arena at the end frees everything.
@@ -246,6 +247,7 @@ import pfront_lex;
 import air_ir;
 import air_scope;
 import air_types;
+import air_text;
 import air_audit;
 
 extern fn int snprintf(char* buf, usz n, char* fmt, ...);
@@ -277,6 +279,8 @@ struct AirLower
     usz          total_cmd;  // # of AirCmd allocated (debug)
     usz          total_decl; // # of AirDecl allocated (debug)
     usz          errors;     // # of lowered nodes that fell to poison/default
+    usz          fatal_errors; // malformed IR that must not be published (e.g. truncated operands)
+    char*        fatal_message;
     long         cop;        // pending compound-assignment token (0 = plain `=`); consumed by assign_expr
 
     // ── Nested function hoisting ──────────────────────────────────────────
@@ -303,9 +307,53 @@ fn void AirLower.init(AirLower* lr, AirModule* m, AirScope* sc, pfront_core::Int
     lr.labels = 0; lr.lets = 0;
     lr.total_prd = 0; lr.total_cns = 0; lr.total_cmd = 0; lr.total_decl = 0;
     lr.errors = 0;
+    lr.fatal_errors = 0;
+    lr.fatal_message = null;
     lr.cop = 0;
     lr.hoist_count = 0;
     lr.qualifier_module_final = false;
+}
+
+fn void AirLower.note_oom(AirLower* lr)
+{
+    if (lr.fatal_errors == 0)
+    {
+        lr.fatal_errors = 1;
+        lr.fatal_message = (char*)"AIR arena allocation failed";
+    }
+}
+
+// Refuse: a construct this lowerer does not model. Sets the same latch as an
+// allocation failure, so `emit_air_program` returns -3 and NO .air is written.
+//
+// This exists because the alternative -- the behaviour before this -- was to
+// substitute something plausible and publish it. See pat_node's default.
+fn void AirLower.note_bad(AirLower* lr, char* why)
+{
+    if (lr.fatal_errors == 0)
+    {
+        lr.fatal_errors = 1;
+        lr.fatal_message = why;
+    }
+}
+
+// air_arm_cap — how many alternatives a single `case` can carry.
+//
+// The arm loops below write into `AirBranch*[64]`, so 64 is the real limit.
+// They used to stop at it (`&& bc < 64`) and drop the rest WITHOUT A WORD: a
+// 300-arm function emitted 64 arms and ended the match, so every input from 64
+// up matched nothing at all. The source limit is 400 (MAX_DEPTH), and
+// tests/pfront/syntax/x09_torture_scale.pie has a 300-arm function, so this was
+// reachable from a checked-in test.
+//
+// Refuse instead. A truncation that reports nothing is the "tool says yes while
+// doing something else" shape this branch has been removing; a refusal costs a
+// diagnostic, a truncation costs correctness.
+const int AIR_ARM_CAP = 64;
+
+fn void AirLower.too_many_arms(AirLower* lr)
+{
+    lr.note_bad((char*)"more than 64 match arms or clause alternatives; this lowerer holds them in a fixed 64-slot array and refuses rather than truncating");
 }
 
 // ── Small helpers ──────────────────────────────────────────────────────────
@@ -328,6 +376,33 @@ fn char* node_text(Node* n, pfront_core::Interner* it)
     {
         char* fname = it.text(n.name_id);
         if (fname != null && fname[0] != 0) return fname;
+    }
+    /*
+     An enum VARIANT has the same shape as a field init: its own name lives in
+     `name_id` (set by the parser at pfront_parse.c3:5128), and its children are
+     the PAYLOAD TYPES. The generic decl case below scans children for an
+     ident/ty-name and therefore returned the first payload type instead of the
+     variant name:
+
+         enum E
+           | Point(i64, i64)
+
+         data E {
+           ctor `i64`(_0 : i64, _1 : i64) : nominal E;    <-- should be `Point`
+         }
+
+     This is not only a naming cosmetic. The match arm still emits the real
+     name (`Point`), so the artifact declares a constructor called `i64` and
+     then matches on one called `Point` -- two names for one variant, with the
+     type's own declaration disagreeing with every use of it. Reported errors=0.
+
+     A bare variant (`| B`) was unaffected because it has no children, which is
+     why this survived: it only shows up when a variant carries a payload.
+    */
+    if ((n.kind == Nk.N_DECL_VARIANT || n.kind == Nk.N_DECL_FIELD) && it != null && n.name_id != 0)
+    {
+        char* vname = it.text(n.name_id);
+        if (vname != null && vname[0] != 0) return vname;
     }
     // Decl/binder/module/use/field/etc: name lives in the first ident child.
     if (pfront_core::is_decl(n.kind)
@@ -440,7 +515,9 @@ fn char* AirLower.dup(AirLower* lr, char* s)
     if (s == null) return null;
     int n = 0;
     while (s[n] != 0) { n = n + 1; }
-    return lr.arena.dup(s, (usz)n);
+    char* copy = lr.arena.dup(s, (usz)n);
+    if (copy == null) { lr.note_oom(); }
+    return copy;
 }
 
 // fmt — format a single long integer into tmp, then dup into arena.
@@ -458,14 +535,18 @@ fn AirCmd* AirLower.cut(AirLower* lr, AirPrd* p, AirCns* k)
 {
     lr.cuts++;
     lr.total_cmd++;
-    return air_ir::air_mk_cut(lr.arena, p, k);
+    AirCmd* c = air_ir::air_mk_cut(lr.arena, p, k);
+    if (c == null) { lr.note_oom(); }
+    return c;
 }
 
 // cns_k — wrap a covariable name into a ACNS_COVAR consumer.
 fn AirCns* AirLower.cns_k(AirLower* lr, char* k)
 {
     lr.total_cns++;
-    return air_ir::air_mk_covar(lr.arena, k);
+    AirCns* c = air_ir::air_mk_covar(lr.arena, k);
+    if (c == null) { lr.note_oom(); }
+    return c;
 }
 
 // nop — <unit | fresh-covar>; used as "hole" filler for sequences where we
@@ -562,6 +643,47 @@ fn AirPat* AirLower.pat(AirLower* lr, Node* p)
     return lr.pat_node(p);
 }
 
+/*
+ `{ A: a }` / `{ B }` naming an ENUM VARIANT -> ctor A(a) / ctor B.
+
+ Returns null when no data declaration in the module has a constructor of that
+ name, so the caller keeps its refusal for structs and unions. Looking the
+ variant up by NAME across the module is enough and avoids inferring the
+ scrutinee's type here: the enclosing match already typed it, and a struct
+ pattern's field name is a lowercase member, which no enum ctor shares.
+*/
+fn AirPat* AirLower.enum_struct_pat(AirLower* lr, Node* p)
+{
+    Node* fe = null;
+    for (usz i = 0; i < p.child_count; i++)
+    {
+        Node* f = p.children[i];
+        if (f != null && f.kind == Nk.N_PAT_FIELD) { fe = f; break; }
+    }
+    if (fe == null) { return null; }
+    char* vnm = node_text(fe, lr.it);
+    if (vnm == null || vnm[0] == 0) { return null; }
+    bool found = false;
+    for (usz i = 0; i < lr.mod.decl_count && !found; i++)
+    {
+        AirDecl* dd = lr.mod.decls[i];
+        if (dd == null || dd.tag != ADECL_DATA) { continue; }
+        for (usz c = 0; c < dd.ctor_count; c++)
+        {
+            AirCtorDecl* ct = dd.ctors[c];
+            if (ct != null && ct.name != null && air_text::streq(ct.name, vnm)) { found = true; break; }
+        }
+    }
+    if (!found) { return null; }
+    AirPat*[1] subs; usz n = 0;
+    if (fe.child_count > 0 && fe.children[0] != null && pfront_core::is_pattern(fe.children[0].kind))
+    {
+        subs[0] = lr.pat_node(fe.children[0]);
+        n = 1;
+    }
+    return air_ir::air_mk_pat_variant(lr.arena, lr.dup(vnm), &subs[0], n);
+}
+
 fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
 {
     air_audit::mark(p);
@@ -630,13 +752,50 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
         {
             char* vnm = node_text(p, lr.it);
             if (vnm == null) vnm = (char*)"_V";
+            /*
+             child[0] is the MODULE-PATH that names the variant, not a payload.
+             Lowering every child (which is what this did) passed that path node
+             to pat_node, which has no case for it and refused the whole program
+             -- so an `enum` variant could not be matched with a payload at all,
+             while the identical `type X = ..` form worked. air_low.c3:3926
+             already filters to `pfront_core::is_pattern(c.kind)`, which is the
+             right rule and skips the path by construction.
+            */
             AirPat*[64] subs; usz n = 0;
             for (usz i = 0; i < p.child_count && i < 64; i++)
             {
-                subs[n] = lr.pat_node(p.children[i]);
+                Node* c = p.children[i];
+                if (c == null || !pfront_core::is_pattern(c.kind)) { continue; }
+                subs[n] = lr.pat_node(c);
                 n = n + 1;
             }
             return air_ir::air_mk_pat_variant(lr.arena, lr.dup(vnm), &subs[0], n);
+        }
+        case Nk.N_PAT_OR:
+        {
+            /*
+             `| A | B -> ...`. AIR has carried APAT_OR (/or(a, b)/) all along --
+             air_ir declares it, air_write prints it, air_read parses it -- but
+             neither lowerer produced one, so or-patterns were refused by
+             air_low.c3 and silently became a WILDCARD here.
+
+             APAT_OR is binary, so an n-ary N_PAT_OR folds left:
+             or(or(a, b), c). The AST arrives in both shapes anyway -- the
+             parser builds n-ary siblings from parse_pattern and a left-nested
+             pair from the clause matcher -- and folding covers both, because a
+             nested child recurses back into this case.
+            */
+            if (p.child_count == 0) { lr.note_bad((char*)"or-pattern with no alternatives"); return lr.mod.pat_wild; }
+            AirPat* acc = lr.pat_node(p.children[0]);
+            for (usz i = 1; i < p.child_count; i++)
+            {
+                AirPat* alt = lr.pat_node(p.children[i]);
+                AirPat* orp = air_ir::air_mk_pat(lr.arena, APAT_OR);
+                orp.sub[0] = acc; orp.sub_count = 1;
+                orp.or_alt = alt;
+                acc = orp;
+            }
+            return acc;
         }
         case Nk.N_PAT_ARRAY:
         {
@@ -650,7 +809,79 @@ fn AirPat* AirLower.pat_node(AirLower* lr, Node* p)
             for (usz i = 0; i < n && i < 64; i++) { pp.sub[i] = subs[i]; pp.sub_count++; }
             return pp;
         }
-        default: return lr.mod.pat_wild;
+        default:
+        {
+            /*
+             An unhandled pattern used to become `_` here: `return lr.mod.pat_wild`.
+
+             That is a silent WRONG ANSWER, not a missing feature. A pattern
+             that fails to match is supposed to send control to the next arm;
+             `_` always matches, so the arm body ran for inputs it was written
+             to exclude. Nothing reported it -- the .air was published looking
+             perfectly well-formed.
+
+             `air_low.c3` (the low-profile lowerer) has always refused this case
+             with `unsup(p, "pattern")`. The two lowerers disagreed, and the one
+             that disagreed silently was the one whose output is the
+             whole-program contract artifact.
+
+             Refuse instead. Refusing costs a diagnostic; guessing costs a
+             miscompile.
+            */
+            /*
+             Name the gap. A generic "does not model" message leaves the reader
+             to work out which construct they hit and whether it is worth fixing;
+             worse, N_PAT_STRUCT was listed in the audit as "only exercised by
+             an XFAIL" when tests/pfront/syntax/x05_lowlevel_ub.pie -- a passing
+             test -- was having its struct patterns wildcarded. Both gaps below
+             are already lowered correctly by air_low.c3's Low.pat, so the fix in
+             each case is a port, not new design:
+
+               N_PAT_STRUCT  Low.pat resolves each field against the struct decl
+                             and recurses into the field's sub-pattern. Not
+                             expressible as APAT_RECORD, which is name-only and
+                             rejects a field carrying a payload.
+               N_PAT_RANGE   `1..=9`; Low.pat lowers it as a two-sided compare.
+
+             N_PAT_REF and N_PAT_REST are deliberately absent from Low.pat too:
+             the parser can produce them but the spec and the stdlib never do.
+            */
+            if (p.kind == Nk.N_PAT_STRUCT)
+            {
+                /*
+                 `{ A: a }` / `{ B }` on an ENUM names a variant, and that is a
+                 straight translation to APAT_VARIANT once the field is known --
+                 air_low.c3:3934 does exactly this. It is the form the conformance
+                 corpus uses (253_enum_clause_patterns, 63_union_exhaustive), and
+                 it was refused here while air_low accepted it, so the same
+                 program compiled or not depending on which lowerer ran.
+
+                 A pattern against a STRUCT or a UNION is NOT this case and stays
+                 refused below: APAT_RECORD is name-only and rejects a payload
+                 (air_write.c3 errors on one), and a union member is a
+                 discriminant test over a flattened member set, which this
+                 lowerer does not model at all. Guessing there would match
+                 everything, which is the failure mode this whole branch exists
+                 to avoid.
+                */
+                AirPat* vp = lr.enum_struct_pat(p);
+                if (vp != null) { return vp; }
+                lr.note_bad((char*)"a struct or union pattern is not lowered by this lowerer (enum variant patterns are; see AirLower.enum_struct_pat). A struct field payload cannot be APAT_RECORD, which is name-only, and a union member needs a discriminant test this lowerer has no representation for -- refusing rather than matching everything");
+            }
+            else if (p.kind == Nk.N_PAT_RANGE)
+            {
+                lr.note_bad((char*)"range patterns are not lowered by this lowerer yet (air_low.c3 does); refusing rather than matching everything");
+            }
+            else
+            {
+                lr.note_bad((char*)"pattern kind this lowerer does not model; refusing rather than treating it as a wildcard");
+            }
+            // pat_node marks the node before the switch, so a refusal would
+            // otherwise leave it recorded as consumed and --air-audit would
+            // report unlowered=0 about a construct that was just dropped.
+            air_audit::unmark(p);
+            return lr.mod.pat_wild;
+        }
     }
 }
 
@@ -738,6 +969,28 @@ fn AirPrd* AirLower.prd(AirLower* lr, Node* n)
 fn AirPrd* AirLower.lambda_prd(AirLower* lr, Node* n)
 {
     lr.scope.enter();
+    /*
+     16 is `AirPrd.binders`' width (air_ir.c3), and the loop below used to stop
+     there and simply not bind the rest:
+
+         for (i = 0; i < n.child_count && bc < 16; i++)
+
+     The parameters past 15 were dropped from the emitted `lam(...)` header but
+     the BODY still referenced them, because their names had already been
+     recorded in the scope. Measured with the supplied binary on a 70-parameter
+     lambda:
+
+         let h = lam(p0 : infer, ... p15 : infer).
+           <(add p0 p1) | comu _x69. ... (add _x68 p3) ... (add p60 p61) ...
+
+     -- `lam` declares 16 parameters and the body uses names up to `p69`, i.e.
+     45 free variables inside a module that still reported `errors=0`. That is
+     the same "publishes a plausible artifact that is wrong" shape as the fmt
+     truncation, the ENOSPC 0-byte write, and the 4096-decl cap.
+
+     Refuse instead. `note_bad` sets the same latch as an allocation failure, so
+     emit_air_program returns -3 and no .air is written.
+    */
     AirBinder*[16] bv; usz bc = 0;
     usz i;
     for (i = 0; i < n.child_count && bc < 16; i++)
@@ -758,6 +1011,23 @@ fn AirPrd* AirLower.lambda_prd(AirLower* lr, Node* n)
             char* an = lr.scope.bind_var(pnm, c);
             bv[bc] = air_ir::air_mk_binder(lr.arena, an, pty, AMULT_UNR);
             bc = bc + 1;
+        }
+    }
+    if (bc >= 16)
+    {
+        // There may be more parameters than the header can carry. Only refuse
+        // when there actually are, so a lambda with exactly 16 params still
+        // lowers (its body cannot reference a 17th).
+        usz nparams = 0;
+        for (usz q = 0; q < n.child_count; q++)
+        {
+            if (n.children[q] != null && n.children[q].kind == Nk.N_DECL_PARAM) { nparams = nparams + 1; }
+        }
+        if (nparams > 16)
+        {
+            lr.note_bad((char*)"lambda has more than 16 parameters; AIR 2.2 cannot represent them");
+            lr.scope.leave();
+            return null;
         }
     }
     char* ret = lr.scope.push_ret("%ret");
@@ -788,6 +1058,7 @@ fn AirPrd* AirLower.struct_lit_prd(AirLower* lr, Node* n)
         if (c == null) continue;
         air_audit::mark(c);
         AirFieldInit* fi = air_ir::air_new_AirFieldInit(lr.arena);
+        if (fi == null) { lr.note_oom(); return null; }
         if (c.kind == Nk.N_EXPR_FIELD_INIT)
         {
             char* fnm = node_text(c, lr.it);
@@ -805,6 +1076,7 @@ fn AirPrd* AirLower.struct_lit_prd(AirLower* lr, Node* n)
         ic = ic + 1;
     }
     AirPrd* rec = air_ir::air_new_AirPrd(lr.arena);
+    if (rec == null) { lr.note_oom(); return null; }
     rec.tag = APRD_RECORD;
     rec.rec_init_count = 0;
     // Emit field inits in DECLARATION order (source order is free — `P { y = 2,
@@ -889,13 +1161,27 @@ fn AirCmd* AirLower.cmd(AirLower* lr, Node* n, char* k)
         }
         case Nk.N_STMT_BREAK:
         {
-            char* lbl = lr.scope.current_break();
+            char* want = n.name_id != 0 ? lr.it.text(n.name_id) : null;
+            char* lbl = lr.scope.break_for(want);
+            if (lbl == null)
+            {
+                // A label that names no enclosing loop must not silently break the
+                // innermost one: fail closed with a named diagnostic.
+                lr.note_bad((char*)"`break` names a label that no enclosing loop declares");
+                return lr.nop();
+            }
             lr.jumps++;
             return air_ir::air_mk_jump0(lr.arena, lbl);
         }
         case Nk.N_STMT_CONTINUE:
         {
-            char* lbl = lr.scope.current_continue();
+            char* want = n.name_id != 0 ? lr.it.text(n.name_id) : null;
+            char* lbl = lr.scope.continue_for(want);
+            if (lbl == null)
+            {
+                lr.note_bad((char*)"`continue` names a label that no enclosing loop declares");
+                return lr.nop();
+            }
             lr.jumps++;
             return air_ir::air_mk_jump0(lr.arena, lbl);
         }
@@ -1945,6 +2231,7 @@ fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
         if (c == null) continue;
         air_audit::mark(c);
         AirFieldInit* fi = air_ir::air_new_AirFieldInit(lr.arena);
+        if (fi == null) { lr.note_oom(); lr.scope.leave(); return null; }
         if (c.kind == Nk.N_EXPR_FIELD_INIT)
         {
             char* fnm = node_text(c, lr.it);
@@ -1991,6 +2278,7 @@ fn AirCmd* AirLower.struct_lit(AirLower* lr, Node* n, AirCns* k)
         inits[ic] = fi; ic = ic + 1;
     }
     AirPrd* rec = air_ir::air_new_AirPrd(lr.arena);
+    if (rec == null) { lr.note_oom(); lr.scope.leave(); return null; }
     rec.tag = APRD_RECORD;
     rec.rec_init_count = 0;
     for (usz i = 0; i < ic && i < 64; i++)
@@ -2206,7 +2494,7 @@ fn long elem_size_from_name(char* nm)
         if (nm[1] == '3' && nm[2] == '2') return 4;
         if (nm[1] == '6' && nm[2] == '4') return 8;
     }
-    else if (nm[0] == 'b' && nm[1] == 'o' && nm[2] == 'o' && nm[3] == 'l') return 1;
+    else if (nm[0] == 'b' && nm[1] == 'o' && nm[2] == 'o' && nm[3] == 'l') { return 1; }
     return 8; // pointers and unknown types default to 8 bytes.
 }
 
@@ -2384,51 +2672,101 @@ fn AirCmd* AirLower.binop(AirLower* lr, Node* n, AirCns* k)
 fn AirCmd* AirLower.shortcircuit_and(AirLower* lr, Node* n, AirCns* k)
 {
     if (n.child_count < 2) return lr.cut(lr.mod.p_false, k);
+    return lr.shortcircuit_join(n, k, true);
+}
+
+/*
+ SHORT-CIRCUIT `&&` / `||` — join-point form, not duplicated continuations.
+
+ The old lowering passed the SAME consumer `k` into both arms of the `if`:
+
+     if a then <true | k>  else <b | k>
+
+ `k` is a shared node, and the AIR text format has no way to share: the writer
+ inlines a node into every position that references it. So the tail under `k`
+ was printed once per path, and with a chained operator the tail is itself
+ another short-circuit -- which doubles again at every level.
+
+ Measured before the fix, for `x == 1 || x == 2 || ... || x == n`:
+
+     n :  2   3   4    5    6     7     8
+     lines: 10  18  34  66  130  258  514      =  2^(n+1) + 2
+
+ and for `n = 8`, the ONE source term `x == 8` appeared **64 times** in the
+ artifact. `examples/tokei/languages.pie` has 97-term chains built exactly this
+ way, which is where the measured 1.43 GB (and 20.6 GB for main.pie) came from.
+ The 3.0 lowerer never had this: Low.shortcircuit routes both sides through a
+ join label, so each side is emitted once.
+
+ Same shape here: evaluate the left operand into a fresh covar, branch, and send
+ both arms to a join label carrying the bool as a parameter. The tail under `k`
+ is then emitted exactly once, after the join.
+*/
+fn AirCmd* AirLower.shortcircuit_join(AirLower* lr, Node* n, AirCns* k, bool is_and)
+{
     lr.scope.enter();
-    AirCmd* els = lr.cut(lr.mod.p_false, k);
-    AirCmd* thn = lr.expr_to_cns(n.children[1], k);
-    AirCmd* iff = air_ir::air_mk_if(lr.arena, lr.mod.p_unit, thn, els);
-    AirCmd* out;
+    // `%scjoinN` for the label. fresh_lbl mints "%<hint><n>" and binds it as a
+    // covar, which is what a label name is; the hint stays dot-free so the name
+    // stays a bare identifier (a `.` would force air_write to backtick-quote it,
+    // as it does for the 3.0 `sc.join7` labels). `_xN` for the parameter.
+    char* join = lr.fresh_lbl("scjoin");
+    char* pv   = lr.fresh_x();
+
+    // join(bool v) { <v | k> }   -- the consumer runs once, here.
+    AirPrd* pvar = air_ir::air_mk_var(lr.arena, lr.dup(pv));
+    AirBinder*[1] argv;
+    argv[0] = air_ir::air_mk_binder(lr.arena, pv, lr.mod.t_bool, AMULT_UNR);
+    lr.labels++;
+    AirCmd* join_lbl = air_ir::air_mk_label(lr.arena, join, &argv[0], 1, lr.cut(pvar, k));
+
+    // Short arm jumps to the join with the short-circuit value. Jump arguments
+    // are variable NAMES (air_mk_jump takes char**), so the constant has to be
+    // materialised with a `let` first — the 3.0 lowerer does the same:
+    //   let _v10 = true : bool in jump sc.join7(_v10);
+    char* sv = lr.fresh_x();
+    char*[1] short_args;
+    short_args[0] = sv;
+    lr.jumps++;
+    AirCmd* short_jmp = air_ir::air_mk_let(lr.arena, sv, is_and ? lr.mod.p_false : lr.mod.p_true,
+        air_ir::air_mk_jump(lr.arena, join, &short_args[0], 1));
+
+    // Long arm evaluates the right operand and jumps to the join with it.
+    char* rx = lr.fresh_x();
+    char*[1] long_args;
+    long_args[0] = rx;
+    lr.jumps++;
+    AirCmd* rgt = lr.expr_to_cns(n.children[1], air_ir::air_mk_comu_cns(lr.arena, rx,
+        air_ir::air_mk_jump(lr.arena, join, &long_args[0], 1)));
+
+    AirCmd* iff;
     if (is_value_node(n.children[0]))
     {
-        // iff needs real scrutinee; rebuild with prd:
-        iff = air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), thn, els);
-        out = iff;
+        // `a && b`: true -> b, false -> short.  `a || b`: true -> short, false -> b.
+        iff = is_and ? air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), rgt, short_jmp)
+                     : air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), short_jmp, rgt);
     }
     else
     {
         char* ax = lr.fresh_x();
         AirPrd* ap = air_ir::air_mk_var(lr.arena, ax);
-        iff = air_ir::air_mk_if(lr.arena, ap, thn, els);
-        out = lr.expr_to_cns(n.children[0],
+        iff = is_and ? air_ir::air_mk_if(lr.arena, ap, rgt, short_jmp)
+                     : air_ir::air_mk_if(lr.arena, ap, short_jmp, rgt);
+        iff = lr.expr_to_cns(n.children[0],
             air_ir::air_mk_comu_cns(lr.arena, ax, iff));
     }
     lr.scope.leave();
-    return out;
+    // Labels are declared BEFORE the code that jumps to them: `seq { label
+    // join(v). <v|k>; <branch> }`. Confirmed against the emitted shape of
+    // `while` (air_lower.c3:2886), which sequences `label %exit(). ...` and
+    // `label %loop(). ...` ahead of the `jump %loop()` that enters. Putting the
+    // branch first would make the join label unreachable-by-declaration.
+    return air_ir::air_mk_seq(lr.arena, join_lbl, iff);
 }
 
 fn AirCmd* AirLower.shortcircuit_or(AirLower* lr, Node* n, AirCns* k)
 {
     if (n.child_count < 2) return lr.cut(lr.mod.p_true, k);
-    lr.scope.enter();
-    AirCmd* thn = lr.cut(lr.mod.p_true, k);
-    AirCmd* els = lr.expr_to_cns(n.children[1], k);
-    AirCmd* out;
-    if (is_value_node(n.children[0]))
-    {
-        AirCmd* iff = air_ir::air_mk_if(lr.arena, lr.prd(n.children[0]), thn, els);
-        out = iff;
-    }
-    else
-    {
-        char* ax = lr.fresh_x();
-        AirPrd* ap = air_ir::air_mk_var(lr.arena, ax);
-        AirCmd* iff = air_ir::air_mk_if(lr.arena, ap, thn, els);
-        out = lr.expr_to_cns(n.children[0],
-            air_ir::air_mk_comu_cns(lr.arena, ax, iff));
-    }
-    lr.scope.leave();
-    return out;
+    return lr.shortcircuit_join(n, k, false);
 }
 
 fn AirCmd* AirLower.unop(AirLower* lr, Node* n, AirCns* k)
@@ -2456,6 +2794,7 @@ fn AirCmd* AirLower.unop(AirLower* lr, Node* n, AirCns* k)
         if (is_value_node(n.children[0]))
         {
             AirCns* dk = air_ir::air_new_AirCns(lr.arena);
+            if (dk == null) { lr.note_oom(); lr.scope.leave(); return null; }
             dk.tag = ACNS_DEREF; dk.tail = k;
             lr.total_cns++;
             out = lr.cut(lr.prd(n.children[0]), dk);
@@ -2465,6 +2804,7 @@ fn AirCmd* AirLower.unop(AirLower* lr, Node* n, AirCns* k)
             char* vx = lr.fresh_x();
             AirPrd* vp = air_ir::air_mk_var(lr.arena, vx);
             AirCns* dk = air_ir::air_new_AirCns(lr.arena);
+            if (dk == null) { lr.note_oom(); lr.scope.leave(); return null; }
             dk.tag = ACNS_DEREF; dk.tail = k;
             lr.total_cns++;
             AirCmd* fin = lr.cut(vp, dk);
@@ -2556,8 +2896,9 @@ fn AirCmd* AirLower.match_(AirLower* lr, Node* n, AirCns* k)
             air_ir::air_mk_comu_cns(lr.arena, xv, lr.nop()));
     }
     AirBranch*[64] bs; usz bc = 0;
-    for (usz i = 1; i < n.child_count && bc < 64; i++)
+    for (usz i = 1; i < n.child_count; i++)   // AIR_ARM_CAP checked in the body
     {
+        if (bc >= AIR_ARM_CAP) { lr.too_many_arms(); break; }
         Node* arm = n.children[i];
         if (arm == null) continue;
         air_audit::mark(arm);
@@ -2655,7 +2996,14 @@ fn AirCmd* AirLower.for_(AirLower* lr, Node* n, AirCns* k)
 
     char* brk = lr.fresh_lbl("exit");
     char* cont = lr.fresh_lbl("loop");
-    lr.scope.push_loop(brk, cont);
+    /*
+     A labelled loop (`'rowscan: while ..`) records its name on the node, so
+     `break 'rowscan` inside a NESTED loop can find THIS loop rather than the
+     innermost one. Without the name a labelled transfer silently targeted the
+     innermost loop -- the label was parsed, stored on the node, and ignored.
+    */
+    char* ulabel = n.name_id != 0 ? lr.it.text(n.name_id) : null;
+    lr.scope.push_loop_named(brk, cont, ulabel);
 
     lr.scope.enter();
     char* pat_nm = null;
@@ -2717,7 +3065,14 @@ fn AirCmd* AirLower.loop_(AirLower* lr, Node* n, AirCns* k)
     lr.scope.enter();
     char* brk = lr.fresh_lbl("exit");
     char* cont = lr.fresh_lbl("loop");
-    lr.scope.push_loop(brk, cont);
+    /*
+     A labelled loop (`'rowscan: while ..`) records its name on the node, so
+     `break 'rowscan` inside a NESTED loop can find THIS loop rather than the
+     innermost one. Without the name a labelled transfer silently targeted the
+     innermost loop -- the label was parsed, stored on the node, and ignored.
+    */
+    char* ulabel = n.name_id != 0 ? lr.it.text(n.name_id) : null;
+    lr.scope.push_loop_named(brk, cont, ulabel);
 
     Node* cond; Node* body;
     if (n.kind == Nk.N_EXPR_WHILE)
@@ -2849,6 +3204,7 @@ fn AirCmd* AirLower.marker_block(AirLower* lr, Node* n, AirCns* k, AirCmdTag tag
     }
     lr.scope.leave();
     AirCmd* m = air_ir::air_new_AirCmd(lr.arena);
+    if (m == null) { lr.note_oom(); return null; }
     m.tag = tag; m.body = body;
     m.prd = null; m.cns = null; m.next = null;
     lr.total_cmd++;
@@ -2931,6 +3287,7 @@ fn AirCmd* AirLower.control_expr(AirLower* lr, Node* n, AirCns* k)
         case Nk.N_EXPR_FENCE:
         {
             AirCmd* c = air_ir::air_new_AirCmd(lr.arena);
+            if (c == null) { lr.note_oom(); return null; }
             c.tag = ACMD_FENCE; c.atomic_order = (int)n.p.ival; c.next = null; lr.total_cmd++;
             return air_ir::air_mk_seq(lr.arena, c, lr.cut(lr.mod.p_unit, k));
         }
@@ -2958,7 +3315,22 @@ fn AirCmd* AirLower.control_expr(AirLower* lr, Node* n, AirCns* k)
             lr.total_prd++;
             return lr.cut(air_ir::air_mk_sizeof(lr.arena, lr.mod.t_usz), k);
         }
-        default: return lr.cut(lr.mod.p_unit, k);
+        default:
+        {
+            /*
+             Unreachable today: control_expr has exactly one caller, and that
+             caller switches on a closed set of six kinds before dispatching
+             here. offsetof is the only one that reaches this switch's cases.
+
+             It stays a refusal rather than `lr.cut(lr.mod.p_unit, k)` because
+             that default DROPPED the computation -- the expression became
+             unit, so an effectful body silently produced nothing. The kind list
+             at the call site will grow; when it does, the construct should cost
+             a diagnostic, not vanish.
+            */
+            lr.note_bad((char*)"control expression this lowerer does not model; refusing rather than lowering it to unit");
+            return lr.cut(lr.mod.p_unit, k);
+        }
     }
 }
 
@@ -2973,6 +3345,7 @@ fn AirCmd* AirLower.control_expr(AirLower* lr, Node* n, AirCns* k)
 fn AirCmd* AirLower.prim_cmd(AirLower* lr, Node* n, AirCmdTag tag, AirCns* k)
 {
     AirCmd* c = air_ir::air_new_AirCmd(lr.arena);
+    if (c == null) { lr.fatal_errors++; lr.fatal_message = (char*)"AIR arena allocation failed"; return null; }
     c.tag = tag; c.next = null; c.cns = k; lr.total_cmd++;
     usz first = 0;
     if (tag == ACMD_ASM)
@@ -2988,10 +3361,20 @@ fn AirCmd* AirLower.prim_cmd(AirLower* lr, Node* n, AirCmdTag tag, AirCns* k)
     }
     else if (tag == ACMD_ATOMIC) { c.atomic_op = n.p.op; c.atomic_order = (int)n.p.ival; }
     // Operands: value nodes are used directly; anything else is bound first, left to right.
+    // AIR's fixed command operand storage carries one primary operand plus 64
+    // trailing operands. Reject larger source forms rather than silently
+    // truncating their tail and changing the program.
     Node*[65] ops; AirPrd*[65] ps; char*[65] names; usz oc = 0;
-    for (usz i = first; i < n.child_count && oc < 65; i++)
+    for (usz i = first; i < n.child_count; i++)
     {
         if (n.children[i] == null) { continue; }
+        if (oc >= 65)
+        {
+            lr.fatal_errors++;
+            lr.fatal_message = (char*)"too many syscall/atomic operands (maximum 65)";
+            // method-call form: `lr` is the receiver, so it must not be passed again
+            return lr.poison_cmd(lr.fatal_message);
+        }
         ops[oc] = n.children[i]; oc++;
     }
     lr.scope.enter();
@@ -3113,8 +3496,9 @@ fn AirCmd* AirLower.handle(AirLower* lr, Node* n, AirCns* k)
         comp = lr.cmd_to_cns(n.children[0], k);
     }
     AirBranch*[64] bs; usz bc = 0;
-    for (usz i = 1; i < n.child_count && bc < 64; i++)
+    for (usz i = 1; i < n.child_count; i++)   // AIR_ARM_CAP checked in the body
     {
+        if (bc >= AIR_ARM_CAP) { lr.too_many_arms(); break; }
         Node* arm = n.children[i];
         if (arm == null) continue;
         air_audit::mark(arm);
@@ -3234,6 +3618,7 @@ fn AirCmd* AirLower.assign_place(AirLower* lr, Node* lhs, Node* rhs, long cop, A
     char* nv_v = cop != 0 ? lr.fresh_x() : v_v;
     AirPrd* sp = air_ir::air_mk_var(lr.arena, nv_v);
     AirCns* st = air_ir::air_new_AirCns(lr.arena);
+    if (st == null) { lr.note_oom(); lr.scope.leave(); return null; }
     lr.total_cns++;
     st.tag = ACNS_STORE; st.prd = sp; st.tail = after; st.idx = esz;
     AirCns* wr_place = st;                         // write side: place consumer ending in the store
@@ -3520,6 +3905,7 @@ fn AirCmd* AirLower.assign_mem(AirLower* lr, Node* n, AirCns* k)
 
     // Build ACNS_STORE tail: receives addr, stores v_v to it, continues to after.
     AirCns* store_c = air_ir::air_new_AirCns(lr.arena);
+    if (store_c == null) { lr.note_oom(); lr.scope.leave(); return null; }
     lr.total_cns++;
     store_c.tag = ACNS_STORE; store_c.prd = vp; store_c.tail = after;
     long store_esz = 1;
@@ -3751,6 +4137,27 @@ fn void AirLower.reg_clause_pat_params(AirLower* lr, AirDecl* dd, Node* pat)
 
 fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
 {
+    /*
+     A `rewrite` declaration is parsed as a synthetic N_DECL_FN whose children
+     are RULES, not a body and not parameters. Lowering it as a function produced
+     a zero-argument body of `<unit>` and reported nothing:
+
+         rewrite simp
+           | 0i64 -> 1i64            def simp() : infer = <unit | %ret_2>;
+
+     so the rule became a function that does nothing, in an artifact that looks
+     well-formed. air_low.c3 refuses the same declaration ("not lowered yet
+     (clause pattern shape): int"); the 2.2 path guessed.
+
+     There is no AIR representation for a rewrite rule yet, so refuse. An
+     SCCP-level fold may still use the rule during optimisation -- this only
+     stops the .air from claiming a lowering that did not happen.
+    */
+    if ((n.flags & pfront_core::NF_SYNTHETIC) != 0)
+    {
+        lr.note_bad((char*)"rewrite rules have no AIR lowering yet; refusing rather than emitting an empty function");
+        return null;
+    }
     // A hoisted nested function is emitted under the AIR name chosen for it.
     char* nm = null;
     for (usz hi = 0; hi < lr.hoist_count; hi++)
@@ -3982,14 +4389,14 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     if (cl == null || cl.kind != Nk.N_CLAUSE) continue;
                     usz arity = 0;
                     bool irrefutable = true;
-                    bool has_guard = false;
+                    Node* guard_n = null;
                     Node* body_n = null;
                     usz bcnt = 0;
                     for (usz j = 0; j < cl.child_count; j++)
                     {
                         Node* cp = cl.children[j];
                         if (cp == null) continue;
-                        if (cp.kind == Nk.N_GUARD) { has_guard = true; continue; }
+                        if (cp.kind == Nk.N_GUARD) { guard_n = cp; continue; }
                         if (pfront_core::is_pattern(cp.kind))
                         {
                             if (!clause_bindings_arity(cp, &arity)) irrefutable = false;
@@ -4004,9 +4411,27 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                             || body_n.kind == Nk.N_STMT_COMPOUND_ASSIGN || body_n.kind == Nk.N_STMT_RETURN
                             || body_n.kind == Nk.N_STMT_BREAK || body_n.kind == Nk.N_STMT_CONTINUE
                             || body_n.kind == Nk.N_STMT_DEFER);
-                    if (irrefutable && !has_guard && arity == d.param_count
-                        && bcnt == 1 && supported_body)
+                    /*
+                     A GUARD is not a reason to refuse the clause. `| (a, b) if a > b -> a`
+                     is a single-clause function whose pattern is an irrefutable tuple of
+                     binders: there is nothing to dispatch on, so the clause lowers to
+                     `if !guard { poison }` -- exactly the shape the match-arm path below
+                     already builds with the %guard covariable (air_lower.c3:4484). This
+                     path used to mark has_guard and then refuse the whole clause, so
+                     tests/lowering/c08_match_guard.pie came out with an UNLOWERED guard
+                     subtree and a poison body.
+                    */
+                    if (irrefutable && arity == d.param_count && bcnt == 1 && supported_body)
                     {
+                        AirPrd* gcond = null;
+                        if (guard_n != null && guard_n.child_count > 0 && guard_n.children[0] != null)
+                        {
+                            air_audit::mark(guard_n);
+                            // No branch here to hang a Br.guard on, so the guard is the
+                            // condition of a real if. (The match path cuts to %guard
+                            // because AIR branches carry their guard that way.)
+                            gcond = lr.prd(guard_n.children[0]);
+                        }
                         if (pfront_core::is_expr(body_n.kind))
                         {
                             body = lr.expr_to_cns(body_n, lr.cns_k(ret));
@@ -4014,6 +4439,13 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                         else
                         {
                             body = lr.cmd(body_n, ret);
+                        }
+                        if (gcond != null)
+                        {
+                            // A false guard reaches the poison, so a body whose guard did
+                            // not hold can never run silently.
+                            AirCmd* fallback = lr.poison_cmd(lr.dup("clause guard was false and no later clause matched"));
+                            body = air_ir::air_mk_if(lr.arena, gcond, body, fallback);
                         }
                     }
                     else
@@ -4023,13 +4455,16 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     break;
                 }
             }
-            if (body == null && d.param_count > 1)
-            {
-                // Fail closed: the legacy match below has one scrutinee and
-                // cannot implement positional multi-argument clause dispatch.
-                // Never let it prune unmatched parameters into a dummy return.
-                body = lr.poison_cmd(lr.dup("multi-parameter clause dispatch requires tuple-pattern lowering; unsupported clause form"));
-            }
+            /*
+             Multi-parameter clause sets used to be refused here outright, on the
+             grounds that the match below has one scrutinee. That is true of the
+             legacy positional dispatch, but the match arms built below match a
+             TUPLE pattern (pc > 1 becomes air_mk_pat_tuple), which is exactly
+             tuple-pattern dispatch. Refusing left tests/lowering/c08_match_guard.pie
+             -- `| (a, b) if a > b -> a` over `| (a, _) -> 0` -- with a poison body
+             in the .air, and the audit reported the guard and clause subtrees as
+             unlowered. Let the tuple-pattern match below build it.
+            */
             if (body == null)
             {
                 AirBranch*[64] bs; usz bc = 0;
@@ -4105,13 +4540,27 @@ fn AirDecl* AirLower.decl_fn(AirLower* lr, Node* n)
                     AirCmd* gcmd = null;
                     if (guard_n != null && guard_n.child_count > 0 && guard_n.children[0] != null)
                     {
+                        /*
+                         Mark the guard's whole SUBTREE, not just the guard node.
+                         expr_to_cns lowers the condition, but the audit reports any
+                         audited descendant it has not seen marked, so `if a > b`
+                         showed up as "UNLOWERED binary 3:17 under guard" even though
+                         the guard was lowered and the program ran correctly. A count
+                         of unlowered nodes must mean what it says.
+                        */
                         air_audit::mark(guard_n);
+                        air_audit::mark_tree(guard_n);
                         gcmd = lr.expr_to_cns(guard_n.children[0], air_ir::air_mk_covar(lr.arena, "%guard"));
                     }
                     lr.scope.leave();
                     AirBranch* br = air_ir::air_mk_branch(lr.arena, pat, bcmd);
                     br.guard = gcmd;
-                    if (bc < 64) { bs[bc] = br; bc++; }
+                    // Refuse at the cap; do not drop the alternative. `bc < 64`
+                    // here silently discarded every clause alternative past the
+                    // 64th, and x09's many_clauses (300 arms) was only the most
+                    // obvious case -- it lost 236 arms with no diagnostic.
+                    if (bc >= AIR_ARM_CAP) { lr.too_many_arms(); }
+                    else { bs[bc] = br; bc++; }
                 }
                 if (bc == 0) { body = lr.cut(lr.mod.p_unit, lr.cns_k(ret)); }
                 else if (bc == 1 && bs[0].pat == lr.mod.pat_wild && scr == lr.mod.p_unit)
@@ -4179,6 +4628,32 @@ fn AirDecl* AirLower.decl_struct(AirLower* lr, Node* n)
     if (nm == null) nm = (char*)"S";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_CODATA, lr.dup(nm));
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
+    /*
+     `AirDecl.dtors` is a fixed AirDtorDecl*[64] and `add_dtor` returns silently
+     once it is full, so a struct with more fields than that used to be emitted
+     with the extras MISSING while still reporting errors=0. Measured with the
+     supplied binary on an 80-field struct: the artifact contained
+
+         op f0() : i64; ... op f63() : i64;     (exactly 64)
+
+     and nothing else -- 16 fields gone, no diagnostic. A program using one of
+     the dropped fields then produced an artifact referring to a field the
+     type does not declare.
+
+     Count first and refuse, rather than emit a type that is not the one that
+     was written.
+    */
+    usz nfields = 0;
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        if (n.children[i] != null && n.children[i].kind == Nk.N_DECL_FIELD) { nfields = nfields + 1; }
+    }
+    if (nfields > 64)
+    {
+        lr.note_bad((char*)"struct has more than 64 fields; AIR 2.2 cannot represent them");
+        lr.total_decl++;
+        return d;
+    }
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* f = n.children[i];
@@ -4201,6 +4676,23 @@ fn AirDecl* AirLower.decl_enum(AirLower* lr, Node* n)
     if (nm == null) nm = (char*)"E";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DATA, lr.dup(nm));
     d.is_pub = (n.flags & pfront_core::NF_PUB) != 0;
+    /*
+     Same fixed-array problem as decl_struct: `ctors` is AirCtorDecl*[64] and
+     `add_ctor` drops silently past it, so an enum with more than 64 variants
+     would be emitted short. Variant field counts are capped at 64 too
+     (`AirCtorDecl.fields`). Refuse rather than publish a partial type.
+    */
+    usz nvariants = 0;
+    for (usz i = 0; i < n.child_count; i++)
+    {
+        if (n.children[i] != null && n.children[i].kind == Nk.N_DECL_VARIANT) { nvariants = nvariants + 1; }
+    }
+    if (nvariants > 64)
+    {
+        lr.note_bad((char*)"enum has more than 64 variants; AIR 2.2 cannot represent them");
+        lr.total_decl++;
+        return d;
+    }
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* v = n.children[i];
@@ -4239,9 +4731,28 @@ fn AirDecl* AirLower.decl_type(AirLower* lr, Node* n)
     if (nm == null) nm = (char*)"T";
     AirDecl* d = air_ir::air_mk_decl(lr.arena, ADECL_DECLARE, lr.dup(nm));
     d.ret_ty = lr.mod.t_infer;
-    if (n.child_count > 0 && n.children[0] != null)
+    /*
+     The target of `type Name = Target` is NOT a child of the declaration
+     node. `parse_type_alias` stores it in `n.type_ann`
+     (pfront_parse.c3:5268), having built the alias's own node before it saw
+     the `=`. This function only ever looked at `children[0]`, which for an
+     alias is empty, so every alias was emitted as
+
+         type Age = i64   ->   declare Age() : infer;
+
+     with the target silently discarded and errors=0. The AIR type layer could
+     represent it (the writer prints `ret_ty` for ADECL_DECLARE); only this
+     read was wrong.
+
+     `children[0]` is kept as a fallback rather than replaced: a type node
+     that does carry its target as a child (however it got built) should keep
+     working.
+    */
+    Node* target = n.type_ann;
+    if (target == null && n.child_count > 0) { target = n.children[0]; }
+    if (target != null)
     {
-        d.ret_ty = air_types::air_ty(lr.mod, n.children[0], lr.it);
+        d.ret_ty = air_types::air_ty(lr.mod, target, lr.it);
     }
     lr.total_decl++;
     return d;

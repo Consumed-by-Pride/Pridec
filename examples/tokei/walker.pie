@@ -1,0 +1,125 @@
+mod tokei.walker
+
+use os.linux
+use str.string
+use fs.dir_iter
+use fs.meta
+use fs.path
+use tokei.model
+use tokei.languages
+use tokei.scanner
+
+fn printf : (ptr, ...) -> i32 #extern("printf") #cc(c)
+
+fn path_is_hidden : ptr -> bool
+  | path ->
+      let base = fs.path.path_basename(path)
+      let chars = string.string_as_slice(&base) as *u8
+      let hidden = string.string_len(&base) > 0i64 && chars[0i64] == '.'
+      string.string_destroy(&base)
+      hidden
+
+fn directory_is_ignored : ptr -> bool
+  | name ->
+      os.linux.strcmp(name, ".git" as ptr) == 0i32
+        || os.linux.strcmp(name, ".hg" as ptr) == 0i32
+        || os.linux.strcmp(name, ".svn" as ptr) == 0i32
+        || os.linux.strcmp(name, "node_modules" as ptr) == 0i32
+        || os.linux.strcmp(name, "vendor" as ptr) == 0i32
+        || os.linux.strcmp(name, "target" as ptr) == 0i32
+        || os.linux.strcmp(name, "dist" as ptr) == 0i32
+        || os.linux.strcmp(name, "build" as ptr) == 0i32
+        || os.linux.strcmp(name, "coverage" as ptr) == 0i32
+        || os.linux.strcmp(name, "__pycache__" as ptr) == 0i32
+        || os.linux.strcmp(name, ".venv" as ptr) == 0i32
+        || os.linux.strcmp(name, "venv" as ptr) == 0i32
+        || os.linux.strcmp(name, ".tox" as ptr) == 0i32
+        || os.linux.strcmp(name, "Pods" as ptr) == 0i32
+        || os.linux.strcmp(name, "Carthage" as ptr) == 0i32
+        || os.linux.strcmp(name, ".next" as ptr) == 0i32
+        || os.linux.strcmp(name, ".nuxt" as ptr) == 0i32
+
+fn walker_add_file : (*Totals, *Options, ptr) -> ()
+  | (totals, options, path) ->
+      let lang = language_id(path)
+      if lang <= 0i64
+        totals.skipped_files = totals.skipped_files + 1i64
+      else
+        let count = scanner_file(path)
+        if count.status == 0i64
+          totals_add_file(totals, &count)
+          if options.show_files && !options.summary_only
+            printf("%9ld %9ld %9ld %9ld %9ld %9ld  %s\n" as ptr,
+                   count.lines, count.code, count.comments, count.blanks,
+                   count.todos, path)
+        else
+          totals_add_file(totals, &count)
+        
+fn walker_scan_directory : (*Totals, *Options, ptr, i64) -> ()
+  | (totals, options, path, depth) ->
+      if depth > MAX_DEPTH
+        totals.skipped_dirs = totals.skipped_dirs + 1i64
+      else
+        if depth > totals.max_depth_seen
+          totals.max_depth_seen = depth
+        let mut iterator = fs.dir_iter.dir_iter_open(path)
+        if iterator.fd < 0i64
+          totals.skipped_dirs = totals.skipped_dirs + 1i64
+        else
+          totals.visited_dirs = totals.visited_dirs + 1i64
+          while true
+            let mut entry = fs.dir_iter.dir_iter_next_name(&iterator)
+            let name_len = string.string_len(&entry)
+            if name_len == 0i64
+              string.string_destroy(&entry)
+              break
+            let name_cstr = string.string_as_cstr(&entry) as ptr
+            let dot_entry = os.linux.strcmp(name_cstr, "." as ptr) == 0i32
+              || os.linux.strcmp(name_cstr, ".." as ptr) == 0i32
+            let hidden = path_is_hidden(name_cstr)
+            let ignored = directory_is_ignored(name_cstr)
+            if dot_entry
+              string.string_destroy(&entry)
+            else if (!options.show_hidden && hidden) || (!options.include_ignored && ignored)
+              totals.skipped_dirs = totals.skipped_dirs + 1i64
+              string.string_destroy(&entry)
+            else
+              let child = fs.path.path_join(path, name_cstr)
+              let child_path = string.string_as_cstr(&child) as ptr
+              let (metadata, stat_error) = fs.meta.meta_from_path(child_path)
+              if stat_error == 0i64
+                if fs.meta.meta_is_dir(&metadata)
+                  walker_scan_directory(totals, options, child_path, depth + 1i64)
+                else if fs.meta.meta_is_file(&metadata)
+                  if options.show_hidden || !path_is_hidden(child_path)
+                    walker_add_file(totals, options, child_path)
+                  else
+                    totals.skipped_files = totals.skipped_files + 1i64
+                else
+                  totals.skipped_files = totals.skipped_files + 1i64
+                fs.meta.meta_destroy(&metadata)
+              else
+                totals.skipped_files = totals.skipped_files + 1i64
+              string.string_destroy(&child)
+              string.string_destroy(&entry)
+          fs.dir_iter.dir_iter_close(&iterator)
+
+fn walker_scan_root : (*Totals, *Options, ptr) -> ()
+  | (totals, options, root) ->
+      options.roots_seen = options.roots_seen + 1i64
+      let (metadata, stat_error) = fs.meta.meta_from_path(root)
+      if stat_error != 0i64
+        printf("tokei-pride: cannot stat %s\n" as ptr, root)
+        totals.total_failed = totals.total_failed + 1i64
+      else
+        if fs.meta.meta_is_dir(&metadata)
+          walker_scan_directory(totals, options, root, 0i64)
+        else if fs.meta.meta_is_file(&metadata)
+          if options.show_hidden || !path_is_hidden(root)
+            walker_add_file(totals, options, root)
+          else
+            totals.skipped_files = totals.skipped_files + 1i64
+        else
+          printf("tokei-pride: not a regular file or directory: %s\n" as ptr, root)
+          totals.skipped_files = totals.skipped_files + 1i64
+        fs.meta.meta_destroy(&metadata)

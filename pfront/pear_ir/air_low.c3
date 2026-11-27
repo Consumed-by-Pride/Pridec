@@ -20,8 +20,9 @@ module air_low;
 import pfront_core;
 import pfront_lex;
 import air_ir;
-import air_ll;
+import air_util;
 import air_text;
+import air_audit;
 import air_lower;
 import air_types;
 import air_write;
@@ -62,7 +63,14 @@ struct Blk
 struct Vx { AirPrd* p; AirTyp* t; }
 struct Pl { AirPrd* ptr; AirTyp* t; }
 struct VarB { Node* decl; AirPrd* p; AirTyp* t; bool slot; bool lit; }
-struct LoopF { usz brk; usz cont; }
+const usz LOOP_NONE = (usz)-1;
+struct LoopF {
+    usz brk; usz cont;
+    // The user-written label (`'rowscan`), or null. A labelled `break`/`continue`
+    // must leave the loop it NAMES, which need not be the innermost one: without
+    // the name every labelled transfer silently targeted loops[nloops-1].
+    char* user_name;
+}
 struct Cap { Node* decl; AirTyp* t; bool by_ref; AirPrd* sp; }
 // a `defer`: function-scoped, registered by setting its flag, replayed (in reverse order) before every return
 struct DeferR { Node* node; AirPrd* flag; Cap[MAXC] snap; usz nsnap; }
@@ -70,6 +78,9 @@ struct FnInfo
 {
     Node* decl; char* name; AirTyp* ret; AirTyp*[MAXA] pty; usz np; AirTyp* fnty; bool ext; bool queued; bool seen; bool variadic;
     bool is_arm; long hnd; usz arm_j; bool is_thk; bool is_yld; bool is_drv; bool is_ret; bool is_lam; bool is_ind; bool is_adapt; bool is_dyn; AirTyp* dself; FnInfo* adapt; Cap[MAXC] caps; usz ncaps; AirTyp* envty;
+    bool is_const;          // `fn K : T = v`: a named constant, not a function
+    Node* const_value;      // the value expression of such a constant
+    bool lowering_const;    // set while a const's own value is being lowered
     TSub[MAXTP] ts; usz nts;
 }
 // a function VALUE is the record { fn: ptr, env: ptr(u8) }; `fn` takes the environment as its first argument
@@ -116,6 +127,7 @@ struct Low
     char** names; usz nnames; usz tmpn; usz lbln;
     AirTyp* ret_ty; char* cur_fn; Node* cur_node;
     int errors; int fn_errors; int fns_ok; int fail_fn; Node* entry_decl;
+    bool audit;   // --air-audit: mark source nodes as the live lowerer consumes them
     bool uses_alloc;
     Fat[48] fats; usz nfat;
     DynI[24] dyns; usz ndyn;
@@ -167,8 +179,8 @@ fn bool Low.lit_note(Low* lw, Node* operand, AirTyp* t)
 {
     if (lw.lit_final || lw.fn_errors > 0 || operand == null || operand.kind != Nk.N_EXPR_IDENT || operand.resolved == null || t == null) { return false; }
     VarB* v = lw.find_var(operand.resolved);
-    if (v == null || !v.lit || v.t == null || air_ll::ty_eq(v.t, t)) { return false; }
-    bool same_class = (air_ll::ty_is_int(v.t) && air_ll::ty_is_int(t)) || (air_ll::ty_is_float(v.t) && air_ll::ty_is_float(t));
+    if (v == null || !v.lit || v.t == null || air_util::ty_eq(v.t, t)) { return false; }
+    bool same_class = (air_util::ty_is_int(v.t) && air_util::ty_is_int(t)) || (air_util::ty_is_float(v.t) && air_util::ty_is_float(t));
     if (!same_class || lw.lit_lookup(operand.resolved) != null || lw.nlit >= 64) { return false; }
     lw.litd[lw.nlit] = operand.resolved; lw.litt[lw.nlit] = t; lw.nlit++;
     lw.lit_retry = true; lw.fn_errors++;
@@ -274,7 +286,7 @@ fn void Low.copy_attrs(Low* lw, AirDecl* ad, Node* src)
         {
             if (!isstr || arg == null || al == 0 || al > 30) { continue; }
             char[32] cb; for (usz i = 0; i < al; i++) { cb[i] = arg[i]; } cb[al] = 0;
-            if (!air_ll::cc_known(&cb[0])) { lw.unsup(src, "unknown calling convention"); continue; }
+            if (!air_util::cc_known(&cb[0])) { lw.unsup(src, "unknown calling convention"); continue; }
             air_ir::air_add_attr(ad, lw.dup("callconv"), lw.dup(&cb[0]), 0, false);
         }
         else if (seq(nn, "align"))
@@ -297,7 +309,7 @@ fn AirTyp* Low.struct_inst(Low* lw, Node* decl, AirTyp** targs, usz nt)
     {
         if (lw.sts[i].decl != decl || lw.sts[i].nt != nt) { continue; }
         bool same = true;
-        for (usz j = 0; j < nt; j++) { if (!air_ll::ty_eq(lw.sts[i].targs[j], targs[j])) { same = false; } }
+        for (usz j = 0; j < nt; j++) { if (!air_util::ty_eq(lw.sts[i].targs[j], targs[j])) { same = false; } }
         if (same) { return lw.sts[i].ty; }
     }
     if (lw.nst >= MAXST) { lw.unsup(decl, "more than 1024 struct types"); return null; }
@@ -485,27 +497,57 @@ fn AirTyp* Low.ty(Low* lw, Node* t)
 // `A -> R ! [fx]`: parameters are the domain (a tuple = several), the result is the constraint child
 fn bool Low.sig_of(Low* lw, Node* tf, AirTyp** ps, usz* np, AirTyp** rt)
 {
+    // The parser produces ty-fn in exactly two shapes:
+    //
+    //   <dom>   <result>                      arrow form:  a -> b,  (a, b) -> c
+    //   <t..>   <result>   [<effect-row>]     fn(..) -> r: fn(a, b) -> c
+    //
+    // In BOTH, the last non-effect child is the result and everything before it is
+    // the domain. The domain is one slot when it is a single type or a tuple, and
+    // one slot per child when it is the flattened `fn(a, b)` form.
+    //
+    // Reading "more than two children" as "the parameters are the leading
+    // children" treated the RESULT as a parameter whenever the domain was a single
+    // type: `extern fn f : i64 -> ()` got a parameter of type `()` instead of
+    // `i64`, and `(i64, i64) -> ()` got one parameter instead of two. The call
+    // site then saw the wrong arity and either dropped the argument or reported
+    // "unit given, i64 wanted".
     usz cc = tf.child_count;
     if (cc > 0 && tf.children[cc - 1] != null && tf.children[cc - 1].kind == Nk.N_TY_EFFECT_ROW) { cc--; }
     if (cc < 2) { lw.unsup(tf, "function type shape"); return false; }
-    Node* dom = tf.children[0];
     *np = 0;
-    if (cc > 2)   // `fn(a, b) -> r`: the parameters are the leading children
+    usz ndom = cc - 1;                       // children 0 .. ndom-1 are the domain
+    if (ndom == 1)
     {
-        for (usz i = 0; i + 1 < cc; i++) { if (*np >= MAXA) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; } AirTyp* e = lw.ty(tf.children[i]); if (e == null) { return false; } ps[*np] = e; *np = *np + 1; }
-    }
-    else if (dom.kind == Nk.N_TY_UNIT) { }
-    else if (dom.kind == Nk.N_TY_TUPLE)
-    {
-        for (usz i = 0; i < dom.child_count; i++)
+        Node* dom = tf.children[0];
+        if (dom == null) { return false; }
+        if (dom.kind == Nk.N_TY_UNIT) { }                       // `() -> r`: no parameters
+        else if (dom.kind == Nk.N_TY_TUPLE)
         {
-            if (*np >= MAXA && !(dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count)) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; }
-            if (dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count) { continue; }   // the trailing `...` of a variadic extern
-            AirTyp* e = lw.ty(dom.children[i]); if (e == null) { return false; }
+            for (usz i = 0; i < dom.child_count; i++)
+            {
+                if (dom.children[i] != null && dom.children[i].kind == Nk.N_TY_INFER && i + 1 == dom.child_count) { continue; }   // trailing `...` of a variadic extern
+                if (*np >= MAXA) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; }
+                AirTyp* e = lw.ty(dom.children[i]); if (e == null) { return false; }
+                ps[*np] = e; *np = *np + 1;
+            }
+        }
+        else
+        {
+            AirTyp* e = lw.ty(dom); if (e == null) { return false; }
+            ps[0] = e; *np = 1;
+        }
+    }
+    else
+    {
+        // the flattened `fn(a, b) -> r` form: one parameter per domain child
+        for (usz i = 0; i < ndom; i++)
+        {
+            if (*np >= MAXA) { lw.unsup(tf, "a function type with more than 64 parameters"); return false; }
+            AirTyp* e = lw.ty(tf.children[i]); if (e == null) { return false; }
             ps[*np] = e; *np = *np + 1;
         }
     }
-    else { AirTyp* e = lw.ty(dom); if (e == null) { return false; } ps[0] = e; *np = 1; }
     AirTyp* r = lw.ty(tf.children[cc - 1]);
     if (r == null) { return false; }
     *rt = r;
@@ -515,17 +557,20 @@ fn bool Low.sig_of(Low* lw, Node* tf, AirTyp** ps, usz* np, AirTyp** rt)
 // ── function registry ──────────────────────────────────────────────────────
 fn FnInfo* Low.fn_for(Low* lw, Node* d)
 {
+    // every function the lowerer will emit passes through here
+    if (lw.audit && d != null) { air_audit::mark(d); }
     Node*[MAXTP] tps;
     if (lw.typarams(d, &tps[0]) > 0) { lw.unsup(d, "generic function used without type arguments"); return null; }
     return lw.fn_inst(d, null, 0);
 }
 fn FnInfo* Low.fn_inst(Low* lw, Node* d, AirTyp** targs, usz nt)
 {
+    if (lw.audit && d != null) { air_audit::mark(d); }
     for (usz i = 0; i < lw.nfn; i++)
     {
         if (lw.fns[i].decl != d || lw.fns[i].is_lam || lw.fns[i].is_adapt || lw.fns[i].nts != nt) { continue; }
         bool same = true;
-        for (usz j = 0; j < nt; j++) { if (!air_ll::ty_eq(lw.fns[i].ts[j].t, targs[j])) { same = false; } }
+        for (usz j = 0; j < nt; j++) { if (!air_util::ty_eq(lw.fns[i].ts[j].t, targs[j])) { same = false; } }
         if (same) { return &lw.fns[i]; }
     }
     usz mark = lw.ntsub;
@@ -544,6 +589,10 @@ fn FnInfo* Low.callee_fn(Low* lw, Node* call, Node* cr)
 }
 fn FnInfo* Low.callee_fn_a(Low* lw, Node* call, Node* cr, Node** args, usz nargs)
 {
+    // The callee expression -- an ident, or a module-qualified path like
+    // `modsys.lib.add` -- is resolved by name here and is never dispatched
+    // through expr(), so its nodes are consumed at this point.
+    if (lw.audit && cr != null) { air_audit::mark_tree(cr); }
     Node*[MAXTP] tps; usz ntp = lw.typarams(cr, &tps[0]);
     if (ntp == 0) { return lw.fn_for(cr); }
     usz mark = lw.ntsub;
@@ -620,7 +669,32 @@ fn FnInfo* Low.fn_build(Low* lw, Node* d, AirTyp** targs, usz nt, Node** tps)
     }
     f.name = nm;
     lw.nfn++;
-    if (d.kind == Nk.N_DECL_FN && d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN)
+    // An extern declaration carries its signature as a function TYPE
+    // (`extern fn f : i64 -> ()`), exactly like a `fn` with an arrow signature.
+    // This used to test only N_DECL_FN, so every extern skipped this branch and
+    // fell into the "parameters are N_DECL_PARAM children" one below -- where an
+    // `extern fn` has none. Result: every extern was registered with zero
+    // parameters, its declaration emitted as `extern declare f() : unit`, and its
+    // call sites silently lost their arguments (or reported "unit given, i64
+    // wanted" when the return type differed).
+    // `fn K : u64 = 7u64` is a named CONSTANT, not a function: the parser gives it
+    // a ty-fn with a single child (the type) and a clause holding the value, so it
+    // is a zero-argument definition whose body is that value. Without this it fell
+    // into sig_of and was refused as "function type shape".
+    if ((d.kind == Nk.N_DECL_FN) && d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN && d.type_ann.child_count == 1)
+    {
+        AirTyp* ct = lw.ty(d.type_ann.children[0]);
+        if (ct == null) { lw.nfn--; return null; }
+        f.np = 0; f.ret = ct;
+        f.is_const = true;
+        // the last child is a `clause` wrapping the value; take the value itself
+        Node* cv = (d.child_count > 0) ? d.children[d.child_count - 1] : null;
+        if (cv != null && cv.kind == Nk.N_CLAUSE && cv.child_count > 0) { cv = cv.children[cv.child_count - 1]; }
+        f.const_value = cv;
+        f.fnty = lw.arrow(&f.pty[0], f.np, f.ret);
+        return f;
+    }
+    if ((d.kind == Nk.N_DECL_FN || d.kind == Nk.N_DECL_EXTERN_FN) && d.type_ann != null && d.type_ann.kind == Nk.N_TY_FN)
     {
         if (!lw.sig_of(d.type_ann, &f.pty[0], &f.np, &f.ret)) { lw.nfn--; return null; }
         if (d.type_ann.child_count > 0 && d.type_ann.children[0] != null && (d.type_ann.children[0].flags & pfront_core::NF_VARIADIC) != 0) { f.variadic = true; }
@@ -681,13 +755,20 @@ fn Ins* Low.push(Low* lw, InsK k)
     return r;
 }
 fn Vx Low.unit(Low* lw) { Vx v; v.p = lw.m.p_unit; v.t = lw.m.t_unit; return v; }
-fn Vx Low.vref(Low* lw, char* nm, AirTyp* t) { Vx v; v.p = air_ir::air_mk_var(lw.a, nm); v.t = t; return v; }
+fn Vx Low.vref(Low* lw, char* nm, AirTyp* t) { Vx v; v.p = air_ir::air_mk_var(lw.a, nm); v.t = t; if (v.p == null) { lw.errors++; return lw.unit(); } return v; }
 
 fn Vx Low.let_(Low* lw, AirPrd* p, AirTyp* t, char* stem)
 {
+    // `p.ty = t` used to run before any null check, so an arena that had just
+    // run out (every air_mk_* returns null once oom is set) segfaulted the
+    // compiler here instead of reporting the failure. A null value cannot be
+    // bound at all, so hand back unit and let the caller continue; the arena
+    // flag is re-checked at the end of emit_low_program, which refuses to write
+    // a .air and turns it into an error.
+    if (p == null) { lw.errors++; return lw.unit(); }
     p.ty = t;
     Ins* i = lw.push(I_LET);
-    if (i == null) { return lw.unit(); }
+    if (i == null) { lw.errors++; return lw.unit(); }
     i.name = lw.fresh(stem); i.a = p;
     return lw.vref(i.name, t);
 }
@@ -716,8 +797,8 @@ fn Vx Low.binop(Low* lw, AirBinop op, Vx a, Vx b)
 }
 fn Vx Low.coerce(Low* lw, Vx v, AirTyp* to)
 {
-    if (to == null || v.t == null || air_ll::ty_eq(v.t, to)) { return v; }
-    if (v.p != null && v.p.tag == APRD_INT && air_ll::ty_is_int(to)) { return lw.lit_int(v.p.ival, to); }
+    if (to == null || v.t == null || air_util::ty_eq(v.t, to)) { return v; }
+    if (v.p != null && v.p.tag == APRD_INT && air_util::ty_is_int(to)) { return lw.lit_int(v.p.ival, to); }
     if (v.p != null && v.p.tag == APRD_NULL && to.tag == ATYP_PTR) { AirPrd* np_ = air_ir::air_mk_prd_null(lw.a); np_.ty = to; Vx r; r.p = np_; r.t = to; return r; }
     if (v.t.tag == ATYP_PTR && lw.clo_of(to) != null) { return lw.raw_clo(v, to); }   // `code_ptr as fn(..) -> r`: a closure whose env IS the code pointer
     AirPrd* p = air_ir::air_new_AirPrd(lw.a); p.tag = APRD_COERCE; p.add_sub(v.p); p.ty = to;
@@ -779,6 +860,30 @@ fn void Low.t_jump(Low* lw, usz to, Vx* args, usz n)
     for (usz i = 0; i < n && i < 8; i++) { b.jargs[i] = names[i]; }
     lw.mark_pred(to); lw.cur = NOBLK;
 }
+// The user-written label on a loop node (`'rowscan: while ..`), or null. The
+// parser records it in name_id; see Parser.parse_stmt.
+fn char* Low.loop_label(Low* lw, Node* n)
+{
+    if (n == null || n.name_id == 0) { return null; }
+    return lw.it.text(n.name_id);
+}
+
+// Index of the loop a transfer targets. An unlabelled transfer takes the
+// innermost loop; a labelled one takes the nearest enclosing loop DECLARING that
+// name (innermost-first, so a shadowed label resolves to the closest one).
+// Returns LOOP_NONE when a label names no enclosing loop, which the caller
+// reports instead of jumping to an arbitrary loop.
+fn usz Low.loop_index_for(Low* lw, char* want)
+{
+    if (want == null) { return lw.nloops > 0 ? lw.nloops - 1 : LOOP_NONE; }
+    for (usz i = lw.nloops; i > 0; i--)
+    {
+        char* have = lw.loops[i - 1].user_name;
+        if (have != null && air_text::streq(have, want)) { return i - 1; }
+    }
+    return LOOP_NONE;
+}
+
 fn void Low.t_jump0(Low* lw, usz to) { Vx[1] none; lw.t_jump(to, &none[0], 0); }
 fn void Low.t_cond(Low* lw, Vx c, usz yes, usz no)
 {
@@ -821,7 +926,7 @@ fn AirTyp* Low.int_suffix_ty(Low* lw, Node* n)   // `5u8` -> u8; an unsuffixed l
     if (n.p.width == 0 || (n.p.aux == 99 && n.p.width == 64 && n.p.is_signed)) { return null; }
     char[16] sb; snprintf(&sb[0], 16, "%c%d", n.p.is_signed ? 'i' : 'u', (int)n.p.width);
     AirTyp* st = air_types::air_prim_ty(lw.m, &sb[0]);
-    return (st != null && air_ll::ty_is_int(st)) ? st : null;
+    return (st != null && air_util::ty_is_int(st)) ? st : null;
 }
 fn AirTyp* Low.hint(Low* lw, Node* n)
 {
@@ -1091,8 +1196,8 @@ fn GlInfo* Low.global_for(Low* lw, Node* d)
         Node* e = init;
         bool neg = false;
         if (e.kind == Nk.N_EXPR_UNARY && (Tk)e.p.op == Tk.TOKEN_MINUS && e.child_count > 0) { neg = true; e = e.children[0]; }
-        if (e.kind == Nk.N_EXPR_INT && air_ll::ty_is_int(t)) { ad.g_init = air_ir::air_mk_int(lw.a, neg ? -(long)e.p.ival : (long)e.p.ival); ad.g_init.ty = t; }
-        else if (e.kind == Nk.N_EXPR_FLOAT && air_ll::ty_is_float(t)) { ad.g_init = air_ir::air_mk_float(lw.a, neg ? -e.p.fval : e.p.fval); ad.g_init.ty = t; }
+        if (e.kind == Nk.N_EXPR_INT && air_util::ty_is_int(t)) { ad.g_init = air_ir::air_mk_int(lw.a, neg ? -(long)e.p.ival : (long)e.p.ival); ad.g_init.ty = t; }
+        else if (e.kind == Nk.N_EXPR_FLOAT && air_util::ty_is_float(t)) { ad.g_init = air_ir::air_mk_float(lw.a, neg ? -e.p.fval : e.p.fval); ad.g_init.ty = t; }
         else if (e.kind == Nk.N_EXPR_BOOL && t.tag == ATYP_BOOL) { ad.g_init = air_ir::air_mk_prd_bool(lw.a, e.p.ival != 0); ad.g_init.ty = t; }
         else if (t.tag == ATYP_PTR && (e.kind == Nk.N_EXPR_NULL || (e.kind == Nk.N_EXPR_INT && e.p.ival == 0)
                  || (e.kind == Nk.N_EXPR_CAST && e.child_count > 0 && e.children[0] != null && e.children[0].kind == Nk.N_EXPR_INT && e.children[0].p.ival == 0)))
@@ -1125,7 +1230,7 @@ fn AirTyp* Low.fat_ty(Low* lw, AirTyp* elem, bool is_str)
 {
     for (usz i = 0; i < lw.nfat; i++)
     {
-        if (lw.fats[i].is_str == is_str && (is_str || air_ll::ty_eq(lw.fats[i].elem, elem))) { return lw.fats[i].ty; }
+        if (lw.fats[i].is_str == is_str && (is_str || air_util::ty_eq(lw.fats[i].elem, elem))) { return lw.fats[i].ty; }
     }
     if (lw.nfat >= 48) { lw.unsup(null, "more than 48 slice types"); return null; }
     if (is_str) { elem = lw.m.t_u8; }
@@ -1395,12 +1500,13 @@ fn usz Low.words(Low* lw, AirTyp* t)
             return w;
         }
         default:
-            if (air_ll::ty_is_int(t) && air_ll::ty_bits(t) > 64) { return (usz)((air_ll::ty_bits(t) + 63) / 64); }
+            if (air_util::ty_is_int(t) && air_util::ty_bits(t) > 64) { return (usz)((air_util::ty_bits(t) + 63) / 64); }
             return 1;
     }
 }
 fn Enm* Low.enum_for(Low* lw, Node* decl)
 {
+    if (lw.audit && decl != null) { air_audit::mark_tree(decl); }
     for (usz i = 0; i < lw.nen; i++) { if (lw.ens[i].decl == decl) { return &lw.ens[i]; } }
     if (lw.nen >= 64) { lw.unsup(decl, "more than 64 enum types"); return null; }
     Enm* e = &lw.ens[lw.nen]; lw.nen++;
@@ -1497,7 +1603,7 @@ fn void Low.flatten_union(Low* lw, Node* t, AirTyp** out, usz* n, bool inter)
         && ((!inter && t.resolved.type_ann.kind == Nk.N_TY_UNION) || (inter && t.resolved.type_ann.kind == Nk.N_TY_INTERSECT)))
     { lw.flatten_union(t.resolved.type_ann, out, n, inter); return; }
     AirTyp* m = lw.ty(t); if (m == null) { return; }
-    for (usz i = 0; i < *n; i++) { if (air_ll::ty_eq(out[i], m)) { return; } }
+    for (usz i = 0; i < *n; i++) { if (air_util::ty_eq(out[i], m)) { return; } }
     if (*n < 8) { out[*n] = m; *n = *n + 1; }
 }
 fn AirTyp* Low.union_enum_ty(Low* lw, AirTyp** ms, usz nm)
@@ -1506,7 +1612,7 @@ fn AirTyp* Low.union_enum_ty(Low* lw, AirTyp** ms, usz nm)
     {
         Enm* e = &lw.ens[i]; if (e.nm != nm) { continue; }
         bool same = true;
-        for (usz j = 0; j < nm; j++) { if (!air_ll::ty_eq(e.um[j], ms[j])) { same = false; } }
+        for (usz j = 0; j < nm; j++) { if (!air_util::ty_eq(e.um[j], ms[j])) { same = false; } }
         if (same) { return e.ty; }
     }
     if (lw.nen >= 64) { lw.unsup(null, "more than 64 enum/union types"); return null; }
@@ -1611,19 +1717,19 @@ fn Vx Low.lit(Low* lw, Node* n, AirTyp* want)
             if (want != null && want.tag == ATYP_PTR && n.p.ival == 0)   // a bare `0` where a pointer is wanted is null
             { AirPrd* zp = air_ir::air_mk_prd_null(lw.a); zp.ty = want; Vx zr; zr.p = zp; zr.t = want; return zr; }
             AirTyp* t = want;
-            if (t == null || !(air_ll::ty_is_int(t) || air_ll::ty_is_float(t)))
+            if (t == null || !(air_util::ty_is_int(t) || air_util::ty_is_float(t)))
             {
                 t = lw.m.t_i64;
                 AirTyp* a = n.type_ann != null ? lw.ty_quiet(n.type_ann) : null;
-                if (a != null && air_ll::ty_is_int(a)) { t = a; }
+                if (a != null && air_util::ty_is_int(a)) { t = a; }
             }
             if (n.p.width != 0 && !(n.p.aux == 99 && n.p.width == 64 && n.p.is_signed))   // an explicit suffix (`5u8`, `0xFFu32`) is the literal's type
             {
                 char[16] sb; snprintf(&sb[0], 16, "%c%d", n.p.is_signed ? 'i' : 'u', (int)n.p.width);
                 AirTyp* st = air_types::air_prim_ty(lw.m, &sb[0]);
-                if (st != null && air_ll::ty_is_int(st)) { t = st; }
+                if (st != null && air_util::ty_is_int(st)) { t = st; }
             }
-            if (air_ll::ty_is_float(t))
+            if (air_util::ty_is_float(t))
             {
                 AirPrd* f = air_ir::air_mk_float(lw.a, (double)(long)n.p.ival); f.ty = t; Vx r; r.p = f; r.t = t; return r;
             }
@@ -1631,11 +1737,11 @@ fn Vx Low.lit(Low* lw, Node* n, AirTyp* want)
         }
         case Nk.N_EXPR_FLOAT:
         {
-            AirTyp* t = (want != null && air_ll::ty_is_float(want)) ? want : lw.m.t_f64;
+            AirTyp* t = (want != null && air_util::ty_is_float(want)) ? want : lw.m.t_f64;
             AirPrd* f = air_ir::air_mk_float(lw.a, n.p.fval); f.ty = t; Vx r; r.p = f; r.t = t; return r;
         }
         case Nk.N_EXPR_BOOL: return lw.lit_bool(n.p.ival != 0);
-        case Nk.N_EXPR_CHAR: { AirTyp* t = (want != null && air_ll::ty_is_int(want)) ? want : lw.m.t_char; return lw.lit_int((long)n.p.ival, t); }
+        case Nk.N_EXPR_CHAR: { AirTyp* t = (want != null && air_util::ty_is_int(want)) ? want : lw.m.t_char; return lw.lit_int((long)n.p.ival, t); }
         case Nk.N_EXPR_UNIT: return lw.unit();
         case Nk.N_EXPR_NULL:
         {
@@ -1654,6 +1760,17 @@ fn Vx Low.lit(Low* lw, Node* n, AirTyp* want)
         }
         default: break;
     }
+    /*
+     Not a literal. Every current caller pre-guards on kind -- 2680 lists the
+     eight literal kinds and matches them into the case above, 2076 and 3030
+     test the kind before calling -- and 2076 also rejects a non-literal tag on
+     the way out, so this is not reachable today.
+
+     Returning `lw.unit()` here would make a non-literal silently lower to unit,
+     which is the failure this file has spent the day removing elsewhere: a
+     well-formed .air for a construct the lowerer did not model. Refuse.
+    */
+    lw.unsup(n, "a non-literal expression reached the literal lowerer");
     return lw.unit();
 }
 // translate a type but do not report an unsupported one (hints only)
@@ -1687,6 +1804,19 @@ fn Node* Low.lit_global_init(Low* lw, Node* r)
 fn Vx Low.read_var(Low* lw, Node* id, AirTyp* want)
 {
     Node* r = id.resolved;
+    // A bare variant name is a nullary constructor: `None` is a value of its
+    // enum, not a variable. The resolver labels it `variant 'None'`, but only the
+    // call form (`Some(1)`) was routed to construction, so `None` fell through to
+    // "name does not resolve to a local, function or global".
+    if (r != null && r.kind == Nk.N_DECL_VARIANT && r.parent != null)
+    {
+        Enm* ve = lw.enum_for(r.parent);
+        if (ve != null)
+        {
+            long vi = lw.variant_index(ve, null, r);
+            if (vi >= 0) { return lw.variant_value(ve, (usz)vi, null, 0, id); }
+        }
+    }
     VarB* v = lw.find_var(r);
     if (v == null && r == null) { v = lw.find_var_named(id); }   // names inside type positions (`[u8; n + 1]`) are not resolved by the front end
     if (v != null)
@@ -1699,6 +1829,25 @@ fn Vx Low.read_var(Low* lw, Node* id, AirTyp* want)
         FnInfo* f = lw.fn_for(r);
         if (f == null) { return lw.unit(); }
         lw.queue(f);
+        // A named constant is a zero-argument DEFINITION in the emitted AIR
+        // (`pub def K() : u64 = ret(7 : u64)`), not a variable, so a use of it has
+        // to become a call. Referring to it by bare name leaves the name unbound
+        // for the backend ("jump argument is unbound: K").
+        if (f.is_const && f.lowering_const)
+        {
+            // The const's value refers to the const itself (`fn K : u64 = K` is a
+            // cycle, and a duplicate name in the AST resolves here). Emitting a
+            // call would make K call itself; report the cycle instead.
+            lw.err(id, "a constant's value refers to the constant itself", f.name);
+            return lw.unit();
+        }
+        if (f.is_const)
+        {
+            Ins* ci = lw.push(I_CALL); if (ci == null) { return lw.unit(); }
+            ci.name = lw.fresh("_k"); ci.a = air_ir::air_mk_var(lw.a, f.name); ci.nargs = 0;
+            Vx cr2; cr2.p = air_ir::air_mk_var(lw.a, ci.name); cr2.t = f.ret;
+            return cr2;
+        }
         Vx x; x.p = air_ir::air_mk_var(lw.a, f.name); x.t = f.fnty; return x;
     }
     if (r != null && r.kind == Nk.N_DECL_CONST)
@@ -1843,6 +1992,10 @@ fn void Low.queue(Low* lw, FnInfo* f) { if (!f.seen) { f.seen = true; f.queued =
 // places: an address plus the type stored there
 fn bool Low.place(Low* lw, Node* n, Pl* out)
 {
+    // A place is resolved structurally (ident / field-access / index / deref) by
+    // this function, not dispatched through expr(), so its nodes are consumed
+    // here even though nothing calls expr() on them.
+    if (lw.audit && n != null) { air_audit::mark(n); }
     switch (n.kind)
     {
         case Nk.N_EXPR_VOLATILE: return n.child_count > 0 && lw.place(n.children[0], out);
@@ -1898,7 +2051,7 @@ fn bool Low.place(Low* lw, Node* n, Pl* out)
             Vx b = lw.expr(n.children[0], null);
             AirTyp* e = lw.pointee(b.t);
             if (e == null) { lw.err(n, "indexing a value that is neither a pointer, an array nor a slice", null); return false; }
-            Vx[1] ix; ix[0] = i.t != null && air_ll::ty_is_int(i.t) ? i : lw.coerce(i, lw.m.t_i64);
+            Vx[1] ix; ix[0] = i.t != null && air_util::ty_is_int(i.t) ? i : lw.coerce(i, lw.m.t_i64);
             Vx g = lw.gep(b.p, e, &ix[0], 1, e);
             out.ptr = g.p; out.t = e; return true;
         }
@@ -1963,7 +2116,7 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
             if (e.kind == Nk.N_EXPR_INT && t.tag == ATYP_PTR) { AirPrd* z = air_ir::air_mk_prd_null(lw.a); z.ty = t; return z; }
             if (e.kind == Nk.N_EXPR_STRING && !(t.tag == ATYP_PTR)) { return null; }
             Vx v = lw.lit(e, t);
-            if (v.p == null || v.t == null || !air_ll::ty_eq(v.t, t)) { return null; }
+            if (v.p == null || v.t == null || !air_util::ty_eq(v.t, t)) { return null; }
             if (v.p.tag != APRD_INT && v.p.tag != APRD_FLOAT && v.p.tag != APRD_BOOL && v.p.tag != APRD_NULL && v.p.tag != APRD_STRING && v.p.tag != APRD_BYTES && v.p.tag != APRD_CHAR) { return null; }
             return v.p;
         }
@@ -1971,14 +2124,14 @@ fn AirPrd* Low.const_init(Low* lw, Node* e, AirTyp* t)
         {
             if ((Tk)e.p.op != Tk.TOKEN_MINUS || e.child_count == 0 || e.children[0] == null) { return null; }
             Node* c0 = e.children[0];
-            if (c0.kind == Nk.N_EXPR_INT && air_ll::ty_is_int(t)) { AirPrd* r = air_ir::air_mk_int(lw.a, -(long)c0.p.ival); r.ty = t; return r; }
-            if (c0.kind == Nk.N_EXPR_FLOAT && air_ll::ty_is_float(t)) { AirPrd* r = air_ir::air_mk_float(lw.a, -c0.p.fval); r.ty = t; return r; }
+            if (c0.kind == Nk.N_EXPR_INT && air_util::ty_is_int(t)) { AirPrd* r = air_ir::air_mk_int(lw.a, -(long)c0.p.ival); r.ty = t; return r; }
+            if (c0.kind == Nk.N_EXPR_FLOAT && air_util::ty_is_float(t)) { AirPrd* r = air_ir::air_mk_float(lw.a, -c0.p.fval); r.ty = t; return r; }
             return null;
         }
         case Nk.N_EXPR_CAST:
         {
             if (e.child_count == 0 || e.children[0] == null) { return null; }
-            AirTyp* to = lw.ty(e.type_ann); if (to == null || !air_ll::ty_eq(to, t)) { return null; }
+            AirTyp* to = lw.ty(e.type_ann); if (to == null || !air_util::ty_eq(to, t)) { return null; }
             Node* c0 = e.children[0];
             if (t.tag == ATYP_PTR && c0.kind == Nk.N_EXPR_INT && c0.p.ival == 0) { AirPrd* z = air_ir::air_mk_prd_null(lw.a); z.ty = t; return z; }
             if (t.tag == ATYP_PTR && c0.kind == Nk.N_EXPR_IDENT && c0.resolved != null && c0.resolved.kind == Nk.N_DECL_FN)   // `f as ptr`: the code address, a link-time constant
@@ -2226,9 +2379,9 @@ fn FnInfo* Low.dyn_thunk(Low* lw, Node* iface, Node* m, AirTyp* t, Node* at)
     if (!lw.dyn_sig(m, &ps[0], &np, &rt)) { return null; }
     FnInfo* tg = lw.fn_for(im); if (tg == null) { return null; }
     AirTyp* pt = lw.ptr(t);
-    bool by_ptr = tg.np >= 1 && air_ll::ty_eq(tg.pty[0], pt);
-    if (tg.np != np + 1 || !(by_ptr || air_ll::ty_eq(tg.pty[0], t)) || !air_ll::ty_eq(tg.ret, rt)) { lw.err(at, "the impl's signature differs from the interface's (needed to build the vtable)", lw.text(m)); return null; }
-    for (usz i = 0; i < np; i++) { if (!air_ll::ty_eq(tg.pty[i + 1], ps[i])) { lw.err(at, "the impl's signature differs from the interface's (needed to build the vtable)", lw.text(m)); return null; } }
+    bool by_ptr = tg.np >= 1 && air_util::ty_eq(tg.pty[0], pt);
+    if (tg.np != np + 1 || !(by_ptr || air_util::ty_eq(tg.pty[0], t)) || !air_util::ty_eq(tg.ret, rt)) { lw.err(at, "the impl's signature differs from the interface's (needed to build the vtable)", lw.text(m)); return null; }
+    for (usz i = 0; i < np; i++) { if (!air_util::ty_eq(tg.pty[i + 1], ps[i])) { lw.err(at, "the impl's signature differs from the interface's (needed to build the vtable)", lw.text(m)); return null; } }
     char[240] b; usz n = (usz)snprintf(&b[0], 240, "dynthunk.%s.%s.", lw.text(iface), lw.text(m)); mang(t, &b[0], n, 240);
     for (usz i = 0; i < lw.nfn; i++) { if (lw.fns[i].is_dyn && seq(lw.fns[i].name, &b[0])) { return &lw.fns[i]; } }
     if (lw.nfn >= MAXFN) { lw.unsup(null, "more than 4096 functions"); return null; }
@@ -2256,7 +2409,7 @@ fn void Low.lower_dynthunk(Low* lw, FnInfo* f)
     }
     AirTyp* pt = lw.ptr(f.dself);
     Vx sp = lw.coerce(pv[0], pt);
-    Vx recv = air_ll::ty_eq(f.adapt.pty[0], f.dself) ? lw.load(sp.p, f.dself) : sp;
+    Vx recv = air_util::ty_eq(f.adapt.pty[0], f.dself) ? lw.load(sp.p, f.dself) : sp;
     Ins* ins = lw.push(I_CALL);
     ins.name = lw.fresh("_r"); ins.a = air_ir::air_mk_var(lw.a, f.adapt.name); ins.nargs = f.np;
     ins.args[0] = recv.p;
@@ -2296,8 +2449,8 @@ fn char* Low.dyn_vtable(Low* lw, DynI* di, AirTyp* t, Node* at)
 // a pointer to a concrete T becomes the trait object {data, vtable of T}
 fn Vx Low.to_dyn(Low* lw, Vx a, DynI* di, Node* at)
 {
-    if (a.t == null || air_ll::ty_eq(a.t, di.ty)) { return a; }
-    if (a.t.tag != ATYP_PTR || a.t.args[0] == null || (air_ll::ty_is_int(a.t.args[0]) && air_ll::ty_bits(a.t.args[0]) == 8))
+    if (a.t == null || air_util::ty_eq(a.t, di.ty)) { return a; }
+    if (a.t.tag != ATYP_PTR || a.t.args[0] == null || (air_util::ty_is_int(a.t.args[0]) && air_util::ty_bits(a.t.args[0]) == 8))
     { lw.err(at, "a dyn value is made from a pointer to a concrete type (write &x)", lw.text(di.iface)); return lw.unit(); }
     AirTyp* t = a.t.args[0];
     char* vt = lw.dyn_vtable(di, t, at); if (vt == null) { return lw.unit(); }
@@ -2386,7 +2539,7 @@ fn Node* Low.impl_method(Low* lw, AirTyp* self_t, char* mname)
             int se = lw.errors; int sfe = lw.fn_errors;
             AirTyp* it = lw.ty(tg);
             lw.errors = se; lw.fn_errors = sfe;
-            if (it == null || !air_ll::ty_eq(it, self_t)) { continue; }
+            if (it == null || !air_util::ty_eq(it, self_t)) { continue; }
             for (usz j = 0; j < im.child_count; j++)
             {
                 Node* m = im.children[j];
@@ -2420,8 +2573,25 @@ fn Vx Low.call(Low* lw, Node* n, AirTyp* want)
 {
     if (n.child_count == 0) { return lw.unit(); }
     Node* cal = n.children[0];
+    // the callee is resolved by NAME (callee_fn_a), never dispatched through expr(),
+    // so mark it here or it reads as an unlowered node on every call.
+    if (lw.audit && cal != null) { air_audit::mark_tree(cal); }
     if (lw.arm.on && lw.arm.kdecl != null && lw.is_resume(n, lw.arm.kdecl)) { return lw.resume_do(n.child_count > 1 ? n.children[1] : null, n); }
     Node* cr = cal.resolved;
+    // An enum variant used as a callee is a CONSTRUCTOR, not a function:
+    // `Some(1)` / `Cons(x, t)` build a value. variant_value() has always been
+    // here (matching uses it), but nothing routed construction to it, so the
+    // callee fell through to "not a function or a function value" and the whole
+    // expression was refused -- enum construction was unimplemented for any
+    // program, while enum *matching* worked.
+    if (cr != null && cr.kind == Nk.N_DECL_VARIANT && cr.parent != null)
+    {
+        Enm* ve = lw.enum_for(cr.parent);
+        if (ve == null) { lw.err(n, "variant whose enum type could not be built", lw.text(cr)); return lw.unit(); }
+        long vi = lw.variant_index(ve, null, cr);
+        if (vi < 0) { lw.err(n, "variant not found in its enum", lw.text(cr)); return lw.unit(); }
+        return lw.variant_value(ve, (usz)vi, &n.children[1], n.child_count - 1, n);
+    }
     if (cr == null && cal.kind == Nk.N_EXPR_IDENT) { cr = lw.fn_by_name(lw.text(cal)); }
     if (cr != null && cr.kind == Nk.N_DECL_FN && lw.is_iface_fn(cr))
     {
@@ -2487,9 +2657,9 @@ fn Vx Low.call_to_a(Low* lw, Node* n, Node* cr, Node** args, usz nargs, AirTyp* 
 // an argument must already have the parameter's type (literals adopt it); anything else is a type error
 fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
 {
-    if (a.t == null || air_ll::ty_eq(a.t, want)) { return a; }
-    if (a.p != null && a.p.tag == APRD_INT && air_ll::ty_is_int(want)) { return lw.lit_int(a.p.ival, want); }
-    if (a.p != null && a.p.tag == APRD_INT && want.tag == ATYP_PTR && air_ll::ty_is_int(a.t))   // the literal `0` as a pointer is null (a constant-folded `0 as *T`)
+    if (a.t == null || air_util::ty_eq(a.t, want)) { return a; }
+    if (a.p != null && a.p.tag == APRD_INT && air_util::ty_is_int(want)) { return lw.lit_int(a.p.ival, want); }
+    if (a.p != null && a.p.tag == APRD_INT && want.tag == ATYP_PTR && air_util::ty_is_int(a.t))   // the literal `0` as a pointer is null (a constant-folded `0 as *T`)
     {
         if (a.p.ival == 0) { AirPrd* np1 = air_ir::air_mk_prd_null(lw.a); np1.ty = want; Vx nr1; nr1.p = np1; nr1.t = want; return nr1; }
         return lw.coerce(lw.lit_int(a.p.ival, lw.m.t_usz), want);
@@ -2500,27 +2670,44 @@ fn Vx Low.coerce_arg(Low* lw, Node* at, Vx a, AirTyp* want)
         for (usz i = 0; i < ue.nm; i++)
         {
             Vx m = a;
-            if (air_ll::ty_eq(ue.um[i], a.t) || (a.p != null && a.p.tag == APRD_INT && air_ll::ty_is_int(ue.um[i]) && air_ll::ty_is_int(a.t) == false))
+            if (air_util::ty_eq(ue.um[i], a.t) || (a.p != null && a.p.tag == APRD_INT && air_util::ty_is_int(ue.um[i]) && air_util::ty_is_int(a.t) == false))
             { Vx[1] av1; av1[0] = m; return lw.variant_pack(ue, i, &av1[0], 1); }
         }
     }
     if (a.t.tag == ATYP_ARROW && lw.clo_of(want) != null) { return lw.to_clo(a, want, at); }
     { DynI* dw = lw.dyn_of(want); if (dw != null) { return lw.to_dyn(a, dw, at); } }
-    if (a.t.tag == ATYP_ARRAY && lw.fat_elem(want) != null && !lw.is_str_t(want) && air_ll::ty_eq(a.t.args[0], lw.fat_elem(want))) {
+    if (a.t.tag == ATYP_ARRAY && lw.fat_elem(want) != null && !lw.is_str_t(want) && air_util::ty_eq(a.t.args[0], lw.fat_elem(want))) {
         Pl pl;   // an array that has an address decays to a slice that ALIASES it
         if (at != null && (at.kind == Nk.N_EXPR_IDENT || at.kind == Nk.N_EXPR_FIELD || at.kind == Nk.N_EXPR_INDEX || at.kind == Nk.N_EXPR_DEREF)
-            && lw.place(at, &pl) && air_ll::ty_eq(pl.t, a.t)) { return lw.slice_at(pl.ptr, pl.t, want); }
+            && lw.place(at, &pl) && air_util::ty_eq(pl.t, a.t)) { return lw.slice_at(pl.ptr, pl.t, want); }
         return lw.array_to_slice(a, want);
     }
     if (a.t.tag == ATYP_PTR && want.tag == ATYP_PTR)   // `ptr` is the untyped pointer: any pointer flows to it and back
     {
         AirTyp* ae = a.t.args[0]; AirTyp* we = want.args[0];
-        if ((ae != null && air_ll::ty_is_int(ae) && air_ll::ty_bits(ae) == 8 && !air_ll::ty_is_signed(ae)) || (we != null && air_ll::ty_is_int(we) && air_ll::ty_bits(we) == 8 && !air_ll::ty_is_signed(we))) { return lw.coerce(a, want); }
+        if ((ae != null && air_util::ty_is_int(ae) && air_util::ty_bits(ae) == 8 && !air_util::ty_is_signed(ae)) || (we != null && air_util::ty_is_int(we) && air_util::ty_bits(we) == 8 && !air_util::ty_is_signed(we))) { return lw.coerce(a, want); }
     }
-    // lossless integer widening is implicit (a `u8` returned from an `i64` function); narrowing needs `as`
-    if (air_ll::ty_is_int(a.t) && air_ll::ty_is_int(want) && air_ll::ty_bits(a.t) < air_ll::ty_bits(want)
-        && (air_ll::ty_is_signed(a.t) == air_ll::ty_is_signed(want) || !air_ll::ty_is_signed(a.t)))
-    { return lw.cast(a, want); }
+    // Integer conversion at a call boundary. Widening is always lossless and is
+    // implicit; narrowing needs `as`. The signedness condition here used to
+    // require matching signs even for a SAME-WIDTH conversion, so `i64` -> `u64`
+    // (the ordinary case of passing a size to a `u64` parameter, e.g.
+    // `os.linux.malloc(n as u64)`) was rejected as "u64 given, i64 wanted".
+    // A same-width integer reinterpretation is exactly what `as` would produce,
+    // so it is safe to apply here; widening into a narrower-magnitude unsigned
+    // type is the only case that could lose a value, and that still requires `as`.
+    // `bool` IS `i1` (docs/specs/AIR.md:201), so it is a 1-bit integer here even
+    // though the surface language keeps `ty_is_int` false for it. WIDENING from
+    // 1 bit is lossless in both directions, which is why the spec says a backend
+    // "may be stricter but must not rely on a type being present or exact":
+    // refusing `bool -> i64` rejected programs the front end had already
+    // accepted (b09_cmp, b17_call_cond, b18_chain_eq).
+    if ((air_util::ty_is_int(a.t) || air_util::ty_is_bool(a.t)) && (air_util::ty_is_int(want) || air_util::ty_is_bool(want)))
+    {
+        usz ab = air_util::ty_is_bool(a.t) ? 1 : (usz)air_util::ty_bits(a.t);
+        usz wb = air_util::ty_is_bool(want) ? 1 : (usz)air_util::ty_bits(want);
+        if (ab < wb) { return lw.cast(a, want); }          // widening: lossless either way
+        if (ab == wb) { return lw.cast(a, want); }         // same width: reinterpret, as `as` would
+    }
     if (lw.lit_note(at, want)) { return a; }
     { char[200] lb; usz ln = mang(a.t, &lb[0], 0, 90); lb[ln] = 0; char[100] rb; usz rn = mang(want, &rb[0], 0, 90); rb[rn] = 0; char[320] mb; snprintf(&mb[0], 320, "%s given, %s wanted", &lb[0], &rb[0]); lw.err(at, "argument type differs from the parameter type", lw.dup(&mb[0])); }
     return a;
@@ -2530,6 +2717,9 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
 {
     if (n == null) { return lw.unit(); }
     if (lw.fn_errors > 0) { return lw.unit(); }
+    // audit: this node reached the live lowerer. Reporting compares marks against
+    // a walk of the source tree, so anything the .air never mentions shows up.
+    if (lw.audit) { air_audit::mark(n); }
     lw.cur_node = n;
     bool dsc = lw.discard; lw.discard = false;
     switch (n.kind)
@@ -2581,12 +2771,18 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_STMT_BREAK:
         {
             if (lw.nloops == 0) { lw.err(n, "break outside a loop", null); return lw.unit(); }
-            lw.t_jump0(lw.loops[lw.nloops - 1].brk); return lw.unit();
+            char* tgt = n.name_id != 0 ? lw.it.text(n.name_id) : null;
+            usz idx = lw.loop_index_for(tgt);
+            if (idx == LOOP_NONE) { lw.err(n, "`break` names a label that no enclosing loop declares", null); return lw.unit(); }
+            lw.t_jump0(lw.loops[idx].brk); return lw.unit();
         }
         case Nk.N_STMT_CONTINUE:
         {
             if (lw.nloops == 0) { lw.err(n, "continue outside a loop", null); return lw.unit(); }
-            lw.t_jump0(lw.loops[lw.nloops - 1].cont); return lw.unit();
+            char* tgt = n.name_id != 0 ? lw.it.text(n.name_id) : null;
+            usz idx = lw.loop_index_for(tgt);
+            if (idx == LOOP_NONE) { lw.err(n, "`continue` names a label that no enclosing loop declares", null); return lw.unit(); }
+            lw.t_jump0(lw.loops[idx].cont); return lw.unit();
         }
         case Nk.N_STMT_EXPR: return n.child_count > 0 ? lw.expr(n.children[0], null) : lw.unit();
         case Nk.N_DECL_LET: lw.let_decl(n); return lw.unit();
@@ -2698,6 +2894,9 @@ fn Vx Low.expr(Low* lw, Node* n, AirTyp* want)
         case Nk.N_EXPR_ASM: return lw.asm_(n);
         case Nk.N_EXPR_METHOD:
         {
+            // `a.b.c(x)` / `module.fn(x)`: the path is resolved by name to a declaration
+            // or a module, never evaluated as an expression, so mark it here.
+            if (lw.audit && n.child_count > 0 && n.children[0] != null) { air_audit::mark_tree(n.children[0]); }
             if (n.child_count > 0 && n.children[0] != null && n.children[0].resolved != null && n.children[0].resolved.kind == Nk.N_DECL_EFFECT)
             {
                 Node* eff = n.children[0].resolved; Node* op = lw.effect_op(eff, lw.dname(n));
@@ -2839,6 +3038,10 @@ fn Vx Low.struct_lit(Low* lw, Node* n, AirTyp* want)
     for (usz i = 0; i < n.child_count; i++)
     {
         Node* fi = n.children[i];
+        // A field initialiser is consumed by name: `AstArena { nodes: x }` reads
+        // the identifier `nodes` to pick the field, never through expr(). Mark it
+        // or every struct literal reports its field names as unlowered.
+        if (lw.audit && fi != null) { air_audit::mark_tree(fi); }
         if (fi == null || fi.kind != Nk.N_EXPR_FIELD_INIT) { continue; }
         char* fnm = lw.text(fi); long k = -1;
         AirTyp* ft = fnm == null ? null : lw.field_ty(st, fnm, &k);
@@ -2942,10 +3145,10 @@ fn Vx Low.saturating(Low* lw, Node* n, bool add, AirTyp* want)
 {
     AirTyp* h = lw.hint(n.children[0]); if (h == null) { h = lw.hint(n.children[1]); } if (h == null) { h = want; }
     Vx l = lw.expr(n.children[0], h); Vx r = lw.expr(n.children[1], h != null ? h : l.t);
-    if (l.t == null || !air_ll::ty_is_int(l.t)) { lw.err(n, "saturating arithmetic needs integers", null); return lw.unit(); }
-    if (!air_ll::ty_eq(l.t, r.t)) { r = lw.coerce_arg(n.children[1], r, l.t); }
-    char[64] b; int bits = air_ll::ty_bits(l.t);
-    snprintf(&b[0], 64, "llvm.%c%s.sat.i%d", air_ll::ty_is_signed(l.t) ? 's' : 'u', add ? "add" : "sub", bits);
+    if (l.t == null || !air_util::ty_is_int(l.t)) { lw.err(n, "saturating arithmetic needs integers", null); return lw.unit(); }
+    if (!air_util::ty_eq(l.t, r.t)) { r = lw.coerce_arg(n.children[1], r, l.t); }
+    char[64] b; int bits = air_util::ty_bits(l.t);
+    snprintf(&b[0], 64, "llvm.%c%s.sat.i%d", air_util::ty_is_signed(l.t) ? 's' : 'u', add ? "add" : "sub", bits);
     AirTyp*[2] ps; ps[0] = l.t; ps[1] = l.t;
     char* fnm = lw.intrinsic(&b[0], &ps[0], 2, l.t);
     if (!lw.live()) { return lw.unit(); }
@@ -3009,7 +3212,7 @@ fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
                 return lw.binop(ABIN_DIV, bytes, esz);
             }
             Vx off = lw.expr(n.children[1], lw.m.t_i64);
-            if (off.t != null && !air_ll::ty_eq(off.t, lw.m.t_i64)) { off = lw.coerce(off, lw.m.t_i64); }
+            if (off.t != null && !air_util::ty_eq(off.t, lw.m.t_i64)) { off = lw.coerce(off, lw.m.t_i64); }
             if (!lw.live()) { return lw.unit(); }
             if (op == Tk.TOKEN_MINUS) { off = lw.binop(ABIN_SUB, lw.lit_int(0, lw.m.t_i64), off); }
             Vx[1] gi; gi[0] = off;
@@ -3023,12 +3226,16 @@ fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
     if (h == null && !cmp) { h = want; }
     Vx l = lw.expr(n.children[0], h);
     Vx r = lw.expr(n.children[1], shift ? l.t : (h != null ? h : l.t));
-    if (l.t != null && r.t != null && !air_ll::ty_eq(l.t, r.t))
+    if (l.t != null && r.t != null && !air_util::ty_eq(l.t, r.t))
     {
-        if (r.p != null && r.p.tag == APRD_INT && air_ll::ty_is_int(l.t)) { r = lw.lit_int(r.p.ival, l.t); }
-        else if (l.p != null && l.p.tag == APRD_INT && air_ll::ty_is_int(r.t)) { l = lw.lit_int(l.p.ival, r.t); }
+        if (r.p != null && r.p.tag == APRD_INT && air_util::ty_is_int(l.t)) { r = lw.lit_int(r.p.ival, l.t); }
+        else if (l.p != null && l.p.tag == APRD_INT && air_util::ty_is_int(r.t)) { l = lw.lit_int(l.p.ival, r.t); }
         else if (l.t.tag == ATYP_PTR && r.p != null && r.p.tag == APRD_NULL) { r = lw.coerce(r, l.t); }
-        else if (shift && air_ll::ty_is_int(l.t) && air_ll::ty_is_int(r.t)) { r = lw.coerce(r, l.t); }
+        else if (shift && air_util::ty_is_int(l.t) && air_util::ty_is_int(r.t)) { r = lw.coerce(r, l.t); }
+        // `(a == b) + 2`: bool is i1, so the integer operand's type wins. Without
+        // this, every comparison used arithmetically was "bool vs i64".
+        else if (air_util::ty_is_bool(l.t) && air_util::ty_is_int(r.t)) { l = lw.coerce(l, r.t); }
+        else if (air_util::ty_is_bool(r.t) && air_util::ty_is_int(l.t)) { r = lw.coerce(r, l.t); }
         else if (lw.lit_note(n.children[0], r.t) || lw.lit_note(n.children[1], l.t)) { return lw.unit(); }
         else { char[200] lb; usz ln = mang(l.t, &lb[0], 0, 90); lb[ln] = 0; char[100] rb; usz rn = mang(r.t, &rb[0], 0, 90); rb[rn] = 0; char[320] mb; snprintf(&mb[0], 320, "%s vs %s", &lb[0], &rb[0]); lw.err(n, "operands have different types", lw.dup(&mb[0])); return lw.unit(); }
     }
@@ -3041,7 +3248,7 @@ fn Vx Low.binary(Low* lw, Node* n, AirTyp* want)
 // dimension) accumulate into the result slot. The shapes are checked here, at lowering time.
 fn Vx Low.mm_zero(Low* lw, AirTyp* e)
 {
-    if (air_ll::ty_is_float(e)) { AirPrd* f = air_ir::air_mk_float(lw.a, 0.0); f.ty = e; Vx r; r.p = f; r.t = e; return r; }
+    if (air_util::ty_is_float(e)) { AirPrd* f = air_ir::air_mk_float(lw.a, 0.0); f.ty = e; Vx r; r.p = f; r.t = e; return r; }
     return lw.lit_int(0, e);
 }
 // open a counted loop `slot` in 0..lim: returns the header block through *hd and the exit block through *ex; the body runs in the current block
@@ -3076,7 +3283,7 @@ fn Vx Low.matmul(Low* lw, Node* n)
     AirTyp* ea = a2 ? at.args[0].args[0] : at.args[0];
     AirTyp* eb = b2 ? bt.args[0].args[0] : bt.args[0];
     if ((a2 && at.args[0].args[0].tag == ATYP_ARRAY) || (b2 && bt.args[0].args[0].tag == ATYP_ARRAY)) { lw.err(n, "`@` supports rank 1 and rank 2 operands", null); return lw.unit(); }
-    if (!air_ll::ty_eq(ea, eb) || !(air_ll::ty_is_int(ea) || air_ll::ty_is_float(ea))) { lw.err(n, "`@` needs numeric operands of one element type", null); return lw.unit(); }
+    if (!air_util::ty_eq(ea, eb) || !(air_util::ty_is_int(ea) || air_util::ty_is_float(ea))) { lw.err(n, "`@` needs numeric operands of one element type", null); return lw.unit(); }
     long dm = a2 ? at.ival : 1;
     long dk = a2 ? at.args[0].ival : at.ival;
     long dk2 = b2 ? bt.ival : bt.ival;
@@ -3256,7 +3463,7 @@ fn void Low.assign(Low* lw, Node* n)
         Vx cur = vol ? lw.load_v(p.ptr, p.t) : lw.load(p.ptr, p.t);
         bool shift = b == ABIN_SHL || b == ABIN_SHR;
         Vx r = lw.expr(n.children[1], p.t);
-        if (!shift && r.t != null && !air_ll::ty_eq(r.t, p.t) && !(r.p != null && r.p.tag == APRD_INT) && lw.lit_note(n.children[0], r.t)) { return; }
+        if (!shift && r.t != null && !air_util::ty_eq(r.t, p.t) && !(r.p != null && r.p.tag == APRD_INT) && lw.lit_note(n.children[0], r.t)) { return; }
         if (shift) { r = lw.coerce(r, p.t); }
         else { r = lw.coerce_arg(n.children[1], r, p.t); }
         if (!lw.live()) { return; }
@@ -3265,7 +3472,7 @@ fn void Low.assign(Low* lw, Node* n)
         return;
     }
     Vx v = lw.expr(n.children[1], p.t);
-    if (v.t != null && !air_ll::ty_eq(v.t, p.t) && !(v.p != null && v.p.tag == APRD_INT) && lw.lit_note(n.children[0], v.t)) { return; }
+    if (v.t != null && !air_util::ty_eq(v.t, p.t) && !(v.p != null && v.p.tag == APRD_INT) && lw.lit_note(n.children[0], v.t)) { return; }
     v = lw.coerce_arg(n.children[1], v, p.t);
     if (!lw.live()) { return; }
     if (vol) { lw.store_v(p.ptr, v); } else { lw.store(p.ptr, v); }
@@ -3280,7 +3487,17 @@ fn Vx Low.if_(Low* lw, Node* n, AirTyp* want)
     if (n.child_count < 2) { return lw.unit(); }
     Vx c = lw.expr(n.children[0], lw.m.t_bool);
     if (!lw.live()) { return lw.unit(); }
-    if (c.t == null || c.t.tag != ATYP_BOOL) { lw.err(n, "if condition is not a bool", null); return lw.unit(); }
+    // A condition is a truth value, and every scalar HAS one: the legacy backend
+    // tests an integer as `!= 0` (`b17_call_cond` calls `g(3)` where `g` returns
+    // `x < 6`, an i64 by its declared signature). Only aggregates have no truth
+    // value, so only they are refused.
+    if (c.t == null) { lw.err(n, "if condition has no type", null); return lw.unit(); }
+    if (c.t.tag != ATYP_BOOL)
+    {
+        if (air_util::ty_is_int(c.t)) { c = lw.binop(ABIN_NEQ, c, lw.lit_int(0, c.t)); }
+        else { lw.err(n, "if condition is not a bool", null); return lw.unit(); }
+        if (!lw.live()) { return lw.unit(); }
+    }
     bool has_else = n.child_count > 2;
     usz tb = lw.blk("then"); usz eb = lw.blk("else"); usz jb = lw.blk("join");
     lw.t_cond(c, tb, eb);
@@ -3303,11 +3520,11 @@ fn Vx Low.if_(Low* lw, Node* n, AirTyp* want)
     {
         if (t_live && e_live)
         {
-            if (tv.t != null && ev.t != null && !air_ll::ty_eq(tv.t, ev.t) && dsc) { tv = lw.unit(); ev = lw.unit(); }   // the value is discarded
-            else if (tv.t != null && ev.t != null && !air_ll::ty_eq(tv.t, ev.t))
+            if (tv.t != null && ev.t != null && !air_util::ty_eq(tv.t, ev.t) && dsc) { tv = lw.unit(); ev = lw.unit(); }   // the value is discarded
+            else if (tv.t != null && ev.t != null && !air_util::ty_eq(tv.t, ev.t))
             {
-                if (ev.p != null && ev.p.tag == APRD_INT && air_ll::ty_is_int(tv.t)) { ev = lw.lit_int(ev.p.ival, tv.t); }
-                else if (tv.p != null && tv.p.tag == APRD_INT && air_ll::ty_is_int(ev.t)) { tv = lw.lit_int(tv.p.ival, ev.t); }
+                if (ev.p != null && ev.p.tag == APRD_INT && air_util::ty_is_int(tv.t)) { ev = lw.lit_int(ev.p.ival, tv.t); }
+                else if (tv.p != null && tv.p.tag == APRD_INT && air_util::ty_is_int(ev.t)) { tv = lw.lit_int(tv.p.ival, ev.t); }
                 else if (tv.p != null && tv.p.tag == APRD_INT && ev.t.tag == ATYP_PTR) { tv = lw.coerce_arg(n.children[1], tv, ev.t); }
                 else if (ev.p != null && ev.p.tag == APRD_INT && tv.t.tag == ATYP_PTR) { ev = lw.coerce_arg(n.children[2], ev, tv.t); }
                 else if (lw.carries(tv.t) || lw.carries(ev.t)) { char[200] tb2; usz tn2 = mang(tv.t, &tb2[0], 0, 100); tb2[tn2] = 0; char[100] eb2; usz en2 = mang(ev.t, &eb2[0], 0, 100); eb2[en2] = 0; char[320] mb2; snprintf(&mb2[0], 320, "%s vs %s", &tb2[0], &eb2[0]); lw.err(n, "if branches have different types", lw.dup(&mb2[0])); return lw.unit(); }
@@ -3351,7 +3568,7 @@ fn Vx Low.while_(Low* lw, Node* n)
         lw.t_cond(c, body, exit);
     }
     lw.cur = body;
-    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.nloops++;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.loops[lw.nloops].user_name = lw.loop_label(n); lw.nloops++;
     lw.expr(n.children[1], null);
     lw.nloops--;
     if (lw.live()) { lw.t_jump0(head); }
@@ -3364,7 +3581,7 @@ fn Vx Low.loop_(Low* lw, Node* n)
     usz head = lw.blk("lp.head"); usz exit = lw.blk("lp.exit");
     lw.t_jump0(head);
     lw.cur = head;
-    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.nloops++;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = head; lw.loops[lw.nloops].user_name = lw.loop_label(n); lw.nloops++;
     if (n.child_count > 0) { lw.expr(n.children[n.child_count - 1], null); }
     lw.nloops--;
     if (lw.live()) { lw.t_jump0(head); }
@@ -3383,7 +3600,7 @@ fn Vx Low.atomic_(Low* lw, Node* n)
     if (n.child_count != want_ops) { lw.err(n, "wrong number of operands for an atomic operation", null); return lw.unit(); }
     Vx pv = lw.expr(n.children[0], null); if (!lw.live()) { return lw.unit(); }
     AirTyp* el = pv.t != null && pv.t.tag == ATYP_PTR ? pv.t.args[0] : null;
-    if (el == null || !air_ll::ty_is_int(el) || air_ll::ty_bits(el) > 64) { lw.err(n, "an atomic operation needs a pointer to an integer of at most 64 bits", null); return lw.unit(); }
+    if (el == null || !air_util::ty_is_int(el) || air_util::ty_bits(el) > 64) { lw.err(n, "an atomic operation needs a pointer to an integer of at most 64 bits", null); return lw.unit(); }
     if (op == 0 && (ord == 2 || ord == 3)) { lw.err(n, "an atomic load cannot be release or acq_rel", null); return lw.unit(); }
     if (op == 1 && (ord == 1 || ord == 3)) { lw.err(n, "an atomic store cannot be acquire or acq_rel", null); return lw.unit(); }
     // (operands are evaluated after the pointer; literals take the element type)
@@ -3406,7 +3623,7 @@ fn Vx Low.atomic_(Low* lw, Node* n)
 // output also stored to its place). `+r` is an in/out operand: an output tied to an input that is the place's current value.
 fn Vx Low.asm_(Low* lw, Node* n)
 {
-    air_ll::Sb tmpl; tmpl.init(); air_ll::Sb cons; cons.init();
+    air_util::Sb tmpl; tmpl.init(); air_util::Sb cons; cons.init();
     Pl[8] outps; AirTyp*[8] ots; bool[8] plus; usz no = 0; bool inputs_seen = false;
     Vx[16] iv; usz ni = 0; usz nt = 0;
     char[320] clob; clob[0] = 0; usz cl = 0;
@@ -3509,7 +3726,7 @@ fn Vx Low.slicing(Low* lw, Node* n)
         el = bt.args[0]; rt = lw.fat_ty(el, false); len = lw.lit_int(bt.ival, i64t);
         if (open_hi) { hi = len; }
         Pl bp;
-        if (!lw.place(n.children[0], &bp) || !air_ll::ty_eq(bp.t, bt))
+        if (!lw.place(n.children[0], &bp) || !air_util::ty_eq(bp.t, bt))
         {
             Vx av = lw.expr(n.children[0], bt); if (!lw.live()) { return lw.unit(); }
             Vx sl = lw.alloca_(bt); lw.store(sl.p, av); bp.ptr = sl.p; bp.t = bt;
@@ -3557,7 +3774,7 @@ fn Vx Low.for_each(Low* lw, Node* n, Node* pat, Node* it, Node* body)
     {
         el = bt.args[0]; len = lw.lit_int(bt.ival, lw.m.t_i64);
         Pl bp;
-        if (!have_pre && lw.place(it, &bp) && air_ll::ty_eq(bp.t, bt))
+        if (!have_pre && lw.place(it, &bp) && air_util::ty_eq(bp.t, bt))
         {
             Vx[2] ix; ix[0] = lw.lit_int(0, lw.m.t_i64); ix[1] = lw.lit_int(0, lw.m.t_i64);
             base = lw.gep(bp.ptr, bt, &ix[0], 2, el).p;
@@ -3603,7 +3820,7 @@ fn Vx Low.for_each(Low* lw, Node* n, Node* pat, Node* it, Node* body)
             if (ins != null) { ins.name = nm; ins.a = ev.p; ev.p.ty = el; lw.bind_var(pat, air_ir::air_mk_var(lw.a, nm), el, false); }
         }
     }
-    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.nloops++;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.loops[lw.nloops].user_name = lw.loop_label(n); lw.nloops++;
     lw.expr(body, null);
     lw.nloops--;
     if (lw.live()) { lw.t_jump0(step); }
@@ -3629,8 +3846,8 @@ fn Vx Low.for_(Low* lw, Node* n)
     if (h == null) { h = lw.m.t_i64; }
     Vx lo = lw.expr(it.children[0], h); Vx hi = lw.expr(it.children[1], h);
     if (!lw.live()) { return lw.unit(); }
-    if (lo.t != null && !air_ll::ty_is_int(lo.t)) { lw.err(n, "for range bounds are not integers", null); return lw.unit(); }
-    if (hi.t != null && !air_ll::ty_eq(lo.t, hi.t)) { hi = lw.coerce(hi, lo.t); }
+    if (lo.t != null && !air_util::ty_is_int(lo.t)) { lw.err(n, "for range bounds are not integers", null); return lw.unit(); }
+    if (hi.t != null && !air_util::ty_eq(lo.t, hi.t)) { hi = lw.coerce(hi, lo.t); }
     AirTyp* t = lo.t;
     Vx slot = lw.alloca_(t);
     lw.store(slot.p, lo);
@@ -3651,7 +3868,7 @@ fn Vx Low.for_(Low* lw, Node* n)
         Ins* ins = lw.push(I_LET);
         if (ins != null) { ins.name = nm; ins.a = i.p; i.p.ty = t; lw.bind_var(pat, air_ir::air_mk_var(lw.a, nm), t, false); }
     }
-    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.nloops++;
+    lw.loops[lw.nloops].brk = exit; lw.loops[lw.nloops].cont = step; lw.loops[lw.nloops].user_name = lw.loop_label(n); lw.nloops++;
     lw.expr(body, null);
     lw.nloops--;
     if (lw.live()) { lw.t_jump0(step); }
@@ -3671,6 +3888,10 @@ fn Vx Low.for_(Low* lw, Node* n)
 // Tests `v` against pattern `p`; on mismatch control goes to `fail`. Binds names. Returns false if unsupported.
 fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
 {
+    // A pattern is consumed as a whole -- its sub-patterns, literals and field
+    // names are read by pat_node/pat_variant rather than dispatched one by one --
+    // so mark the whole subtree here or every sub-pattern reads as unlowered.
+    if (lw.audit && p != null) { air_audit::mark_tree(p); }
     if (p == null) { return true; }
     switch (p.kind)
     {
@@ -3694,9 +3915,9 @@ fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
             Node* lit = p.children[0];
             Vx l = lw.expr(lit, v.t);
             if (!lw.live()) { return true; }
-            if (l.t != null && v.t != null && !air_ll::ty_eq(l.t, v.t))
+            if (l.t != null && v.t != null && !air_util::ty_eq(l.t, v.t))
             {
-                if (l.p != null && l.p.tag == APRD_INT && air_ll::ty_is_int(v.t)) { l = lw.lit_int(l.p.ival, v.t); }
+                if (l.p != null && l.p.tag == APRD_INT && air_util::ty_is_int(v.t)) { l = lw.lit_int(l.p.ival, v.t); }
                 else { lw.err(p, "pattern type differs from the scrutinee", null); return false; }
             }
             Vx eq = lw.binop(ABIN_EQ, v, l);
@@ -3767,6 +3988,48 @@ fn bool Low.pat(Low* lw, Node* p, Vx v, usz fail)
             }
             return true;
         }
+        case Nk.N_PAT_OR:
+        {
+            /*
+             Or-pattern: `| A | B -> ...`, parsed as an n-ary N_PAT_OR.
+
+             Neither lowerer handled this, so every or-pattern was refused with
+             "pattern (not lowered yet)" even though AIR has carried an APAT_OR
+             constructor all along (air_ir.c3, air_write, air_read, air_emit all
+             define it) -- the producer was simply missing. A construct the IR
+             can express and the front end refuses is not a backend gap; it is
+             an unfinished lowering.
+
+             Each alternative matches the SAME scrutinee, and only one of them
+             runs, so each is compiled against `fail` = the next alternative's
+             entry block. The last alternative falls through to the caller's
+             `fail`. Bindings inside alternatives therefore live in separate
+             blocks, which is what the semantics require: `| Some(x) | None`
+             must not promise `x` after the match.
+
+             Binds correct by construction: the arm body is only reachable after
+             one alternative succeeded.
+            */
+            if (p.child_count < 2) { lw.unsup(p, "or-pattern with fewer than two alternatives"); return false; }
+            usz n = p.child_count;
+            bool ok = true;
+            for (usz i = 0; i < n && ok; i++)
+            {
+                /*
+                 Each alternative tests the same scrutinee and jumps to the next
+                 one's block when it does not match; the last alternative falls
+                 through to the caller's `fail`.
+
+                 A failed alternative does NOT leave `lw.cur` live -- pat_variant
+                 sets cur to NOBLK after emitting t_cond -- so the next
+                 alternative has to be entered explicitly rather than assumed.
+                */
+                usz alt_fail = (i + 1 < n) ? lw.blk("or.next") : fail;
+                lw.cur = alt_fail;
+                ok = lw.pat(p.children[i], v, alt_fail);
+            }
+            return ok;
+        }
         default:
             lw.unsup(p, "pattern"); return false;
     }
@@ -3794,6 +4057,7 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
     for (usz ai = 0; ai < narms; ai++)
     {
         Node* arm = arms[ai];
+        if (lw.audit && arm != null) { air_audit::mark(arm); }
         if (arm == null || arm.child_count == 0) { continue; }
         usz next = lw.blk("arm.next");
         usz nv0 = lw.nvars;
@@ -3861,9 +4125,9 @@ fn Vx Low.arms(Low* lw, Node** arms, usz narms, Vx* scr, usz nscr, AirTyp* want,
         Vx ev = end_val[i];
         if (carry)
         {
-            if (ev.t != null && !air_ll::ty_eq(ev.t, jt))
+            if (ev.t != null && !air_util::ty_eq(ev.t, jt))
             {
-                if (ev.p != null && ev.p.tag == APRD_INT && air_ll::ty_is_int(jt)) { ev = lw.lit_int(ev.p.ival, jt); }
+                if (ev.p != null && ev.p.tag == APRD_INT && air_util::ty_is_int(jt)) { ev = lw.lit_int(ev.p.ival, jt); }
                 else { lw.err(null, "match arms have different types", null); return lw.unit(); }
             }
             Vx[1] a; a[0] = ev; lw.t_jump(jb, &a[0], 1);
@@ -3979,9 +4243,9 @@ fn AirTyp* Low.clo_ty(Low* lw, AirTyp** ps, usz np, AirTyp* ret)
     for (usz i = 0; i < lw.nclo; i++)
     {
         CloI* c = &lw.clos[i];
-        if (c.np != np || !air_ll::ty_eq(c.ret, ret)) { continue; }
+        if (c.np != np || !air_util::ty_eq(c.ret, ret)) { continue; }
         bool same = true;
-        for (usz j = 0; j < np; j++) { if (!air_ll::ty_eq(c.ps[j], ps[j])) { same = false; } }
+        for (usz j = 0; j < np; j++) { if (!air_util::ty_eq(c.ps[j], ps[j])) { same = false; } }
         if (same) { return c.ty; }
     }
     if (lw.nclo >= 128) { lw.unsup(null, "more than 128 function types"); return null; }
@@ -4046,8 +4310,8 @@ fn Vx Low.to_clo(Low* lw, Vx a, AirTyp* want, Node* at)
     FnInfo* tg = null;
     for (usz i = 0; i < lw.nfn; i++) { if (!lw.fns[i].is_adapt && !lw.fns[i].is_lam && seq(lw.fns[i].name, a.p.name)) { tg = &lw.fns[i]; } }
     if (tg == null) { return a; }
-    bool ok = tg.np == ci.np && air_ll::ty_eq(tg.ret, ci.ret);
-    for (usz j = 0; ok && j < ci.np; j++) { if (!air_ll::ty_eq(tg.pty[j], ci.ps[j])) { ok = false; } }
+    bool ok = tg.np == ci.np && air_util::ty_eq(tg.ret, ci.ret);
+    for (usz j = 0; ok && j < ci.np; j++) { if (!air_util::ty_eq(tg.pty[j], ci.ps[j])) { ok = false; } }
     if (!ok) { lw.err(at, "function does not have the expected function type", tg.name); return a; }
     if (tg.ext) { Vx ec = lw.coerce(a, lw.ptr(lw.m.t_u8)); return lw.raw_clo(ec, want); }   // an extern is a bare code pointer: wrap it
     lw.queue(tg);
@@ -4285,7 +4549,7 @@ fn Vx Low.raw_clo(Low* lw, Vx code, AirTyp* want)
     FnInfo* ind = lw.ind_for(ci); if (ind == null) { return code; }
     Vx env = code;
     AirTyp* pu8 = lw.ptr(lw.m.t_u8);
-    if (!air_ll::ty_eq(code.t, pu8)) { env = lw.coerce(code, pu8); }
+    if (!air_util::ty_eq(code.t, pu8)) { env = lw.coerce(code, pu8); }
     return lw.mk_clo(want, air_ir::air_mk_var(lw.a, ind.name), env.p);
 }
 fn void Low.lower_ind(Low* lw, FnInfo* f)
@@ -4621,6 +4885,7 @@ fn Vx Low.handle(Low* lw, Node* n, AirTyp* want)
     for (usz i = 1; i < n.child_count; i++)
     {
         Node* arm = n.children[i]; if (arm == null) { continue; }
+        if (lw.audit) { air_audit::mark(arm); }   // consumed here as a handler arm, not via expr()
         Node* op = arm.resolved;
         if ((op == null || op.kind != Nk.N_DECL_EFFECT_OP) && lw.is_ret_arm(arm))   // `| return(x) -> e`: applied to the value of the handled computation
         {
@@ -5337,8 +5602,33 @@ fn void Low.lower_arm(Low* lw, FnInfo* f)
     lw.m.add_decl(ad); lw.fns_ok++;
 }
 
+fn void Low.lower_const(Low* lw, FnInfo* f)
+{
+    // Per-function state must be reset exactly as lower_fn does it. Without the
+    // block list reset, a const lowered after another function reused that
+    // function's blocks and emitted a body calling itself.
+    lw.nb = 0; lw.nvars = 0; lw.nloops = 0; lw.nhx = 0; lw.arm.on = false; lw.nnames = 0; lw.tmpn = 0; lw.unchecked = 0;
+    usz b = lw.blk("entry");
+    lw.cur = b; lw.cur_fn = f.name;
+    lw.fn_errors = 0; lw.ret_ty = f.ret; lw.ndefer = 0; lw.in_replay = false;
+    f.lowering_const = true;
+    Vx v = f.const_value != null ? lw.expr(f.const_value, f.ret) : lw.unit();
+    f.lowering_const = false;
+    if (lw.fn_errors > 0) { lw.fail_fn++; return; }
+    v = lw.coerce_arg(f.const_value, v, f.ret);
+    lw.t_ret(v);
+    AirDecl* ad = air_ir::air_mk_decl(lw.a, ADECL_DEF, f.name);
+    ad.is_pub = true; ad.ret_ty = f.ret; ad.def_body = lw.assemble();
+    lw.m.add_decl(ad);
+    lw.fns_ok++;
+}
+
 fn void Low.lower_fn(Low* lw, FnInfo* f)
 {
+    // A named constant lowers like a zero-argument definition whose body is the
+    // value: `fn K : u64 = 7u64` becomes `def K() : u64 = ret 7`. Callers refer to
+    // it by name through fn_by_name, so no special call-site handling is needed.
+    if (f.is_const) { lw.lower_const(f); return; }
     lw.nlit = 0; lw.lit_final = false;
     for (int att = 0; att < 6; att++)
     {
@@ -5564,6 +5854,7 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
     lw.ens = (Enm*)calloc(64, Enm::size); lw.nen = 0;
     lw.clos = (CloI*)calloc(128, CloI::size); lw.nclo = 0; lw.nlam = 0;
     lw.errors = 0; lw.fn_errors = 0; lw.fns_ok = 0; lw.fail_fn = 0; lw.cur = NOBLK;
+    lw.audit = air_audit::enabled();
     Node* mn = null;
     for (usz i = 0; i < root_count && mn == null; i++) { mn = find_main(roots[i], it); }
     if (mn != null)
@@ -5625,6 +5916,12 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
             lw.lower_fn(f);
         }
     }
+    // An exhausted arena means nodes were never built. The flag was set and
+    // nobody looked at it: the write below could then either emit a tree with
+    // holes or report an incidental "null declaration" that says nothing about
+    // the cause. Check it first so the diagnostic names the real failure, and
+    // never write a .air built from a truncated tree.
+    if (arena.oom && lw.errors == 0) { lw.errors = lw.errors + 1; }
     int errs = lw.errors;
     if (errs == 0)
     {
@@ -5633,6 +5930,18 @@ fn int emit_low_program(Node** roots, usz root_count, Node* entry_root, pfront_c
         else { printf("air-low: %d function(s) lowered -> %s\n", lw.fns_ok, out_path); }
     }
     else { printf("air-low: %d error(s) in %d function(s); no .air written\n", errs, lw.fail_fn); }
+    // The audit answers "did every source construct reach AIR?". It walks the same
+    // roots the lowerer was given and reports the outermost node of any subtree the
+    // live lowerer never marked -- the silent-drop class, measured rather than argued.
+    if (lw.audit)
+    {
+        // Only the roots handed to the lowerer are candidates: a library module is
+        // not lowered unless something in it is reachable, so reporting its contents
+        // as "unlowered" would be noise. The entry file is the one being compiled.
+        Node* are = entry_root != null ? entry_root : roots[0];
+        air_audit::report_low(are, src_path, 0);
+    }
+    if (arena.oom) { printf("air-low: AIR arena exhausted (out of memory): %d slabs, %zu bytes; no .air written\n", (int)arena.slab_count, arena.bytes_used); }
     arena.destroy();
     return errs;
 }

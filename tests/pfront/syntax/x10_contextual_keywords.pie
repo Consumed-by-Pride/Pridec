@@ -1,0 +1,102 @@
+-- x10 — contextual keywords and continuation layout.
+--
+-- Two parser defects found while bringing up examples/tokei. Both were silent:
+-- the program still "compiled", it just produced the wrong tree.
+--
+-- 1. `quote`, `splice`, `unquote`, `reify` and `eval` are metaprogramming
+--    OPERATORS, but they are also natural variable names — `let quote = ...`
+--    appears in every lexer and scanner. They were handled as unconditional
+--    prefix operators, so binding one worked and using it failed:
+--
+--        let quote = scanner_count(...)   -- binds (keyword is in the
+--                                         -- contextual-name range)
+--        quote.code == 1i64               -- `quote` starts an operator, so
+--                                         -- `.` is taken as its operand and
+--                                         -- the error lands at the `.`
+--
+--    The rule now matches `tail`: an operator form needs an operand on the
+--    same line, so if the next token cannot start an expression the keyword
+--    is a name.
+--
+-- 2. A continuation line indented DEEPER than the statement it continues
+--    absorbed an INDENT that was never counted, so the matching DEDENT was
+--    read by the block parser as the end of the enclosing block. Every
+--    statement after the continuation was ejected from its function and
+--    reported as an unresolved name at the use site while the binder sat
+--    inside the function.
+--
+--    `--emit-sexp` made it visible: the last expression of a three-line
+--    function appeared as a TOP-LEVEL `(ident dot)` beside `(fn f ...)`.
+
+-- §1  metaprogramming keywords as ordinary binder names
+fn kw_quote : () -> i64
+  | () ->
+      let quote = 7i64
+      quote
+
+fn kw_splice : () -> i64
+  | () ->
+      let splice = 8i64
+      splice
+
+fn kw_eval : () -> i64
+  | () ->
+      let eval = 9i64
+      eval
+
+fn kw_reify : () -> i64
+  | () ->
+      let reify = 10i64
+      reify
+
+fn kw_unquote : () -> i64
+  | () ->
+      let unquote = 11i64
+      unquote
+
+-- The operator readings must still parse. These are never run; the point is
+-- that the guard did not disable the operators themselves.
+fn op_quote : () -> i64
+  | () ->
+      let frag = quote 1i64
+      0i64
+
+fn op_reify : () -> i64
+  | () ->
+      let frag = reify 1i64
+      0i64
+
+-- §2  a deeper continuation must not end the enclosing block
+fn cont_body : ptr -> i64
+  | path ->
+      let name_cstr = path
+      let dot = 1i64
+        + 2i64
+      -- `name_cstr` must still be in scope here, and `dot` must be the
+      -- folded 3, not a top-level identifier.
+      (name_cstr as i64) + dot
+
+fn cont_or_chain : ptr -> i64
+  | path ->
+      let name_cstr = path
+      let dot = 1i64 == 0i64
+        || 2i64 == 0i64
+      (name_cstr as i64) + (dot as i64)
+
+-- Same shape, but the continuation is longer than one level.
+--
+-- NOTE: the closing statement below is indented to the CONTINUATION column,
+-- not back to the statement column. That is deliberate. A statement that
+-- dedents back to the enclosing level after TWO OR MORE continuation lines
+-- is currently misparsed -- the block closes early and the statement is
+-- ejected to top level. One continuation line is fine; two or more is not.
+-- See tests/pfront/bug/known/multi_continuation_eject.pie for the minimal
+-- repro. Writing the closing statement at the continuation column does not
+-- reach the buggy path (the lexer emits no layout token at all), so this
+-- fixture keeps covering the long-continuation shape without tripping it.
+fn cont_param_after : (i64, i64) -> i64
+  | (a, b) ->
+      let s = a
+        + b
+        + a
+        s + b

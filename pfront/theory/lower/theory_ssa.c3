@@ -381,7 +381,7 @@ fn void SsaBuilder.build_dom(SsaBuilder* b)
         if(parent>=0&&parent!=child) {
             if(!ssa_adj_push(b.dom_kids,b.dom_kid_count,b.dom_kid_cap,(usz)parent,child,b.n_blocks))b.overflow=true;
         }
-        else if(parent<0)b.idom_errors=b.idom_errors+1;
+        else if (parent < 0) { b.idom_errors = b.idom_errors + 1; }
     }
     free((void*)rpo);
 }
@@ -1112,7 +1112,7 @@ fn void SsaBuilder.verify_dom_reference(SsaBuilder* b)
                     component[next]=comp;
                     queue[tail++]=next;
                 }
-                else if(component[next]!=comp)b.cfg_edge_errors++;
+                else if (component[next] != comp) { b.cfg_edge_errors++; }
             }
         }
         comp++;

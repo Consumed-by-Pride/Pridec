@@ -329,7 +329,16 @@ fn void Verifier.report(Verifier* v)
 {
     printf("  integrity        : %d nodes, depth %d, %d synthetic\n",
            (int)v.nodes, v.max_depth, (int)v.synthetic_nodes);
-    if (v.ok() && v.shared_nodes == 0 && v.bad_spans == 0 && v.bad_resolution == 0)
+    /*
+     The early return must cover EVERY counter the next line prints, and
+     `arity` was missing from it. A program whose only finding was an I8 arity
+     violation therefore printed "invariants: all 8 hold" and then, two lines
+     later, "arity=1" -- with the findings list (the only thing naming the
+     offending node) skipped, because it sits after the return. That is how
+     `handle` with a plain arm came to report a contradiction and no location.
+    */
+    if (v.ok() && v.shared_nodes == 0 && v.bad_spans == 0 && v.bad_resolution == 0
+        && v.arity_errors == 0 && v.stage_imbalance == 0)
     {
         printf("  invariants       : all 8 hold\n");
         return;

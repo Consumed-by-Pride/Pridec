@@ -39,13 +39,26 @@ import pfront_sccp;
 import air;
 import air_audit;
 import air_low;
+import air_ir;
+import air_read;
+import air_c;
 
 // --emit-air-pretty selects the legacy human-oriented AIR dump (diagnostic only).
 bool g_air_pretty = false;
 // --air-roundtrip: test-only differential check of the .air text format (see air.c3).
 bool g_air_roundtrip = false;
 bool g_air_low = false;
+// --emit-c: read the .low.air just written and transpile it to C (air_c).
+// The C target is a consumer of the facts, so it reads AIR, not the AST.
+bool g_emit_c = false;
 bool g_low_failed = false;       // --emit-air-low: the typed AIR 3.0 low-profile lowering (air_low.c3)
+bool g_air_failed = false;       // AIR allocation/lowering failed; no usable .air was published
+// Lowering errors are counted by the lowerer, not by the DiagBag: `lw.err` prints a
+// line and bumps `lw.errors`. Without this the summary reported "errors: 0" for a
+// file the lowerer had just refused, because `rr.errors` only ever read the
+// DiagBag -- a failed lowering looked like a clean compile in the summary, and a
+// harness that reads the summary (rather than the exit code) would call it a pass.
+int g_low_errors = 0;
 bool g_air_audit = false;      // --air-audit: report source constructs the lowering never consumed
 
 extern fn void* malloc(usz size);
@@ -54,6 +67,12 @@ extern fn int   printf(char* fmt, ...);
 extern fn int   strncmp(char* a, char* b, usz n);
 extern fn void* opendir(char* path);
 extern fn int   closedir(void* dir);
+extern fn int   remove(char* path);
+
+// Module-scoped consts are not re-exported across modules in this dialect;
+// air_roundtrip.c3 redeclares the same value for the same reason. Keep the two
+// in step with air.c3's AIR_PATH_MAX.
+const usz PF_AIR_PATH_MAX = 4096;
 
 alias Node = pfront_core::PNode;
 alias Nk   = pfront_core::NodeKind;
@@ -73,6 +92,38 @@ fn bool streq(char* a, char* b)
     if (la != lb) { return false; }
     for (usz i = 0; i < la; i++) { if (a[i] != b[i]) { return false; } }
     return true;
+}
+
+// remove_stale_artifact — delete the .air a REFUSED emit would have written.
+//
+// The artifact is only written for a program that compiled, which is right. But
+// returning early left the previous run's artifact untouched: same path, same
+// size, nothing to tell it apart. Nothing in the tree compares mtimes, so a
+// consumer opens FILE.air and reads a program that does not match the source it
+// just failed to compile.
+//
+// `suffix` is ".air" for the 2.2 artifact and ".low.air" for the 3.0 one; both
+// replace the source extension, and neither appends to it. Returns true when a
+// stale file was actually removed, so the caller can say so.
+fn bool remove_stale_artifact(char* path, char* suffix)
+{
+    // `-` means stdout: no file exists, and remove("-") must not run.
+    if (path == null || path[0] == 0) { return false; }
+    if (path[0] == '-' && path[1] == 0) { return false; }
+    char[PF_AIR_PATH_MAX] buf;
+    usz n = 0; usz dot = 0; bool has_dot = false;
+    while (path[n] != 0 && n < PF_AIR_PATH_MAX - 16)
+    {
+        if (path[n] == '.') { dot = n; has_dot = true; }
+        if (path[n] == '/') { has_dot = false; }
+        n = n + 1;
+    }
+    usz stem = has_dot ? dot : n;
+    usz sfx = slen(suffix);
+    if (stem + sfx + 1 >= PF_AIR_PATH_MAX) { return false; }
+    for (usz i = 0; i < stem; i++) { buf[i] = path[i]; }
+    for (usz i = 0; i <= sfx; i++) { buf[stem + i] = suffix[i]; }
+    return remove(&buf[0]) == 0;
 }
 
 // ── AST dump ────────────────────────────────────────────────────────────────
@@ -594,7 +645,12 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
         {
             // `--emit-air-pretty`: the old human-oriented, lossy dump of the entry
             // module. A diagnostic, not a contract, so it stays unconditional.
-            air::emit_air(entry.ast, it, path);
+            int pretty_err = air::emit_air(entry.ast, it, path);
+            if (pretty_err != 0)
+            {
+                printf("air: lowering/allocation failed (%d) -- no usable .air emitted\n", pretty_err);
+                g_air_failed = true;
+            }
         }
         // Artifacts that are meant to be run or linked are written only when the
         // program actually compiled. Reporting errors and still leaving an
@@ -621,11 +677,40 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 }
                 if (an == 0) { air_roots[0] = entry.ast; an = 1; }
                 int werrs = air::emit_air_program(&air_roots[0], an, it, path);
-                if (werrs != 0) { printf("air: %d writer error(s) -- the .air is unusable\n", werrs); }
+                if (werrs != 0)
+                {
+                    if (werrs == -3) { printf("air: allocation/lowering failed -- no usable .air emitted\n"); }
+                    else { printf("air: %d writer/setup error(s) -- the .air is unusable\n", werrs); }
+                    g_air_failed = true;
+                }
             }
             else
             {
-                printf("air: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count);
+                /*
+                 Refusing to emit must also mean the OLD artifact does not
+                 survive. Before this, a failed compile left whatever .air was
+                 lying there from a previous good run -- measured: 551 KB, same
+                 size, same path, nothing to distinguish it from a fresh one. A
+                 backend or test that opens FILE.air then reads a program that
+                 does not match the source it just failed to compile.
+
+                 This is the same rule the removed --emit-exe flag follows: fail
+                 loudly, so a stale script cannot believe it built something.
+                */
+                if (remove_stale_artifact(path, (char*)".air"))
+                {
+                    printf("air: removed the stale .air left by an earlier run\n");
+                }
+                // Say WHY. A bare count leaves the reader with "2 error(s)" and no
+                // way to find them: the diagnostic lines were printed above only
+                // in verbose mode, so --quiet produced a refusal with no cause.
+                printf("air: %d error(s) -- refusing to emit a .air; first error:\n", (int)diags.error_count);
+                for (usz di = 0; di < diags.count; di++)
+                {
+                    if (diags.items[di].sev != pfront_core::Severity.SEV_ERROR) { continue; }
+                    printf("  %s:%d:%d: %s\n", path, diags.items[di].line, diags.items[di].col, diags.items[di].msg != null ? diags.items[di].msg : "(no message)");
+                    break;
+                }
             }
         }
         if (g_air_low)
@@ -650,9 +735,63 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 char* suf = ".low.air";
                 for (usz i = 0; i < 9; i++) { lowp[stem + i] = suf[i]; }
                 int lerrs = air_low::emit_low_program(&low_roots[0], ln, entry.ast, it, path, &lowp[0]);
-                if (lerrs != 0) { g_low_failed = true; }
+                if (lerrs == 0 && g_emit_c)
+                {
+                    // --emit-c: read the AIR text just written and transpile it.
+                    // Reading our own output rather than reusing in-memory state
+                    // is deliberate: it is exactly the contract airc obeys, so a
+                    // program that compiles here also compiles from the .air alone.
+                    AirArena carena;
+                    AirModule cmod;
+                    if (!air_read::read_file(&lowp[0], &carena, &cmod, false))
+                    {
+                        g_low_failed = true;
+                        printf("air-c: could not read back the .low.air it just wrote\n");
+                    }
+                    else
+                    {
+                        char[4096] cp;
+                        for (usz i = 0; i < stem; i++) { cp[i] = path[i]; }
+                        char* csuf = ".c";
+                        for (usz i = 0; i < 3; i++) { cp[stem + i] = csuf[i]; }
+                        int cerrs = air_c::write_c(&cmod, &cp[0]);
+                        if (cerrs != 0)
+                        {
+                            g_low_failed = true;
+                            printf("air-c: %d error(s) -- the C this module needs is not in air_c yet\n", cerrs);
+                        }
+                    }
+                }
+                if (lerrs != 0)
+                {
+                    g_low_failed = true; g_low_errors = g_low_errors + (lerrs > 0 ? lerrs : 0);
+                    // The lowering refused, so whatever FILE.low.air is on disk
+                    // is from an earlier run. Remove it for the same reason as
+                    // the 2.2 path: a stale artifact reads as current.
+                    if (remove_stale_artifact(path, (char*)".low.air"))
+                    {
+                        printf("air-low: removed the stale .low.air left by an earlier run\n");
+                    }
+                }
             }
-            else { printf("air-low: %d error(s) -- refusing to emit a .air\n", (int)diags.error_count); g_low_failed = true; }
+            else
+            {
+                // Same rule as the 2.2 path above: refusing to emit must not
+                // leave a stale FILE.low.air behind for a consumer to read as if
+                // it described the current source.
+                if (remove_stale_artifact(path, (char*)".low.air"))
+                {
+                    printf("air-low: removed the stale .low.air left by an earlier run\n");
+                }
+                printf("air-low: %d error(s) -- refusing to emit a .air; first error:\n", (int)diags.error_count);
+                for (usz di = 0; di < diags.count; di++)
+                {
+                    if (diags.items[di].sev != pfront_core::Severity.SEV_ERROR) { continue; }
+                    printf("  %s:%d:%d: %s\n", path, diags.items[di].line, diags.items[di].col, diags.items[di].msg != null ? diags.items[di].msg : "(no message)");
+                    break;
+                }
+                g_low_failed = true;
+            }
         }
         if (g_air_roundtrip && emit_ok)
         {
@@ -665,7 +804,7 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
                 if (ra != null) { rt_roots[rtn] = ra; rtn = rtn + 1; }
             }
             if (rtn == 0) { rt_roots[0] = entry.ast; rtn = 1; }
-            (void)air::roundtrip_program(&rt_roots[0], rtn, it, path);
+            printf("--air-roundtrip moved to `airtool roundtrip` (it needs the AIR reader, and the\n  compiler does not link one)\n");
         }
 
         pfront_ext::Stats st;
@@ -714,10 +853,15 @@ fn RunResult compile_one(char* path, char*[] roots, usz root_count, char* exe_di
         if (mg != null) { free((void*)mg); }
     }
 
-    rr.errors = diags.error_count;
+    // A lowering failure is an error even though no Diag was created for it: the
+    // lowerer reports by printing and counting. Folding its count in here keeps the
+    // summary honest -- `ok`, `errors` and the exit status now agree with each other
+    // and with the lines already on stderr.
+    usz low_errs = g_low_errors > 0 ? (usz)g_low_errors : (usz)0;
+    rr.errors = diags.error_count + low_errs;
     rr.warnings = diags.warning_count;
     rr.modules = ld.module_count;
-    rr.ok = diags.error_count == 0;
+    rr.ok = (diags.error_count + low_errs) == (usz)0;
 
     if (!quiet && diags.count > 0)
     {
@@ -766,6 +910,7 @@ fn void print_usage()
     printf("  -O0 | -O1 | -O2 | -O3   optimisation level for the middle end (default -O2)\n");
     printf("  --no-opt          disable the optimiser (same as -O0 for the middle end)\n");
     printf("  --emit-air        write the whole program as AIR 2.0 text next to the source (FILE.air)\n");
+    printf("  --emit-c          write the AIR 3.0 LOW-profile lowering, read it back, and transpile it to C (FILE.c) -- one command, no separate airc step\n");
     printf("  --emit-air-low    write the AIR 3.0 LOW-profile lowering (typed, reachable from main) as FILE.low.air; diagnostics instead of a file when a construct is not lowered yet\n");
     printf("  --air-audit       with --emit-air: list source constructs the AIR lowering never consumed\n");
     printf("  --emit-air-pretty print the entry module in the old human-oriented, lossy AIR notation\n");
@@ -883,6 +1028,7 @@ fn int main(String[] args)
         else if (streq(a, "--emit-sexp"))    { emit_ast = true; emit_sexp = true; }
         else if (streq(a, "--emit-air"))     { emit_air = true; }
         else if (streq(a, "--emit-air-low")) { g_air_low = true; }
+        else if (streq(a, "--emit-c")) { g_air_low = true; g_emit_c = true; }
         else if (streq(a, "--air-roundtrip")) { g_air_roundtrip = true; }
         else if (streq(a, "--air-audit")) { g_air_audit = true; air_audit::enable(true); }
         else if (streq(a, "--emit-air-pretty")) { emit_air = true; g_air_pretty = true; }
@@ -994,7 +1140,7 @@ fn int main(String[] args)
     }
 
     if (rr.errors > 0) { return 2; }
-    if (g_low_failed) { return 3; }
+    if (g_low_failed || g_air_failed) { return 3; }
     if (rr.warnings > 0) { return 1; }
     return 0;
 }

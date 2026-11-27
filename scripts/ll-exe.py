@@ -73,7 +73,15 @@ if want_triple:   # cross target: the module takes the target's triple and data 
     L.LLVMCreateTargetDataLayout.restype = vp; L.LLVMCreateTargetDataLayout.argtypes = [vp]
     L.LLVMSetModuleDataLayout.argtypes = [vp, vp]; L.LLVMSetModuleDataLayout(mod, L.LLVMCreateTargetDataLayout(tm))
     _fs32 = "--freestanding" in args and want_triple.startswith((b"i386", b"i486", b"i586", b"i686"))   # linked by the host ld in i386 mode below
-    if "--emit-obj" not in args and "--ld-script" not in args and not _fs32: args.append("--emit-obj")
+    # A cross target produces an object file and nothing else -- but "cross" means
+    # the target is not this host's. Testing `want_triple` alone is true for every
+    # module that declares its own triple, which is every module this compiler
+    # emits: a native x86-64 .ll would quietly produce an object and exit 0
+    # without ever linking, which reads as a pass and is the worst possible
+    # failure for a test driver. Compare against the host triple instead.
+    _host_triple = ctypes.cast(L.LLVMGetDefaultTargetTriple(), cp).value or b""
+    _cross = want_triple is not None and want_triple.split(b"-")[0] != _host_triple.split(b"-")[0]
+    if _cross and "--emit-obj" not in args and "--ld-script" not in args and not _fs32: args.append("--emit-obj")
 if lvl > 0:
     L.LLVMRunPasses.argtypes = [vp, cp, vp, vp]
     L.LLVMCreatePassBuilderOptions.restype = vp

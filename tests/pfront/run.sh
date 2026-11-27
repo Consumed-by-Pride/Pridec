@@ -7,7 +7,11 @@
 # so a silent regression to "no diagnostics" fails the suite.
 set -u
 cd "$(dirname "$0")/../.." || exit 1
-BIN=./pfrontc
+source tests/harness/pfront_case.sh
+# PFRONT_BIN lets a caller point the suite at a stub (see the self-test in
+# tests/pfront/selftest.sh); PF_BIN is honored for backwards compatibility.
+# It defaults to the tree's compiler so `make test-pfront` is unchanged.
+BIN=${PFRONT_BIN:-${PF_BIN:-./pfrontc}}
 [ -x "$BIN" ] || { echo "build ./pfront first"; exit 2; }
 
 declare -A EXPECT=(
@@ -156,7 +160,19 @@ pass=0; fail=0
 for f in tests/pfront/*.pie; do
   name=$(basename "$f" .pie)
   want=${EXPECT[$name]:-0}
-  got=$("$BIN" "$f" -I tests/pfront -I stdlib -I . 2>&1 | grep -c "$f:.*error")
+  # A compiler that dies produces no diagnostics at all, so counting matching
+  # lines alone would score a crashed run as "expected 0 errors, got 0" -- every
+  # CLEAN case would pass and the suite would report health while the compiler
+  # was broken. tests/harness/pfront_case.sh enforces the compiler's contract
+  # (exit 0 clean, 1 or 2 for reported diagnostics, a well-formed summary whose
+  # counts match the diagnostics actually printed) and refuses to score a run
+  # that did not finish.
+  pf_out=$("$BIN" "$f" -I tests/pfront -I stdlib -I . 2>&1); rc=$?
+  if ! pfront_check_case_result "$pf_out" "$rc" "$f"; then
+    fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "$name" "$PFRONT_CASE_FAILURE"
+    continue
+  fi
+  got=$PFRONT_CASE_ERRORS
   if [ "$got" = "$want" ]; then
     pass=$((pass+1)); printf '  PASS  %-26s (%s errors)\n' "$name" "$got"
   else
@@ -724,6 +740,26 @@ for f in tests/pfront/syntax/x*.pie; do
     ./pfrontc -I stdlib "$f" 2>&1 | grep "error\[" | head -3 | sed 's/^/      /'
   fi
 done
+
+# A continuation line indented deeper than its statement must not end the
+# enclosing block. The parser absorbed the INDENT but never counted it, so the
+# matching DEDENT reached the block parser and closed the clause body: every
+# statement after the continuation was ejected from the function and reported
+# as an unresolved name AT THE USE SITE, while the binder sat inside it.
+#
+# "parses clean" does not catch this — the ejected statement is still valid at
+# top level. Assert the SHAPE: every expression must stay inside its `fn`.
+cont_sexp=$(printf 'mod t\nfn f : ptr -> i64\n  | path ->\n      let a = path\n      let d = 1i64\n        + 2i64\n      (a as i64) + d\n' > /tmp/pf_cont.pie; ./pfrontc /tmp/pf_cont.pie --emit-sexp 2>/dev/null)
+# A top-level `(ident d)` (or any ident) sitting beside `(fn f` means the body
+# was split. The whole function must be a single balanced form.
+cont_toplevel=$(printf '%s\n' "$cont_sexp" | grep -cE '^\((ident|cast|add|int) ')
+cont_ok=$(printf '%s\n' "$cont_sexp" | grep -c '^(fn f')
+if [ "$cont_ok" = "1" ] && [ "$cont_toplevel" = "0" ]; then
+  pass=$((pass+1)); printf '  PASS  %-26s %s\n' "syntax_continuation_scope" "(deeper continuation keeps the body intact)"
+else
+  fail=$((fail+1)); printf '  FAIL  %-26s %s\n' "syntax_continuation_scope" "fn=$cont_ok stray-toplevel=$cont_toplevel (want 1/0)"
+  printf '%s\n' "$cont_sexp" | head -6 | sed 's/^/      /'
+fi
 
 # `not x` and `¬x` are LOGICAL negation. Both lowered to bitwise
 # complement (AUO_BNOT) because only TOKEN_BANG was mapped, so `not true`
@@ -1560,9 +1596,16 @@ fi
 # of each function's normal form, including the reductions that must NOT
 # happen (capture, mut) and the ones that must be done carefully (effects).
 nb=$("$BIN" tests/pfront/83_nbe_normalise.pie -I stdlib -I . --emit-ast --quiet 2>&1)
-sect() { echo "$nb" | sed -n "/^  fn '$1'/,/^  fn '$2'/p"; }
+# `sed -n "/start/,/end/p"` needs BOTH ends: called with one argument the range
+# never closes and `$2` under `set -u` aborts the whole script. A missing end
+# means "to the end of the dump", which is what the one-argument callers want.
+sect() { local _end="${2:-}"; if [ -n "$_end" ]; then echo "$nb" | sed -n "/^  fn '$1'/,/^  fn '$_end'/p"; else echo "$nb" | sed -n "/^  fn '$1'/,\$p"; fi; }
 nb_ok=1; nb_why=""
-chk() { [ "$1" = "1" ] || { nb_ok=0; nb_why="$nb_why $2"; }; }
+# Called as `chk $(cond && echo 1) "label"`. When cond is false the substitution
+# yields nothing, so $1 is empty and $2 is the LABEL -- but the label then lands
+# in $1 and $2 is unbound, which under `set -u` aborts the run instead of
+# reporting the failed check. `:-` on both keeps the failure a failure.
+chk() { [ "${1:-}" = "1" ] || { nb_ok=0; nb_why="$nb_why ${2:-}"; }; }
 pc=$(sect pure_chain once)
 chk $([ "$(echo "$pc" | grep -c "lambda")" = 0 ] && [ "$(echo "$pc" | grep -c "int 7i64")" = 1 ] && [ "$(echo "$pc" | grep -c "int 10i64")" = 1 ] && echo 1) "pure_chain->7+k(10),no lambdas"
 on=$(sect once ordered)

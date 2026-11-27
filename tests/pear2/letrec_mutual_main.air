@@ -1,0 +1,24 @@
+// PEAR 2: mutually recursive local bindings (`letrec`), and a call whose
+// continuation is a `comu` binding in an ordinary expression.
+//
+// The group is planned in rounds: a member is planned only once every name it
+// calls is already visible, so `is_even` and `is_odd` can each be typed from the
+// arm that does not recurse while the sibling is still unknown. Both lift to
+// module-level functions with a null environment, which is what makes the mutual
+// reference a constant closure rather than a captured one.
+//
+// is_even(10) = 1, so the program exits 42.
+air 2.2 Main "letrec_mutual_main.pie";
+
+def main() : i64 =
+  mu~ %ret.
+    letrec (is_even = lam (n : i64) -> if (lt n 1 : i64) then
+                                      <1 : i64 | %ret>
+                                    else
+                                      <is_odd | call · (sub n 1 : i64) · %ret>,
+            is_odd  = lam (n : i64) -> if (lt n 1 : i64) then
+                                      <0 : i64 | %ret>
+                                    else
+                                      <is_even | call · (sub n 1 : i64) · %ret>) in
+      <is_even | call · 10 : i64 · comu even.
+        <(mul even 42) | %ret>>;

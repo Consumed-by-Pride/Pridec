@@ -1,0 +1,187 @@
+mod tokei.scanner
+
+use os.linux
+use str.string
+use fs.file
+use tokei.model
+use tokei.languages
+
+-- Byte-oriented, allocation-free line classifier. It preserves lexical state
+-- across every byte, including CRLF, escaped quotes, multiline strings, nested
+-- block comments and comment delimiters split conceptually across source lines.
+
+const SCAN_OK : i64 = 0i64
+const SCAN_IO_ERROR : i64 = 1i64
+const SCAN_UNKNOWN_LANGUAGE : i64 = 2i64
+
+fn byte_is_space : u8 -> bool
+  | b -> b == ' ' || b == '\t' || b == '\r' || b == '\x0b' || b == '\x0c'
+
+fn bytes_match : (ptr, i64, i64, ptr) -> bool
+  | (source, source_len, at, token) ->
+      if token as i64 == 0i64 then false
+      else
+        let n = os.linux.strlen(token) as i64
+        if n <= 0i64 || at < 0i64 || at + n > source_len then false
+        else
+          let input = source as *u8
+          let marker = token as *u8
+          let mut i : i64 = 0i64
+          let mut same = true
+          while i < n
+            if input[at + i] != marker[i]
+              same = false
+              break
+            i = i + 1i64
+          same
+
+fn scanner_finish_line : *LexerState -> ()
+  | s ->
+      s.lines = s.lines + 1i64
+      if s.line_code
+        s.code = s.code + 1i64
+      else if s.line_comment
+        s.comments = s.comments + 1i64
+      else
+        s.blanks = s.blanks + 1i64
+      s.line_code = false
+      s.line_comment = false
+      s.in_line_comment = false
+      s.pending_todo = false
+      s.line_touched = false
+      s.line_number = s.line_number + 1i64
+
+fn scanner_note_todo : (*LexerState, ptr, i64, i64) -> ()
+  | (s, source, len, at) ->
+      if !s.pending_todo && (bytes_match(source, len, at, "TODO" as ptr)
+          || bytes_match(source, len, at, "FIXME" as ptr)
+          || bytes_match(source, len, at, "XXX" as ptr)
+          || bytes_match(source, len, at, "HACK" as ptr))
+        s.todos = s.todos + 1i64
+        s.pending_todo = true
+
+fn scanner_count_buffer : (i64, ptr, i64) -> FileCount
+  | (lang, source, length) ->
+      let mut result = file_count_empty(lang)
+      result.bytes = length
+      let mut s = lexer_state_new()
+      let line_marker = language_line_marker(lang)
+      let block_open = language_block_open(lang)
+      let block_close = language_block_close(lang)
+      let mut i : i64 = 0i64
+      let input = source as *u8
+      let mut nested = language_nested_blocks(lang)
+      if source as i64 == 0i64 || length < 0i64
+        result.status = SCAN_IO_ERROR
+      else
+        while i < length
+          let c = input[i]
+          if c == '\n'
+            scanner_finish_line(&s)
+            i = i + 1i64
+          else
+            s.line_touched = true
+            if s.in_line_comment
+              s.line_comment = true
+              scanner_note_todo(&s, source, length, i)
+              i = i + 1i64
+            else if s.block_depth > 0i64
+              s.line_comment = true
+              if nested && bytes_match(source, length, i, block_open)
+                s.block_depth = s.block_depth + 1i64
+                i = i + os.linux.strlen(block_open) as i64
+              else if bytes_match(source, length, i, block_close)
+                s.block_depth = s.block_depth - 1i64
+                i = i + os.linux.strlen(block_close) as i64
+              else
+                scanner_note_todo(&s, source, length, i)
+                i = i + 1i64
+            else if s.quote != 0i64
+              s.line_code = true
+              if s.escaped
+                s.escaped = false
+                i = i + 1i64
+              else if c == '\\'
+                s.escaped = true
+                i = i + 1i64
+              else if c as i64 == s.quote
+                s.quote = 0i64
+                i = i + 1i64
+              else
+                i = i + 1i64
+            else if bytes_match(source, length, i, block_open)
+              s.block_depth = 1i64
+              s.line_comment = true
+              i = i + os.linux.strlen(block_open) as i64
+            else if bytes_match(source, length, i, line_marker)
+              s.in_line_comment = true
+              s.line_comment = true
+              i = i + os.linux.strlen(line_marker) as i64
+            else if c == '"' || c == '\'' || c == '`'
+              s.quote = c as i64
+              s.line_code = true
+              i = i + 1i64
+            else
+              if !byte_is_space(c)
+                s.line_code = true
+              i = i + 1i64
+        if s.line_touched
+          s.lines = s.lines + 1i64
+          if s.line_code
+            s.code = s.code + 1i64
+          else if s.line_comment
+            s.comments = s.comments + 1i64
+          else
+            s.blanks = s.blanks + 1i64
+      result.lines = s.lines
+      result.code = s.code
+      result.comments = s.comments
+      result.blanks = s.blanks
+      result.todos = s.todos
+      result
+
+fn scanner_file : ptr -> FileCount
+  | path ->
+      let lang = language_id(path)
+      if lang <= 0i64
+        let mut unknown = file_count_empty(0i64)
+        unknown.status = SCAN_UNKNOWN_LANGUAGE
+        unknown
+      else
+        let mut probe = fs.file.file_open_read(path)
+        if probe.fd < 0i64
+          let mut failed = file_count_empty(lang)
+          failed.status = SCAN_IO_ERROR
+          failed
+        else
+          fs.file.file_close(&probe)
+          let source = fs.file.file_read_to_string(path)
+          let data = string.string_as_slice(&source)
+          let len = string.string_len(&source)
+          let count = scanner_count_buffer(lang, data, len)
+          string.string_destroy(&source)
+          count
+
+fn scanner_selftest_comment_only : () -> bool
+  | () ->
+      let source = "// first\n// TODO second\n\n"
+      let c = scanner_count_buffer(1i64, source as ptr, os.linux.strlen(source as ptr) as i64)
+      c.lines == 3i64 && c.comments == 2i64 && c.blanks == 1i64 && c.code == 0i64 && c.todos == 1i64
+
+fn scanner_selftest_mixed_line : () -> bool
+  | () ->
+      let source = "int n = 1; // comment\n/* block */\n"
+      let c = scanner_count_buffer(1i64, source as ptr, os.linux.strlen(source as ptr) as i64)
+      c.lines == 2i64 && c.code == 1i64 && c.comments == 1i64
+
+fn scanner_selftest_quoted_markers : () -> bool
+  | () ->
+      let source = "char *s = \"// not a comment\";\n"
+      let c = scanner_count_buffer(1i64, source as ptr, os.linux.strlen(source as ptr) as i64)
+      c.code == 1i64 && c.comments == 0i64
+
+fn scanner_selftest_hash_language : () -> bool
+  | () ->
+      let source = "x = '# not comment'\n# real comment\n"
+      let c = scanner_count_buffer(9i64, source as ptr, os.linux.strlen(source as ptr) as i64)
+      c.code == 1i64 && c.comments == 1i64

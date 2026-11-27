@@ -1,0 +1,32 @@
+/* TODO fixture block for CSS */
+fixture_023_declaration = 23
+
+string_marker_probe = "// # -- /* not comments inside a string"
+fixture_023_inline = 1 /* inline note */
+
+fixture_023_continued = (
+    23 + 3
+)
+/* TODO block begins
+block continuation remains a comment
+block closes here */
+
+array_probe = [1, 2, 3, 5, 8, 13]
+operator_probe = left + right * factor
+quoted_hash_probe = "# is data here"
+unicode_probe = "λ bar μ mu tilde"
+empty_record_probe = {}
+
+generated_call_0(generated_value_-1)
+
+generated_value_2 = 48
+generated_call_3(generated_value_2)
+generated_call_4(generated_value_3)
+
+generated_value_6 = 144
+generated_call_7(generated_value_6)
+stable_order_023 = 23
+branch_probe_023 = if left < right then left else right
+format_probe_023 = "line 23: value={value}"
+padding_probe_023_30 = 30
+final_probe_023 = true

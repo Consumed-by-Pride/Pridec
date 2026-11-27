@@ -753,14 +753,20 @@ fn int Inferencer.infer_call(Inferencer* inf, Node* e)
                 }
             }
         }
-        if (np != na)
+        /*
+         A variadic callee accepts any number of arguments at or above its fixed
+         count, so `printf("%ld", n)` (1 fixed + 1 extra) is not a mismatch. The
+         flag rides on TyNode.is_mut for TY_FN -- see TypeTable.mk_fn_varargs.
+        */
+        bool is_va = cn.is_mut;
+        if (is_va ? (na < np) : (np != na))
         {
             inf.arity_errors = inf.arity_errors + 1;
             inf.diags.advisory(pfront_core::Phase.PH_RESOLVE, 3102, e.line, e.col,
                                "argument count differs from the declaration", inf.file);
             return ret;
         }
-        for (usz i = 0; i < na; i++)
+        for (usz i = 0; i < na && (i < np || !is_va); i++)
         {
             inf.check_type(e.children[i + 1], cn.args[i], args[i]);
         }

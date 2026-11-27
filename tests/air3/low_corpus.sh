@@ -14,7 +14,17 @@
 # Usage: tests/air3/low_corpus.sh [-v] [--tsv OUT] [files...]   (default: tests/exec/*.pie tests/exec/pear/*.pie)
 set -u
 cd "$(dirname "$0")/../.."
-export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
+# libLLVM lives wherever the toolchain bootstrap put it. The apt layout keeps it
+# in ~/.cache/llvm23, the npm layout under node_modules; both are tried rather
+# than assuming one, because a wrong guess here reads as "every program failed to
+# link" and looks like a compiler bug.
+_llvm_ld=""
+for _d in "$HOME/.cache/llvm23" \
+          "$HOME/.cache/llvm23/node_modules/llvm-runtime-clang-linux-x64/lib" \
+          "/usr/lib/x86_64-linux-gnu"; do
+    if [ -e "$_d/libLLVM-23.so" ] || [ -e "$_d/libLLVM.so.23.1" ]; then _llvm_ld="$_d"; break; fi
+done
+export LD_LIBRARY_PATH="${_llvm_ld:-$HOME/.cache/llvm23}:/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 V=0; TSV=""; files=(); WASM=0; I386=0; FS=0; LLX=""; EXX=""
 export PATH="$PATH:$HOME/.local/bin"
 FS32=0

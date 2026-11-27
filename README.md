@@ -4,11 +4,11 @@
 
 Pride is a gradually-sorted systems language built on the **classical sequent calculus λ̄μμ̃** (Curien–Herbelin 2000): every term is a producer, every evaluation context a consumer, and computation is a *cut* between them. Multi-stage programming, algebraic effects & handlers, semantic subtyping, IRDL dialects (a là MLIR), and PGL decision-tree pattern matching are all built in rather than bolted on.
 
-This repository ships **pfrontc** — the Pride front end, **AIR 1.0**
-(Abstractive Intermediate Representation) emitter, and **PEAR LLVM backend**.
-The current pipeline can emit AIR text, LLVM bitcode, or a native x86-64 Linux
-ELF executable from `.pie` source. Backend coverage is partial; emitting a
-binary is not proof that every language feature works at runtime.
+This repository ships **pfrontc**, the Pride front end, which emits canonical
+**AIR 2.2** (Abstractive Intermediate Representation) text. PEAR backends consume
+that file and can produce LLVM bitcode or native executables for supported
+programs. Backend coverage is partial; emitting a binary is not proof that
+every language feature works at runtime.
 
 ---
 
@@ -16,7 +16,7 @@ binary is not proof that every language feature works at runtime.
 
 ### Prerequisites
 
-* **c3c 0.8.4** — the C3 compiler (Pridec is implemented in C3).
+* **c3c 0.8.6** — the C3 compiler (Pridec is implemented in C3).
   `make c3c` will fetch a static build to `~/c3bin/c3c` for you.
 * **libLLVM 23** — PEAR uses the LLVM-C API and LLVM-23 attribute IDs. LLVM 19
   is not a supported substitute for optimized native-code testing.
@@ -26,7 +26,7 @@ binary is not proof that every language feature works at runtime.
 ### Build the compiler
 
 ```bash
-bash scripts/agent3-env.sh    # restore c3c 0.8.4 + C3 stdlib + libLLVM 23
+bash scripts/agent3-env.sh    # restore c3c + C3 stdlib + libLLVM 23
 make                         # builds ./pfrontc
 export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 ```
@@ -34,7 +34,7 @@ export LD_LIBRARY_PATH="$HOME/.cache/llvm23:/usr/lib/x86_64-linux-gnu"
 ### Run
 
 ```bash
-./pfrontc path/to/file.pie --emit-air     # writes file.air (AIR 2.0, whole program) next to the source; pfrontc ends here
+./pfrontc path/to/file.pie --emit-air     # writes file.air (AIR 2.2, whole program) next to the source; pfrontc ends here
 scripts/pie-exe.sh path/to/file.pie -O2   # the chain: pfrontc -> file.air -> legacy pear1c -> native executable (needs `make legacy-pear`)
 ./pfrontc path/to/file.pie --dump-ast     # print the resolved, post-theory AST
 ./pfrontc path/to/file.pie --strict-types # turn sort/type advice into errors
@@ -93,7 +93,7 @@ Pridec/
 │   │   ├── air_scope.c3         # name/ret/loop stacks, α-renaming
 │   │   ├── air_types.c3         # PNode type annotation → AirTyp
 │   │   ├── air_lower.c3         # PNode → AirModule (λ̄μμ̃)
-│   │   ├── air_emit.c3          # AirModule → AIR 1.0 text
+│   │   ├── air_emit.c3          # legacy diagnostic AIR 1.0-style dump (--emit-air-pretty)
 │   │   └── README.md            # calculus, invariants, C3 gotchas
 │   └── theory/                  # theory pipeline (~40 passes)
 │       ├── theory_check.c3      # orchestrator (registration → opt → verify)
@@ -113,7 +113,7 @@ Pridec/
 ├── examples/                    # example .pie programs
 ├── bench/                       # benchmarks (.pie kernels + C harnesses)
 ├── docs/
-│   ├── specs/AIR.md             # AIR 2.0 specification (normative)
+│   ├── specs/AIR.md             # AIR 2.2 specification (normative)
 │   └── dev/                     # developer notes (HANDOFF, TODOs)
 ├── scripts/                     # build/regression/CI helpers
 ├── experiments/                 # research scratchpads (not built by default)
@@ -158,7 +158,7 @@ theory pipeline  (~40 passes — see pfront/theory/theory_check.c3)
 air_lower  →  AirModule (λ̄μμ̃ IR in slab arena)
    │
    ▼
-air_write  →  AIR 2.0 text  (.air file; pfrontc ends here, no LLVM)
+air_write  →  AIR 2.2 text  (.air file; pfrontc ends here, no LLVM)
    │
    ├─ legacy/pear1 (pear1c)  →  LLVM 23 bitcode / native ELF   (frozen reference + gate)
    └─ PEAR 2                 →  built against docs/pear2/

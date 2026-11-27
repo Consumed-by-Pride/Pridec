@@ -1,0 +1,43 @@
+// AIR middle end: constant folding must produce the literal answer, and only
+// where the answer is the same program.
+//
+// `k` is 2 + 3 folded to 5 by --passes=fold. The three `unfoldable` functions
+// are the refusals the pass must make, and they are the reason this fixture is
+// worth having: a folding pass that gets any of them wrong changes behaviour
+// silently, and none of them is reachable from a corpus run.
+//
+//   2 + 3                = 5      (folded)
+//   100i8 + 100i8        no fold  (would leave the i8 range: the add wraps)
+//   x / 0                no fold  (would move a trap to compile time)
+//   x << 64              no fold  (shift amount outside the width)
+//   (7 * 6) - 2          = 40     (folded through two levels)
+//   x * 1                = x      (identity, no literal needed)
+air 2.2 Main "fold_main.pie";
+
+def constant() : i64 =
+  mu~ %ret.
+    <(add 2 3 : i64) | %ret>;
+
+def nested() : i64 =
+  mu~ %ret.
+    <(sub (mul 7 6 : i64) 2 : i64) | %ret>;
+
+def narrow(x : i8) : i8 =
+  mu~ %ret.
+    <(add x 100 : i8) | %ret>;
+
+def by_zero(x : i64) : i64 =
+  mu~ %ret.
+    <(div x 0 : i64) | %ret>;
+
+def big_shift(x : i64) : i64 =
+  mu~ %ret.
+    <(shl x 64 : i64) | %ret>;
+
+def times_one(x : i64) : i64 =
+  mu~ %ret.
+    <(mul x 1 : i64) | %ret>;
+
+def main() : i64 =
+  mu~ %ret.
+    <constant | call · %ret>;

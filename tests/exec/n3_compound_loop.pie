@@ -1,8 +1,14 @@
 -- EXIT: 42
--- Known defect (Agent-4 §49): += assigns its RHS instead of adding; hangs at all tiers.
+-- `+=` in a loop body compiles to load-add-store, so the counter reaches the
+-- bound and the accumulator gets every step. This test used to carry a "known
+-- defect: += assigns its RHS instead of adding" note and asserted a bare 42, so
+-- it would have passed even if the loop never ran. The defect is fixed; the
+-- assertion now depends on the accumulated value, which is 1+2+3 = 6.
 fn main : () -> i64
   | () ->
       let mut i : i64 = 0
+      let mut acc : i64 = 0
       while i < 3
         i += 1
-      42
+        acc += i
+      acc + 36

@@ -1598,7 +1598,7 @@ fn void emit_decl(AirEmitter* e, AirDecl* d)
 }
 
 // ── Public entry point ─────────────────────────────────────────────────
-fn void emit_module(AirModule* mod, AirLower* lr, char* path)
+fn int emit_module(AirModule* mod, AirLower* lr, char* path)
 {
     AirEmitter e;
     e.mod = mod;
@@ -1606,6 +1606,21 @@ fn void emit_module(AirModule* mod, AirLower* lr, char* path)
     e.indent = 0;
     e.need_space = false;
     e.in_tail = false;
+    /*
+     Refuse to emit a module that overflowed its decl array. `decls` is a fixed
+     [4096]; add_decl dropped anything past it and callers ignored the false
+     return, so the artifact would be written SHORT while reporting errors=0 --
+     the same "success, truncated artifact" shape as the fmt and ENOSPC bugs.
+     This is the writer `--emit-air` uses, so the guard has to live here too and
+     not only in air_write::write_module (which serves the reader/round-trip
+     paths). Nothing reaches the cap today (2,430 decls); that is the point.
+    */
+    if (mod.decl_overflow)
+    {
+        void* se = fdopen(2, "w");
+        fprintf(se, "air-emit: module exceeded the 4096-decl cap; the .air would be missing declarations, refusing to write it\n", (char*)null);
+        return 1;
+    }
     void* std_out = get_stdout();
     if (path != null)
     {
@@ -1631,5 +1646,15 @@ fn void emit_module(AirModule* mod, AirLower* lr, char* path)
 
     e.wr("\n; end of AIR\n");
 
-    if (path != null && e.out != std_out) { fclose(e.out); }
+    /*
+     Return the write result. stdio does its last flush inside fclose, so on a
+     full disk every wr() succeeds and fclose returns EOF -- the artifact is
+     short or empty and the caller was previously told nothing. Measured: with
+     the disk full, --emit-air wrote a 0-byte .air and still reported errors=0.
+    */
+    if (path != null && e.out != std_out)
+    {
+        if (fclose(e.out) != 0) { return -1; }
+    }
+    return 0;
 }

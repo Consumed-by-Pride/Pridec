@@ -18,6 +18,10 @@ struct AirLocal {
 }
 struct AirLoopLabel {
     char* break_lbl; char* continue_lbl; int depth;
+    // The user-written label (`'rowscan` in `'rowscan: while ..`), or null for
+    // an unlabelled loop. A labelled `break`/`continue` has to find the loop it
+    // names, not just the innermost one.
+    char* user_name;
 }
 struct AirScope {
     AirArena* arena;
@@ -192,9 +196,13 @@ fn char* AirScope.fresh_label(AirScope* s, char* hint) {
     s.bind_covar(nm, null); return nm;
 }
 fn void AirScope.push_loop(AirScope* s, char* brk, char* cont) {
+    s.push_loop_named(brk, cont, null);
+}
+fn void AirScope.push_loop_named(AirScope* s, char* brk, char* cont, char* user_name) {
     if (s.loop_count >= AIR_SCOPE_LABELS) return;
     AirLoopLabel* lbl = &s.loops[s.loop_count];
     lbl.break_lbl = brk; lbl.continue_lbl = cont; lbl.depth = s.depth;
+    lbl.user_name = user_name;
     s.loop_count++;
 }
 fn void AirScope.pop_loop(AirScope* s) { if (s.loop_count > 0) s.loop_count--; }
@@ -203,6 +211,34 @@ fn char* AirScope.current_break(AirScope* s) {
 }
 fn char* AirScope.current_continue(AirScope* s) {
     if (s.loop_count <= 0) return (char*)"%ret"; return s.loops[s.loop_count-1].continue_lbl;
+}
+/*
+ A labelled transfer (`break 'rowscan`) leaves the loop that CARRIES that name,
+ which need not be the innermost one. Searching outward-to-inward (innermost
+ first) means a shadowed label still resolves to the nearest enclosing loop that
+ declares it, which is what every language with labelled loops does.
+
+ Returns null when no enclosing loop declares the name; the caller reports that
+ rather than silently breaking the innermost loop, which is what happened while
+ `break 'x` was parsed and then ignored the label entirely.
+*/
+fn char* AirScope.break_for(AirScope* s, char* user_name) {
+    if (user_name == null) return s.current_break();
+    for (int i = s.loop_count - 1; i >= 0; i--) {
+        if (s.loops[i].user_name != null && streq(s.loops[i].user_name, user_name)) {
+            return s.loops[i].break_lbl;
+        }
+    }
+    return null;
+}
+fn char* AirScope.continue_for(AirScope* s, char* user_name) {
+    if (user_name == null) return s.current_continue();
+    for (int i = s.loop_count - 1; i >= 0; i--) {
+        if (s.loops[i].user_name != null && streq(s.loops[i].user_name, user_name)) {
+            return s.loops[i].continue_lbl;
+        }
+    }
+    return null;
 }
 
 fn bool streq(char* a, char* b) {

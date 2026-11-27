@@ -1,0 +1,14 @@
+-- EXPECT: Z\n
+-- EXIT: 0
+-- AIR 2.2 syscall payload from heap: write(1, buf, 2) where buf is an allocated
+-- buffer filled by an indexed store, then freed. The syscall operand is a heap
+-- address. Out of the PEAR 2 subset: pear2c must reject the file with a
+-- positioned diagnostic rather than emit a program that writes nothing.
+fn main(_) -> i64 ! [IO, Alloc] {
+  let buf : *u8 = alloc [u8; 8];
+  buf[0] = 90u8;
+  buf[1] = 10u8;
+  syscall(1, 1, buf as i64, 2);
+  free buf;
+  return 0;
+}

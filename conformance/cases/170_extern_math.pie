@@ -1,13 +1,18 @@
 -- EXPECT-CLEAN
-fn sqrt   #[extern("sqrt")]   : f64 -> f64
-fn fabs   #[extern("fabs")]   : f64 -> f64
-fn floor  #[extern("floor")]  : f64 -> f64
-fn ceil   #[extern("ceil")]   : f64 -> f64
-fn sin    #[extern("sin")]    : f64 -> f64
-fn cos    #[extern("cos")]    : f64 -> f64
-fn exp    #[extern("exp")]    : f64 -> f64
-fn log    #[extern("log")]    : f64 -> f64
-fn pow    #[extern("pow")]    : (f64, f64) -> f64
+-- Declaration attributes sit AFTER the signature, not between the name and it:
+-- tests/pfront/syntax/x07_meta_attrs.pie:23 spells an extern
+-- `fn ext_sin : f64 -> f64 #extern("sin") #cc(c)`, and that is the only form the
+-- parser accepts. The `fn puts #[extern("puts")] : ptr -> i32` spelling used
+-- here failed with E1050 "expected an expression" on the attribute.
+fn sqrt : f64 -> f64 #[extern("sqrt")]
+fn fabs : f64 -> f64 #[extern("fabs")]
+fn floor : f64 -> f64 #[extern("floor")]
+fn ceil : f64 -> f64 #[extern("ceil")]
+fn sin : f64 -> f64 #[extern("sin")]
+fn cos : f64 -> f64 #[extern("cos")]
+fn exp : f64 -> f64 #[extern("exp")]
+fn log : f64 -> f64 #[extern("log")]
+fn pow : (f64, f64) -> f64 #[extern("pow")]
 
 fn hypotenuse : (f64, f64) -> f64
   | (a, b) -> sqrt(a * a + b * b)

@@ -68,7 +68,29 @@ nair=$(ls "$W"/*.air 2>/dev/null | wc -l); nsrc=$(wc -l < "$W/sources.txt")
 : > "$W/verify.tsv"
 for f in "$W"/*.air; do
     id=$(basename "$f" .air)
-    "$AT" fmt "$f" 2>/dev/null | cmp -s - "$f" || { bad "corpus/$id: fmt not idempotent"; continue; }
+    # `fmt` must BOTH succeed and be a fixed point. Piping into cmp discarded
+    # airtool's exit status -- the pipeline reports only cmp's -- so a fmt that
+    # failed, or that dropped half the module and still exited 0, was reported
+    # as "not idempotent" at worst and not detected at all if the truncated
+    # output happened to compare equal. Capture the status separately.
+    if ! "$AT" fmt "$f" > "$W/fmt.out" 2>"$W/fmt.err"; then
+        bad "corpus/$id: fmt FAILED (exit $?) on a file pfrontc just wrote"
+        sed 's/^/    /' "$W/fmt.err" | head -3
+        continue
+    fi
+    if ! cmp -s "$W/fmt.out" "$f"; then
+        # Distinguish "reformatted" from "lost data": a fmt that changes bytes
+        # is a canonicalisation bug, but one that drops declarations is a
+        # correctness bug, and the two must not read the same.
+        n_in=$(grep -c '^\(def\|defco\|declare\|codata\|data\|module\) ' "$f" 2>/dev/null || echo 0)
+        n_out=$(grep -c '^\(def\|defco\|declare\|codata\|data\|module\) ' "$W/fmt.out" 2>/dev/null || echo 0)
+        if [ "$n_in" != "$n_out" ]; then
+            bad "corpus/$id: fmt DROPPED DECLARATIONS ($n_in in, $n_out out) and exited 0"
+        else
+            bad "corpus/$id: fmt not idempotent"
+        fi
+        continue
+    fi
     line=$("$AT" verify "$f" 2>&1 | tail -1)
     cnt=$(echo "$line" | sed -n 's/.*V1=\([0-9]*\) V2=\([0-9]*\) V3=\([0-9]*\) V4=\([0-9]*\).*/\1 \2 \3 \4/p')
     [ -n "$cnt" ] || { bad "corpus/$id: verify produced no summary"; continue; }
@@ -83,8 +105,17 @@ rt_list="tests/exec/01_hello.pie tests/exec/12_struct_ops.pie tests/exec/pear/p0
 [ "${AIR_RT_FULL:-0}" = 1 ] && rt_list=$(cat "$W/sources.txt")
 for src in $rt_list; do
     d=$(dirname "$src"); b=$(basename "$src")
-    out=$( cd "$d" && timeout 300 "$OLDPWD/$PF" "$b" --air-roundtrip -O2 --quiet 2>&1 )
-    if echo "$out" | grep -q "errors=[1-9]"; then continue; fi          # does not compile: nothing to round-trip
+    # Round-tripping needs the AIR *reader*, which pfrontc no longer links: the
+    # front end writes AIR and stops at that boundary. So the loop goes through
+    # the front end twice -- .pie -> .air by pfrontc, .air -> .air by airtool --
+    # which is also the shape a real round trip takes.
+    staged="$W/rt.air"
+    emit=$( cd "$d" && timeout 300 "$OLDPWD/$PF" "$b" --emit-air-low --quiet 2>&1 )
+    if echo "$emit" | grep -q "errors=[1-9]"; then continue; fi         # does not compile: nothing to round-trip
+    cp "$d/${b%.*}.low.air" "$staged" 2>/dev/null || cp "$d/${b%.*}.air" "$staged" 2>/dev/null || true
+    [ -f "$staged" ] || { bad "roundtrip/$src: no .air was produced by the front end"; continue; }
+    out=$(timeout 300 "$AT" roundtrip "$staged" 2>&1)
+    if echo "$out" | grep -q "errors=[1-9]"; then continue; fi
     echo "$out" | grep -q "roundtrip: structure identical" || { bad "roundtrip/$src: structure: $(echo "$out" | grep roundtrip | head -1)"; continue; }
     # a few shapes crash the legacy PEAR itself (tracked in the exec ledger); the structural result still counts
     if echo "$out" | grep -q "roundtrip: bitcode identical"; then ok

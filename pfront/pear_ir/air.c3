@@ -17,9 +17,8 @@ import air_scope;
 import air_lower;
 import air_emit;
 import air_write;
-import air_read;
-import air_facts;
 import air_audit;
+import air_facts;
 
 alias PNode = pfront_core::PNode;
 
@@ -66,7 +65,7 @@ fn char* module_name_of(PNode* root)
     return (char*)"Main";
 }
 
-fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
+fn int emit_air(PNode* root, pfront_core::Interner* it, char* path)
 {
     char[AIR_PATH_MAX] buf;
     char* out_path = null;
@@ -78,28 +77,42 @@ fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
 
     // ── Build IR ────────────────────────────────────────────────────────
     AirArena arena;
-    if (!arena.init()) return;
+    if (!arena.init()) return -2;
     AirModule mod;
     char* mod_nm = module_name_of(root);
     if (!mod.init(&arena, mod_nm, path))
     {
         arena.destroy();
-        return;
+        return -2;
     }
     AirScope sc;
     sc.init(&arena);
+    if (arena.oom) { printf("air-lower: AIR arena allocation failed\n"); sc.destroy(); arena.destroy(); return -3; }
     AirLower lr;
     lr.init(&mod, &sc, it);
     lr.module_body(root);
+    if (arena.oom || lr.fatal_errors != 0)
+    {
+        printf("air-lower: %s\n", lr.fatal_message != null ? lr.fatal_message : (char*)"AIR arena allocation failed");
+        sc.destroy(); arena.destroy(); return -3;
+    }
 
     air_facts::validate_module(&mod);
 
     // ── Emit text ──────────────────────────────────────────────────────
-    air_emit::emit_module(&mod, &lr, out_path);
+    int werr = air_emit::emit_module(&mod, &lr, out_path);
+    if (werr != 0)
+    {
+        printf("air: write failed -- the .air on disk is incomplete (out of space?)\n");
+        sc.destroy();
+        arena.destroy();
+        return werr;
+    }
 
     // ── Teardown ───────────────────────────────────────────────────────
     sc.destroy();
     arena.destroy();
+    return 0;
 }
 
 
@@ -109,7 +122,8 @@ fn void emit_air(PNode* root, pfront_core::Interner* it, char* path)
 // module's definitions lowered into ONE AirModule, in load order, then screened
 // by air_facts and serialised by air_write. The file is written only when the
 // writer reports zero errors — a lossy `.air` is never published. Returns the
-// writer error count (0 = ok, -1 = could not open the file, -2 = setup failed).
+// writer error count (0 = ok, -1 = could not open the file, -2 = setup failed,
+// -3 = arena exhaustion or a fatal lowering limit; no AIR is published).
 fn int emit_air_program(PNode** roots, usz root_count, pfront_core::Interner* it, char* path)
 {
     if (roots == null || root_count == 0) { return -2; }
@@ -127,15 +141,23 @@ fn int emit_air_program(PNode** roots, usz root_count, pfront_core::Interner* it
     if (!mod.init(&arena, mod_nm, path)) { arena.destroy(); return -2; }
     AirScope sc;
     sc.init(&arena);
+    if (arena.oom) { printf("air-lower: AIR arena allocation failed\n"); sc.destroy(); arena.destroy(); return -3; }
     AirLower lr;
     lr.init(&mod, &sc, it);
     for (usz i = 0; i < root_count; i++)
     {
         if (roots[i] == null) continue;
         lr.module_body(roots[i]);
+        if (arena.oom || lr.fatal_errors != 0)
+        {
+            printf("air-lower: %s\n", lr.fatal_message != null ? lr.fatal_message : (char*)"AIR arena allocation failed");
+            sc.destroy(); arena.destroy(); return -3;
+        }
         air_audit::report(roots[i], i, module_name_of(roots[i]), i == 0);
+        if (arena.oom) { sc.destroy(); arena.destroy(); return -3; }
     }
     air_facts::validate_module(&mod);
+    if (arena.oom) { sc.destroy(); arena.destroy(); return -3; }
     int errs = air_write::write_module(&mod, out_path);
     sc.destroy();
     arena.destroy();
@@ -173,49 +195,3 @@ fn long slurp(char* path, char** out)
     return (long)got;
 }
 
-// roundtrip_program — the faithfulness proof for the `.air` format (test-only,
-// `--air-roundtrip`). Lowers the program, writes the text, reads it back and
-// compares a structural fingerprint of the two modules: every node's tag and
-// every non-pointer field, ids and addresses ignored (air_write::digest_module).
-// Equal fingerprints mean the text lost no field a backend could read.
-//
-// Before the PEAR/pfront split the same check was also run against the LLVM
-// bitcode of both modules: byte-identical for every program of the exec, PEAR,
-// pfront and examples suites at -O2 that the legacy backend could compile
-// (180 of 185; the other five crash the legacy backend itself).
-// Returns 0 = identical, 1 = differs, 2 = could not run (reported).
-fn int roundtrip_program(PNode** roots, usz root_count, pfront_core::Interner* it, char* path)
-{
-    if (roots == null || root_count == 0) { return 2; }
-    char[AIR_PATH_MAX] pt;
-    snprintf(&pt[0], AIR_PATH_MAX, "%s.rt.air", path);
-
-    AirArena arena;
-    if (!arena.init()) return 2;
-    AirModule mod;
-    if (!mod.init(&arena, module_name_of(roots[0]), path)) { arena.destroy(); return 2; }
-    AirScope sc;
-    sc.init(&arena);
-    AirLower lr;
-    lr.init(&mod, &sc, it);
-    for (usz i = 0; i < root_count; i++) { if (roots[i] != null) lr.module_body(roots[i]); }
-    air_facts::validate_module(&mod);
-
-    int werr = air_write::write_module(&mod, &pt[0]);
-    if (werr != 0) { printf("roundtrip: writer reported %d error(s)\n", werr); sc.destroy(); arena.destroy(); return 2; }
-    AirArena arena2;
-    if (!arena2.init()) { sc.destroy(); arena.destroy(); return 2; }
-    AirModule mod2;
-    if (!air_read::read_file(&pt[0], &arena2, &mod2, false)) { printf("roundtrip: reader rejected the writer's own output\n"); sc.destroy(); arena.destroy(); arena2.destroy(); return 2; }
-    air_facts::validate_module(&mod2);
-    if (getenv("AIR_DIGEST") != null) { (void)air_write::write_module(&mod2, "/tmp/rt_b.air"); }
-
-    ulong da = air_write::digest_module(&mod);
-    ulong db = air_write::digest_module(&mod2);
-    int rc = 0;
-    if (da != db) { printf("roundtrip: STRUCTURE differs after write/read (%lx vs %lx) -- a field is not in the text\n", da, db); rc = 1; }
-    else { printf("roundtrip: structure identical (%lx)\n", da); }
-    if (getenv("AIR_RT_KEEP") == null) { remove(&pt[0]); }
-    sc.destroy(); arena.destroy(); arena2.destroy();
-    return rc;
-}

@@ -1,0 +1,10 @@
+-- EXIT: 77
+-- AIR 2.2 memory: pointer offset arithmetic feeding an indexed store and load.
+-- `(a + 2)[1]` must land on element 3 of an i64 array (byte offset 24), not on
+-- a byte offset; guards the element-size-aware GEP on a computed base.
+fn main(_) -> i64 ! [Alloc] {
+  let a : *i64 = alloc [i64; 8];
+  let p : *i64 = a + 2;
+  p[1] = 77;
+  return a[3];
+}

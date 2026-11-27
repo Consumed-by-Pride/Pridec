@@ -254,14 +254,26 @@ fn int TypeTable.mk_tuple(TypeTable* t, int* elems, usz n)
 }
 
 // Function type: args[0..n-1] are parameters, args[n] is the result.
+//
+// `varargs` records a trailing `...` (`fn printf : (ptr, ...) -> i32`). It is
+// carried on TyNode.is_mut, which no other TY_FN meaning uses, so that the
+// call-site arity check can tell a variadic callee (any number of extra
+// arguments) from a fixed one. Without it every `printf("%ld", n)` looked like
+// an arity mismatch: the example programs called it dozens of times and each
+// call counted as an error.
 fn int TypeTable.mk_fn(TypeTable* t, int* params, usz n, int ret)
+{
+    return t.mk_fn_varargs(params, n, ret, false);
+}
+
+fn int TypeTable.mk_fn_varargs(TypeTable* t, int* params, usz n, int ret, bool varargs)
 {
     int[MAX_TYPE_ARGS] a;
     usz k = 0;
     for (usz i = 0; i < n && k + 1 < MAX_TYPE_ARGS; i++) { a[k] = params[i]; k = k + 1; }
     a[k] = ret;
     k = k + 1;
-    return t.intern(TyKind.TY_FN, 0, false, false, 0, null, 0, &a[0], k);
+    return t.intern(TyKind.TY_FN, 0, false, varargs, 0, null, 0, &a[0], k);
 }
 
 fn int TypeTable.mk_named(TypeTable* t, Node* decl, uint name_id)
@@ -1094,13 +1106,42 @@ fn int TypeMapper.map(TypeMapper* m, Node* ty, int depth)
             usz np = 0;
             int ret = m.tt.t_unit;
             Node* p0 = ty.child(0);
+            bool va = p0 != null && (p0.flags & pfront_core::NF_VARIADIC) != 0;
             if (p0 != null && p0.kind == Nk.N_TY_TUPLE)
             {
                 for (usz i = 0; i < p0.child_count && np < MAX_TYPE_ARGS - 1; i++)
                 {
+                    /*
+                     A variadic parameter list ends with a placeholder node: the
+                     parser appends N_TY_INFER for the `...` itself
+                     (pfront_parse.c3:1195). It is not a parameter. Counting it
+                     made `fn printf : (ptr, ...)` look like TWO fixed parameters,
+                     so every call that supplied the real one and a format
+                     argument still missed -- and `printf("hi\n")` alone was
+                     flagged too.
+                    */
+                    if (va && i + 1 == p0.child_count) { break; }
                     params[np] = m.map(p0.children[i], depth + 1);
                     np = np + 1;
                 }
+            }
+            /*
+             `()` in parameter position is the ZERO-parameter signature, not a
+             one-parameter signature taking the unit value. The parser hands it
+             over as N_TY_UNIT (not an empty N_TY_TUPLE -- see the AST for
+             `fn f : () -> i64`: its first child is `ty-unit`), so it fell into
+             this single-parameter branch and `fn f : () -> i64` was recorded as
+             `(unit) -> i64`.
+
+             The cost was a spurious W3102 on the natural nullary call: `f()`
+             passes na=0 against np=1 and was reported as an arity mismatch,
+             while the awkward `f(())` passed. Nothing rejected the program --
+             type facts are advisories (DiagBag.advisory) -- but the lint lied
+             and the arity errors counter made the front end look unsound.
+            */
+            else if (p0 != null && p0.kind == Nk.N_TY_UNIT)
+            {
+                np = 0;
             }
             else if (p0 != null && p0.kind != Nk.N_TY_CONSTRAINT)
             {
@@ -1115,7 +1156,9 @@ fn int TypeMapper.map(TypeMapper* m, Node* ty, int depth)
                     ret = m.map(c.children[0], depth + 1);
                 }
             }
-            return m.tt.mk_fn(&params[0], np, ret);
+            // `va` was read above, before the placeholder child was skipped: the
+            // call site needs it to accept extra arguments (`printf("%ld", n)`).
+            return m.tt.mk_fn_varargs(&params[0], np, ret, va);
         }
         case N_TY_GENERIC:
         {

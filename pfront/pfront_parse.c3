@@ -386,11 +386,40 @@ fn void Parser.sync(Parser* p)
     }
 }
 
+/*
+ Depth guard.
+
+ `enter` increments depth; every caller is written
+
+     if (!p.enter()) { Tok c = p.cur(); return p.mk_error(c); }
+
+ and returns WITHOUT calling leave(), so the frame that failed to enter was
+ never balanced. It happened to come out right because the normal path calls
+ leave() once per frame, but the imbalance is real and the failed frame leaked.
+
+ The second half of the bug was the diagnosis itself. `mk_error` runs while the
+ parser is still parked on the offending token, so hitting the limit produced
+
+     error[E1001]: expression nests too deeply
+     error[E1041]: expected ')' after expression
+
+ The second error is noise: it reads like a missing paren in the source and
+ sends the reader looking for one that is not missing. A nesting limit is not a
+ syntax error. Entering the existing panic state on the limit hit makes
+ `err`/`err_hint` suppress the cascade, so only the real cause is reported.
+*/
 fn bool Parser.enter(Parser* p)
 {
     p.depth = p.depth + 1;
     if (p.depth > MAX_DEPTH)
     {
+        p.depth = p.depth - 1;          // balance the frame that never entered
+        // Enter the parser's existing panic state. `err`/`err_hint` already
+        // return early while panicking, so the follow-on diagnostics that used
+        // to accompany a limit hit ("expected ')' after expression") are
+        // suppressed by the mechanism that exists for exactly this purpose:
+        // after one real error, stop piling on.
+        p.panicking = true;
         if (!p.depth_reported)
         {
             Tok c = p.cur();
@@ -404,6 +433,8 @@ fn bool Parser.enter(Parser* p)
 }
 
 fn void Parser.leave(Parser* p) { p.depth = p.depth - 1; }
+
+
 
 // ── Node helpers ────────────────────────────────────────────────────────────
 fn Node* Parser.mk(Parser* p, Nk k, int line, int col)
@@ -1881,10 +1912,53 @@ fn Node* Parser.parse_expr_prec(Parser* p, int min_prec)
                 if (p.peek(look).col - 1 <= p.stmt_indent) { continues = false; }
             }
             if (!continues) { break; }
-            for (usz k = 0; k < look; k++) { p.advance(); }
+            /*
+             An INDENT absorbed here belongs to the continuation line and MUST
+             be balanced by end_stmt. It was assumed "the block parser tolerates
+             an extra" DEDENT, and that was wrong: the block parser reads a
+             DEDENT as the end of the block. So
+
+                 let dot = 1i64
+                   || 2i64           <- deeper continuation, INDENT absorbed
+                 name_cstr as i64     <- DEDENT lands, block ends HERE
+
+             ejected every statement after the continuation out of the clause
+             body. The s-expression for a three-line function showed the final
+             expression as a TOP-LEVEL `(ident dot)` beside `(fn f ...)`, so the
+             name was reported unresolved at its use site while the binding sat
+             inside the function. That is the shape of the tokei walker errors.
+
+             Count them so end_stmt closes exactly as many as were opened.
+            */
+            for (usz k = 0; k < look; k++)
+            {
+                if (p.ct() == Tk.TOKEN_INDENT) { p.cont_indents = p.cont_indents + 1; }
+                p.advance();
+            }
             t = p.ct();
         }
 
+        /*
+         `xor` is a word operator (docs/pride/SYNTAX.md:629 lists it beside `^`)
+         but is NOT a reserved word -- stdlib/hash/auto_hash.pie:194 binds
+         `let xor = h ^ base`. Reserving it in the lexer therefore broke the whole
+         stdlib, so the reading is decided POSITIONALLY here instead: an ident
+         spelling `xor` in infix position, i.e. with a left operand already
+         parsed, is the operator. In every other position -- `let xor = ..`, a
+         binder, the head of an expression -- it stays a name.
+
+         This has to happen before the juxtaposition rule in the postfix loop,
+         which would otherwise read `v xor mask` as `v(xor)(mask)`: that is what
+         made the AST a CALL with an unresolved `xor` inside.
+        */
+        if (t == Tk.TOKEN_IDENT)
+        {
+            Tok w = p.cur();
+            if (w.len == 3 && w.start != null && w.start[0] == 'x' && w.start[1] == 'o' && w.start[2] == 'r')
+            {
+                t = Tk.TOKEN_XOR;
+            }
+        }
         int prec = infix_prec(t);
         /*
          Inside a handler's computation a `|` opens an ARM, not a bitwise
@@ -1892,8 +1966,26 @@ fn Node* Parser.parse_expr_prec(Parser* p, int min_prec)
          infix_prec so the table stays a pure function of the token.
         */
         if (t == Tk.TOKEN_PIPE && p.no_pipe_infix) { break; }
+        /*
+         `xor` is a word operator (docs/pride/SYNTAX.md:629 lists it beside `^`),
+         and unlike `and`/`or`/`not` it is NOT a reserved word: stdlib/hash/
+         auto_hash.pie:194 binds `let xor = h ^ base`, so making the lexer emit
+         TOKEN_XOR broke the whole stdlib (megaload: 2 errors over 261 modules).
+
+         The disambiguation is positional and unambiguous: a bare `xor` standing
+         BETWEEN two operands is the operator, and anywhere else -- after `let`,
+         in binder position, at the head of an expression -- it is a name. Re-read
+         it as the operator here so both spellings work.
+        */
         if (prec == 0 || prec < min_prec) { break; }
         Tok op = p.advance();
+        /*
+         The word operator `xor` lexes as TOKEN_IDENT, so `op` carries the wrong
+         type; the node records `op.type` and the lowerers dispatch on it. Retag
+         before anything consumes it, or `v xor mask` reaches the lowering as an
+         operator PRIDE has no case for ("not lowered yet (binary operator)").
+        */
+        if (op.type == Tk.TOKEN_IDENT && tok_is_word_xor(op)) { op.type = Tk.TOKEN_XOR; }
         // Symmetric case: the operator is at END of line and the operand is on
         // the next. `x ||\n  y` — skip the layout run before the right side.
         p.skip_continuation_layout();
@@ -2232,6 +2324,14 @@ fn bool tok_is_member_name(Tk t)
  ordinary call, and anything operator-shaped is excluded because `k - 1`
  is subtraction, not application to a negative literal.
 */
+// `xor` is a word operator that is also a legal identifier; see the positional
+// note in parse_expr_prec. Shared so the juxtaposition rule can exclude it.
+fn bool tok_is_word_xor(Tok t)
+{
+    return t.type == Tk.TOKEN_IDENT && t.len == 3 && t.start != null
+        && t.start[0] == 'x' && t.start[1] == 'o' && t.start[2] == 'r';
+}
+
 fn bool tok_is_juxta_arg(Tk t)
 {
     switch (t)
@@ -2272,6 +2372,7 @@ fn Node* Parser.parse_postfix(Parser* p)
         */
         if (p.juxta_apply && tok_is_juxta_arg(t) && e != null
             && !tok_is_then(p.cur())
+            && !tok_is_word_xor(p.cur())
             && p.cur().line == e.line)
         {
             Node* call = p.mk_at(Nk.N_EXPR_CALL, p.cur());
@@ -3196,6 +3297,15 @@ fn Node* Parser.parse_primary(Parser* p)
         case TOKEN_KW_REIFY:
         case TOKEN_KW_EVAL:
         {
+            if (pfront_meta_is_name(p))
+            {
+                p.advance();
+                Node* id = p.mk_at(Nk.N_EXPR_IDENT, t);
+                id.name_id = p.intern_tok(t);
+                id.p.sptr = t.start;
+                id.p.slen = t.len;
+                return id;
+            }
             /*
              `reify e` and `eval e` — MSP operators (spec §20's keyword
              list) with no parse rule at all. They fell through to the
@@ -3222,6 +3332,16 @@ fn Node* Parser.parse_primary(Parser* p)
         case TOKEN_SIGIL_DATA:
         case TOKEN_SIGIL_BYTES:
         {
+            // `quote` alone is far more often a variable than an operator.
+            if (t.type == Tk.TOKEN_KW_QUOTE && pfront_meta_is_name(p))
+            {
+                p.advance();
+                Node* id = p.mk_at(Nk.N_EXPR_IDENT, t);
+                id.name_id = p.intern_tok(t);
+                id.p.sptr = t.start;
+                id.p.slen = t.len;
+                return id;
+            }
             p.advance();
             Node* n = p.mk_at(Nk.N_EXPR_QUOTE, t);
             n.p.op = (int)t.type;
@@ -3257,6 +3377,15 @@ fn Node* Parser.parse_primary(Parser* p)
         case TOKEN_KW_SPLICE:
         case TOKEN_KW_UNQUOTE:
         {
+            if (pfront_meta_is_name(p))
+            {
+                p.advance();
+                Node* id = p.mk_at(Nk.N_EXPR_IDENT, t);
+                id.name_id = p.intern_tok(t);
+                id.p.sptr = t.start;
+                id.p.slen = t.len;
+                return id;
+            }
             p.advance();
             Node* n = p.mk_at(Nk.N_EXPR_SPLICE, t);
             p.add(n, p.parse_unary());
@@ -3592,6 +3721,37 @@ fn bool tok_is_then(Tok c)
     if (c.len != 4) { return false; }
     return c.start[0] == 't' && c.start[1] == 'h'
         && c.start[2] == 'e' && c.start[3] == 'n';
+}
+
+/*
+ Is a metaprogramming keyword being used as an ORDINARY NAME here?
+
+ `quote`, `splice`, `unquote`, `reify` and `eval` are real operators, but they
+ are also natural variable names -- and `quote` in particular shows up in every
+ lexer and scanner (`let quote = count(...)`, then `quote.code`).
+
+ The four cases in parse_primary below were UNCONDITIONAL prefix operators: the
+ parser consumed the keyword, then demanded an operand. So
+
+     let quote = selftest_count(...)     -- binds fine, keyword is in the
+                                            contextual-name range
+     quote.code == 1i64                  -- `quote` starts an operator, the
+                                            parser eats `.` as its operand and
+                                            reports "expected an expression"
+
+ at 43:27 -- the `.`, not the `let`. The binding and its use were parsed by two
+ different rules, and only the diagnostic at the use site was visible.
+
+ An operator form needs an operand to follow. If the next token cannot start an
+ expression -- an operator, a closing bracket, a comma, a line break, or the end
+ of the statement -- the keyword is a name. This mirrors the `tail` rule below,
+ and for the same reason.
+*/
+fn bool pfront_meta_is_name(Parser* p)
+{
+    Tok nx = p.peek(1);
+    if (nx.line != p.cur().line) { return true; }
+    return !tok_starts_expr(nx.type);
 }
 
 fn Node* Parser.parse_while(Parser* p)
@@ -4307,6 +4467,37 @@ fn Node* Parser.parse_stmt(Parser* p)
 {
     p.skip_newlines();
     Tok t = p.cur();
+    /*
+     `'rowscan: while ..` -- a labelled loop. The lexer already produces
+     TOKEN_LABEL_REF for `'name` (it exists for `break 'name`); nothing consumed
+     it in STATEMENT position, so the label fell through to expression parsing
+     and every labelled-loop program died with E1050 "expected an expression"
+     at the colon.
+
+     The label is not a wrapper node: it is recorded on the loop it names, so
+     lowering can push the loop's own break/continue targets under that name.
+     Only a loop may carry a label -- `'x: let ..` is not a jump target.
+    */
+    if (t.type == Tk.TOKEN_LABEL_REF && p.ring[1].type == Tk.TOKEN_COLON)
+    {
+        Tok lb = p.advance();      // the label
+        p.advance();               // ':'
+        p.skip_newlines();
+        Tk after = p.ct();
+        if (after == Tk.TOKEN_KW_WHILE || after == Tk.TOKEN_KW_FOR || after == Tk.TOKEN_KW_DO)
+        {
+            Node* body = p.parse_stmt();
+            if (body != null)
+            {
+                body.name_id = p.interner.intern(lb.start, lb.len);
+                body.p.sptr = lb.start;
+                body.p.slen = lb.len;
+            }
+            return body;
+        }
+        p.err_at(1051, lb.line, lb.col, "a label must name a loop (`'name: while ..`)");
+        return p.parse_stmt();
+    }
     switch (t.type)
     {
         case TOKEN_KW_LET:      return p.parse_let();

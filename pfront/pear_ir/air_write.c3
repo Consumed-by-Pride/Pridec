@@ -829,6 +829,27 @@ fn int write_module(AirModule* m, char* path)
     AirW w;
     w.errs = 0;
     for (usz i = 0; i < 8; i++) { w.first_err[i] = null; }
+    /*
+     Refuse to write a module that overflowed its decl array.
+
+     `AirModule.decls` is a fixed [4096]. Once full, add_decl dropped the rest
+     and every caller ignored the false return, so the artifact was written
+     SHORT while the caller was told errors=0 -- the same "success, truncated
+     artifact" shape as the fmt and ENOSPC bugs. Nothing reaches this today
+     (2,430 decls), which is exactly why it would go unnoticed when it did.
+     Fail loudly instead of publishing a body missing declarations.
+    */
+    if (m.decl_overflow)
+    {
+        // Nested scope so this stderr handle does not collide with the one the
+        // write-failure path declares later in this function.
+        {
+            void* se = fdopen(2, "w");
+            fprintf(se, "air-write: module '%s' exceeded the 4096-decl cap; the .air would be missing declarations, refusing to write it\n", m.name);
+            fflush(se);
+        }
+        return 1;
+    }
     void* f = (path != null) ? fopen(path, "w") : fdopen(1, "w");
     if (f == null) { return -1; }
     w.out = f;
@@ -841,7 +862,30 @@ fn int write_module(AirModule* m, char* path)
     w.dg = 0;
     w.s(m.low ? "air 3.0 " : "air 2.2 "); w.name(m.name); w.c(' '); w.opt_str(m.source_path); w.s(";\n\n");
     for (usz i = 0; i < m.decl_count; i++) { w.decl(m.decls[i]); }
-    if (path != null) { fclose(f); } else { fflush(f); }
+    /*
+     The return value of fclose/fflush IS the write result.
+
+     stdio buffers: the last 4 KiB (or more) is flushed by fclose itself, and
+     every earlier flush can fail without the individual fputs noticing. On a
+     full disk fclose returns EOF and the artifact is short or empty -- but
+     write_module returned w.errs, which is 0, so the caller was told the .air
+     was fine. Measured: with the sandbox disk full, --emit-air wrote a 0-byte
+     .air and still printed `errors=0`. That is the same "reports success,
+     artifact is wrong" shape as the fmt truncation in tests/pfront/bug/known.
+
+     Count it as a writer error so emit_air_program returns non-zero and
+     pfront_main refuses the artifact instead of publishing it.
+    */
+    int close_rc = (path != null) ? fclose(f) : fflush(f);
+    if (close_rc != 0)
+    {
+        if (w.errs == 0)
+        {
+            w.first_err[0] = "write failed while flushing the .air (out of space?); the file on disk is incomplete";
+            w.errs = 1;
+        }
+        else { w.errs = w.errs + 1; }
+    }
     void* se = fdopen(2, "w");
     for (int i = 0; i < w.errs && i < 8; i++) { fprintf(se, "air-write: %s\n", w.first_err[(usz)i]); }
     fflush(se);

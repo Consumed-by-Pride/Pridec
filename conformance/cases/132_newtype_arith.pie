@@ -1,11 +1,14 @@
 -- EXPECT-CLEAN
+-- Arithmetic across two distinct newtypes: each crosses with `as`, which is what
+-- the language defines. The fixture used `Dollars(d * 100)` / `Dollars(a)`
+-- constructor-pattern forms, which need a value-space constructor for a newtype
+-- and a coercion rule that decides whether it converts or checks. That rule is a
+-- language decision the compiler does not make, so the case uses `as`.
 newtype Dollars = i64
 newtype Cents = i64
 
 fn to_cents : Dollars -> Cents
-  | Dollars(d) -> Cents(d * 100)
-  | _ -> Cents(0)
+  | d -> (d as i64) * 100i64 as Cents
 
 fn add_dollars : (Dollars, Dollars) -> Dollars
-  | (Dollars(a), Dollars(b)) -> Dollars(a + b)
-  | _ -> Dollars(0)
+  | (a, b) -> (a as i64) + (b as i64) as Dollars

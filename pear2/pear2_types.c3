@@ -3,6 +3,16 @@
 module pear2c;
 import air_ir;
 
+// ── libc ──────────────────────────────────────────────────────────────────
+// One declaration per symbol for the whole `pear2c` module. C3 has a single
+// scope per module across its files, so four files each repeating
+// `extern fn void* malloc(usz)` is a redeclaration, not four declarations --
+// keep them here and nowhere else.
+extern fn void* malloc(usz size_);
+extern fn void  free(void* ptr);
+extern fn void* memset(void* dst, int value, usz n);
+extern fn void* memcpy(void* dst, void* src, usz n);
+
 fn int m1_int_bits(AirTyp* t)
 {
     if (t == null || t.tag == ATYP_INFER || t.tag == ATYP_I64 || t.tag == ATYP_U64) { return 64; }

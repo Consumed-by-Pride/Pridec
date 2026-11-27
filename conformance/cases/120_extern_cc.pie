@@ -1,6 +1,11 @@
 -- EXPECT-CLEAN
-fn puts #[extern("puts")] #[cc(c)] : ptr -> i32
-fn malloc #[extern("malloc")] : i64 -> ptr
-fn free #[extern("free")] : ptr -> ()
+-- Declaration attributes sit AFTER the signature, not between the name and it:
+-- tests/pfront/syntax/x07_meta_attrs.pie:23 spells an extern
+-- `fn ext_sin : f64 -> f64 #extern("sin") #cc(c)`, and that is the only form the
+-- parser accepts. The `fn puts #[extern("puts")] : ptr -> i32` spelling used
+-- here failed with E1050 "expected an expression" on the attribute.
+fn puts : ptr -> i32 #[extern("puts")] #[cc(c)]
+fn malloc : i64 -> ptr #[extern("malloc")]
+fn free : ptr -> () #[extern("free")]
 fn f : i32 -> i32
   | n -> n

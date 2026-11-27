@@ -1,9 +1,13 @@
 -- EXPECT-CLEAN
+-- `newtype N = T` is a distinct nominal type over T; a value crosses with `as`.
+-- The fixture used to write `Meters(n)` that `Meters(d)`, which would need a
+-- value-space CONSTRUCTOR for the newtype. Declaring one is a coercion-semantics
+-- decision (does N(n) check, wrap, or convert?) that the language does not make,
+-- so the case is written with the `as` form the compiler defines.
 newtype Meters = i64
 
 fn make_meters : i64 -> Meters
-  | n -> Meters(n)
+  | n -> n as Meters
 
 fn unwrap_meters : Meters -> i64
-  | Meters(d) -> d
-  | _ -> 0i64
+  | d -> d as i64
