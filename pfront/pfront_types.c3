@@ -1102,6 +1102,24 @@ fn int TypeMapper.map(TypeMapper* m, Node* ty, int depth)
                     np = np + 1;
                 }
             }
+            /*
+             `()` in parameter position is the ZERO-parameter signature, not a
+             one-parameter signature taking the unit value. The parser hands it
+             over as N_TY_UNIT (not an empty N_TY_TUPLE -- see the AST for
+             `fn f : () -> i64`: its first child is `ty-unit`), so it fell into
+             this single-parameter branch and `fn f : () -> i64` was recorded as
+             `(unit) -> i64`.
+
+             The cost was a spurious W3102 on the natural nullary call: `f()`
+             passes na=0 against np=1 and was reported as an arity mismatch,
+             while the awkward `f(())` passed. Nothing rejected the program --
+             type facts are advisories (DiagBag.advisory) -- but the lint lied
+             and the arity errors counter made the front end look unsound.
+            */
+            else if (p0 != null && p0.kind == Nk.N_TY_UNIT)
+            {
+                np = 0;
+            }
             else if (p0 != null && p0.kind != Nk.N_TY_CONSTRAINT)
             {
                 params[0] = m.map(p0, depth + 1);

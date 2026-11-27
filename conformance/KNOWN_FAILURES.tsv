@@ -11,7 +11,6 @@
 08_mixed_numeric.pie	count type-warn want=1 got=0
 106_multi_return.pie	expected CLEAN, got 1 errors/warnings
 10_field_nonstruct.pie	count type-warn want=1 got=0
-114_generic_identity.pie	4 unexpected compile errors
 115_module_path.pie	expected CLEAN, got 2 errors/warnings; 2 unexpected compile errors
 11_logical_nonbool.pie	missing type-warn at 3:10
 120_extern_cc.pie	expected CLEAN, got 3 errors/warnings; 3 unexpected compile errors
@@ -50,7 +49,6 @@
 21_generic_constraint_violated.pie	missing type-warn at 5:13
 243_enum_payload_oversize.pie	count type-err want=1 got=0
 244_enum_payload_multi.pie	count type-err want=1 got=0
-247_effect_arm_outer_assign.pie	count type-err want=1 got=0; 1 unexpected compile errors
 24_struct_field_mismatch.pie	missing type-warn at 6:27
 250_enum_match_sealed.pie	expected CLEAN, got 2 errors/warnings
 251_enum_arm_order.pie	expected CLEAN, got 2 errors/warnings

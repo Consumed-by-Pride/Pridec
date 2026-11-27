@@ -1,6 +1,12 @@
 -- Test: generic identity function
-fn id : A -> A
+--
+-- A bare `A` in a signature is not a type variable: the checker reports E3003
+-- "unknown type name". Type variables are QUANTIFIED with <..>, as the working
+-- tests use (tests/pfront/stress/s01_typealgebra.pie:90
+-- `fn identity_quant<A> : A -> A`). Without the angle brackets the name is
+-- looked up in NS_TYPE and fails, so this fixture was the bug, not the compiler.
+fn id<A> : A -> A
   | x -> x
 
-fn id_twice : A -> A
+fn id_twice<A> : A -> A
   | x -> id(id(x))
