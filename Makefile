@@ -111,7 +111,7 @@ AIR_READ_CORE := pfront/pfront_core.c3 pfront/pear_ir/air_ir.c3 pfront/pear_ir/a
              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_facts.c3
 
 # ── Top-level targets ───────────────────────────────────────────────────
-.PHONY: all c3c air-boundary air-pass lint-pride probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c lairc check-lair test-lair legacy-pear test-legacy clean legacy \
+.PHONY: all c3c air-boundary air-pass lint-pride probe-pear2 test-pear2-corpus probe-pear2-corpus test-pear2-stdlib test test-pfront test-conform test-exec test-pear test-pear2 test-pear2-exec check-pear2 test-harness test-experiments test-subtype test-type-store test-llvm-attrs test-air-contracts test-air test-air3 test-lowering airtool pear2c lairc check-lair test-lair test-lair-bc legacy-pear test-legacy clean legacy \
         runtime air-everything
 
 all: $(BINARY)
@@ -280,6 +280,11 @@ check-lair: $(LAIRC)
 # The same gate plus .ll execution: exit status through ll-exe.py.
 test-lair: $(LAIRC)
 	bash tests/lair/gate.sh
+
+# Bitcode A/B: lairc .bc (via scripts/ll-bc.py) vs pear2c --emit-bc -O0,
+# behavior-compared (exit status) over the shared slice. Needs pear2c + clang.
+test-lair-bc: $(LAIRC) $(PEAR2_BIN)
+	bash tests/lair/bc-ab.sh
 
 test-pear2: $(PEAR2_BIN) $(PEAR2_OPT_TEST)
 	$(C3_RUNTIME_ENV) ./$(PEAR2_OPT_TEST)

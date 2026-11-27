@@ -226,8 +226,12 @@ the captured names at the edge. A `while` whose body rebinds carried names
 gets a parameterized header: the entry edge carries the entry values, the
 back edge the body's final bindings, and after the loop the names are bound
 to the header phis. A jump may only target a label already declared on the
-spine — forward jumps fail closed (pear2c's order-independent edge
-collection is phase 3).
+spine — forward jumps fail closed. This is **not** a LAIR-slice limitation:
+pear2c rejects them too, with AIR-verify V2 ("jump/break/continue target is a
+`label` … that is visible: its own body, or the rest of the `seq` that
+defines it" — a label declared later is not yet visible). `jump l`, `break l`
+and `continue l` before `label l` are invalid AIR for both consumers, so no
+order-independent edge collection is needed.
 
 **Explicitly out of the slice** (phase 3+): closures/`letrec`/`lambda`,
 memory (`alloca`/`load`/`store`/`gep`), pointer-typed edge values (`null`,
@@ -264,10 +268,15 @@ reader bug outside this slice, to be reconciled separately.
 2. **(done)** labels/jumps/break/continue through the edge-argument path,
    with loop-carried phi promotion: the nine label/`phi` fixtures run with
    the same exit statuses pear2c produces at the same optimization level.
-3. Bitcode from `scripts/ll-bc.py` A/B-compared against `pear2c --emit-bc`
-   on the shared subset (behind the future `--emit-bc=lair` flag; identical
-   *behavior* first, identical bytes only where deterministic); forward
-   jumps (order-independent label edge collection, as pear2c does).
+3. **(done)** Bitcode from `scripts/ll-bc.py` A/B-compared against `pear2c
+   --emit-bc` on the shared subset via `make test-lair-bc`
+   (`tests/lair/bc-ab.sh`). pear2c is driven at `-O0` — the only level
+   semantically comparable to lairc's unoptimized IR. Result: **19/19
+   behavior-matched** (both sides built with clang and run, exit status
+   compared); **0/19 byte-identical**, as expected for two different emitters
+   — the comparison is behavioral, bytes only where deterministic. Forward
+   jumps are settled: invalid AIR for both pear2c (V2) and lairc, so no
+   work here.
 4. Memory forms + aggregates; the coverage ladder of `BACKENDS.md` §3
    re-run with `lairc` as a third row.
 5. The 48 `tests/exec/pear` fixtures at parity, then stdlib.
