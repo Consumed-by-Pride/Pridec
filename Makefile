@@ -121,7 +121,11 @@ all: $(BINARY)
 # text printer. `air_roundtrip` is the single consumer-side module it links, and
 # only because --air-roundtrip is a self-test of the writer that has to read its
 # own output back.
-PFRONT_SRC := $(PFRONT) $(THEORY) $(AIR_CORE) $(AIR_EMIT) pfront/pear_ir/air_facts.c3
+# air_read and air_c are here because pfrontc --emit-c reads back the .low.air it
+# just wrote and hands it to air_c -- the same contract the standalone airc obeys,
+# so a program that compiles here also compiles from the .air alone.
+PFRONT_SRC := $(PFRONT) $(THEORY) $(AIR_CORE) $(AIR_EMIT) pfront/pear_ir/air_facts.c3 \
+              pfront/pear_ir/air_read.c3 pfront/pear_ir/air_c.c3
 $(BINARY): $(PFRONT_SRC) | c3c
 	$(C3_RUNTIME_ENV) $(C3C) compile --stdlib $(C3C_LIB) $(PFRONT_SRC) --max-stack-object-size 262144 -o $(BINARY)
 

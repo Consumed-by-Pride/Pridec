@@ -70,3 +70,8 @@ bench/arr4
 # Large downloaded artifacts (Drive uploads land here)
 google_drive/
 tmp/
+
+# air_c output (852 KB per run); regenerate with pfrontc --emit-c
+examples/tokei/main.c
+examples/tokei/main.low.air
+*.low.air
