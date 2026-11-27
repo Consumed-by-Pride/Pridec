@@ -21,6 +21,18 @@ define the interface: `docs/specs/AIR3.md` (what a producer guarantees) and
 `pfront/pear_ir/air_ll.c3` (the only complete consumer, 1,211 lines). Where this
 document says "refuse", it means the C3 emitter must report a diagnostic and stop,
 exactly as `air_ll` does — never approximate.
+>
+> **Current state (measured).** An emitter exists — `pfront/pear_ir/air_c3.c3`,
+> reachable as `airtool emit-c3` — and it now builds against official c3c 0.8.x
+> (it had not compiled since the 0.8.6 move; see commit 0e95b28 on
+> arena/92826c14-pridec). It is a **partial** implementation and still cannot
+> consume what `pfrontc --emit-air` actually produces: even
+> `fn f : i64 -> i64 | x -> x + 1i64` is refused, because clause bodies lower to
+> `match` over `infer`-typed parameters and this emitter only takes the low
+> profile's label-spine form with concrete types. It fails closed with named
+> diagnostics and no crash, which is the behaviour this document asks for, but
+> C is the target that ships (`docs/pear2/C_TARGET.md`) and this file remains a
+> record of the investigation, not a working backend.
 
 ---
 

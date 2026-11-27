@@ -1171,7 +1171,17 @@ fn void C3Target.header(C3Target* c, AirDecl* d, Sb* o)
         if (b == null) { continue; }
         if (!ty_low(b.ty, 0)) { c.err((char*)"parameter type is not part of the low profile", b.name); }
         if (wrote > 0) { o.put((char*)", "); }
-        c.ty_decl( o, b.ty, b.name);
+        /*
+         An extern declaration's parameters carry AIR's wildcard name `_`
+         (`extern declare malloc(_ : i64) : ptr(u8)`). `_` IS a C3 keyword -- it
+         cannot name a parameter -- but these parameters are never referenced, so
+         the right answer is a generated name, not an error. Refusing here made
+         `airtool emit-c3` reject every module that calls malloc/free/write:
+         "name is not a legal C3 identifier: _". A NAMED parameter that is still
+         illegal keeps the error (a real name cannot be mangled safely).
+        */
+        if (air_text::streq(b.name, "_")) { c.ty_decl( o, b.ty, (char*)"__anon"); }
+        else { c.ty_decl( o, b.ty, b.name); }
         wrote++;
     }
     o.putc(')');
@@ -1317,7 +1327,10 @@ fn void C3Target.declare(C3Target* c, AirDecl* d, Sb* o)
         AirBinder* b = d.params[i];
         if (b == null) { continue; }
         if (wrote > 0) { o.put((char*)", "); }
-        c.ty_decl( o, b.ty, b.name);
+        // See decl_fn: an extern's parameters carry AIR's wildcard name `_`, which
+        // is a C3 keyword. They are never referenced, so a generated name is right.
+        if (air_text::streq(b.name, "_")) { c.ty_decl( o, b.ty, (char*)"__anon"); }
+        else { c.ty_decl( o, b.ty, b.name); }
         wrote++;
     }
     if (d.is_varargs) { if (wrote > 0) { o.put((char*)", "); } o.put((char*)"..."); }
