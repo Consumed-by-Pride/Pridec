@@ -408,6 +408,7 @@ const int OP_KEY_BASE = 512;
 const int LIT_KEY_BASE  = 600;
 const int VAR_KEY_BASE  = 740;
 const int CALL_KEY_BASE = 880;
+const int REC_KEY_BASE  = 1020;
 const int KEY_BAND      = 140;
 
 fn int top_key(Node* n)
@@ -491,6 +492,37 @@ fn int top_key(Node* n)
          conservative: more terms treated as possibly-equal, never fewer.
          Inventing a key from a non-name would collide, which is the bug.
         */
+    }
+    /*
+     A RECORD pattern is keyed by its field name, for the fifth time.
+
+     `{ some: v }` and `{ none: n }` are both N_PAT_STRUCT, so returning the
+     kind made them one constructor. On a two-variant union the decision tree
+     then saw the second row as an exact duplicate of the first, marked it
+     shadowed, and every exhaustive two-arm union match in the test suite was
+     reported as having a dead clause:
+
+         type Opt = union
+           some : i32
+           none : ()
+         fn unwrap : Opt -> i32
+           | { some: v } -> v        <- clean, must not warn
+           | { none: n } -> n
+
+     N_PAT_FIELD carries the field's interned name_id (see parse_pattern), so
+     the record's head field identifies the variant exactly as a variant
+     pattern's name_id does.
+
+     A record pattern with no field child -- `{}` -- has nothing to key on and
+     keeps the kind key, matching the conservative rule used above.
+    */
+    if (n.kind == Nk.N_PAT_STRUCT && n.child_count > 0)
+    {
+        Node* head = n.children[0];
+        if (head != null && head.kind == Nk.N_PAT_FIELD && head.name_id != 0)
+        {
+            return REC_KEY_BASE + (int)(head.name_id % (uint)KEY_BAND);
+        }
     }
     return (int)n.kind;
 }
