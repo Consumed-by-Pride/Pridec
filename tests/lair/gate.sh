@@ -48,6 +48,15 @@ while_main:9
 char_main:42
 coerce_integer_main:0
 assert_trap_main:42
+label_main:42
+label_arg_main:42
+label_bool_main:42
+label_loop_main:3
+break_main:42
+phi_while_carried_main:42
+phi_nested_while_main:42
+phi_label_ladder_main:20
+phi_diamond_join_main:42
 "
 
 [ -x "$LAIRC" ] || { echo "gate: $LAIRC missing (run make lairc)"; exit 1; }
@@ -73,8 +82,9 @@ expect_rc() { # expect_rc <rc-wanted> <label> <cmd...>
     fi
     printf '%s' "$out" | grep -qE ':[0-9]+:[0-9]+:' || bad "$label: no source position in: $(printf '%s' "$out" | head -1)"
 }
-expect_rc 3 "labels (phase 2)"       "$LAIRC" tests/pear2/label_main.air --check
 expect_rc 3 "closures (slice)"       "$LAIRC" tests/pear2/closure_scalar_capture_main.air --check
+expect_rc 3 "pointer edge values"    "$LAIRC" tests/pear2/label_pointer_main.air --check
+expect_rc 3 "for/arrays (slice)"     "$LAIRC" tests/pear2/phi_for_index_main.air --check
 expect_rc 1 "invalid AIR (read)"     "$LAIRC" tests/air/bad/missing_semicolon.air --check
 
 # ── 3. shape of the emitted forms (one fixture, cheap and strict) ───────────
@@ -120,7 +130,7 @@ for fx in $FIXTURES; do
 done
 
 if [ "$fail" = 0 ]; then
-    echo "gate: OK (10 fixtures: check + .ll execution + .bc, negatives fail closed)"
+    echo "gate: OK ($(printf %s "$FIXTURES" | grep -c .) fixtures: check + .ll execution + .bc, negatives fail closed)"
 else
     echo "gate: FAILED"
 fi
