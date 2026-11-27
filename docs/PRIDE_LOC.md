@@ -92,13 +92,36 @@ with `*.low.air`. The build is 3.1 s and needs `-msse4.1` for
 
 | | before | after |
 |---|---:|---:|
-| pass | 72 | **78** |
-| fail | 9 | **3** |
+| pass | 72 | **81** |
+| fail | 9 | **0** |
 
-The last three are `b09_cmp`, `b17_call_cond`, `b18_chain_eq`, and they never
-reach the C emitter: `air_low` refuses them upstream (`bool given, i64 wanted`;
+`b09_cmp`, `b17_call_cond` and `b18_chain_eq` were the last three and they never
+reached the C emitter: `air_low` refused them upstream (`bool given, i64 wanted`;
 `if condition is not a bool`; `operands have different types: bool vs i64`).
-That is one `air_low` defect, not a C-target one.
+
+That was one defect, and the interesting part is which half of the compiler was
+wrong. The front end accepts these programs and records the difference as an
+ADVISORY -- `pfront_infer.c3`: "ADVISORY, never an error. Pride is untyped: a
+shape difference is information for the optimizer, not grounds to reject the
+program." `air_low` then rejected exactly those shapes, so a program was legal
+or illegal depending on which stage you asked. `docs/specs/AIR.md:201` settles
+it: `bool` **is** `i1`, and "a new backend may be stricter but must not *rely*
+on a type being present or exact."
+
+So `air_low` now treats `bool` as the 1-bit integer it is, in the three places
+the shape appears -- widening from it (lossless in both directions), a bool
+operand in a binop, and an integer `if` condition tested as `!= 0` (which is
+what the legacy backend already did). `ty_is_int(bool)` stays **false**: the
+surface language is right to keep the two distinct, and the width is computed
+explicitly at these three sites instead.
+
+The generated C is checkable by eye:
+
+```c
+bool   _t2;  int64_t _c3;
+_t2 = (a == b);            /* (a == b) + 2, with a:b:i64 */
+_c3 = ((int64_t)((_t2)));
+```
 
 The round's real defect was aggregate parts of array type. C decays an array to
 a pointer inside an initializer, so `(Grid){.cells = arr}` stored a *pointer*
