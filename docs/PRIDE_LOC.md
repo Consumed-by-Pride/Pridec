@@ -79,3 +79,65 @@ Two defects were found this way and fixed in `air_c`, not worked around:
   (`T[N] x`) rather than C's (`T x[N]`).
 
 Reproduce with `bash scripts/pfrontc-build.sh` then the four commands at the top.
+
+---
+
+# `pfront/` — the compiler itself
+
+Measured separately because it is **C3, not Pride**: 129 `.c3` files, and `.c3`
+is not in tokei's 189-extension table, so tokei reports only the 8 Markdown
+files under that directory. These are the counts a classifier over `//` and
+`/* */` gives; `wc -l` agrees to within the final-line convention.
+
+| | Files | Lines | Code | Comments | Blanks |
+|---|---:|---:|---:|---:|---:|
+| `pfront/` total | 129 | 103,277 | 84,262 | 13,149 | 5,866 |
+
+| Directory | Files | Code | Comments | Blanks | Total |
+|---|---:|---:|---:|---:|---:|
+| `pfront/` (front end) | 61 | 28,802 | 5,226 | 2,369 | 36,397 |
+| `pfront/pear_ir/` (AIR) | 21 | 19,508 | 2,720 | 636 | 22,864 |
+| `pfront/theory/types/` | 11 | 8,874 | 1,180 | 657 | 10,711 |
+| `pfront/theory/lower/` | 9 | 7,253 | 902 | 576 | 8,731 |
+| `pfront/theory/meta/` | 10 | 6,215 | 1,145 | 565 | 7,925 |
+| `pfront/theory/rewrite/` | 7 | 4,954 | 891 | 433 | 6,278 |
+| `pfront/theory/effects/` | 5 | 4,603 | 518 | 314 | 5,435 |
+| `pfront/theory/analysis/` | 4 | 3,107 | 377 | 240 | 3,724 |
+| `pfront/theory/` (top) | 1 | 946 | 190 | 76 | 1,212 |
+
+16% of it is commentary, which is the number that matters for a compiler that
+has to be read before it can be changed.
+
+## Largest single files, by code (not by raw lines)
+
+| File | Code | Comments |
+|---|---:|---:|
+| `pear_ir/air_low.c3` | 5,475 | 345 |
+| `pfront_parse.c3` | 4,201 | 1,491 |
+| `pear_ir/air_lower.c3` | 3,528 | 1,154 |
+| `pfront_resolve.c3` | 1,918 | 418 |
+| `pfront_lex.c3` | 1,890 | 190 |
+| `theory/effects/theory_cps.c3` | 1,651 | 147 |
+| `pear_ir/air_c.c3` | 1,602 | 291 |
+
+`air_low.c3` is the outlier: 5,475 code lines against 345 of commentary. It is
+also where 14 of the compiler's 103 refusal sites live.
+
+## Where "better" has room
+
+The 103 sites that refuse (`not implemented`, `not yet`, `unsupported`,
+`refus(e|ing)`) are the ceiling on what the compiler accepts:
+
+| File | Refusal sites |
+|---|---:|
+| `pear_ir/air_lower.c3` | 22 |
+| `pear_ir/air_low.c3` | 14 |
+| `pear_ir/air_c.c3` | 10 |
+| `theory/meta/theory_nbe.c3` | 9 |
+| `pfront_main.c3` | 8 |
+
+Measured against `tests/exec` (48 programs, compile to C, gcc, run): **41 now
+compile**, up from 32 before this round. The 5 that `air_c` refuses and the 2
+that fail to link are named in the commit; the 2 link failures want runtime
+support (`__pride_fiber_yield`, `__pride_local_get`) that the C prelude does
+not have.
