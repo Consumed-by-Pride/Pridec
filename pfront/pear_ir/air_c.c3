@@ -159,9 +159,12 @@ struct Ctx
     bool       quiet;      // a prescan pass: a partial answer is not an error
     char**     tup; // tuple shapes already defined (module level)
     usz        ntup;
+    char**     mk;  // array-part aggregate builders already defined (module level)
+    usz        nmk;
 
     // module level
     Sb         types_out;  // structs, one per distinct shape
+
     Sb         pre;        // string literals
     usz        nstr;
 }
@@ -440,7 +443,7 @@ fn void Ctx.declarator(Ctx* c, Sb* o, AirTyp* t, char* nm)
             c.ty(o, a); wrote = true;
         }
         if (!wrote) { o.put((char*)"void"); }
-        o.put((char*)"))");
+        o.put((char*)")");
         return;
     }
     if (t.tag == ATYP_PTR && t.arg_count > 0 && t.args[0] != null && t.args[0].tag == ATYP_ARRAY)
@@ -581,7 +584,44 @@ fn Val Ctx.prd(Ctx* c, AirPrd* p)
             AirDecl* d = c.find(p.name);
             if (d != null && (d.tag == ADECL_GLOBAL || d.tag == ADECL_DEF || d.tag == ADECL_DECLARE))
             {
-                Sb s; s.init(); c.name(&s, p.name, d.tag == ADECL_GLOBAL); v.op = s.take(); v.ty = d.ret_ty; return v;
+                Sb s; s.init();
+                // A global's NAME is its address, which is what `load` and `store`
+                // take (`load(counter)`, `store(counter, v)`). Answering with the
+                // value type made both refuse with "load from a non-pointer"; and
+                // answering with the pointer type but the bare C name emitted
+                // `*counter`, a dereference of an int64_t. Both the type and the
+                // expression have to say "address", so the op is `&name`.
+                if (d.tag == ADECL_GLOBAL)
+                {
+                    s.putc('&'); c.name(&s, p.name, true); v.op = s.take(); v.ty = d.ret_ty;
+                    if (d.ret_ty != null && c.m != null && c.m.arena != null)
+                    {
+                        AirTyp* pt = air_ir::air_mk_typ_ptr(c.m.arena, d.ret_ty);
+                        if (pt != null) { v.ty = pt; }
+                    }
+                    return v;
+                }
+                c.name(&s, p.name, false); v.op = s.take(); v.ty = d.ret_ty;
+                // A def used as a VALUE is a function pointer, not its result:
+                // storing `add5.clo` into a field of type `arrow(...)` gave
+                // "aggregate part has the wrong type: i64 vs arrow". Build the
+                // arrow from the declared signature.
+                if (d.tag == ADECL_DEF && c.m != null && c.m.arena != null)
+                {
+                    AirTyp* ar = air_ir::air_mk_typ(c.m.arena, ATYP_ARROW);
+                    if (ar != null)
+                    {
+                        AirTyp* dom = air_ir::air_mk_typ(c.m.arena, ATYP_TUPLE);
+                        if (dom != null)
+                        {
+                            for (usz pi = 0; pi < d.param_count; pi++) { if (d.params[pi] != null) { dom.add_arg(d.params[pi].ty); } }
+                            ar.add_arg(dom);
+                        }
+                        ar.add_arg(d.ret_ty);
+                        v.ty = ar;
+                    }
+                }
+                return v;
             }
             c.err((char*)"unbound variable", p.name); return v;
         }
@@ -731,6 +771,12 @@ fn Val Ctx.gep(Ctx* c, AirPrd* p)
                     if (acc_is_ptr) { acc.put((char*)"->"); }
                     else { acc.putc('.'); }
                     c.name(&acc, dd.ctors[0].fields[(usz)ip.ival].name, false);
+                    // `->f` / `.f` is an LVALUE, so `&` is needed -- unless the
+                    // field is itself an array, because an array lvalue already
+                    // decays to the address the consumer wants. Marking every
+                    // field step as a value put `&` in front of an array field:
+                    // `&(p->cells)` is `ptr(ptr(i64))`, so the next index stepped
+                    // by whole arrays and every element read was garbage.
                     acc_is_ptr = false;
                 }
                 step = ft;
@@ -802,6 +848,155 @@ fn Val Ctx.aggregate(Ctx* c, AirPrd* p)
     {
         parts[i] = c.prd(p.tag == APRD_RECORD ? p.rec_inits[i].value : p.subs[i]);
         if (parts[i].ty != null && want[i] != null && !air_util::ty_eq(parts[i].ty, want[i])) { c.err((char*)"aggregate part has the wrong type", null); }
+    }
+    // An AGGREGATE PART OF ARRAY TYPE cannot be written in an initializer: C
+    // decays `arr` to `T*` there, so `(Grid){.cells = arr}` stores a pointer
+    // reinterpreted as elements and the elements read back as garbage. AIR means
+    // a byte copy, and a compound literal has nowhere to put a statement, so
+    // emit a static builder once per shape: it takes every part as an argument,
+    // copies the array ones with memcpy and assigns the rest.
+    bool any_array = false;
+    for (usz i = 0; i < n; i++) { if (want[i] != null && want[i].tag == ATYP_ARRAY) { any_array = true; } }
+    if (any_array && !ty_is_void(p.ty) && p.ty.tag != ATYP_ARRAY)
+    {
+        // Name the builder from the type AND the parts' types: the arrays are
+        // declared with a fixed length, so the shape fixes the signature.
+        Sb nm; nm.init(); nm.put((char*)"__mk_");
+        char* tn0 = p.ty.tag == ATYP_NOMINAL ? p.ty.name : null;
+        for (usz i = 0; tn0 != null && i < 40 && tn0[i] != 0; i++)
+        {
+            char ch = tn0[i];
+            nm.putc((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ? ch : '_');
+        }
+        if (p.ty.tag != ATYP_NOMINAL) { c.ty(&nm, p.ty); }
+        for (usz i = 0; i < n; i++) { nm.putc('_'); c.ty(&nm, want[i]); }
+        // `ty()` writes C sugar (`int64_t[3]`); the name must be an identifier.
+        for (usz i = 0; i < nm.n; i++)
+        {
+            char ch = nm.d[i];
+            if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) { nm.d[i] = '_'; }
+        }
+        char* tn = nm.take();
+        bool seen = false;
+        for (usz i = 0; i < c.nmk; i++) { if (air_text::streq(c.mk[i], tn)) { seen = true; } }
+        if (c.nmk < 1024) { c.mk[c.nmk] = tn; c.nmk++; }
+        Sb call; call.init();
+        call.put(tn); call.put((char*)"(");
+        for (usz i = 0; i < n; i++)
+        {
+            if (i > 0) { call.put((char*)", "); }
+            call.put(parts[i].op);
+        }
+        call.put((char*)")");
+        if (!seen)
+        {
+            Sb sig; sig.init();
+            sig.put((char*)"static ");
+            c.ty(&sig, p.ty); sig.putc(' '); sig.put(tn);   // tn is already a C identifier
+            sig.put((char*)"(");
+            // An array part is taken as a POINTER to its element type; the body
+            // memcpy's, so the elements are copied, not the pointer.
+            for (usz i = 0; i < n; i++)
+            {
+                if (i > 0) { sig.put((char*)", "); }
+                AirTyp* at = want[i];
+                if (at != null && at.tag == ATYP_ARRAY && at.args[0] != null)
+                {
+                    c.declarator(&sig, air_ir::air_mk_typ_ptr(c.m.arena, at.args[0]), (char*)"p");
+                }
+                else { c.declarator(&sig, at, (char*)"p"); }
+                sig.int_((long)i);
+            }
+            sig.put((char*)")");
+            Sb body; body.init();
+            body.put((char*)" {\n    ");
+            c.ty_decl(&body, p.ty, (char*)"__r");
+            body.put((char*)";\n");
+            for (usz i = 0; i < n; i++)
+            {
+                bool isarr = want[i] != null && want[i].tag == ATYP_ARRAY;
+                body.put((char*)"    ");
+                if (isarr)
+                {
+                    body.put((char*)"memcpy(&__r.");
+                    if (p.tag == APRD_RECORD) { c.name(&body, p.rec_inits[i].name, false); }
+                    else { body.put((char*)"._"); body.int_((long)i); }
+                    body.put((char*)", p"); body.int_((long)i);
+                    body.put((char*)", sizeof("); c.ty(&body, want[i]); body.put((char*)"));\n");
+                }
+                else
+                {
+                    body.put((char*)"__r.");
+                    if (p.tag == APRD_RECORD) { c.name(&body, p.rec_inits[i].name, false); }
+                    else { body.put((char*)"._"); body.int_((long)i); }
+                    body.put((char*)" = p"); body.int_((long)i); body.put((char*)";\n");
+                }
+            }
+            body.put((char*)"    return __r; }\n");
+            c.types_out.put(sig.take()); c.types_out.put(body.take()); c.types_out.put((char*)"\n");
+        }
+        v.op = call.take();
+        return v;
+    }
+    // An ARRAY whose parts are arrays has the same decay problem, and C cannot
+    // return an array, so the builder writes through a slot the caller owns:
+    // `(__mk_xxx(&__a7, parts...), __a7)` is a comma expression, not a statement,
+    // so it still fits wherever a producer is allowed.
+    if (any_array && p.ty.tag == ATYP_ARRAY)
+    {
+        Sb nm; nm.init(); nm.put((char*)"__mka");
+        for (usz i = 0; i < n; i++) { nm.putc('_'); c.ty(&nm, want[i]); }
+        for (usz i = 0; i < nm.n; i++)
+        {
+            char ch = nm.d[i];
+            if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))) { nm.d[i] = '_'; }
+        }
+        char* tn = nm.take();
+        char* slot = c.fresh((char*)"a");
+        c.decls.put((char*)"    ");
+        c.declarator(&c.decls, p.ty, slot);
+        c.decls.put((char*)";\n");
+        bool seen = false;
+        for (usz i = 0; i < c.nmk; i++) { if (air_text::streq(c.mk[i], tn)) { seen = true; } }
+        if (c.nmk < 1024) { c.mk[c.nmk] = tn; c.nmk++; }
+        if (!seen)
+        {
+            Sb sig; sig.init(); sig.put((char*)"static void* "); sig.put(tn); sig.put((char*)"(");
+            c.declarator(&sig, air_ir::air_mk_typ_ptr(c.m.arena, p.ty), (char*)"out");
+            for (usz i = 0; i < n; i++)
+            {
+                sig.put((char*)", ");
+                AirTyp* at = want[i];
+                if (at != null && at.tag == ATYP_ARRAY && at.args[0] != null) { c.declarator(&sig, air_ir::air_mk_typ_ptr(c.m.arena, at.args[0]), (char*)"p"); }
+                else { c.declarator(&sig, at, (char*)"p"); }
+                sig.int_((long)i);
+            }
+            sig.put((char*)")");
+            Sb body; body.init(); body.put((char*)" {\n");
+            for (usz i = 0; i < n; i++)
+            {
+                body.put((char*)"    memcpy(&(*out)["); body.int_((long)i); body.put((char*)"]");
+                if (want[i] != null && want[i].tag == ATYP_ARRAY) { body.put((char*)", p"); body.int_((long)i); body.put((char*)", sizeof("); c.ty(&body, want[i]); body.put((char*)"))"); }
+                else { body.put((char*)", &p"); body.int_((long)i); body.put((char*)", sizeof("); c.ty(&body, want[i]); body.put((char*)"))"); }
+                body.put((char*)";\n");
+            }
+            body.put((char*)"    return out;\n}\n");
+            c.types_out.put(sig.take()); c.types_out.put(body.take()); c.types_out.put((char*)"\n");
+        }
+        // The producer's value has to stay an LVALUE: callers take its address
+        // (`&<op>`), and neither a comma expression nor a call is addressable.
+        // So the helper returns the slot it filled and the value is the
+        // dereference of that pointer -- `*(T(*)[N])` is always an lvalue.
+        Sb call; call.init();
+        // `ty()` writes array sugar (`int64_t[2][2] *`), which is not a cast
+        // type; `declarator` writes pointer-to-array correctly: `int64_t (*)[2][2]`.
+        call.put((char*)"*(");
+        c.declarator(&call, air_ir::air_mk_typ_ptr(c.m.arena, p.ty), (char*)"");
+        call.put((char*)" )" ); call.put(tn); call.put((char*)"(&"); call.put(slot);
+        for (usz i = 0; i < n; i++) { call.put((char*)", "); call.put(parts[i].op); }
+        call.put((char*)")");   // close the call; the cast's `(` was closed above
+        v.op = call.take();
+        return v;
     }
     // A compound literal needs its type in parentheses; `T[N]` is already the
     // array form, so the cast shape is right for both.
@@ -975,6 +1170,14 @@ fn void Ctx.call(Ctx* c, AirPrd* callee, AirCns* k, AirCmd** next_out, Sb* o)
     {
         AirDecl* fd = c.find(callee.name);
         if (fd != null) { rty = fd.ret_ty; }
+        // A call through a function POINTER (`fn` is a local of arrow type) has
+        // no declaration to read: the callee value already carries the arrow, and
+        // its codomain is the result type.
+        if (rty == null)
+        {
+            AirTyp* ct = f.ty;
+            if (ct != null && ct.tag == ATYP_ARROW && ct.arg_count > 1) { rty = ct.args[1]; }
+        }
     }
     Sb s; s.init();
     c.pad(o);
@@ -1907,6 +2110,7 @@ fn int to_c(AirModule* m, char** result, bool want_text)
     c.vn = (char**)malloc(8 * MAXV); c.vv = (Val*)malloc(Val::size * MAXV);
     c.dn = (char**)malloc(8 * MAXV); c.ndn = 0;
     c.tup = (char**)malloc(8 * 512); c.ntup = 0;
+    c.mk = (char**)malloc(8 * 1024); c.nmk = 0;
     c.lbls = (Lbl*)malloc(Lbl::size * MAXL);
     c.nv = 0; c.nl = 0; c.tmp = 0; c.nstr = 0;
     c.decls.init(); c.types_out.init(); c.pre.init();
